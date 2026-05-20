@@ -1,11 +1,16 @@
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText } from "../errors.js";
+import { runTool, toolText, toolError } from "../errors.js";
+import { checkOutboundRecipient } from "../allowlist.js";
 
 // Outbound SMS — single-message send from the identity's provisioned phone
 // number. Returns a queued TextMessage; final delivery state arrives via the
 // inbound webhook (Phase 2).
-export function registerSendSms(api: any, runtime: InkboxRuntime): void {
+export function registerSendSms(
+  api: any,
+  runtime: InkboxRuntime,
+  allowedRecipients?: string[],
+): void {
   api.registerTool({
     name: "inkbox_send_sms",
     description:
@@ -22,6 +27,9 @@ export function registerSendSms(api: any, runtime: InkboxRuntime): void {
     }),
     async execute(_id: string, params: any) {
       return runTool(async () => {
+        const block = checkOutboundRecipient(params.to, allowedRecipients);
+        if (block) return toolError(block);
+
         const identity = await runtime.getIdentity();
         const msg = await identity.sendText({ to: params.to, text: params.text });
         return toolText(

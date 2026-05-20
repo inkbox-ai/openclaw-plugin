@@ -13,6 +13,7 @@ export interface OpenTunnelOptions {
   tunnelName?: string;
   handlers: InboundHandlers;
   logger?: PluginLogger;
+  allowedContactIds?: string[];
 }
 
 // Open an Inkbox tunnel that terminates at our in-process Fetch handler.
@@ -38,6 +39,7 @@ export async function openInkboxTunnel(opts: OpenTunnelOptions) {
       handlers: opts.handlers,
       dedup,
       logger: opts.logger,
+      allowedContactIds: opts.allowedContactIds,
     });
     return new Response(result.body ?? "", {
       status: result.status,

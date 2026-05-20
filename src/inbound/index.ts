@@ -46,6 +46,7 @@ export function startInbound(opts: StartInboundOptions): void {
         tunnelName: cfg.tunnelName,
         handlers,
         logger,
+        allowedContactIds: cfg.allowedInboundContactIds,
       }),
     )
     .catch((err) => {

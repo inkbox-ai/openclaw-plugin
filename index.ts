@@ -9,6 +9,7 @@ import { registerCallReads } from "./src/tools/call-reads.js";
 import { registerContactTools } from "./src/tools/contacts.js";
 import { registerNoteTools } from "./src/tools/notes.js";
 import { registerVaultTools } from "./src/tools/vault.js";
+import { registerWhoami } from "./src/tools/whoami.js";
 import { createVaultRuntime } from "./src/vault.js";
 import { startInbound } from "./src/inbound/index.js";
 
@@ -29,12 +30,13 @@ export default definePluginEntry({
     const runtime = createInkboxRuntime(cfg, api.logger);
 
     // Required outbound tools — registered without { optional: true } so they
-    // light up as soon as the plugin is enabled.
-    registerSendEmail(api, runtime);
-    registerSendSms(api, runtime);
+    // light up as soon as the plugin is enabled. Recipient allowlist is
+    // threaded through; when undefined, no filtering applies.
+    registerSendEmail(api, runtime, cfg.allowedRecipients);
+    registerSendSms(api, runtime, cfg.allowedRecipients);
 
     // Optional outbound tools — require explicit opt-in via tools.allow.
-    registerForwardEmail(api, runtime);
+    registerForwardEmail(api, runtime, cfg.allowedRecipients);
 
     // Read/lifecycle tools for email, SMS, and calls. Required tools light up
     // by default; optional ones (mark-read, raw text list/get) require opt-in.
@@ -54,6 +56,9 @@ export default definePluginEntry({
       keyEnvVar: (cfg as any).vault?.keyEnvVar,
     });
     registerVaultTools(api, runtime, vault);
+
+    // Diagnostic / introspection tools.
+    registerWhoami(api, runtime);
 
     // Inbound delivery. Skipped when signingKey is missing; failures are
     // non-fatal (outbound still works). Phase 2c will replace these stub

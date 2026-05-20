@@ -1,11 +1,16 @@
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText } from "../errors.js";
+import { runTool, toolText, toolError } from "../errors.js";
+import { checkOutboundRecipients } from "../allowlist.js";
 
 // Forward a previously received message out from the identity's mailbox.
 // Inline (default) re-attaches original parts; wrapped attaches the original
 // as a single .eml-style note. Optional only — not every workflow needs it.
-export function registerForwardEmail(api: any, runtime: InkboxRuntime): void {
+export function registerForwardEmail(
+  api: any,
+  runtime: InkboxRuntime,
+  allowedRecipients?: string[],
+): void {
   api.registerTool(
     {
       name: "inkbox_forward_email",
@@ -55,6 +60,15 @@ export function registerForwardEmail(api: any, runtime: InkboxRuntime): void {
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
+          // Allowlist check across to/cc/bcc on the forwarded message.
+          const all = [
+            ...(params.to ?? []),
+            ...(params.cc ?? []),
+            ...(params.bcc ?? []),
+          ];
+          const block = checkOutboundRecipients(all, allowedRecipients);
+          if (block) return toolError(block);
+
           const identity = await runtime.getIdentity();
           const msg = await identity.forwardEmail(params.messageId, {
             to: params.to,

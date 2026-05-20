@@ -1,9 +1,14 @@
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText } from "../errors.js";
+import { runTool, toolText, toolError } from "../errors.js";
+import { checkOutboundRecipients } from "../allowlist.js";
 
 // Outbound email — the primary write path for the email channel.
-export function registerSendEmail(api: any, runtime: InkboxRuntime): void {
+export function registerSendEmail(
+  api: any,
+  runtime: InkboxRuntime,
+  allowedRecipients?: string[],
+): void {
   api.registerTool({
     name: "inkbox_send_email",
     description:
@@ -27,6 +32,15 @@ export function registerSendEmail(api: any, runtime: InkboxRuntime): void {
     }),
     async execute(_id: string, params: any) {
       return runTool(async () => {
+        // Allowlist check: every recipient across to/cc/bcc must pass.
+        const all = [
+          ...(params.to ?? []),
+          ...(params.cc ?? []),
+          ...(params.bcc ?? []),
+        ];
+        const block = checkOutboundRecipients(all, allowedRecipients);
+        if (block) return toolError(block);
+
         const identity = await runtime.getIdentity();
         const msg = await identity.sendEmail({
           to: params.to,

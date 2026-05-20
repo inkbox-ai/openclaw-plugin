@@ -8,6 +8,8 @@ export interface WebhookHandlerOptions {
   handlers: InboundHandlers;
   dedup?: RequestIdDedup;
   logger?: PluginLogger;
+  // Optional contact-id allowlist; passed through to dispatchInbound.
+  allowedContactIds?: string[];
 }
 
 export interface WebhookResponse {
@@ -62,7 +64,7 @@ export async function handleInkboxWebhook(
     return { status: 400, body: "invalid json" };
   }
 
-  const result = await dispatchInbound(parsed, opts.handlers);
+  const result = await dispatchInbound(parsed, opts.handlers, opts.allowedContactIds);
   // Remember only after a successful dispatch; if dispatch throws, we'd
   // rather Inkbox retry than silently swallow the event.
   opts.dedup?.remember(requestId);

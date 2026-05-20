@@ -33,7 +33,8 @@
       "inkbox_credentials_get_login",
       "inkbox_credentials_get_api_key",
       "inkbox_credentials_get_ssh_key",
-      "inkbox_totp_code"
+      "inkbox_totp_code",
+      "inkbox_whoami"
     ]
   },
   "toolMetadata": {
@@ -50,7 +51,8 @@
     "inkbox_credentials_get_login": { "optional": true },
     "inkbox_credentials_get_api_key": { "optional": true },
     "inkbox_credentials_get_ssh_key": { "optional": true },
-    "inkbox_totp_code": { "optional": true }
+    "inkbox_totp_code": { "optional": true },
+    "inkbox_whoami": { "optional": true }
   },
   "activation": {
     "onStartup": true
@@ -94,6 +96,16 @@
             "description": "Env var the vault unlock key is read from. Defaults to INKBOX_VAULT_KEY."
           }
         }
+      },
+      "allowedRecipients": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Outbound recipient allowlist. When set, send_email / send_sms / forward_email reject any recipient (to/cc/bcc) not on this list. Phone numbers in E.164, emails as exact addresses."
+      },
+      "allowedInboundContactIds": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Inbound contact-id allowlist. When set, webhook events whose remote contact id is not on this list are dropped (mail/text become no-ops, calls are rejected). Events with no contact resolution are also dropped."
       }
     }
   }

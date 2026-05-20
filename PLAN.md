@@ -62,7 +62,7 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 - [x] **Phase 4** — Read/lifecycle tools: 22 tools across email reads, SMS reads, call reads, contacts, notes
 - [x] **Phase 5** — Vault + credentials + TOTP — 5 optional tools, env-var unlock
 - [x] **Phase 6** — Bundled skills: email triage ✅, SMS responder ✅, onboarding ✅, call handler ✅, contact lookup ✅, credential use ✅
-- [ ] **Phase 7** — Polish: allowlist, dedup, batching, doctor
+- [~] **Phase 7** — Polish: outbound allowlist ✅, inbound contact allowlist ✅, whoami diag tool ✅; SMS batching, doctor command, rate_status remaining
 - [ ] **Phase 8** — Publish: ClawHub primary, npm secondary, GitHub release
 
 ---

@@ -3,11 +3,30 @@ import type {
   TextWebhookPayload,
   PhoneIncomingCallWebhookPayload,
 } from "@inkbox/sdk";
+import { inboundContactAllowed } from "../allowlist.js";
 
 // Sync response Inkbox expects for an inbound call webhook.
 export interface InboundCallDecision {
   action: "answer" | "reject";
   clientWebsocketUrl?: string;
+}
+
+// Resolve the "remote party" contact id from a webhook payload. Mail events
+// carry an array of contacts with `bucket` (from/cc/to/bcc); we use the
+// from-bucket for the allowlist decision. Text and call payloads have a
+// singular `contact` field.
+function resolveRemoteContactId(parsed: any, kind: "mail" | "text" | "call"): string | null {
+  if (kind === "mail") {
+    const contacts = parsed?.data?.contacts;
+    if (!Array.isArray(contacts)) return null;
+    const fromContact = contacts.find((c: any) => c?.bucket === "from");
+    return fromContact?.id ?? null;
+  }
+  if (kind === "text") {
+    return parsed?.data?.contact?.id ?? null;
+  }
+  // call: flat payload, contact at top level.
+  return parsed?.contact?.id ?? null;
 }
 
 export interface InboundHandlers {
@@ -39,9 +58,14 @@ export interface DispatchResult {
 // handler. Mail and text payloads share an envelope shape with `event_type`
 // + `data`. Inbound calls are flat — no envelope — so the absence of
 // event_type signals call.
+//
+// When allowedContactIds is set, events whose remote contact id isn't on the
+// list are dropped: mail/text become silent no-ops, calls return a reject
+// decision. Events with no resolvable contact id are also dropped.
 export async function dispatchInbound(
   parsed: unknown,
   handlers: InboundHandlers,
+  allowedContactIds?: string[],
 ): Promise<DispatchResult> {
   if (
     parsed &&
@@ -51,15 +75,28 @@ export async function dispatchInbound(
   ) {
     const eventType = (parsed as { event_type: string }).event_type;
     if (eventType.startsWith("message.")) {
+      const contactId = resolveRemoteContactId(parsed, "mail");
+      if (!inboundContactAllowed(contactId, allowedContactIds)) {
+        return { kind: "mail" };
+      }
       await handlers.onMail?.(parsed as MailWebhookPayload);
       return { kind: "mail" };
     }
     if (eventType.startsWith("text.")) {
+      const contactId = resolveRemoteContactId(parsed, "text");
+      if (!inboundContactAllowed(contactId, allowedContactIds)) {
+        return { kind: "text" };
+      }
       await handlers.onText?.(parsed as TextWebhookPayload);
       return { kind: "text" };
     }
   }
-  // Flat call payload. Default to reject if no handler is wired.
+  // Flat call payload. Check allowlist before consulting the handler so
+  // disallowed callers always get a reject regardless of handler logic.
+  const contactId = resolveRemoteContactId(parsed, "call");
+  if (!inboundContactAllowed(contactId, allowedContactIds)) {
+    return { kind: "call", callDecision: { action: "reject" } };
+  }
   const decision =
     (await handlers.onCall?.(parsed as PhoneIncomingCallWebhookPayload)) ?? {
       action: "reject" as const,

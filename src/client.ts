@@ -18,6 +18,14 @@ export interface InkboxPluginConfig {
   // Inbound: if set, skip the Inkbox tunnel and assume webhooks land at this
   // public URL (e.g. when OpenClaw is hosted on a reachable host). Phase 7.
   publicUrl?: string;
+  // Outbound recipient allowlist. When set, send_email / send_sms /
+  // forward_email reject any recipient not on the list. Phone matches in
+  // E.164, email matches by exact address. Empty/undefined → no filtering.
+  allowedRecipients?: string[];
+  // Inbound contact-id allowlist. When set, the webhook dispatcher drops
+  // any event whose contact id is not on the list. Events with no contact
+  // resolution are also dropped (conservative default).
+  allowedInboundContactIds?: string[];
 }
 
 export interface InkboxRuntime {
