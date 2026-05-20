@@ -44,3 +44,12 @@ The Inkbox plugin gives the agent access to contacts the identity has been grant
 - Granting / revoking contact access (admin-only).
 - Bulk vCard import — that's an admin flow, not exposed as an agent tool.
 - Creating contacts — admin-only in current plugin scope.
+
+## When you need more — raw Inkbox docs
+
+If a lookup filter, contact field, or access semantics question isn't covered here, go to the source:
+
+- **https://inkbox.ai/llms.txt** — LLM-friendly index of every Inkbox doc page.
+- **https://inkbox.ai/docs/all.md** — the full Inkbox documentation concatenated as one markdown file.
+
+Prefer fetching these over guessing field names or filter semantics.

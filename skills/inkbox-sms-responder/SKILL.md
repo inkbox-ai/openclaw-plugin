@@ -48,3 +48,12 @@ The Inkbox plugin gives you a working phone number under an agent identity. Use 
 - Provisioning phone numbers (that's the setup wizard).
 - Org-level SMS opt-in registry writes (admin-only, customer-managed 10DLC campaigns only).
 - MMS sending (current SDK supports SMS only for outbound).
+
+## When you need more — raw Inkbox docs
+
+If something here doesn't match what you're seeing, or you need API behavior this skill doesn't describe (field names, error codes, edge cases), go to the source:
+
+- **https://inkbox.ai/llms.txt** — LLM-friendly index of every Inkbox doc page.
+- **https://inkbox.ai/docs/all.md** — the full Inkbox documentation concatenated as one markdown file.
+
+Prefer fetching these over guessing.

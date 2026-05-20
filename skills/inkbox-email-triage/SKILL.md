@@ -44,3 +44,12 @@ The Inkbox plugin gives you a working mailbox under an agent identity. Use this 
 - Granting other identities access to contacts/notes (admin-only, do via the Inkbox Console).
 - Domain-level rule changes (admin-only).
 - Inbound webhook handling — that happens at the plugin level, you just see the events as session input.
+
+## When you need more — raw Inkbox docs
+
+If something here doesn't match what you're seeing, or you need API behavior this skill doesn't describe (field names, error codes, edge cases), go to the source:
+
+- **https://inkbox.ai/llms.txt** — LLM-friendly index of every Inkbox doc page.
+- **https://inkbox.ai/docs/all.md** — the full Inkbox documentation concatenated as one markdown file.
+
+Prefer fetching these over guessing.

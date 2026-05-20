@@ -33,3 +33,12 @@ Use this skill whenever the user asks about call history, missed calls, transcri
 
 - Calls may not have transcripts (very short calls, dropped calls, or calls where transcription was disabled). `inkbox_list_call_transcripts` will return an empty array, not an error.
 - Transcript segments are best-effort and reflect speech-to-text confidence, not verbatim quotes. Hedge appropriately when summarizing for the user.
+
+## When you need more — raw Inkbox docs
+
+If something here doesn't match what you're seeing, or you need API behavior this skill doesn't describe (call lifecycle states, transcript shape, rate limits, recording fields), go to the source:
+
+- **https://inkbox.ai/llms.txt** — LLM-friendly index of every Inkbox doc page.
+- **https://inkbox.ai/docs/all.md** — the full Inkbox documentation concatenated as one markdown file.
+
+Prefer fetching these over guessing.

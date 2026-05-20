@@ -58,3 +58,12 @@ If `INKBOX_VAULT_KEY` is not set, the very first credential tool call returns "V
 - Creating, updating, or deleting secrets — there's no plugin tool for this in agent-scoped mode.
 - Granting access to secrets — admin-only via the Inkbox Console.
 - TOTP setup — initial TOTP config also happens in the Console.
+
+## When you need more — raw Inkbox docs
+
+If a payload shape, secret type, vault behavior, or TOTP detail isn't covered here, go to the source:
+
+- **https://inkbox.ai/llms.txt** — LLM-friendly index of every Inkbox doc page.
+- **https://inkbox.ai/docs/all.md** — the full Inkbox documentation concatenated as one markdown file.
+
+Especially useful when checking the exact fields on `LoginPayload`, `APIKeyPayload`, `SSHKeyPayload`, `KeyPairPayload`, `OtherPayload`, or `TOTPCode` rather than guessing.

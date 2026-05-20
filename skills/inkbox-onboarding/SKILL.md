@@ -68,3 +68,12 @@ Vault tools are all **optional** and must be allowlisted via `tools.allow` befor
 - Phone number provisioning specifics (carrier types, geographic constraints).
 - Custom email-sending-domain setup.
 - Org admin operations (rule changes, opt-in registry writes, identity creation/deletion).
+
+## When you need more — raw Inkbox docs
+
+If a config field, error message, or onboarding step here doesn't match what the user is seeing, go to the source:
+
+- **https://inkbox.ai/llms.txt** — LLM-friendly index of every Inkbox doc page.
+- **https://inkbox.ai/docs/all.md** — the full Inkbox documentation concatenated as one markdown file.
+
+This is the canonical reference for setup flows, key types, signing keys, vault initialization, and anything else this skill summarizes.
