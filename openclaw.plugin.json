@@ -5,8 +5,14 @@
   "contracts": {
     "tools": [
       "inkbox_send_email",
-      "inkbox_send_sms"
+      "inkbox_send_sms",
+      "inkbox_forward_email"
     ]
+  },
+  "toolMetadata": {
+    "inkbox_forward_email": {
+      "optional": true
+    }
   },
   "activation": {
     "onStartup": true

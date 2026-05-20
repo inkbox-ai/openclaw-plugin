@@ -56,7 +56,7 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 ## Phase Roadmap
 
 - [x] **Phase 0** — Scaffold (initial commit)
-- [ ] **Phase 1** — Outbound tools: `send_email`, `send_sms`, `place_call`
+- [~] **Phase 1** — Outbound tools: `send_email` ✅, `send_sms` ✅, `forward_email` ✅; `place_call` deferred to Phase 2 (needs WS)
 - [ ] **Phase 2** — Inbound: tunnel + webhook signature verify + channel plugin promotion
 - [ ] **Phase 3** — Setup wizard: `openclaw inkbox setup`
 - [ ] **Phase 4** — Read/lifecycle tools: lists, threads, conversations, contacts, notes
@@ -75,21 +75,17 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 
 | Tool | Required? | Underlying SDK | Notes |
 |---|---|---|---|
-| `inkbox_send_email` | required | `identity.sendEmail({to, subject, bodyText?, bodyHtml?, cc?, bcc?, inReplyToMessageId?, attachments?})` | Already wired in scaffold |
-| `inkbox_send_sms` | required | `identity.sendText({to, text})` | Already wired in scaffold |
-| `inkbox_forward_email` | optional | `identity.forwardEmail(messageId, {to?, cc?, bcc?, mode?, subject?, bodyText?, bodyHtml?, additionalAttachments?, includeOriginalAttachments?, replyTo?})` | Default `mode: "inline"`. Useful for ops handoffs. |
-| `inkbox_place_call` | optional | `identity.placeCall({toNumber, clientWebsocketUrl})` | Requires inbound WS endpoint — gated behind Phase 2 |
+| `inkbox_send_email` ✅ | required | `identity.sendEmail({to, subject, bodyText?, bodyHtml?, cc?, bcc?, inReplyToMessageId?, attachments?})` | Wired in `src/tools/send-email.ts` |
+| `inkbox_send_sms` ✅ | required | `identity.sendText({to, text})` | Wired in `src/tools/send-sms.ts` |
+| `inkbox_forward_email` ✅ | optional | `identity.forwardEmail(messageId, {to?, cc?, bcc?, mode?, subject?, bodyText?, bodyHtml?, includeOriginalAttachments?, replyTo?})` | Wired in `src/tools/forward-email.ts` |
+| `inkbox_place_call` | optional | `identity.placeCall({toNumber, clientWebsocketUrl})` | Deferred to Phase 2 — needs WS endpoint |
 
 ### Behavior to get right
 
-- **Lazy SDK client.** Construct `new Inkbox(...)` on first tool call, not at registration. Cache the resolved `AgentIdentity` for the process lifetime. Already done in scaffold.
-- **whoami check on first construction.** Call `inkbox.whoami()` once; if `authSubtype !== AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_CLAIMED`, log a clear warning. We don't *block* admin keys (some users will start that way), but we surface that admin-only tools won't appear.
-- **Error mapping.** Catch `InkboxAPIError`; turn `statusCode` + `detail` into a tool-result `error` content block. Specifically:
-  - 403 `sender_sms_pending` → "10DLC carrier propagation in progress, retry in 10–15 min"
-  - 403 `recipient_not_opted_in` → "Recipient has not texted START to any of your numbers"
-  - 403 `recipient_opted_out` → "Recipient has texted STOP"
-  - 409 on rate limit → surface `rateLimit.callsRemaining` / SMS limit
-- **No vendor names in messages.** Per project policy — no Telnyx etc. in any output the agent sees.
+- ✅ **Lazy SDK client.** `src/client.ts:createInkboxRuntime()` constructs `new Inkbox(...)` and resolves the identity on first tool call, cached after that.
+- ✅ **whoami check on first construction.** Warns (does not block) when key isn't agent-scoped — covers `AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_CLAIMED` and `_UNCLAIMED`.
+- ✅ **Error mapping.** `src/errors.ts:mapInkboxError()` translates `InkboxAPIError` into agent-friendly tool errors. Specific 403 codes handled: `sender_sms_pending`, `recipient_not_opted_in`, `recipient_opted_out`. 404/409/422 carry through with their detail.
+- ✅ **No vendor names in messages.** Error strings reference only "carriers" / "Inkbox" — no upstream vendor.
 
 ### Tests
 
