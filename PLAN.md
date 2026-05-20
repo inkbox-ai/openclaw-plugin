@@ -57,7 +57,7 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 
 - [x] **Phase 0** — Scaffold (initial commit)
 - [~] **Phase 1** — Outbound tools: `send_email` ✅, `send_sms` ✅, `forward_email` ✅; `place_call` deferred to Phase 2 (needs WS)
-- [ ] **Phase 2** — Inbound: tunnel + webhook signature verify + channel plugin promotion
+- [~] **Phase 2** — Inbound: tunnel ✅, webhook signature verify ✅, dedup ✅, event dispatch ✅, channel plugin promotion ⏳
 - [ ] **Phase 3** — Setup wizard: `openclaw inkbox setup`
 - [ ] **Phase 4** — Read/lifecycle tools: lists, threads, conversations, contacts, notes
 - [ ] **Phase 5** — Vault + credentials + TOTP
@@ -102,27 +102,25 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 
 ### Sub-phase 2a — Tunnel + HTTP handler
 
-- [ ] Add `@inkbox/sdk/tunnels/connect` import; gated behind a runtime feature so the main entry stays browser-safe.
-- [ ] On plugin activation, call `connect(inkbox, { name: <identity-handle>, handler: inboxFetchHandler })`.
-  - Tunnel name = identity handle so the public URL is stable across restarts.
-  - Optional `publicUrl` override in config to skip tunnel entirely.
-- [ ] Write a Fetch-API handler that:
-  1. Reads body as `Uint8Array`
-  2. Calls `verifyWebhook({payload, headers, secret: config.signingKey})`
-  3. On `false`, returns `403`
-  4. Parses JSON, discriminates on `event_type` (mail/text) or shape (call has no envelope)
-  5. Dispatches to a per-event handler (Phase 2b)
-- [ ] Dedup: `x-inkbox-request-id` — track last N in an LRU; reject repeats with `200 ok` (Inkbox treats non-200 as retry).
+- [x] Add `@inkbox/sdk/tunnels/connect` — dynamic import in `src/inbound/tunnel.ts` keeps it out of the main require graph (POSIX-only subpath).
+- [x] On plugin activation, open tunnel via `startInbound()` in `src/inbound/index.ts`. Fire-and-forget so outbound stays available even if the tunnel doesn't come up.
+- [x] Fetch-API handler in `src/inbound/tunnel.ts` reads body + lowercase headers, defers to the pure `handleInkboxWebhook()` in `src/inbound/handler.ts`.
+- [x] Pure handler verifies required headers (`x-inkbox-request-id`, `x-inkbox-signature`, `x-inkbox-timestamp`), checks dedup, calls `verifyWebhook()` from `@inkbox/sdk`, parses JSON, dispatches.
+- [x] Dedup in `src/inbound/dedup.ts` — bounded set (10k entries default) with LRU eviction. Replays short-circuit before HMAC.
+- [ ] `publicUrl` config override path (skip tunnel for hosted OpenClaw) — Phase 7.
 
 ### Sub-phase 2b — Event dispatch
 
+- [x] Discrimination in `src/inbound/dispatch.ts`: mail/text envelopes split on `event_type` prefix; flat call payload routes to `onCall` with default-reject.
+- [x] `InboundHandlers` interface with `onMail`, `onText`, `onCall` — caller wires the actual session logic.
+
 | Event | Handler |
 |---|---|
-| `message.received` (mail) | Open or merge session keyed by contact UUID (`data.contacts[0].id`); enqueue inbound turn with subject + body |
+| `message.received` (mail) | Open or merge session keyed by contact UUID (`data.contacts[0].id`); enqueue inbound turn with subject + body — wires up in 2c |
 | `message.sent`, `message.delivered`, `message.bounced`, `message.failed`, `message.forwarded` | Telemetry only — surface in session metadata if session is open |
-| `text.received` | Open or merge session keyed by contact UUID; enqueue inbound turn with text |
+| `text.received` | Open or merge session keyed by contact UUID; enqueue inbound turn with text — wires up in 2c |
 | `text.sent`, `text.delivered`, `text.delivery_failed`, `text.delivery_unconfirmed` | Telemetry only |
-| `PhoneIncomingCallWebhookPayload` (flat, sync) | Decide `auto_accept` (return WS URL) vs `reject` based on allowlist + agent availability; if accept, register the WS handler for the call audio bridge |
+| `PhoneIncomingCallWebhookPayload` (flat, sync) | Decide `auto_accept` (return WS URL) vs `reject` based on allowlist + agent availability; if accept, register the WS handler for the call audio bridge — wires up in 2c |
 
 ### Sub-phase 2c — Channel plugin promotion
 

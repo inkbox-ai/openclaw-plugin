@@ -10,7 +10,14 @@ export interface InkboxPluginConfig {
   apiKey: string;
   identity: string;
   baseUrl?: string;
+  // Inbound: HMAC secret used to verify webhooks. Required for inbound delivery.
   signingKey?: string;
+  // Inbound: override tunnel name. Defaults to identity handle so the
+  // public URL is stable across restarts.
+  tunnelName?: string;
+  // Inbound: if set, skip the Inkbox tunnel and assume webhooks land at this
+  // public URL (e.g. when OpenClaw is hosted on a reachable host). Phase 7.
+  publicUrl?: string;
 }
 
 export interface InkboxRuntime {

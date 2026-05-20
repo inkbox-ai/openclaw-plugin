@@ -37,6 +37,14 @@
       "signingKey": {
         "type": "string",
         "description": "Webhook HMAC signing secret. Required when inbound webhooks are enabled."
+      },
+      "tunnelName": {
+        "type": "string",
+        "description": "Override the Inkbox tunnel name. Defaults to the identity handle so the public URL is stable across restarts."
+      },
+      "publicUrl": {
+        "type": "string",
+        "description": "If set, skip the Inkbox tunnel and assume webhooks land at this public URL. Used when OpenClaw is hosted on a publicly reachable host."
       }
     }
   }
