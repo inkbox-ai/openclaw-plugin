@@ -8,6 +8,8 @@ import { registerSmsReads } from "./src/tools/sms-reads.js";
 import { registerCallReads } from "./src/tools/call-reads.js";
 import { registerContactTools } from "./src/tools/contacts.js";
 import { registerNoteTools } from "./src/tools/notes.js";
+import { registerVaultTools } from "./src/tools/vault.js";
+import { createVaultRuntime } from "./src/vault.js";
 import { startInbound } from "./src/inbound/index.js";
 
 export default definePluginEntry({
@@ -44,6 +46,14 @@ export default definePluginEntry({
     // filters list/lookup/get to entries this identity has access to.
     registerContactTools(api, runtime);
     registerNoteTools(api, runtime);
+
+    // Vault tools. All optional; user must opt in via tools.allow. Vault
+    // unlock key is read once on first use from $INKBOX_VAULT_KEY (or a
+    // custom env var when vault.keyEnvVar is configured).
+    const vault = createVaultRuntime(runtime, {
+      keyEnvVar: (cfg as any).vault?.keyEnvVar,
+    });
+    registerVaultTools(api, runtime, vault);
 
     // Inbound delivery. Skipped when signingKey is missing; failures are
     // non-fatal (outbound still works). Phase 2c will replace these stub

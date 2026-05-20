@@ -28,7 +28,12 @@
       "inkbox_get_note",
       "inkbox_create_note",
       "inkbox_update_note",
-      "inkbox_delete_note"
+      "inkbox_delete_note",
+      "inkbox_credentials_list",
+      "inkbox_credentials_get_login",
+      "inkbox_credentials_get_api_key",
+      "inkbox_credentials_get_ssh_key",
+      "inkbox_totp_code"
     ]
   },
   "toolMetadata": {
@@ -40,7 +45,12 @@
     "inkbox_mark_text_conversation_read": { "optional": true },
     "inkbox_export_contact_vcard": { "optional": true },
     "inkbox_update_note": { "optional": true },
-    "inkbox_delete_note": { "optional": true }
+    "inkbox_delete_note": { "optional": true },
+    "inkbox_credentials_list": { "optional": true },
+    "inkbox_credentials_get_login": { "optional": true },
+    "inkbox_credentials_get_api_key": { "optional": true },
+    "inkbox_credentials_get_ssh_key": { "optional": true },
+    "inkbox_totp_code": { "optional": true }
   },
   "activation": {
     "onStartup": true
@@ -73,6 +83,17 @@
       "publicUrl": {
         "type": "string",
         "description": "If set, skip the Inkbox tunnel and assume webhooks land at this public URL. Used when OpenClaw is hosted on a publicly reachable host."
+      },
+      "vault": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Vault tool configuration. Vault tools are optional and must be opted into via tools.allow.",
+        "properties": {
+          "keyEnvVar": {
+            "type": "string",
+            "description": "Env var the vault unlock key is read from. Defaults to INKBOX_VAULT_KEY."
+          }
+        }
       }
     }
   }
