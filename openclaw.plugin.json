@@ -6,13 +6,29 @@
     "tools": [
       "inkbox_send_email",
       "inkbox_send_sms",
-      "inkbox_forward_email"
+      "inkbox_forward_email",
+      "inkbox_list_unread_emails",
+      "inkbox_list_emails",
+      "inkbox_get_email",
+      "inkbox_get_email_thread",
+      "inkbox_mark_emails_read",
+      "inkbox_list_text_conversations",
+      "inkbox_get_text_conversation",
+      "inkbox_list_texts",
+      "inkbox_get_text",
+      "inkbox_mark_text_read",
+      "inkbox_mark_text_conversation_read",
+      "inkbox_list_calls",
+      "inkbox_list_call_transcripts"
     ]
   },
   "toolMetadata": {
-    "inkbox_forward_email": {
-      "optional": true
-    }
+    "inkbox_forward_email": { "optional": true },
+    "inkbox_mark_emails_read": { "optional": true },
+    "inkbox_list_texts": { "optional": true },
+    "inkbox_get_text": { "optional": true },
+    "inkbox_mark_text_read": { "optional": true },
+    "inkbox_mark_text_conversation_read": { "optional": true }
   },
   "activation": {
     "onStartup": true

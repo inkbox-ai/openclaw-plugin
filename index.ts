@@ -3,6 +3,9 @@ import { createInkboxRuntime, type InkboxPluginConfig } from "./src/client.js";
 import { registerSendEmail } from "./src/tools/send-email.js";
 import { registerSendSms } from "./src/tools/send-sms.js";
 import { registerForwardEmail } from "./src/tools/forward-email.js";
+import { registerEmailReads } from "./src/tools/email-reads.js";
+import { registerSmsReads } from "./src/tools/sms-reads.js";
+import { registerCallReads } from "./src/tools/call-reads.js";
 import { startInbound } from "./src/inbound/index.js";
 
 export default definePluginEntry({
@@ -28,6 +31,12 @@ export default definePluginEntry({
 
     // Optional outbound tools — require explicit opt-in via tools.allow.
     registerForwardEmail(api, runtime);
+
+    // Read/lifecycle tools for email, SMS, and calls. Required tools light up
+    // by default; optional ones (mark-read, raw text list/get) require opt-in.
+    registerEmailReads(api, runtime);
+    registerSmsReads(api, runtime);
+    registerCallReads(api, runtime);
 
     // Inbound delivery. Skipped when signingKey is missing; failures are
     // non-fatal (outbound still works). Phase 2c will replace these stub
