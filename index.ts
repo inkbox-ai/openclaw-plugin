@@ -13,6 +13,9 @@ import { registerWhoami } from "./src/tools/whoami.js";
 import { createVaultRuntime } from "./src/vault.js";
 import { startInbound } from "./src/inbound/index.js";
 
+// CLI registrar is lazy-imported via api.registerCli so we don't pay the
+// commander/Inkbox SDK cost on every plugin load.
+
 export default definePluginEntry({
   id: "inkbox",
   name: "Inkbox",
@@ -59,6 +62,25 @@ export default definePluginEntry({
 
     // Diagnostic / introspection tools.
     registerWhoami(api, runtime);
+
+    // CLI subcommand group: `openclaw inkbox {setup,doctor,whoami}`. Lazy-
+    // loaded — the cli module is only imported when a user actually runs an
+    // inkbox subcommand.
+    api.registerCli?.(
+      async ({ program }: { program: any }) => {
+        const { registerInkboxCli } = await import("./src/cli.js");
+        registerInkboxCli(program);
+      },
+      {
+        descriptors: [
+          {
+            name: "inkbox",
+            description: "Inkbox plugin commands (setup, doctor, whoami)",
+            hasSubcommands: true,
+          },
+        ],
+      },
+    );
 
     // Inbound delivery. Skipped when signingKey is missing; failures are
     // non-fatal (outbound still works). Phase 2c will replace these stub

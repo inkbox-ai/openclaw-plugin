@@ -58,7 +58,7 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 - [x] **Phase 0** — Scaffold (initial commit)
 - [~] **Phase 1** — Outbound tools: `send_email` ✅, `send_sms` ✅, `forward_email` ✅; `place_call` deferred to Phase 2 (needs WS)
 - [~] **Phase 2** — Inbound: tunnel ✅, webhook signature verify ✅, dedup ✅, event dispatch ✅, channel plugin promotion ⏳
-- [ ] **Phase 3** — Setup wizard: `openclaw inkbox setup`
+- [~] **Phase 3** — Setup wizard: CLI scaffold ✅, doctor ✅, whoami ✅; interactive `setup` wizard still stubbed (prints manual instructions)
 - [x] **Phase 4** — Read/lifecycle tools: 22 tools across email reads, SMS reads, call reads, contacts, notes
 - [x] **Phase 5** — Vault + credentials + TOTP — 5 optional tools, env-var unlock
 - [x] **Phase 6** — Bundled skills: email triage ✅, SMS responder ✅, onboarding ✅, call handler ✅, contact lookup ✅, credential use ✅
