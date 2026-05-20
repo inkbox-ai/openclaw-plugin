@@ -19,7 +19,16 @@
       "inkbox_mark_text_read",
       "inkbox_mark_text_conversation_read",
       "inkbox_list_calls",
-      "inkbox_list_call_transcripts"
+      "inkbox_list_call_transcripts",
+      "inkbox_lookup_contact",
+      "inkbox_get_contact",
+      "inkbox_list_contacts",
+      "inkbox_export_contact_vcard",
+      "inkbox_list_notes",
+      "inkbox_get_note",
+      "inkbox_create_note",
+      "inkbox_update_note",
+      "inkbox_delete_note"
     ]
   },
   "toolMetadata": {
@@ -28,7 +37,10 @@
     "inkbox_list_texts": { "optional": true },
     "inkbox_get_text": { "optional": true },
     "inkbox_mark_text_read": { "optional": true },
-    "inkbox_mark_text_conversation_read": { "optional": true }
+    "inkbox_mark_text_conversation_read": { "optional": true },
+    "inkbox_export_contact_vcard": { "optional": true },
+    "inkbox_update_note": { "optional": true },
+    "inkbox_delete_note": { "optional": true }
   },
   "activation": {
     "onStartup": true

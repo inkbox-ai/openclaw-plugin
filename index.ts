@@ -6,6 +6,8 @@ import { registerForwardEmail } from "./src/tools/forward-email.js";
 import { registerEmailReads } from "./src/tools/email-reads.js";
 import { registerSmsReads } from "./src/tools/sms-reads.js";
 import { registerCallReads } from "./src/tools/call-reads.js";
+import { registerContactTools } from "./src/tools/contacts.js";
+import { registerNoteTools } from "./src/tools/notes.js";
 import { startInbound } from "./src/inbound/index.js";
 
 export default definePluginEntry({
@@ -37,6 +39,11 @@ export default definePluginEntry({
     registerEmailReads(api, runtime);
     registerSmsReads(api, runtime);
     registerCallReads(api, runtime);
+
+    // Access-scoped contact + note tools. With an agent-scoped key the SDK
+    // filters list/lookup/get to entries this identity has access to.
+    registerContactTools(api, runtime);
+    registerNoteTools(api, runtime);
 
     // Inbound delivery. Skipped when signingKey is missing; failures are
     // non-fatal (outbound still works). Phase 2c will replace these stub
