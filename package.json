@@ -1,0 +1,39 @@
+{
+  "name": "@inkbox/openclaw-plugin",
+  "version": "0.1.0",
+  "description": "Inkbox plugin for OpenClaw — adds email, SMS, and voice messaging tools and inbound webhook handling",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@inkbox/sdk": "^0.4.3",
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "*",
+    "typescript": "^5.4.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    },
+    "build": {
+      "openclawVersion": "2026.3.24-beta.2",
+      "pluginSdkVersion": "2026.3.24-beta.2"
+    }
+  }
+}

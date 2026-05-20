@@ -1,0 +1,37 @@
+{
+  "id": "inkbox",
+  "name": "Inkbox",
+  "description": "Adds Inkbox messaging tools (email, SMS, voice) to OpenClaw",
+  "contracts": {
+    "tools": [
+      "inkbox_send_email",
+      "inkbox_send_sms"
+    ]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["apiKey", "identity"],
+    "properties": {
+      "apiKey": {
+        "type": "string",
+        "description": "Inkbox API key (ApiKey_... format). Create one in the Inkbox Console."
+      },
+      "identity": {
+        "type": "string",
+        "description": "Agent identity handle to send from (3–63 lowercase alphanum/dash)."
+      },
+      "baseUrl": {
+        "type": "string",
+        "description": "Override Inkbox API base URL. Defaults to https://inkbox.ai."
+      },
+      "signingKey": {
+        "type": "string",
+        "description": "Webhook HMAC signing secret. Required when inbound webhooks are enabled."
+      }
+    }
+  }
+}
