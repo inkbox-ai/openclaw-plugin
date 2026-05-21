@@ -26,6 +26,14 @@ export interface InkboxPluginConfig {
   // any event whose contact id is not on the list. Events with no contact
   // resolution are also dropped (conservative default).
   allowedInboundContactIds?: string[];
+  // Inbound SMS fragment batching. When `batchDelayMs > 0`, consecutive
+  // text.received events from the same remote number within the window are
+  // accumulated and delivered as a single event with concatenated body.
+  sms?: {
+    batchDelayMs?: number;
+    maxMessages?: number;
+    maxChars?: number;
+  };
 }
 
 export interface InkboxRuntime {

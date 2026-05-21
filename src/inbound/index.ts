@@ -2,6 +2,9 @@ import type { InkboxRuntime, InkboxPluginConfig, PluginLogger } from "../client.
 import type { InboundHandlers } from "./dispatch.js";
 import { openInkboxTunnel } from "./tunnel.js";
 import { registerInboundHttpRoute } from "./http-route.js";
+import { SmsBatcher, DEFAULT_SMS_BATCH } from "./batch.js";
+export { SmsBatcher, DEFAULT_SMS_BATCH } from "./batch.js";
+export type { SmsBatchConfig, BatchedTextEvent } from "./batch.js";
 
 export { RequestIdDedup } from "./dedup.js";
 export { handleInkboxWebhook } from "./handler.js";
@@ -42,6 +45,40 @@ export function startInbound(opts: StartInboundOptions): void {
     return;
   }
 
+  // If batching is configured, wrap onText with a batcher. text.received
+  // events from the same remote number within the window get collapsed
+  // into one synthetic batched event before they reach the handler.
+  const batchDelayMs = cfg.sms?.batchDelayMs ?? DEFAULT_SMS_BATCH.batchDelayMs;
+  let wrappedHandlers = handlers;
+  if (batchDelayMs > 0 && handlers.onText) {
+    const userOnText = handlers.onText;
+    const batcher = new SmsBatcher(
+      {
+        batchDelayMs,
+        maxMessages: cfg.sms?.maxMessages ?? DEFAULT_SMS_BATCH.maxMessages,
+        maxChars: cfg.sms?.maxChars ?? DEFAULT_SMS_BATCH.maxChars,
+      },
+      async (batched) => {
+        await userOnText(batched);
+      },
+    );
+    wrappedHandlers = {
+      ...handlers,
+      onText: async (event) => {
+        // Try to accumulate. If accepted, the batcher will fire userOnText
+        // on flush — we MUST NOT also call it here. If not accepted (e.g.
+        // delivery-status event), pass through immediately.
+        const accepted = batcher.accept(event as any);
+        if (!accepted) {
+          await userOnText(event);
+        }
+      },
+    };
+    logger?.info?.(
+      `Inkbox SMS batching on (delay=${batchDelayMs}ms, maxMessages=${cfg.sms?.maxMessages ?? DEFAULT_SMS_BATCH.maxMessages}, maxChars=${cfg.sms?.maxChars ?? DEFAULT_SMS_BATCH.maxChars}).`,
+    );
+  }
+
   // Branch on cfg.publicUrl: when set, OpenClaw is already publicly
   // reachable so we register the webhook as an in-process HTTP route. When
   // unset, fall back to the Inkbox tunnel so laptop/local-dev setups don't
@@ -55,7 +92,7 @@ export function startInbound(opts: StartInboundOptions): void {
       registerInboundHttpRoute({
         api,
         signingKey: cfg.signingKey,
-        handlers,
+        handlers: wrappedHandlers,
         allowedContactIds: cfg.allowedInboundContactIds,
         logger,
       });
@@ -76,7 +113,7 @@ export function startInbound(opts: StartInboundOptions): void {
         identityHandle: cfg.identity!,
         signingKey: cfg.signingKey!,
         tunnelName: cfg.tunnelName,
-        handlers,
+        handlers: wrappedHandlers,
         logger,
         allowedContactIds: cfg.allowedInboundContactIds,
       }),

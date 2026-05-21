@@ -110,6 +110,28 @@
         "type": "array",
         "items": { "type": "string" },
         "description": "Inbound contact-id allowlist. When set, webhook events whose remote contact id is not on this list are dropped (mail/text become no-ops, calls are rejected). Events with no contact resolution are also dropped."
+      },
+      "sms": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Inbound SMS fragment batching. Useful when senders split a message across multiple texts in rapid succession — collapses them into one logical event.",
+        "properties": {
+          "batchDelayMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Wait this many ms of inactivity from a sender before flushing the batch. 0 disables batching."
+          },
+          "maxMessages": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Max fragments per batch before forced flush. Default 8."
+          },
+          "maxChars": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Max total chars per batch before forced flush. Default 4000."
+          }
+        }
       }
     }
   }
