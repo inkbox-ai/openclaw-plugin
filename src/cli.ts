@@ -1,12 +1,11 @@
 import { Inkbox } from "@inkbox/sdk";
+import { readIdentityState } from "./state.js";
 
 // CLI registrar — called by OpenClaw with a commander-style `program` so we
 // can attach the `inkbox` subcommand group. Each action is self-contained
 // and reads its config from env vars (INKBOX_API_KEY, INKBOX_IDENTITY,
 // INKBOX_BASE_URL) so the commands work regardless of how OpenClaw threads
-// plugin config into the CLI process. The full setup wizard (interactive
-// signup → identity → key mint → persist) is stubbed here; it lands in a
-// follow-up commit.
+// plugin config into the CLI process.
 export function registerInkboxCli(program: any): void {
   const inkbox = program
     .command("inkbox")
@@ -28,9 +27,12 @@ export function registerInkboxCli(program: any): void {
 
   inkbox
     .command("setup")
-    .description("Interactive setup for the Inkbox plugin (signup, identity, key, signing key)")
+    .description("Interactive setup for the Inkbox plugin (identity, phone, signing key)")
     .action(async () => {
-      printSetupStub();
+      // Lazy import so the readline prompter isn't pulled into doctor/whoami
+      // command paths that don't need it.
+      const { runSetupWizardCli } = await import("./setup-wizard.js");
+      await runSetupWizardCli();
     });
 }
 
@@ -100,6 +102,24 @@ async function runDoctor(): Promise<void> {
     console.log();
 
     console.log("✅ Inkbox connection healthy.");
+
+    // Section 3: cached state (from `openclaw inkbox setup`).
+    const cached = await readIdentityState();
+    if (cached) {
+      console.log("\nCached state (~/.openclaw/inkbox/identity-state.json):");
+      console.log(`  identityHandle: ${cached.identityHandle}`);
+      console.log(`  emailAddress: ${cached.emailAddress ?? "(none)"}`);
+      console.log(`  phoneNumber: ${cached.phoneNumber ?? "(none)"}`);
+      console.log(`  tunnelPublicHost: ${cached.tunnelPublicHost ?? "(none)"}`);
+      console.log(`  savedAt: ${cached.savedAt}`);
+      if (cached.identityHandle !== cfg.identity) {
+        console.log(
+          `\n⚠️  Cached identity (${cached.identityHandle}) does not match INKBOX_IDENTITY (${cfg.identity}). Re-run setup to refresh.`,
+        );
+      }
+    } else {
+      console.log("\nNo cached state — run `openclaw inkbox setup` to generate one.");
+    }
   } catch (err) {
     console.log(`❌ API check failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exitCode = 1;
@@ -128,26 +148,3 @@ async function runWhoami(): Promise<void> {
   }
 }
 
-function printSetupStub(): void {
-  console.log(`Inkbox plugin setup (interactive wizard coming soon).
-
-For now, configure manually:
-
-1. Sign up at https://inkbox.ai/console (or sign in to an existing account).
-2. Create an agent identity. This atomically provisions a mailbox at
-   <handle>@inkboxmail.com and a tunnel.
-3. Provision a phone number on the identity if you want SMS or voice.
-   Local numbers support SMS; toll-free numbers are voice-only today.
-4. Mint an agent-scoped API key bound to that identity.
-5. (Optional, for inbound) Generate a webhook signing key in the Console.
-6. Drop the values into OpenClaw config at plugins.entries.inkbox.config:
-
-   {
-     "apiKey": "ApiKey_xxxxxxxxxxxx",
-     "identity": "your-agent-handle",
-     "signingKey": "whsec_xxxxxxxxxxxx"
-   }
-
-7. Verify with: openclaw inkbox doctor
-`);
-}
