@@ -1,15 +1,22 @@
 import type { InkboxRuntime, InkboxPluginConfig, PluginLogger } from "../client.js";
 import type { InboundHandlers } from "./dispatch.js";
 import { openInkboxTunnel } from "./tunnel.js";
+import { registerInboundHttpRoute } from "./http-route.js";
 
 export { RequestIdDedup } from "./dedup.js";
 export { handleInkboxWebhook } from "./handler.js";
 export { dispatchInbound } from "./dispatch.js";
 export { openInkboxTunnel } from "./tunnel.js";
+export { registerInboundHttpRoute } from "./http-route.js";
 export type { InboundHandlers, InboundCallDecision, DispatchResult } from "./dispatch.js";
 export type { WebhookHandlerOptions, WebhookResponse } from "./handler.js";
 
 export interface StartInboundOptions {
+  // OpenClaw plugin api. Needed for the registerHttpRoute path when
+  // cfg.publicUrl is set. Optional only because the tunnel path doesn't
+  // strictly require it — but you'll get the tunnel branch in either case
+  // if `api` is omitted.
+  api?: any;
   cfg: Partial<InkboxPluginConfig> & { tunnelName?: string };
   runtime: InkboxRuntime;
   handlers: InboundHandlers;
@@ -23,7 +30,7 @@ export interface StartInboundOptions {
 // Caller decides which handlers to wire. Phase 2c will wire real session
 // ingress; for now the entry point logs and rejects calls.
 export function startInbound(opts: StartInboundOptions): void {
-  const { cfg, runtime, handlers, logger } = opts;
+  const { api, cfg, runtime, handlers, logger } = opts;
   if (!cfg.signingKey) {
     logger?.info?.(
       "Inkbox inbound delivery skipped — no signingKey configured. Set plugins.entries.inkbox.config.signingKey to enable.",
@@ -35,7 +42,32 @@ export function startInbound(opts: StartInboundOptions): void {
     return;
   }
 
-  // Fire-and-forget. Error path warns and falls back to outbound-only mode.
+  // Branch on cfg.publicUrl: when set, OpenClaw is already publicly
+  // reachable so we register the webhook as an in-process HTTP route. When
+  // unset, fall back to the Inkbox tunnel so laptop/local-dev setups don't
+  // need a public host.
+  if (cfg.publicUrl) {
+    if (!api) {
+      logger?.warn?.(
+        "Inkbox publicUrl override set but no api was passed to startInbound; cannot register HTTP route. Falling back to tunnel.",
+      );
+    } else {
+      registerInboundHttpRoute({
+        api,
+        signingKey: cfg.signingKey,
+        handlers,
+        allowedContactIds: cfg.allowedInboundContactIds,
+        logger,
+      });
+      logger?.info?.(
+        `Inkbox inbound at ${cfg.publicUrl}/inkbox/webhook — point mailbox + phone webhook URLs here.`,
+      );
+      return;
+    }
+  }
+
+  // Tunnel branch (default). Fire-and-forget; tunnel failures don't block
+  // outbound tools.
   runtime
     .getClient()
     .then((inkbox) =>

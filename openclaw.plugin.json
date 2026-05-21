@@ -34,7 +34,9 @@
       "inkbox_credentials_get_api_key",
       "inkbox_credentials_get_ssh_key",
       "inkbox_totp_code",
-      "inkbox_whoami"
+      "inkbox_whoami",
+      "inkbox_place_call",
+      "inkbox_rate_status"
     ]
   },
   "toolMetadata": {
@@ -52,7 +54,9 @@
     "inkbox_credentials_get_api_key": { "optional": true },
     "inkbox_credentials_get_ssh_key": { "optional": true },
     "inkbox_totp_code": { "optional": true },
-    "inkbox_whoami": { "optional": true }
+    "inkbox_whoami": { "optional": true },
+    "inkbox_place_call": { "optional": true },
+    "inkbox_rate_status": { "optional": true }
   },
   "activation": {
     "onStartup": true

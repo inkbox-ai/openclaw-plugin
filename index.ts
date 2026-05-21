@@ -10,6 +10,8 @@ import { registerContactTools } from "./src/tools/contacts.js";
 import { registerNoteTools } from "./src/tools/notes.js";
 import { registerVaultTools } from "./src/tools/vault.js";
 import { registerWhoami } from "./src/tools/whoami.js";
+import { registerPlaceCall } from "./src/tools/place-call.js";
+import { registerRateStatus } from "./src/tools/rate-status.js";
 import { createVaultRuntime } from "./src/vault.js";
 import { startInbound } from "./src/inbound/index.js";
 
@@ -40,6 +42,7 @@ export default definePluginEntry({
 
     // Optional outbound tools — require explicit opt-in via tools.allow.
     registerForwardEmail(api, runtime, cfg.allowedRecipients);
+    registerPlaceCall(api, runtime, cfg.allowedRecipients);
 
     // Read/lifecycle tools for email, SMS, and calls. Required tools light up
     // by default; optional ones (mark-read, raw text list/get) require opt-in.
@@ -62,6 +65,7 @@ export default definePluginEntry({
 
     // Diagnostic / introspection tools.
     registerWhoami(api, runtime);
+    registerRateStatus(api, runtime);
 
     // CLI subcommand group: `openclaw inkbox {setup,doctor,whoami}`. Lazy-
     // loaded — the cli module is only imported when a user actually runs an
@@ -86,6 +90,7 @@ export default definePluginEntry({
     // non-fatal (outbound still works). Phase 2c will replace these stub
     // handlers with real session ingress via defineChannelPluginEntry.
     startInbound({
+      api,
       cfg,
       runtime,
       logger: api.logger,
