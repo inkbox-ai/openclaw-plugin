@@ -433,14 +433,6 @@ async function dispatchInboundTurn(
     opts.turn.mode === "voice"
       ? markInkboxVoiceTurnActive(route.sessionKey, {
           callId: callIdFromTurn(opts.turn),
-          deliverFinalReply: async (text) => {
-            await deliverReply({
-              turn: opts.turn,
-              text,
-              runtime: opts.runtime,
-              activeCalls: opts.activeCalls,
-            });
-          },
         })
       : undefined;
   try {
@@ -455,6 +447,9 @@ async function dispatchInboundTurn(
       recordInboundSession: core.session.recordInboundSession,
       dispatchReplyWithBufferedBlockDispatcher:
         core.reply.dispatchReplyWithBufferedBlockDispatcher,
+      ...(opts.turn.mode === "voice"
+        ? { replyOptions: { sourceReplyDeliveryMode: "automatic" as const } }
+        : {}),
       delivery: {
         deliver: async (payload: unknown) => {
           const text = payloadText(payload);
@@ -788,7 +783,6 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           typeof payload.turn_id === "string" && payload.turn_id.trim()
             ? payload.turn_id.trim()
             : `${Date.now()}`;
-        await sendVoiceText(active, "I heard you. One moment.", `${turnId}:ack`);
         const body = `[inkbox:voice_call call_id=${meta.callId} | ${renderContactMarker(meta.contact)}]\n${text}`;
         await dispatchInboundTurn({
           ...opts,

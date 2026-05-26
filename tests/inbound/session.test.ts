@@ -114,6 +114,11 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       ],
     });
     expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyOptions: { sourceReplyDeliveryMode: "automatic" },
+      }),
+    );
     expect(sendText).not.toHaveBeenCalled();
     expect(bridge.activeCalls.size).toBe(0);
     expect(
@@ -131,20 +136,14 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         sequence: 1,
       }),
       expect.objectContaining({
-        delta: "I heard you. One moment.",
-        turn_id: "turn-1:ack",
-        sequence: 3,
-      }),
-      expect.objectContaining({
         delta: "I can hear you on the call.",
         turn_id: "turn-1",
-        sequence: 5,
+        sequence: 3,
       }),
     ]);
     expect(frames.filter((frame) => frame.done)).toEqual([
       expect.objectContaining({ turn_id: "greeting", sequence: 2 }),
-      expect.objectContaining({ turn_id: "turn-1:ack", sequence: 4 }),
-      expect.objectContaining({ turn_id: "turn-1", sequence: 6 }),
+      expect.objectContaining({ turn_id: "turn-1", sequence: 4 }),
     ]);
   });
 
@@ -178,13 +177,6 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       }),
     );
     expect(frames[2]).toEqual(
-      expect.objectContaining({
-        event: "text",
-        delta: "I heard you. One moment.",
-        turn_id: "turn-2:ack",
-      }),
-    );
-    expect(frames[4]).toEqual(
       expect.objectContaining({
         event: "text",
         delta: "Yes, I am here.",

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  deliverInkboxVoiceFinalReply,
   markInkboxVoiceTurnActive,
   registerInkboxVoiceToolGuard,
   shouldBlockInkboxOutboundToolDuringVoice,
@@ -49,34 +48,5 @@ describe("Inkbox voice tool guard", () => {
       blockReason: expect.stringContaining("Inkbox voice call is active"),
     });
     expect(allowed).toBeUndefined();
-  });
-
-  it("registers a finalize hook that speaks the final voice reply once", async () => {
-    const hooks = new Map<string, any>();
-    const api = {
-      registerHook: vi.fn((event: string, handler: any) => hooks.set(event, handler)),
-    };
-    registerInkboxVoiceToolGuard(api);
-    const speak = vi.fn();
-    const clear = markInkboxVoiceTurnActive("voice-session", {
-      callId: "call-3",
-      deliverFinalReply: speak,
-    });
-    const handler = hooks.get("before_agent_finalize");
-
-    await handler({ lastAssistantMessage: "Yes, I can hear you clearly." }, { sessionKey: "voice-session" });
-    await handler({ lastAssistantMessage: "Yes, I can hear you clearly." }, { sessionKey: "voice-session" });
-    clear();
-
-    expect(api.registerHook).toHaveBeenCalledWith(
-      "before_agent_finalize",
-      expect.any(Function),
-      expect.objectContaining({ name: "inkbox-voice-final-reply-tts" }),
-    );
-    expect(speak).toHaveBeenCalledTimes(1);
-    expect(speak).toHaveBeenCalledWith("Yes, I can hear you clearly.");
-    await expect(
-      deliverInkboxVoiceFinalReply("voice-session", "after clear"),
-    ).resolves.toBe(false);
   });
 });
