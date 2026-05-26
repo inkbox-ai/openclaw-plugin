@@ -29,6 +29,20 @@ export interface InkboxPluginConfig {
   voiceAgentPrewarm?: boolean;
   voiceAgentPrewarmTtlMs?: number;
   voiceAgentPrewarmTimeoutMs?: number;
+  // Voice: optional raw-media bridge to an OpenClaw realtime voice provider
+  // such as OpenAI Realtime. When unavailable, the call falls back to Inkbox
+  // managed STT/TTS unless fallbackToInkboxSttTts is false.
+  voiceRealtime?: {
+    enabled?: boolean;
+    provider?: string;
+    model?: string;
+    voice?: string;
+    instructions?: string;
+    toolPolicy?: "safe-read-only" | "owner" | "none";
+    consultPolicy?: "auto" | "substantive" | "always";
+    providers?: Record<string, Record<string, unknown>>;
+    fallbackToInkboxSttTts?: boolean;
+  };
   // Outbound recipient allowlist. When set, send_email / send_sms /
   // forward_email reject any recipient not on the list. Phone matches in
   // E.164, email matches by exact address. Empty/undefined → no filtering.

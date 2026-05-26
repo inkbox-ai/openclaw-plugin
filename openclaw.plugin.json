@@ -98,6 +98,33 @@
               "maxChars": { "type": "integer", "minimum": 1 }
             }
           },
+          "voiceRealtime": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "provider": { "type": "string" },
+              "model": { "type": "string" },
+              "voice": { "type": "string" },
+              "instructions": { "type": "string" },
+              "toolPolicy": {
+                "type": "string",
+                "enum": ["safe-read-only", "owner", "none"]
+              },
+              "consultPolicy": {
+                "type": "string",
+                "enum": ["auto", "substantive", "always"]
+              },
+              "providers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "fallbackToInkboxSttTts": { "type": "boolean" }
+            }
+          },
           "vault": {
             "type": "object",
             "additionalProperties": false,
@@ -135,6 +162,33 @@
                     "batchDelayMs": { "type": "integer", "minimum": 0 },
                     "maxMessages": { "type": "integer", "minimum": 1 },
                     "maxChars": { "type": "integer", "minimum": 1 }
+                  }
+                },
+                "voiceRealtime": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "provider": { "type": "string" },
+                    "model": { "type": "string" },
+                    "voice": { "type": "string" },
+                    "instructions": { "type": "string" },
+                    "toolPolicy": {
+                      "type": "string",
+                      "enum": ["safe-read-only", "owner", "none"]
+                    },
+                    "consultPolicy": {
+                      "type": "string",
+                      "enum": ["auto", "substantive", "always"]
+                    },
+                    "providers": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "fallbackToInkboxSttTts": { "type": "boolean" }
                   }
                 },
                 "vault": {
@@ -243,6 +297,55 @@
             "type": "integer",
             "minimum": 1,
             "description": "Max total chars per batch before forced flush. Default 4000."
+          }
+        }
+      },
+      "voiceRealtime": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Raw call-media bridge to an OpenClaw realtime voice provider. Falls back to Inkbox STT/TTS by default when unavailable.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable raw phone-media bridging through an OpenClaw realtime voice provider."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Realtime voice provider id, for example openai."
+          },
+          "model": {
+            "type": "string",
+            "description": "Provider realtime model, for example gpt-realtime."
+          },
+          "voice": {
+            "type": "string",
+            "description": "Provider voice, for example alloy, cedar, or marin."
+          },
+          "instructions": {
+            "type": "string",
+            "description": "Additional realtime voice instructions."
+          },
+          "toolPolicy": {
+            "type": "string",
+            "enum": ["safe-read-only", "owner", "none"],
+            "description": "Realtime consult tool policy. owner lets the OpenClaw consult use the normal agent tool policy."
+          },
+          "consultPolicy": {
+            "type": "string",
+            "enum": ["auto", "substantive", "always"],
+            "description": "Guidance for when the realtime model should call openclaw_agent_consult."
+          },
+          "providers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "description": "Provider-owned realtime config keyed by provider id, such as { openai: { apiKey, model, voice } }."
+          },
+          "fallbackToInkboxSttTts": {
+            "type": "boolean",
+            "description": "Fall back to Inkbox-managed STT/TTS when realtime auth/provider config is unavailable. Defaults to true."
           }
         }
       }

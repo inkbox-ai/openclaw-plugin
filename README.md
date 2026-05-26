@@ -60,7 +60,33 @@ Legacy plugin-scoped config is still supported for tools and the default channel
 | `allowedRecipients` | no | — | Outbound allowlist. Empty = no filtering. |
 | `allowedInboundContactIds` | no | — | Inbound allowlist by contact UUID. Empty = no filtering. |
 | `sms.batchDelayMs` | no | `0` | Inbound SMS fragment batching window. |
+| `voiceRealtime.enabled` | no | `false` | Use Inkbox raw call media with an OpenClaw realtime voice provider instead of Inkbox STT/TTS. |
+| `voiceRealtime.provider` | no | runtime default | Realtime provider id, for example `openai`. |
+| `voiceRealtime.model` | no | provider default | Realtime model override, for example `gpt-realtime`. |
+| `voiceRealtime.fallbackToInkboxSttTts` | no | `true` | Fall back to Inkbox STT/TTS when realtime auth/provider config is unavailable. |
 | `vault.keyEnvVar` | no | `INKBOX_VAULT_KEY` | Env var the vault unlock key is read from. |
+
+Realtime voice example:
+
+```json5
+{
+  "channels": {
+    "inkbox": {
+      "apiKey": "ApiKey_xxxxxxxxxxxx",
+      "identity": "my-agent-handle",
+      "signingKey": "whsec_xxxxxxxxxxxx",
+      "voiceRealtime": {
+        "enabled": true,
+        "provider": "openai",
+        "model": "gpt-realtime",
+        "voice": "cedar",
+        "toolPolicy": "owner",
+        "consultPolicy": "substantive"
+      }
+    }
+  }
+}
+```
 
 ## Tools
 
@@ -124,7 +150,8 @@ Each skill ends with a pointer to `https://inkbox.ai/llms.txt` and `https://inkb
 - **Plugin, not fork.** OpenClaw's plugin SDK does everything we need (`defineChannelPluginEntry`, channel gateway, tools, HTTP routes, CLI).
 - **Agent-scoped.** Authenticates with an agent-scoped Inkbox API key. Admin operations are deliberately not exposed.
 - **Tunnel-first inbound.** When `signingKey` is set, opens an Inkbox tunnel at `https://<identity>.inkboxwire.com`, patches the identity mailbox/phone webhook URLs, and routes inbound webhooks into OpenClaw sessions with HMAC verification and dedup.
-- **Voice bridge.** Incoming and plugin-placed calls use Inkbox STT/TTS over the tunnel WebSocket; final transcripts become OpenClaw turns and replies stream back as Inkbox TTS text frames.
+- **Voice bridge.** Incoming and plugin-placed calls use Inkbox STT/TTS over the tunnel WebSocket by default; final transcripts become OpenClaw turns and replies stream back as Inkbox TTS text frames.
+- **Realtime voice bridge.** When `voiceRealtime.enabled` is true, the call WebSocket requests raw G.711 u-law media from Inkbox, bridges it through an OpenClaw realtime voice provider, and delegates OpenClaw/Inkbox tool work through `openclaw_agent_consult`. If realtime auth or provider config is unavailable, calls fall back to Inkbox STT/TTS unless disabled.
 - **Lazy SDK client.** The Inkbox SDK is constructed on first tool call, never at registration.
 - **Allowlists.** Optional outbound recipient allowlist and inbound contact-id allowlist for stricter deployments.
 

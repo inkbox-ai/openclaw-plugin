@@ -122,6 +122,47 @@ function normalizeVault(value: unknown): InkboxAccountConfig["vault"] | undefine
   return keyEnvVar ? { keyEnvVar } : undefined;
 }
 
+function normalizeVoiceRealtime(
+  value: unknown,
+): InkboxAccountConfig["voiceRealtime"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const out: NonNullable<InkboxAccountConfig["voiceRealtime"]> = {};
+  if (typeof value.enabled === "boolean") {
+    out.enabled = value.enabled;
+  }
+  for (const field of ["provider", "model", "voice", "instructions"] as const) {
+    const resolved = nonEmptyString(value[field]);
+    if (resolved) {
+      out[field] = resolved;
+    }
+  }
+  const toolPolicy = nonEmptyString(value.toolPolicy);
+  if (
+    toolPolicy === "safe-read-only" ||
+    toolPolicy === "owner" ||
+    toolPolicy === "none"
+  ) {
+    out.toolPolicy = toolPolicy;
+  }
+  const consultPolicy = nonEmptyString(value.consultPolicy);
+  if (
+    consultPolicy === "auto" ||
+    consultPolicy === "substantive" ||
+    consultPolicy === "always"
+  ) {
+    out.consultPolicy = consultPolicy;
+  }
+  if (isRecord(value.providers)) {
+    out.providers = value.providers as Record<string, Record<string, unknown>>;
+  }
+  if (typeof value.fallbackToInkboxSttTts === "boolean") {
+    out.fallbackToInkboxSttTts = value.fallbackToInkboxSttTts;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function normalizeConfig(value: unknown): InkboxAccountConfig {
   if (!isRecord(value)) {
     return {};
@@ -178,6 +219,10 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
   const vault = normalizeVault(value.vault);
   if (vault) {
     out.vault = vault;
+  }
+  const voiceRealtime = normalizeVoiceRealtime(value.voiceRealtime);
+  if (voiceRealtime) {
+    out.voiceRealtime = voiceRealtime;
   }
   return out;
 }

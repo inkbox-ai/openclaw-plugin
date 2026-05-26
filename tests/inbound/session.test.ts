@@ -1,4 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const realtimeMock = vi.hoisted(() => ({
+  available: true,
+  sessions: [] as any[],
+  toolCallOnAudio: false,
+}));
 
 vi.mock("@inkbox/sdk", () => ({
   verifyWebhook: vi.fn(() => true),
@@ -16,6 +22,74 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
       body,
     }),
   })),
+}));
+
+vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
+  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME: "openclaw_agent_consult",
+  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ: {
+    encoding: "g711_ulaw",
+    sampleRateHz: 8000,
+    channels: 1,
+  },
+  buildRealtimeVoiceAgentConsultChatMessage: vi.fn((args: any) => args.question),
+  buildRealtimeVoiceAgentConsultPolicyInstructions: vi.fn(() => "Consult policy."),
+  buildRealtimeVoiceAgentConsultWorkingResponse: vi.fn(() => ({
+    status: "working",
+  })),
+  resolveRealtimeVoiceAgentConsultToolPolicy: vi.fn((value: any, fallback: any) => value ?? fallback),
+  resolveRealtimeVoiceAgentConsultTools: vi.fn((policy: string) =>
+    policy === "none"
+      ? []
+      : [
+          {
+            type: "function",
+            name: "openclaw_agent_consult",
+            description: "Consult OpenClaw",
+            parameters: { type: "object", properties: {}, required: [] },
+          },
+        ],
+  ),
+  resolveConfiguredRealtimeVoiceProvider: vi.fn(() => {
+    if (!realtimeMock.available) {
+      throw new Error("Realtime voice provider \"openai\" is not configured");
+    }
+    return {
+      provider: { id: "openai", label: "OpenAI" },
+      providerConfig: { model: "gpt-realtime" },
+    };
+  }),
+  createRealtimeVoiceBridgeSession: vi.fn((params: any) => {
+    let toolCalled = false;
+    const session: any = {
+      bridge: { supportsToolResultContinuation: true },
+      connect: vi.fn(async () => {
+        params.onReady?.(session);
+      }),
+      sendAudio: vi.fn((audio: Buffer) => {
+        if (realtimeMock.toolCallOnAudio && !toolCalled) {
+          toolCalled = true;
+          params.onToolCall?.(
+            {
+              itemId: "item-1",
+              callId: "tool-1",
+              name: "openclaw_agent_consult",
+              args: { question: "Save this as a note." },
+            },
+            session,
+          );
+        }
+      }),
+      setMediaTimestamp: vi.fn(),
+      triggerGreeting: vi.fn(() => {
+        params.audioSink.sendAudio(Buffer.from([0xff, 0xff]));
+      }),
+      handleBargeIn: vi.fn(),
+      submitToolResult: vi.fn(),
+      close: vi.fn(),
+    };
+    realtimeMock.sessions.push({ params, session });
+    return session;
+  }),
 }));
 
 import { createInkboxSessionBridge, prewarmInkboxAgent } from "../../src/inbound/session.js";
@@ -85,6 +159,12 @@ function parseSentTextFrames(ws: FakeInkboxWebSocket) {
 }
 
 describe("createInkboxSessionBridge call WebSocket", () => {
+  beforeEach(() => {
+    realtimeMock.available = true;
+    realtimeMock.sessions = [];
+    realtimeMock.toolCallOnAudio = false;
+  });
+
   it("prewarms the voice agent path without delivering a visible reply", async () => {
     const { runtime, sendText } = createRuntime();
     const channelRuntime = createChannelRuntime("ready");
@@ -335,5 +415,151 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         "agent:main:inkbox:call:call-1",
       ),
     ).toBe(false);
+  });
+
+  it("bridges raw Inkbox media through the OpenClaw realtime voice provider", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const inboundAudio = Buffer.from([0x01, 0x02, 0x03]);
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({
+        event: "media",
+        stream_id: "stream-1",
+        media: { payload: inboundAudio.toString("base64"), timestamp: "40" },
+      }),
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+
+    expect(ws.accept).toHaveBeenCalledWith({
+      headers: [
+        ["x-use-inkbox-text-to-speech", "false"],
+        ["x-use-inkbox-speech-to-text", "false"],
+      ],
+    });
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.connect).toHaveBeenCalledTimes(1);
+    expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
+      "Greet there in one short sentence and ask how you can help.",
+    );
+    expect(realtimeSession.sendAudio).toHaveBeenCalledWith(inboundAudio);
+    expect(realtimeSession.setMediaTimestamp).toHaveBeenCalledWith(40);
+    expect(channelRuntime.turn.runAssembled).not.toHaveBeenCalled();
+
+    const frames = parseSentTextFrames(ws);
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        event: "media",
+        stream_id: "stream-1",
+        media: expect.objectContaining({ track: "outbound" }),
+      }),
+    );
+  });
+
+  it("falls back to Inkbox STT/TTS when realtime auth is unavailable", async () => {
+    realtimeMock.available = false;
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Fallback voice reply.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          voiceRealtime: { enabled: true, provider: "openai" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({
+        event: "transcript",
+        text: "Use fallback.",
+        is_final: true,
+        turn_id: "turn-fallback",
+      }),
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+
+    expect(ws.accept).toHaveBeenCalledWith({
+      headers: [
+        ["x-use-inkbox-text-to-speech", "true"],
+        ["x-use-inkbox-speech-to-text", "true"],
+      ],
+    });
+    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    expect(realtimeMock.sessions).toHaveLength(0);
+    const frames = parseSentTextFrames(ws);
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        event: "text",
+        delta: "Fallback voice reply.",
+        turn_id: "turn-fallback",
+      }),
+    );
+  });
+
+  it("delegates realtime tool calls to the OpenClaw Inkbox session", async () => {
+    realtimeMock.toolCallOnAudio = true;
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Saved that note.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({
+        event: "media",
+        stream_id: "stream-1",
+        media: { payload: Buffer.from([0x01]).toString("base64") },
+      }),
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain("[inkbox:voice_realtime_consult");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Save this as a note.");
+    expect(run.ctxPayload.extra.InkboxVoiceReplyOnly).toBe(true);
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
+      "tool-1",
+      { status: "working" },
+      { willContinue: true },
+    );
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
+      status: "ok",
+      result: "Saved that note.",
+    });
   });
 });

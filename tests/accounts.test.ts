@@ -20,6 +20,19 @@ describe("inkbox account config", () => {
                 voiceAgentPrewarm: false,
                 voiceAgentPrewarmTtlMs: 120000,
                 voiceAgentPrewarmTimeoutMs: 45000,
+                voiceRealtime: {
+                  enabled: true,
+                  provider: "openai",
+                  model: "gpt-realtime",
+                  voice: "cedar",
+                  toolPolicy: "owner",
+                  consultPolicy: "substantive",
+                  providers: {
+                    openai: {
+                      apiKey: "${OPENAI_API_KEY}",
+                    },
+                  },
+                },
               },
             },
           },
@@ -36,6 +49,19 @@ describe("inkbox account config", () => {
     expect(account.config.voiceAgentPrewarm).toBe(false);
     expect(account.config.voiceAgentPrewarmTtlMs).toBe(120000);
     expect(account.config.voiceAgentPrewarmTimeoutMs).toBe(45000);
+    expect(account.config.voiceRealtime).toEqual({
+      enabled: true,
+      provider: "openai",
+      model: "gpt-realtime",
+      voice: "cedar",
+      toolPolicy: "owner",
+      consultPolicy: "substantive",
+      providers: {
+        openai: {
+          apiKey: "${OPENAI_API_KEY}",
+        },
+      },
+    });
   });
 
   it("lets channel account config override plugin config", () => {

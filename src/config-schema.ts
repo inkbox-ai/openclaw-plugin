@@ -31,6 +31,60 @@ const vaultSchema = {
   },
 };
 
+const voiceRealtimeSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    enabled: {
+      type: "boolean",
+      description:
+        "Enable raw phone-media bridging through an OpenClaw realtime voice provider.",
+    },
+    provider: {
+      type: "string",
+      description: "Realtime voice provider id, for example openai.",
+    },
+    model: {
+      type: "string",
+      description: "Provider realtime model, for example gpt-realtime.",
+    },
+    voice: {
+      type: "string",
+      description: "Provider voice, for example alloy, cedar, or marin.",
+    },
+    instructions: {
+      type: "string",
+      description: "Additional realtime voice instructions.",
+    },
+    toolPolicy: {
+      type: "string",
+      enum: ["safe-read-only", "owner", "none"],
+      description:
+        "Realtime consult tool policy. owner lets the OpenClaw consult use the normal agent tool policy.",
+    },
+    consultPolicy: {
+      type: "string",
+      enum: ["auto", "substantive", "always"],
+      description:
+        "Guidance for when the realtime model should call openclaw_agent_consult.",
+    },
+    providers: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        additionalProperties: true,
+      },
+      description:
+        "Provider-owned realtime config keyed by provider id, such as { openai: { apiKey, model, voice } }.",
+    },
+    fallbackToInkboxSttTts: {
+      type: "boolean",
+      description:
+        "Fall back to Inkbox-managed STT/TTS when realtime auth/provider config is unavailable. Defaults to true.",
+    },
+  },
+};
+
 export const inkboxAccountConfigJsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -100,6 +154,7 @@ export const inkboxAccountConfigJsonSchema = {
       description:
         "Maximum time to let the hidden voice agent warmup run before aborting. Defaults to 70000.",
     },
+    voiceRealtime: voiceRealtimeSchema,
     vault: vaultSchema,
     allowedRecipients: {
       type: "array",

@@ -7,6 +7,19 @@ import type {
 } from "@inkbox/sdk";
 import type { InkboxWebSocket, InkboxWsHandler } from "@inkbox/sdk/tunnels/connect";
 import { resolveInboundRouteEnvelopeBuilderWithRuntime } from "openclaw/plugin-sdk/inbound-envelope";
+import {
+  buildRealtimeVoiceAgentConsultChatMessage,
+  buildRealtimeVoiceAgentConsultPolicyInstructions,
+  buildRealtimeVoiceAgentConsultWorkingResponse,
+  createRealtimeVoiceBridgeSession,
+  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
+  resolveConfiguredRealtimeVoiceProvider,
+  resolveRealtimeVoiceAgentConsultToolPolicy,
+  resolveRealtimeVoiceAgentConsultTools,
+  type RealtimeVoiceBridgeSession,
+  type RealtimeVoiceToolCallEvent,
+} from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
 import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
@@ -55,6 +68,20 @@ type VoiceTranscriptSegment = {
   receivedAt: number;
 };
 
+type RealtimeTranscriptEntry = {
+  role: "user" | "assistant";
+  text: string;
+};
+
+type RealtimeCallMeta = {
+  callId: string;
+  remotePhoneNumber: string;
+  direction: string;
+  contact?: ContactSummary;
+  contactKey: string;
+  fromLabel: string;
+};
+
 export interface InkboxSessionBridgeOptions {
   cfg: unknown;
   account: ResolvedInkboxAccount;
@@ -81,6 +108,16 @@ export interface ConfigureIdentityDeliveryOptions {
 const DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS = 1200;
 const DEFAULT_VOICE_AGENT_PREWARM_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_VOICE_AGENT_PREWARM_TIMEOUT_MS = 70 * 1000;
+const TELEPHONY_CHUNK_BYTES = 160;
+const TELEPHONY_CHUNK_MS = 20;
+const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
+const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
+const REALTIME_REQUIRED_QUIET_CHUNKS = 12;
+const MULAW_LINEAR_SAMPLES = new Int16Array(256);
+
+for (let i = 0; i < MULAW_LINEAR_SAMPLES.length; i += 1) {
+  MULAW_LINEAR_SAMPLES[i] = decodeMulawSample(i);
+}
 
 const voiceAgentPrewarmState = new Map<
   string,
@@ -96,6 +133,149 @@ function parseTimestamp(value: string | null | undefined): number | undefined {
   }
   const ts = Date.parse(value);
   return Number.isFinite(ts) ? ts : undefined;
+}
+
+function decodeMulawSample(value: number): number {
+  const muLaw = ~value & 255;
+  const sign = muLaw & 128;
+  const exponent = (muLaw >> 4) & 7;
+  let sample = (((muLaw & 15) << 3) + 132) << exponent;
+  sample -= 132;
+  return sign ? -sample : sample;
+}
+
+function calculateMulawRms(muLaw: Buffer): number {
+  if (muLaw.length === 0) {
+    return 0;
+  }
+  let sum = 0;
+  for (const byte of muLaw) {
+    const normalized = (MULAW_LINEAR_SAMPLES[byte] ?? 0) / 32768;
+    sum += normalized * normalized;
+  }
+  return Math.sqrt(sum / muLaw.length);
+}
+
+class RealtimeMulawSpeechStartDetector {
+  private loudChunks = 0;
+  private quietChunks = REALTIME_REQUIRED_QUIET_CHUNKS;
+  private speaking = false;
+
+  accept(muLaw: Buffer): boolean {
+    if (calculateMulawRms(muLaw) >= REALTIME_SPEECH_RMS_THRESHOLD) {
+      this.quietChunks = 0;
+      this.loudChunks += 1;
+      if (!this.speaking && this.loudChunks >= REALTIME_REQUIRED_LOUD_CHUNKS) {
+        this.speaking = true;
+        return true;
+      }
+      return false;
+    }
+
+    this.loudChunks = 0;
+    this.quietChunks += 1;
+    if (this.quietChunks >= REALTIME_REQUIRED_QUIET_CHUNKS) {
+      this.speaking = false;
+    }
+    return false;
+  }
+}
+
+class InkboxRealtimeAudioPacer {
+  private queue: Array<Buffer | "done"> = [];
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private closed = false;
+  private queuedAudioBytes = 0;
+
+  constructor(
+    private readonly send: (payload: Record<string, unknown>) => Promise<void>,
+    private readonly streamId: () => string | undefined,
+  ) {}
+
+  get hasQueuedAudio(): boolean {
+    return this.queuedAudioBytes > 0;
+  }
+
+  sendAudio(audio: Buffer): void {
+    if (this.closed || audio.length === 0) {
+      return;
+    }
+    for (let offset = 0; offset < audio.length; offset += TELEPHONY_CHUNK_BYTES) {
+      const chunk = Buffer.from(audio.subarray(offset, offset + TELEPHONY_CHUNK_BYTES));
+      this.queue.push(chunk);
+      this.queuedAudioBytes += chunk.length;
+    }
+    this.pump();
+  }
+
+  sendAudioDone(): void {
+    if (this.closed) {
+      return;
+    }
+    this.queue.push("done");
+    this.pump();
+  }
+
+  clearAudio(): void {
+    if (this.closed) {
+      return;
+    }
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    this.queue = [];
+    this.queuedAudioBytes = 0;
+    void this.send({ event: "clear" }).catch(() => {});
+  }
+
+  close(): void {
+    this.closed = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    this.queue = [];
+    this.queuedAudioBytes = 0;
+  }
+
+  private pump(): void {
+    if (this.closed || this.timer || this.queue.length === 0) {
+      return;
+    }
+    const item = this.queue.shift();
+    if (!item) {
+      return;
+    }
+    if (item === "done") {
+      const message: Record<string, unknown> = { event: "audio_done" };
+      const streamId = this.streamId();
+      if (streamId) {
+        message.stream_id = streamId;
+      }
+      void this.send(message).finally(() => this.pump());
+      return;
+    }
+
+    this.queuedAudioBytes = Math.max(0, this.queuedAudioBytes - item.length);
+    const message: Record<string, unknown> = {
+      event: "media",
+      media: {
+        payload: item.toString("base64"),
+        track: "outbound",
+      },
+    };
+    const streamId = this.streamId();
+    if (streamId) {
+      message.stream_id = streamId;
+    }
+    void this.send(message).finally(() => {
+      this.timer = setTimeout(() => {
+        this.timer = undefined;
+        this.pump();
+      }, TELEPHONY_CHUNK_MS);
+    });
+  }
 }
 
 function contactSummary(
@@ -390,6 +570,131 @@ function resolveVoiceTranscriptCoalesceMs(account: ResolvedInkboxAccount): numbe
   return typeof raw === "number" && Number.isFinite(raw) && raw >= 0
     ? raw
     : DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS;
+}
+
+function isVoiceRealtimeEnabled(account: ResolvedInkboxAccount): boolean {
+  return account.config.voiceRealtime?.enabled === true;
+}
+
+function shouldFallbackToInkboxSttTts(account: ResolvedInkboxAccount): boolean {
+  return account.config.voiceRealtime?.fallbackToInkboxSttTts !== false;
+}
+
+function resolveRealtimeConfig(account: ResolvedInkboxAccount) {
+  const config = account.config.voiceRealtime ?? {};
+  return {
+    provider: config.provider,
+    model: config.model,
+    voice: config.voice,
+    instructions: config.instructions,
+    providers: config.providers,
+    toolPolicy: resolveRealtimeVoiceAgentConsultToolPolicy(config.toolPolicy, "owner"),
+    consultPolicy: config.consultPolicy ?? "substantive",
+  };
+}
+
+function buildRealtimeInstructions(
+  account: ResolvedInkboxAccount,
+  meta: RealtimeCallMeta,
+): string {
+  const config = resolveRealtimeConfig(account);
+  const policyInstructions = buildRealtimeVoiceAgentConsultPolicyInstructions({
+    toolPolicy: config.toolPolicy,
+    consultPolicy: config.consultPolicy,
+  });
+  return [
+    "You are the configured OpenClaw agent speaking on a live Inkbox phone call.",
+    "Use natural, concise spoken replies. Keep most answers to one or two short sentences.",
+    "Do not mention implementation details unless the caller asks.",
+    account.config.identity
+      ? `Inkbox identity handle: ${account.config.identity}.`
+      : undefined,
+    meta.remotePhoneNumber ? `Caller phone number: ${meta.remotePhoneNumber}.` : undefined,
+    meta.contact?.name ? `Caller contact name: ${meta.contact.name}.` : undefined,
+    "When the caller asks for contact, note, email, SMS, call-history, workspace, memory, current-info, or tool work, call openclaw_agent_consult and speak the returned result.",
+    config.instructions,
+    policyInstructions,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildRealtimeGreeting(meta: RealtimeCallMeta): string {
+  const name = meta.contact?.name?.split(/\s+/)[0] || "there";
+  return `Greet ${name} in one short sentence and ask how you can help.`;
+}
+
+function parseBase64AudioPayload(value: unknown): Buffer | undefined {
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+  try {
+    const audio = Buffer.from(value, "base64");
+    return audio.length > 0 ? audio : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function payloadMedia(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const media = record.media;
+  return media && typeof media === "object" && !Array.isArray(media)
+    ? (media as Record<string, unknown>)
+    : undefined;
+}
+
+function payloadTimestampMs(record: Record<string, unknown>): number | undefined {
+  const media = payloadMedia(record);
+  const raw = media?.timestamp ?? record.timestamp_ms ?? record.timestamp;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw;
+  }
+  if (typeof raw === "string") {
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function appendRealtimeTranscript(
+  entries: RealtimeTranscriptEntry[],
+  entry: RealtimeTranscriptEntry,
+): void {
+  const text = entry.text.trim();
+  if (!text) {
+    return;
+  }
+  entries.push({ ...entry, text });
+  while (entries.length > 20) {
+    entries.shift();
+  }
+}
+
+function renderRealtimeTranscript(entries: RealtimeTranscriptEntry[]): string {
+  return entries
+    .slice(-12)
+    .map((entry) => `${entry.role === "assistant" ? "Agent" : "Caller"}: ${entry.text}`)
+    .join("\n");
+}
+
+function resolveRealtimeProvider(opts: InkboxSessionBridgeOptions) {
+  const realtime = resolveRealtimeConfig(opts.account);
+  const providerConfigOverrides: Record<string, unknown> = {};
+  if (realtime.model) {
+    providerConfigOverrides.model = realtime.model;
+  }
+  if (realtime.voice) {
+    providerConfigOverrides.voice = realtime.voice;
+  }
+  return resolveConfiguredRealtimeVoiceProvider({
+    cfg: opts.cfg as any,
+    configuredProviderId: realtime.provider,
+    providerConfigs: realtime.providers,
+    providerConfigOverrides,
+    defaultModel: realtime.model,
+    noRegisteredProviderMessage:
+      "No realtime voice provider registered; load OpenClaw's openai plugin or configure another realtime provider.",
+  });
 }
 
 function createVoiceTranscriptBuffer(params: {
@@ -707,6 +1012,121 @@ async function dispatchInboundTurn(
   }
 }
 
+async function runRealtimeAgentConsult(
+  opts: InkboxSessionBridgeOptions & {
+    activeCalls: Map<string, ActiveCall>;
+    meta: RealtimeCallMeta;
+    toolEvent: RealtimeVoiceToolCallEvent;
+    transcript: RealtimeTranscriptEntry[];
+  },
+): Promise<Record<string, unknown>> {
+  let requestText: string;
+  try {
+    requestText = buildRealtimeVoiceAgentConsultChatMessage(opts.toolEvent.args);
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  const recentTranscript = renderRealtimeTranscript(opts.transcript);
+  const visibleText: string[] = [];
+  await dispatchInboundTurn({
+    ...opts,
+    activeCalls: opts.activeCalls,
+    replyOptionsOverride: {
+      sourceReplyDeliveryMode: "automatic",
+      bootstrapContextMode: "lightweight",
+      fastModeOverride: true,
+      thinkingLevelOverride: "minimal",
+      suppressDefaultToolProgressMessages: true,
+    },
+    deliveryOverride: {
+      deliver: async (payload: unknown) => {
+        const text = payloadText(payload).trim();
+        if (text) {
+          visibleText.push(text);
+        }
+        return { visibleReplySent: false };
+      },
+      onError: (error: unknown) => {
+        opts.logger?.warn?.(
+          `Inkbox realtime consult delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    },
+    turn: {
+      mode: "voice",
+      contactKey: opts.meta.contactKey,
+      contact: opts.meta.contact,
+      fromLabel: opts.meta.fromLabel,
+      remoteAddress: opts.meta.remotePhoneNumber,
+      body: [
+        `[inkbox:voice_realtime_consult call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
+        requestText,
+        recentTranscript ? `Recent live-call transcript:\n${recentTranscript}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      messageId: `call:${opts.meta.callId}:realtime-tool:${opts.toolEvent.callId}`,
+      replyToId: opts.toolEvent.callId,
+      threadId: opts.meta.direction === "outbound" ? undefined : `call:${opts.meta.callId}`,
+      timestamp: Date.now(),
+      raw: {
+        event: "realtime_tool_call",
+        tool: opts.toolEvent.name,
+        args: opts.toolEvent.args,
+      },
+    },
+  });
+
+  const result = visibleText.join("\n\n").trim();
+  return {
+    status: "ok",
+    result: result || "OpenClaw completed the consult but returned no speakable text.",
+  };
+}
+
+function handleRealtimeToolCall(
+  opts: InkboxSessionBridgeOptions & {
+    activeCalls: Map<string, ActiveCall>;
+    meta: RealtimeCallMeta;
+    session: RealtimeVoiceBridgeSession;
+    toolEvent: RealtimeVoiceToolCallEvent;
+    transcript: RealtimeTranscriptEntry[];
+  },
+): void {
+  const callId = opts.toolEvent.callId || opts.toolEvent.itemId;
+  if (opts.toolEvent.name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
+    opts.session.submitToolResult(callId, {
+      error: `Tool "${opts.toolEvent.name}" is not available in Inkbox realtime calls.`,
+    });
+    return;
+  }
+
+  try {
+    if (opts.session.bridge.supportsToolResultContinuation) {
+      opts.session.submitToolResult(
+        callId,
+        buildRealtimeVoiceAgentConsultWorkingResponse("caller"),
+        { willContinue: true },
+      );
+    }
+  } catch {
+    // Continuation is an optimization; the final tool result is authoritative.
+  }
+
+  void runRealtimeAgentConsult(opts)
+    .then((result) => {
+      opts.session.submitToolResult(callId, result);
+    })
+    .catch((error) => {
+      opts.session.submitToolResult(callId, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+}
+
 function prewarmStateKey(account: ResolvedInkboxAccount): string {
   return `${account.accountId}:${account.config.identity ?? ""}`;
 }
@@ -946,7 +1366,7 @@ async function resolveCallMeta(
   opts: InkboxSessionBridgeOptions,
   ws: InkboxWebSocket,
   stashed: Map<string, Partial<InkboxInboundTurn> & { callId: string }>,
-) {
+): Promise<RealtimeCallMeta> {
   const url = new URL(ws.url);
   const context = parseCallContext(headerValue(ws.headers, "x-call-context"));
   const callId =
@@ -989,6 +1409,188 @@ async function resolveCallMeta(
     contactKey,
     fromLabel: contact?.name ?? remotePhoneNumber ?? callId,
   };
+}
+
+function createActiveCall(
+  meta: RealtimeCallMeta,
+  ws: InkboxWebSocket,
+): ActiveCall {
+  return {
+    callId: meta.callId,
+    contactKey: meta.contactKey,
+    remotePhoneNumber: meta.remotePhoneNumber,
+    ws,
+    sequence: 0,
+    keys: activeCallKeys({
+      callId: meta.callId,
+      contactKey: meta.contactKey,
+      remotePhoneNumber: meta.remotePhoneNumber,
+    }),
+  };
+}
+
+async function runRealtimeCallWebSocket(
+  opts: InkboxSessionBridgeOptions & {
+    ws: InkboxWebSocket;
+    meta: RealtimeCallMeta;
+    active: ActiveCall;
+    activeCalls: Map<string, ActiveCall>;
+  },
+): Promise<void> {
+  const realtime = resolveRealtimeConfig(opts.account);
+  const resolved = resolveRealtimeProvider(opts);
+  let streamId: string | undefined;
+  let closed = false;
+  const transcript: RealtimeTranscriptEntry[] = [];
+  const sendJson = async (payload: Record<string, unknown>) => {
+    if (closed) {
+      return;
+    }
+    await opts.ws.send(JSON.stringify(payload));
+  };
+  const audioPacer = new InkboxRealtimeAudioPacer(sendJson, () => streamId);
+  const speechDetector = new RealtimeMulawSpeechStartDetector();
+  const session = createRealtimeVoiceBridgeSession({
+    provider: resolved.provider,
+    cfg: opts.cfg as any,
+    providerConfig: resolved.providerConfig,
+    audioFormat: REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
+    instructions: buildRealtimeInstructions(opts.account, opts.meta),
+    initialGreetingInstructions: buildRealtimeGreeting(opts.meta),
+    triggerGreetingOnReady: false,
+    autoRespondToAudio: true,
+    interruptResponseOnInputAudio: true,
+    markStrategy: "ack-immediately",
+    tools: resolveRealtimeVoiceAgentConsultTools(realtime.toolPolicy),
+    audioSink: {
+      isOpen: () => !closed,
+      sendAudio: (audio) => {
+        audioPacer.sendAudio(audio);
+      },
+      clearAudio: () => {
+        audioPacer.clearAudio();
+      },
+    },
+    onTranscript: (role, text, isFinal) => {
+      if (isFinal) {
+        appendRealtimeTranscript(transcript, { role, text });
+      }
+      void sendJson({
+        event: "transcript",
+        party: role === "user" ? "remote" : "local",
+        text,
+        is_final: isFinal,
+      }).catch(() => {});
+    },
+    onEvent: (event) => {
+      if (event.type === "response.done") {
+        audioPacer.sendAudioDone();
+      }
+      if (event.type === "error") {
+        opts.logger?.warn?.(
+          `Inkbox realtime provider error: ${event.detail ?? "unknown error"}`,
+        );
+      }
+    },
+    onToolCall: (toolEvent, realtimeSession) => {
+      handleRealtimeToolCall({
+        ...opts,
+        session: realtimeSession,
+        toolEvent,
+        transcript,
+      });
+    },
+    onReady: () => {
+      opts.logger?.info?.(
+        `Inkbox realtime bridge ready: call_id=${opts.meta.callId} provider=${resolved.provider.id}`,
+      );
+    },
+    onError: (error) => {
+      opts.logger?.warn?.(`Inkbox realtime bridge error: ${error.message}`);
+    },
+    onClose: (reason) => {
+      opts.logger?.info?.(
+        `Inkbox realtime bridge closed: call_id=${opts.meta.callId} reason=${reason}`,
+      );
+    },
+  });
+
+  await opts.ws.accept({
+    headers: [
+      ["x-use-inkbox-text-to-speech", "false"],
+      ["x-use-inkbox-speech-to-text", "false"],
+    ],
+  });
+
+  let greetingTriggered = false;
+  try {
+    await session.connect();
+    registerActiveCall(opts.activeCalls, opts.active);
+    opts.logger?.info?.(
+      `Inkbox call WebSocket open: call_id=${opts.meta.callId} contact=${opts.meta.contactKey} direction=${opts.meta.direction} mode=realtime provider=${resolved.provider.id}`,
+    );
+
+    for await (const raw of opts.ws) {
+      if (typeof raw !== "string") {
+        continue;
+      }
+      let payload: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          continue;
+        }
+        payload = parsed as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+
+      const event = payload.event;
+      if (event === "start") {
+        streamId = typeof payload.stream_id === "string" ? payload.stream_id : streamId;
+        if (!greetingTriggered) {
+          greetingTriggered = true;
+          session.triggerGreeting(buildRealtimeGreeting(opts.meta));
+        }
+        continue;
+      }
+
+      if (event === "media") {
+        const media = payloadMedia(payload);
+        const audio = parseBase64AudioPayload(media?.payload);
+        if (!audio) {
+          continue;
+        }
+        if (audioPacer.hasQueuedAudio && speechDetector.accept(audio)) {
+          audioPacer.clearAudio();
+          session.handleBargeIn({ audioPlaybackActive: true, force: true });
+        }
+        const timestampMs = payloadTimestampMs(payload);
+        if (timestampMs !== undefined) {
+          session.setMediaTimestamp(timestampMs);
+        }
+        session.sendAudio(audio);
+        continue;
+      }
+
+      if (event === "barge_in") {
+        audioPacer.clearAudio();
+        session.handleBargeIn({ audioPlaybackActive: true, force: true });
+        continue;
+      }
+
+      if (event === "stop") {
+        break;
+      }
+    }
+  } finally {
+    closed = true;
+    audioPacer.close();
+    session.close();
+    unregisterActiveCall(opts.activeCalls, opts.active);
+    await opts.ws.close().catch(() => {});
+    opts.logger?.info?.(`Inkbox call WebSocket closed: call_id=${opts.meta.callId}`);
+  }
 }
 
 export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): InkboxSessionBridge {
@@ -1044,28 +1646,56 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       await ws.close(1008, "invalid signature");
       return;
     }
+    const meta = await resolveCallMeta(opts, ws, callMetaById);
+    const active = createActiveCall(meta, ws);
+
+    if (isVoiceRealtimeEnabled(opts.account)) {
+      let realtimeUnavailable: unknown;
+      try {
+        resolveRealtimeProvider(opts);
+      } catch (error) {
+        realtimeUnavailable = error;
+      }
+
+      if (!realtimeUnavailable) {
+        try {
+          await runRealtimeCallWebSocket({
+            ...opts,
+            ws,
+            meta,
+            active,
+            activeCalls,
+          });
+        } catch (error) {
+          opts.logger?.warn?.(
+            `Inkbox realtime call bridge failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          await ws.close(1011, "realtime bridge unavailable");
+        }
+        return;
+      }
+
+      if (!shouldFallbackToInkboxSttTts(opts.account)) {
+        opts.logger?.warn?.(
+          `Inkbox realtime call bridge unavailable: ${realtimeUnavailable instanceof Error ? realtimeUnavailable.message : String(realtimeUnavailable)}`,
+        );
+        await ws.close(1011, "realtime bridge unavailable");
+        return;
+      }
+      opts.logger?.warn?.(
+        `Inkbox realtime call bridge unavailable; falling back to Inkbox STT/TTS: ${realtimeUnavailable instanceof Error ? realtimeUnavailable.message : String(realtimeUnavailable)}`,
+        );
+    }
+
     await ws.accept({
       headers: [
         ["x-use-inkbox-text-to-speech", "true"],
         ["x-use-inkbox-speech-to-text", "true"],
       ],
     });
-    const meta = await resolveCallMeta(opts, ws, callMetaById);
-    const active: ActiveCall = {
-      callId: meta.callId,
-      contactKey: meta.contactKey,
-      remotePhoneNumber: meta.remotePhoneNumber,
-      ws,
-      sequence: 0,
-      keys: activeCallKeys({
-        callId: meta.callId,
-        contactKey: meta.contactKey,
-        remotePhoneNumber: meta.remotePhoneNumber,
-      }),
-    };
     registerActiveCall(activeCalls, active);
     opts.logger?.info?.(
-      `Inkbox call WebSocket open: call_id=${meta.callId} contact=${meta.contactKey} direction=${meta.direction}`,
+      `Inkbox call WebSocket open: call_id=${meta.callId} contact=${meta.contactKey} direction=${meta.direction} mode=inkbox-stt-tts`,
     );
     const voiceTranscripts = createVoiceTranscriptBuffer({
       callId: meta.callId,
