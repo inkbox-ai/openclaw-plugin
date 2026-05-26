@@ -77,6 +77,12 @@ export const inkboxAccountConfigJsonSchema = {
       description:
         "Explicit outbound-call media WebSocket URL. If omitted, tunnel mode derives it from tunnelName/identity.",
     },
+    voiceTranscriptCoalesceMs: {
+      type: "integer",
+      minimum: 0,
+      description:
+        "Wait this many ms before dispatching final voice transcript segments so clipped caller phrases can be coalesced. Defaults to 1200.",
+    },
     vault: vaultSchema,
     allowedRecipients: {
       type: "array",

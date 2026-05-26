@@ -49,6 +49,12 @@ type ActiveCall = {
   keys: string[];
 };
 
+type VoiceTranscriptSegment = {
+  text: string;
+  turnId: string;
+  receivedAt: number;
+};
+
 export interface InkboxSessionBridgeOptions {
   cfg: unknown;
   account: ResolvedInkboxAccount;
@@ -71,6 +77,8 @@ export interface ConfigureIdentityDeliveryOptions {
   callWebsocketUrl?: string;
   logger?: PluginLogger;
 }
+
+const DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS = 1200;
 
 function parseTimestamp(value: string | null | undefined): number | undefined {
   if (!value) {
@@ -128,6 +136,11 @@ function renderContactMarker(contact: ContactSummary | undefined): string {
     parts.push(`contact_phones=${contact.phones.join(",")}`);
   }
   return parts.join(" ");
+}
+
+function renderIdentityMarker(account: ResolvedInkboxAccount): string {
+  const identity = account.config.identity?.trim();
+  return identity ? ` inkbox_identity=${identity}` : "";
 }
 
 async function hydrateContact(
@@ -351,10 +364,152 @@ async function deliverReply(
   return msg.id;
 }
 
+function mergeVoiceTranscriptSegments(segments: VoiceTranscriptSegment[]): string {
+  return segments.map((segment) => segment.text).join("\n");
+}
+
+function lastVoiceTranscriptTurnId(segments: VoiceTranscriptSegment[]): string {
+  return segments[segments.length - 1]?.turnId ?? `${Date.now()}`;
+}
+
+function resolveVoiceTranscriptCoalesceMs(account: ResolvedInkboxAccount): number {
+  const raw = account.config.voiceTranscriptCoalesceMs;
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0
+    ? raw
+    : DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS;
+}
+
+function createVoiceTranscriptBuffer(params: {
+  callId: string;
+  coalesceMs: number;
+  logger?: PluginLogger;
+  dispatch: (
+    segments: VoiceTranscriptSegment[],
+    abortSignal: AbortSignal,
+    shouldDeliverReply: () => boolean,
+  ) => Promise<void>;
+}) {
+  let pending: VoiceTranscriptSegment[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let active:
+    | {
+        id: number;
+        segments: VoiceTranscriptSegment[];
+        abortController: AbortController;
+        stale: boolean;
+      }
+    | undefined;
+  let activeSeededIntoPendingId: number | undefined;
+  let nextRunId = 0;
+  let chain = Promise.resolve();
+
+  const clearTimer = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+
+  const enqueueRun = (segments: VoiceTranscriptSegment[]) => {
+    chain = chain.then(async () => {
+      let runSegments = segments;
+      if (pending.length) {
+        runSegments = [...runSegments, ...pending];
+        pending = [];
+        activeSeededIntoPendingId = undefined;
+        clearTimer();
+      }
+
+      const abortController = new AbortController();
+      const run = {
+        id: ++nextRunId,
+        segments: runSegments,
+        abortController,
+        stale: false,
+      };
+      active = run;
+      try {
+        await params.dispatch(runSegments, abortController.signal, () => {
+          return active === run && !run.stale && !abortController.signal.aborted;
+        });
+      } catch (error) {
+        if (run.stale || abortController.signal.aborted) {
+          params.logger?.info?.(
+            `Inkbox voice turn cancelled: call_id=${params.callId} segments=${runSegments.length}`,
+          );
+          return;
+        }
+        params.logger?.warn?.(
+          `Inkbox voice turn failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        if (active === run) {
+          active = undefined;
+        }
+      }
+    });
+    chain = chain.catch((error) => {
+      params.logger?.warn?.(
+        `Inkbox voice turn queue failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+    return chain;
+  };
+
+  const flush = async () => {
+    clearTimer();
+    if (!pending.length) {
+      return chain;
+    }
+    const segments = pending;
+    pending = [];
+    activeSeededIntoPendingId = undefined;
+    return enqueueRun(segments);
+  };
+
+  const schedule = () => {
+    clearTimer();
+    if (params.coalesceMs <= 0) {
+      void flush();
+      return;
+    }
+    timer = setTimeout(() => {
+      void flush();
+    }, params.coalesceMs);
+  };
+
+  return {
+    push(segment: VoiceTranscriptSegment) {
+      if (active && !active.stale) {
+        active.stale = true;
+        active.abortController.abort();
+        if (activeSeededIntoPendingId !== active.id) {
+          pending = [...active.segments, ...pending];
+          activeSeededIntoPendingId = active.id;
+        }
+        params.logger?.info?.(
+          `Inkbox voice turn superseded by newer transcript: call_id=${params.callId}`,
+        );
+      }
+      pending.push(segment);
+      schedule();
+    },
+    async flush() {
+      await flush();
+    },
+    async drain() {
+      await flush();
+      await chain;
+    },
+  };
+}
+
 async function dispatchInboundTurn(
   opts: InkboxSessionBridgeOptions & {
     turn: InkboxInboundTurn;
     activeCalls: Map<string, ActiveCall>;
+    dispatchAbortSignal?: AbortSignal;
+    shouldDeliverReply?: () => boolean;
   },
 ): Promise<void> {
   const core = opts.channelRuntime;
@@ -472,6 +627,7 @@ async function dispatchInboundTurn(
               bootstrapContextMode: "lightweight" as const,
               fastModeOverride: true,
               thinkingLevelOverride: "minimal",
+              abortSignal: opts.dispatchAbortSignal,
               skillFilter: [
                 "inkbox-call-handler",
                 "inkbox-contact-lookup",
@@ -484,6 +640,12 @@ async function dispatchInboundTurn(
         deliver: async (payload: unknown) => {
           const text = payloadText(payload);
           if (!text.trim()) {
+            return { visibleReplySent: false };
+          }
+          if (opts.turn.mode === "voice" && opts.shouldDeliverReply?.() === false) {
+            opts.logger?.info?.(
+              `Inkbox voice reply suppressed; newer caller transcript superseded call_id=${callIdFromTurn(opts.turn) ?? "unknown"}`,
+            );
             return { visibleReplySent: false };
           }
           const messageId = await deliverReply({
@@ -765,6 +927,35 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     opts.logger?.info?.(
       `Inkbox call WebSocket open: call_id=${meta.callId} contact=${meta.contactKey} direction=${meta.direction}`,
     );
+    const voiceTranscripts = createVoiceTranscriptBuffer({
+      callId: meta.callId,
+      coalesceMs: resolveVoiceTranscriptCoalesceMs(opts.account),
+      logger: opts.logger,
+      dispatch: async (segments, abortSignal, shouldDeliverReply) => {
+        const turnId = lastVoiceTranscriptTurnId(segments);
+        const text = mergeVoiceTranscriptSegments(segments);
+        const body = `[inkbox:voice_call call_id=${meta.callId}${renderIdentityMarker(opts.account)} segments=${segments.length} | ${renderContactMarker(meta.contact)}]\n${text}`;
+        await dispatchInboundTurn({
+          ...opts,
+          activeCalls,
+          dispatchAbortSignal: abortSignal,
+          shouldDeliverReply,
+          turn: {
+            mode: "voice",
+            contactKey: meta.contactKey,
+            contact: meta.contact,
+            fromLabel: meta.fromLabel,
+            remoteAddress: meta.remotePhoneNumber,
+            body,
+            messageId: `call:${meta.callId}:${turnId}`,
+            replyToId: turnId,
+            threadId: meta.direction === "outbound" ? undefined : `call:${meta.callId}`,
+            timestamp: segments[0]?.receivedAt ?? Date.now(),
+            raw: { event: "transcript", segments },
+          },
+        });
+      },
+    });
 
     let greetingSent = false;
     try {
@@ -792,6 +983,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           }
         }
         if (event === "stop") {
+          await voiceTranscripts.drain();
           break;
         }
         if (event !== "transcript") {
@@ -814,26 +1006,18 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           typeof payload.turn_id === "string" && payload.turn_id.trim()
             ? payload.turn_id.trim()
             : `${Date.now()}`;
-        const body = `[inkbox:voice_call call_id=${meta.callId} | ${renderContactMarker(meta.contact)}]\n${text}`;
-        await dispatchInboundTurn({
-          ...opts,
-          activeCalls,
-          turn: {
-            mode: "voice",
-            contactKey: meta.contactKey,
-            contact: meta.contact,
-            fromLabel: meta.fromLabel,
-            remoteAddress: meta.remotePhoneNumber,
-            body,
-            messageId: `call:${meta.callId}:${turnId}`,
-            replyToId: turnId,
-            threadId: meta.direction === "outbound" ? undefined : `call:${meta.callId}`,
-            timestamp: Date.now(),
-            raw: payload,
-          },
+        voiceTranscripts.push({
+          text,
+          turnId,
+          receivedAt: Date.now(),
         });
       }
     } finally {
+      await voiceTranscripts.drain().catch((error) => {
+        opts.logger?.warn?.(
+          `Inkbox voice transcript drain failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
       unregisterActiveCall(activeCalls, active);
       await ws.close().catch(() => {});
       opts.logger?.info?.(`Inkbox call WebSocket closed: call_id=${meta.callId}`);

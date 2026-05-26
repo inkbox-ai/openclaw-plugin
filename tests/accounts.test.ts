@@ -16,6 +16,7 @@ describe("inkbox account config", () => {
                 apiKey: "ApiKey_plugin",
                 identity: "plugin-agent",
                 signingKey: "sign_plugin",
+                voiceTranscriptCoalesceMs: 900,
               },
             },
           },
@@ -28,6 +29,7 @@ describe("inkbox account config", () => {
     expect(account.apiKey).toBe("ApiKey_plugin");
     expect(account.identity).toBe("plugin-agent");
     expect(account.signingKey).toBe("sign_plugin");
+    expect(account.config.voiceTranscriptCoalesceMs).toBe(900);
   });
 
   it("lets channel account config override plugin config", () => {

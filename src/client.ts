@@ -21,6 +21,9 @@ export interface InkboxPluginConfig {
   // Voice: explicit WebSocket URL for outbound call media. Usually omitted;
   // tunnel mode derives it from tunnelName/identity.
   callWebsocketUrl?: string;
+  // Voice: wait this many ms for consecutive final transcript segments before
+  // sending the combined caller turn to OpenClaw.
+  voiceTranscriptCoalesceMs?: number;
   // Outbound recipient allowlist. When set, send_email / send_sms /
   // forward_email reject any recipient not on the list. Phone matches in
   // E.164, email matches by exact address. Empty/undefined → no filtering.

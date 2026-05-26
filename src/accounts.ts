@@ -147,6 +147,13 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
   if (typeof value.enabled === "boolean") {
     out.enabled = value.enabled;
   }
+  if (
+    typeof value.voiceTranscriptCoalesceMs === "number" &&
+    Number.isFinite(value.voiceTranscriptCoalesceMs) &&
+    value.voiceTranscriptCoalesceMs >= 0
+  ) {
+    out.voiceTranscriptCoalesceMs = value.voiceTranscriptCoalesceMs;
+  }
   const allowedRecipients = stringArray(value.allowedRecipients);
   if (allowedRecipients) {
     out.allowedRecipients = allowedRecipients;

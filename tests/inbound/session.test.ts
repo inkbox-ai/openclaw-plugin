@@ -191,6 +191,59 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     );
   });
 
+  it("coalesces consecutive final voice transcripts into one agent turn", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("That first message was split in two.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({
+        event: "transcript",
+        text: "What is it",
+        is_final: true,
+        turn_id: "turn-4a",
+      }),
+      JSON.stringify({
+        event: "transcript",
+        text: "take you so long to respond to my first message?",
+        is_final: true,
+        turn_id: "turn-4b",
+      }),
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+
+    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain("segments=2");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("inkbox_identity=smoke-agent");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("What is it");
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "take you so long to respond to my first message?",
+    );
+    expect(run.ctxPayload.reply.replyToId).toBe("turn-4b");
+
+    const frames = parseSentTextFrames(ws);
+    expect(frames.filter((frame) => frame.event === "text" && frame.delta)).toEqual([
+      expect.objectContaining({ delta: "Hi there, how can I help?" }),
+      expect.objectContaining({
+        delta: "That first message was split in two.",
+        turn_id: "turn-4b",
+      }),
+    ]);
+  });
+
   it("marks the route session as voice-active during agent processing", async () => {
     const { runtime } = createRuntime();
     const runAssembled = vi.fn(async (params: any) => {
