@@ -2,6 +2,11 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
+import {
+  decorateCallWebsocketUrlWithContext,
+  registerOutboundCallContext,
+  type OutboundCallContext,
+} from "../outbound-call-context.js";
 
 // Outbound voice — initiates a call from the identity's phone number to the
 // given E.164 recipient. When the Inkbox channel gateway is running, the tool
@@ -11,17 +16,33 @@ export function registerPlaceCall(
   api: any,
   runtime: InkboxRuntime,
   allowedRecipients?: string[],
-  resolveClientWebsocketUrl?: () => string | undefined,
+  resolveClientWebsocketUrl?: (context?: OutboundCallContext) => string | undefined,
 ): void {
   api.registerTool(
     {
       name: "inkbox_place_call",
       description:
-        "Place an outbound call from the configured Inkbox identity's phone number. Uses the plugin's active call WebSocket when available, or an explicit clientWebsocketUrl override. Returns the queued call's id + status + rate-limit info.",
+        "Place an outbound call from the configured Inkbox identity's phone number. Always include purpose when the user gave a topic/reason; it is loaded into the live call so the agent opens with context instead of asking a generic greeting. Uses the plugin's active call WebSocket when available, or an explicit clientWebsocketUrl override. Returns the queued call's id + status + rate-limit info.",
       parameters: Type.Object({
         toNumber: Type.String({
           description: "Recipient phone number in E.164 format.",
         }),
+        purpose: Type.String({
+          description:
+            "Why this call is being placed. If no topic was specified, say that the user asked for a general call. This is loaded into the live call before the greeting.",
+        }),
+        openingMessage: Type.Optional(
+          Type.String({
+            description:
+              "Optional exact or near-exact first thing to say when the call connects. Use this when the user specified what the call is about.",
+          }),
+        ),
+        context: Type.Optional(
+          Type.String({
+            description:
+              "Optional relevant background to load into the call session. Include concise facts the voice agent may need after the opening.",
+          }),
+        ),
         clientWebsocketUrl: Type.Optional(
           Type.String({
             description:
@@ -34,18 +55,28 @@ export function registerPlaceCall(
           const block = checkOutboundRecipient(params.toNumber, allowedRecipients);
           if (block) return toolError(block);
 
+          const callContext = registerOutboundCallContext({
+            toNumber: params.toNumber,
+            purpose: params.purpose,
+            openingMessage: params.openingMessage,
+            context: params.context,
+          });
           const clientWebsocketUrl =
-            params.clientWebsocketUrl ?? resolveClientWebsocketUrl?.();
+            params.clientWebsocketUrl ?? resolveClientWebsocketUrl?.(callContext);
           if (!clientWebsocketUrl) {
             return toolError(
               "No Inkbox call WebSocket is available. Start the inkbox channel gateway or pass clientWebsocketUrl explicitly.",
             );
           }
+          const decoratedClientWebsocketUrl = decorateCallWebsocketUrlWithContext(
+            clientWebsocketUrl,
+            callContext,
+          );
 
           const identity = await runtime.getIdentity();
           const call = await identity.placeCall({
             toNumber: params.toNumber,
-            clientWebsocketUrl,
+            clientWebsocketUrl: decoratedClientWebsocketUrl,
           });
           // rateLimit is on the call response — surface it so the agent can
           // see remaining capacity before queueing more outbound calls.

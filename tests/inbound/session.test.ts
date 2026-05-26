@@ -93,11 +93,15 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
 }));
 
 import { createInkboxSessionBridge, prewarmInkboxAgent } from "../../src/inbound/session.js";
+import {
+  decorateCallWebsocketUrlWithContext,
+  registerOutboundCallContext,
+} from "../../src/outbound-call-context.js";
 import { shouldBlockInkboxOutboundToolDuringVoice } from "../../src/voice-guard.js";
 
 class FakeInkboxWebSocket {
   readonly headers = new Map<string, string>();
-  readonly url = "wss://example.com/inkbox/phone/media/ws?call_id=call-1";
+  readonly url: string;
   readonly sent: string[] = [];
   readonly accept = vi.fn(async () => undefined);
   readonly send = vi.fn(async (message: string) => {
@@ -105,7 +109,12 @@ class FakeInkboxWebSocket {
   });
   readonly close = vi.fn(async () => undefined);
 
-  constructor(private readonly messages: string[]) {}
+  constructor(
+    private readonly messages: string[],
+    url = "wss://example.com/inkbox/phone/media/ws?call_id=call-1",
+  ) {
+    this.url = url;
+  }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<string> {
     for (const message of this.messages) {
@@ -467,6 +476,52 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         stream_id: "stream-1",
         media: expect.objectContaining({ track: "outbound" }),
       }),
+    );
+  });
+
+  it("loads outbound call purpose into realtime greeting instructions", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const context = registerOutboundCallContext({
+      toNumber: "+15551234567",
+      purpose: "the project launch checklist",
+      openingMessage: "I am calling about the project launch checklist.",
+      context: "Ask whether the staging deploy has finished.",
+    })!;
+    const ws = new FakeInkboxWebSocket(
+      [
+        JSON.stringify({ event: "start", stream_id: "stream-1" }),
+        JSON.stringify({ event: "stop" }),
+      ],
+      decorateCallWebsocketUrlWithContext(
+        "wss://example.com/inkbox/phone/media/ws?call_id=call-out",
+        context,
+      ),
+    );
+
+    await bridge.wsHandler(ws as any);
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    const params = realtimeMock.sessions[0].params;
+    expect(params.instructions).toContain("Purpose: the project launch checklist");
+    expect(params.instructions).toContain("Ask whether the staging deploy has finished.");
+    expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
+      expect.stringContaining("I am calling about the project launch checklist."),
+    );
+    expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
+      expect.not.stringContaining("how you can help"),
     );
   });
 

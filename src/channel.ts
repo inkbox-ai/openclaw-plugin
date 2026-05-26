@@ -199,7 +199,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
             : "- Inkbox is enabled but the identity handle is not configured; use `inkbox_whoami`/doctor output to debug before sending.",
           "- For Inkbox conversations, prefer Inkbox tools for Inkbox state: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_emails`, `inkbox_list_calls`, `inkbox_list_call_transcripts`, `inkbox_lookup_contact`, `inkbox_create_contact`, and `inkbox_create_note`.",
           "- When a user asks to save a contact, use `inkbox_lookup_contact` first; then use `inkbox_create_contact` or `inkbox_update_contact`. Use `inkbox_create_note` only for free-form memory that is not an address-book contact field.",
-          "- When a user asks you to call them, use `inkbox_place_call`. During an active voice-call turn, answer conversationally; the Inkbox bridge speaks your reply over TTS, so do not send SMS or email unless the user explicitly asks for a separate follow-up.",
+          "- When a user asks you to call them, use `inkbox_place_call`. Always include the call `purpose` when the user gave a reason/topic, and include `openingMessage` when you know what should be said first; the call bridge loads that context before greeting the callee. During an active voice-call turn, answer conversationally; the Inkbox bridge speaks your reply over TTS, so do not send SMS or email unless the user explicitly asks for a separate follow-up.",
         ];
       },
       inboundFormattingHints: () => ({

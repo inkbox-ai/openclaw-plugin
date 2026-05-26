@@ -22,6 +22,10 @@ import {
 } from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
+import {
+  consumeOutboundCallContextFromUrl,
+  type OutboundCallContext,
+} from "../outbound-call-context.js";
 import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
 import { markInkboxVoiceTurnActive } from "../voice-guard.js";
 
@@ -80,6 +84,7 @@ type RealtimeCallMeta = {
   contact?: ContactSummary;
   contactKey: string;
   fromLabel: string;
+  outboundContext?: OutboundCallContext;
 };
 
 export interface InkboxSessionBridgeOptions {
@@ -611,6 +616,18 @@ function buildRealtimeInstructions(
       : undefined,
     meta.remotePhoneNumber ? `Caller phone number: ${meta.remotePhoneNumber}.` : undefined,
     meta.contact?.name ? `Caller contact name: ${meta.contact.name}.` : undefined,
+    meta.outboundContext?.purpose
+      ? `This is an outbound call you placed. Purpose: ${meta.outboundContext.purpose}`
+      : undefined,
+    meta.outboundContext?.openingMessage
+      ? `Preferred opening message: ${meta.outboundContext.openingMessage}`
+      : undefined,
+    meta.outboundContext?.context
+      ? `Relevant outbound-call context:\n${meta.outboundContext.context}`
+      : undefined,
+    meta.outboundContext
+      ? "For outbound calls, do not open with a generic offer to help. Start by explaining why you are calling, then ask the next specific question or give the requested update."
+      : undefined,
     "When the caller asks for contact, note, email, SMS, call-history, workspace, memory, current-info, or tool work, call openclaw_agent_consult and speak the returned result.",
     config.instructions,
     policyInstructions,
@@ -621,7 +638,32 @@ function buildRealtimeInstructions(
 
 function buildRealtimeGreeting(meta: RealtimeCallMeta): string {
   const name = meta.contact?.name?.split(/\s+/)[0] || "there";
+  if (meta.outboundContext?.openingMessage) {
+    return [
+      `Greet ${name} briefly, then say this opening message naturally:`,
+      meta.outboundContext.openingMessage,
+      "Do not ask a generic how-can-I-help question.",
+    ].join("\n");
+  }
+  if (meta.outboundContext?.purpose) {
+    return [
+      `Greet ${name} briefly, then immediately explain that you are calling because:`,
+      meta.outboundContext.purpose,
+      "Ask the next specific question or give the requested update. Do not ask a generic how-can-I-help question.",
+    ].join("\n");
+  }
   return `Greet ${name} in one short sentence and ask how you can help.`;
+}
+
+function buildInkboxTtsGreeting(meta: RealtimeCallMeta): string {
+  const name = meta.contact?.name?.split(/\s+/)[0] || "there";
+  if (meta.outboundContext?.openingMessage) {
+    return `Hi ${name}. ${meta.outboundContext.openingMessage}`;
+  }
+  if (meta.outboundContext?.purpose) {
+    return `Hi ${name}. I'm calling about ${meta.outboundContext.purpose}`;
+  }
+  return `Hi ${name}, how can I help?`;
 }
 
 function parseBase64AudioPayload(value: unknown): Buffer | undefined {
@@ -1368,6 +1410,7 @@ async function resolveCallMeta(
   stashed: Map<string, Partial<InkboxInboundTurn> & { callId: string }>,
 ): Promise<RealtimeCallMeta> {
   const url = new URL(ws.url);
+  const outboundContext = consumeOutboundCallContextFromUrl(url);
   const context = parseCallContext(headerValue(ws.headers, "x-call-context"));
   const callId =
     url.searchParams.get("call_id") ||
@@ -1379,6 +1422,7 @@ async function resolveCallMeta(
   }
   let remotePhoneNumber =
     stashedMeta?.remoteAddress ||
+    outboundContext?.toNumber ||
     (typeof context.remote_phone_number === "string" ? context.remote_phone_number : "");
   let direction = typeof context.direction === "string" ? context.direction : "";
 
@@ -1389,7 +1433,7 @@ async function resolveCallMeta(
       const inkbox = await opts.runtime.getClient();
       const call = await inkbox.calls.get(phoneNumberId, callId);
       remotePhoneNumber = remotePhoneNumber || call.remotePhoneNumber;
-      direction = direction || call.direction;
+      direction = direction || (outboundContext ? "outbound" : call.direction);
     }
   } catch (error) {
     opts.logger?.warn?.(
@@ -1404,10 +1448,11 @@ async function resolveCallMeta(
   return {
     callId,
     remotePhoneNumber,
-    direction: direction || "inbound",
+    direction: direction || (outboundContext ? "outbound" : "inbound"),
     contact,
     contactKey,
     fromLabel: contact?.name ?? remotePhoneNumber ?? callId,
+    outboundContext,
   };
 }
 
@@ -1746,8 +1791,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         const event = payload.event;
         if (!greetingSent && (event === "start" || event === "transcript")) {
           greetingSent = true;
-          const name = meta.contact?.name?.split(/\s+/)[0] || "there";
-          await sendVoiceText(active, `Hi ${name}, how can I help?`, "greeting");
+          await sendVoiceText(active, buildInkboxTtsGreeting(meta), "greeting");
           if (event === "start") {
             continue;
           }

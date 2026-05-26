@@ -231,4 +231,41 @@ describe("registerPlaceCall", () => {
     });
     expect(out.content[0].text).toContain("call-10");
   });
+
+  it("attaches outbound call context to the resolved WebSocket URL", async () => {
+    const { api, tools } = createApi();
+    const placeCall = vi.fn().mockResolvedValue({
+      id: "call-11",
+      status: "queued",
+    });
+    const resolveUrl = vi.fn(() => "wss://derived.example/ws");
+    registerPlaceCall(
+      api,
+      createMockRuntime({ placeCall }),
+      undefined,
+      resolveUrl,
+    );
+    const tool = tools.get("inkbox_place_call")!;
+    await tool.execute("turn-1", {
+      toNumber: "+15551234567",
+      purpose: "the launch checklist",
+      openingMessage: "I am calling about the launch checklist.",
+      context: "Confirm whether staging finished.",
+    });
+
+    expect(resolveUrl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toNumber: "+15551234567",
+        purpose: "the launch checklist",
+        openingMessage: "I am calling about the launch checklist.",
+        context: "Confirm whether staging finished.",
+      }),
+    );
+    const callParams = placeCall.mock.calls[0][0];
+    expect(callParams.toNumber).toBe("+15551234567");
+    const url = new URL(callParams.clientWebsocketUrl);
+    expect(url.searchParams.get("inkbox_call_context_id")).toMatch(
+      /^[0-9a-f-]{36}$/,
+    );
+  });
 });
