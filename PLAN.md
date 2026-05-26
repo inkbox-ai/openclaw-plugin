@@ -413,6 +413,9 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 - `inkbox_lookup_contact`
 - `inkbox_get_contact`
 - `inkbox_list_contacts`
+- `inkbox_create_contact`
+- `inkbox_update_contact` ✱
+- `inkbox_delete_contact` ✱
 - `inkbox_export_contact_vcard` ✱
 - `inkbox_list_notes`
 - `inkbox_get_note`

@@ -2,7 +2,7 @@
 
 [Inkbox](https://inkbox.ai) plugin for [OpenClaw](https://openclaw.ai). Gives the agent a working mailbox, phone number, and contact/note/credential access under an Inkbox agent identity — outbound and inbound — without forking OpenClaw.
 
-> **Status:** all outbound tools, inbound webhook delivery (tunnel + HMAC), reads, vault, and 6 bundled skills shipped. **Not yet:** channel-plugin promotion (inbound sessions), interactive setup wizard, SMS batching, ClawHub publish. See [PLAN.md](./PLAN.md) for the full roadmap.
+> **Status:** outbound tools, reads, vault, bundled skills, SMS batching, and real OpenClaw channel ingress for Inkbox email/SMS/voice are shipped. **Not yet:** full interactive setup wizard and ClawHub publish. See [PLAN.md](./PLAN.md) for the full roadmap.
 
 ## Install (development)
 
@@ -17,7 +17,21 @@ Edits to `index.ts` and `src/**` are picked up on the next session reload — no
 
 ## Configure
 
-Set `plugins.entries.inkbox.config` in your OpenClaw config:
+Preferred channel config:
+
+```json
+{
+  "channels": {
+    "inkbox": {
+      "apiKey": "ApiKey_xxxxxxxxxxxx",
+      "identity": "my-agent-handle",
+      "signingKey": "whsec_xxxxxxxxxxxx"
+    }
+  }
+}
+```
+
+Legacy plugin-scoped config is still supported for tools and the default channel account:
 
 ```json
 {
@@ -45,6 +59,7 @@ Set `plugins.entries.inkbox.config` in your OpenClaw config:
 | `publicUrl` | no | — | If set, skip the tunnel and assume webhooks land here. |
 | `allowedRecipients` | no | — | Outbound allowlist. Empty = no filtering. |
 | `allowedInboundContactIds` | no | — | Inbound allowlist by contact UUID. Empty = no filtering. |
+| `sms.batchDelayMs` | no | `0` | Inbound SMS fragment batching window. |
 | `vault.keyEnvVar` | no | `INKBOX_VAULT_KEY` | Env var the vault unlock key is read from. |
 
 ## Tools
@@ -53,20 +68,20 @@ Set `plugins.entries.inkbox.config` in your OpenClaw config:
 - `inkbox_send_email`, `inkbox_send_sms`
 
 **Outbound** — optional, opt-in via `tools.allow`:
-- `inkbox_forward_email`
+- `inkbox_forward_email`, `inkbox_place_call`
 
 **Read / lifecycle** (email, SMS, voice, contacts, notes) — required by default unless noted optional:
 - Email: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`, `inkbox_mark_emails_read` *(opt)*
 - SMS: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_texts` *(opt)*, `inkbox_get_text` *(opt)*, `inkbox_mark_text_read` *(opt)*, `inkbox_mark_text_conversation_read` *(opt)*
 - Voice: `inkbox_list_calls`, `inkbox_list_call_transcripts`
-- Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_export_contact_vcard` *(opt)*
+- Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact` *(opt)*, `inkbox_delete_contact` *(opt)*, `inkbox_export_contact_vcard` *(opt)*
 - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`, `inkbox_update_note` *(opt)*, `inkbox_delete_note` *(opt)*
 
 **Vault** — all optional, gate plaintext access:
 - `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
 
 **Diagnostic** — optional:
-- `inkbox_whoami`
+- `inkbox_whoami`, `inkbox_rate_status`
 
 Enable in OpenClaw config:
 
@@ -90,7 +105,7 @@ openclaw inkbox setup     # interactive wizard (stub — prints manual flow)
 
 ## Bundled skills
 
-Six SKILL.md files under `skills/`:
+Seven SKILL.md files under `skills/`:
 
 | Skill | Triggers when… |
 |---|---|
@@ -99,15 +114,17 @@ Six SKILL.md files under `skills/`:
 | `inkbox-sms-responder` | sending or replying to SMS |
 | `inkbox-call-handler` | reviewing call history or transcripts |
 | `inkbox-contact-lookup` | "who is X" / resolving names to contacts |
+| `inkbox-notes-memory` | saving, retrieving, or updating persistent Inkbox notes |
 | `inkbox-credential-use` | "log into X" / fetching a TOTP code |
 
 Each skill ends with a pointer to `https://inkbox.ai/llms.txt` and `https://inkbox.ai/docs/all.md` as a raw-docs fallback when behavior questions go past what's bundled.
 
 ## Architecture
 
-- **Plugin, not fork.** OpenClaw's plugin SDK does everything we need (`registerTool`, `registerHttpRoute`, `registerCli`).
+- **Plugin, not fork.** OpenClaw's plugin SDK does everything we need (`defineChannelPluginEntry`, channel gateway, tools, HTTP routes, CLI).
 - **Agent-scoped.** Authenticates with an agent-scoped Inkbox API key. Admin operations are deliberately not exposed.
-- **Tunnel-first inbound.** When `signingKey` is set, opens an Inkbox tunnel at `https://<identity>.inkboxwire.com` and routes inbound webhooks into an in-process HMAC-verified handler with dedup. `publicUrl` config skips the tunnel for hosted deployments.
+- **Tunnel-first inbound.** When `signingKey` is set, opens an Inkbox tunnel at `https://<identity>.inkboxwire.com`, patches the identity mailbox/phone webhook URLs, and routes inbound webhooks into OpenClaw sessions with HMAC verification and dedup.
+- **Voice bridge.** Incoming and plugin-placed calls use Inkbox STT/TTS over the tunnel WebSocket; final transcripts become OpenClaw turns and replies stream back as Inkbox TTS text frames.
 - **Lazy SDK client.** The Inkbox SDK is constructed on first tool call, never at registration.
 - **Allowlists.** Optional outbound recipient allowlist and inbound contact-id allowlist for stricter deployments.
 
@@ -115,12 +132,9 @@ See [PLAN.md](./PLAN.md) for the full architecture write-up and 8-phase roadmap.
 
 ## Roadmap (what's still ahead)
 
-- Channel-plugin promotion so inbound webhook events become real OpenClaw sessions
 - Interactive `openclaw inkbox setup` wizard (port of the 3-branch Hermes Agent flow)
-- `inkbox_rate_status` tool + SMS fragment batching window
-- `inkbox_place_call` outbound voice (needs WS audio bridge)
 - ClawHub publishing (`clawhub:inkbox/openclaw-plugin`)
-- Test suite for HMAC verify, dedup, allowlists, async iterator caps, vault unlock paths
+- More end-to-end coverage against a live Inkbox tunnel
 
 ## License
 

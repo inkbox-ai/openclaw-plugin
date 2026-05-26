@@ -1,12 +1,16 @@
 import { Inkbox } from "@inkbox/sdk";
+import { resolveInkboxAccount } from "./accounts.js";
 import { readIdentityState } from "./state.js";
 
 // CLI registrar — called by OpenClaw with a commander-style `program` so we
-// can attach the `inkbox` subcommand group. Each action is self-contained
-// and reads its config from env vars (INKBOX_API_KEY, INKBOX_IDENTITY,
-// INKBOX_BASE_URL) so the commands work regardless of how OpenClaw threads
-// plugin config into the CLI process.
-export function registerInkboxCli(program: any): void {
+// can attach the `inkbox` subcommand group.
+export interface InkboxCliOptions {
+  pluginConfig?: unknown;
+  readCurrentConfig?: () => unknown;
+  env?: NodeJS.ProcessEnv;
+}
+
+export function registerInkboxCli(program: any, options: InkboxCliOptions = {}): void {
   const inkbox = program
     .command("inkbox")
     .description("Inkbox plugin commands (setup, doctor, whoami)");
@@ -15,14 +19,14 @@ export function registerInkboxCli(program: any): void {
     .command("doctor")
     .description("Diagnose the Inkbox plugin's configuration and connection state")
     .action(async () => {
-      await runDoctor();
+      await runDoctor(options);
     });
 
   inkbox
     .command("whoami")
     .description("Print the authenticated Inkbox identity and key info")
     .action(async () => {
-      await runWhoami();
+      await runWhoami(options);
     });
 
   inkbox
@@ -41,14 +45,28 @@ interface CliConfig {
   identity: string | undefined;
   baseUrl: string | undefined;
   signingKey: string | undefined;
+  source: string;
 }
 
-function readEnvConfig(): CliConfig {
+function readCliConfig(options: InkboxCliOptions = {}): CliConfig {
+  let cfg: unknown;
+  try {
+    cfg = options.readCurrentConfig?.();
+  } catch {
+    cfg = undefined;
+  }
+  const account = resolveInkboxAccount({
+    cfg,
+    pluginConfig: options.pluginConfig,
+    env: options.env ?? process.env,
+  });
+  const hasOpenClawConfig = Boolean(account.config.apiKey || account.config.identity);
   return {
-    apiKey: process.env.INKBOX_API_KEY,
-    identity: process.env.INKBOX_IDENTITY,
-    baseUrl: process.env.INKBOX_BASE_URL,
-    signingKey: process.env.INKBOX_SIGNING_KEY,
+    apiKey: account.apiKey,
+    identity: account.identity,
+    baseUrl: account.baseUrl,
+    signingKey: account.signingKey,
+    source: hasOpenClawConfig ? "OpenClaw config/env" : "env vars",
   };
 }
 
@@ -58,21 +76,21 @@ function fmt(label: string, value: string | null | undefined, masked = false): s
   return `  ${label}: ${display}`;
 }
 
-async function runDoctor(): Promise<void> {
-  const cfg = readEnvConfig();
+async function runDoctor(options: InkboxCliOptions = {}): Promise<void> {
+  const cfg = readCliConfig(options);
   console.log("Inkbox plugin doctor\n");
 
   // Section 1: config presence.
-  console.log("Config (from env vars):");
-  console.log(fmt("INKBOX_API_KEY", cfg.apiKey, true));
-  console.log(fmt("INKBOX_IDENTITY", cfg.identity));
-  console.log(fmt("INKBOX_BASE_URL", cfg.baseUrl ?? "(default: https://inkbox.ai)"));
-  console.log(fmt("INKBOX_SIGNING_KEY", cfg.signingKey, true));
+  console.log(`Config (${cfg.source}):`);
+  console.log(fmt("apiKey", cfg.apiKey, true));
+  console.log(fmt("identity", cfg.identity));
+  console.log(fmt("baseUrl", cfg.baseUrl ?? "(default: https://inkbox.ai)"));
+  console.log(fmt("signingKey", cfg.signingKey, true));
   console.log();
 
   if (!cfg.apiKey || !cfg.identity) {
     console.log(
-      "❌ Missing required config. Set INKBOX_API_KEY and INKBOX_IDENTITY (or configure via plugins.entries.inkbox.config) and re-run.",
+      "❌ Missing required config. Set channels.inkbox.apiKey and channels.inkbox.identity, or set INKBOX_API_KEY and INKBOX_IDENTITY, then re-run.",
     );
     process.exitCode = 1;
     return;
@@ -93,7 +111,7 @@ async function runDoctor(): Promise<void> {
 
     const identity = await client.getIdentity(cfg.identity);
     console.log("Identity:");
-    console.log(`  handle: ${identity.handle}`);
+    console.log(`  handle: ${identity.agentHandle}`);
     console.log(`  emailAddress: ${identity.mailbox?.emailAddress ?? "(no mailbox)"}`);
     console.log(`  phoneNumber: ${identity.phoneNumber?.number ?? "(no phone)"}`);
     if (identity.phoneNumber) {
@@ -114,7 +132,7 @@ async function runDoctor(): Promise<void> {
       console.log(`  savedAt: ${cached.savedAt}`);
       if (cached.identityHandle !== cfg.identity) {
         console.log(
-          `\n⚠️  Cached identity (${cached.identityHandle}) does not match INKBOX_IDENTITY (${cfg.identity}). Re-run setup to refresh.`,
+          `\n⚠️  Cached identity (${cached.identityHandle}) does not match configured identity (${cfg.identity}). Re-run setup to refresh.`,
         );
       }
     } else {
@@ -126,10 +144,10 @@ async function runDoctor(): Promise<void> {
   }
 }
 
-async function runWhoami(): Promise<void> {
-  const cfg = readEnvConfig();
+async function runWhoami(options: InkboxCliOptions = {}): Promise<void> {
+  const cfg = readCliConfig(options);
   if (!cfg.apiKey) {
-    console.log("INKBOX_API_KEY not set.");
+    console.log("Inkbox apiKey not set. Configure channels.inkbox.apiKey or INKBOX_API_KEY.");
     process.exitCode = 1;
     return;
   }
@@ -147,4 +165,3 @@ async function runWhoami(): Promise<void> {
     process.exitCode = 1;
   }
 }
-

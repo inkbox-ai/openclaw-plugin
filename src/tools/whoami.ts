@@ -30,7 +30,7 @@ export function registerWhoami(api: any, runtime: InkboxRuntime): void {
               info.authType === "api_key" ? info.label : undefined,
             organizationId: info.organizationId,
             identity: {
-              handle: identity.handle,
+              handle: identity.agentHandle,
               emailAddress: identity.mailbox?.emailAddress ?? null,
               phoneNumber: identity.phoneNumber?.number ?? null,
               smsStatus: identity.phoneNumber?.smsStatus ?? null,

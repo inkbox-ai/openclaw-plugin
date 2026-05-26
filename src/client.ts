@@ -18,6 +18,9 @@ export interface InkboxPluginConfig {
   // Inbound: if set, skip the Inkbox tunnel and assume webhooks land at this
   // public URL (e.g. when OpenClaw is hosted on a reachable host). Phase 7.
   publicUrl?: string;
+  // Voice: explicit WebSocket URL for outbound call media. Usually omitted;
+  // tunnel mode derives it from tunnelName/identity.
+  callWebsocketUrl?: string;
   // Outbound recipient allowlist. When set, send_email / send_sms /
   // forward_email reject any recipient not on the list. Phone matches in
   // E.164, email matches by exact address. Empty/undefined → no filtering.
@@ -51,24 +54,45 @@ export interface PluginLogger {
   debug?(msg: string): void;
 }
 
+export type InkboxConfigSource =
+  | Partial<InkboxPluginConfig>
+  | (() => Partial<InkboxPluginConfig>);
+
+function readConfig(source: InkboxConfigSource): Partial<InkboxPluginConfig> {
+  return typeof source === "function" ? source() : source;
+}
+
+function runtimeCacheKey(cfg: Partial<InkboxPluginConfig>): string {
+  return JSON.stringify({
+    apiKey: cfg.apiKey ?? "",
+    identity: cfg.identity ?? "",
+    baseUrl: cfg.baseUrl ?? "",
+  });
+}
+
 // Build a lazy-cached runtime. The Inkbox SDK client and the identity resolution
 // happen on first tool call, not at plugin registration. This keeps startup
 // cheap when the user never invokes an Inkbox tool in a given session.
 export function createInkboxRuntime(
-  cfg: Partial<InkboxPluginConfig>,
+  source: InkboxConfigSource,
   logger?: PluginLogger,
 ): InkboxRuntime {
-  let resolved: Promise<{ inkbox: Inkbox; identity: AgentIdentity }> | null = null;
+  let resolved: {
+    key: string;
+    promise: Promise<{ inkbox: Inkbox; identity: AgentIdentity }>;
+  } | null = null;
 
   function resolve(): Promise<{ inkbox: Inkbox; identity: AgentIdentity }> {
+    const cfg = readConfig(source);
     if (!cfg.apiKey || !cfg.identity) {
       throw new Error(
         "Inkbox plugin is not configured. Set `plugins.entries.inkbox.config.apiKey` and `.identity`, or run `openclaw inkbox setup`.",
       );
     }
-    if (!resolved) {
+    const key = runtimeCacheKey(cfg);
+    if (!resolved || resolved.key !== key) {
       const inkbox = new Inkbox({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
-      resolved = (async () => {
+      const promise = (async () => {
         // Confirm the key shape before we go any further. Agent-scoped is the
         // expected mode; admin-scoped works for outbound but we surface a warning
         // since several plugin features assume the agent-scoped access pattern.
@@ -99,8 +123,9 @@ export function createInkboxRuntime(
         const identity = await inkbox.getIdentity(cfg.identity!);
         return { inkbox, identity };
       })();
+      resolved = { key, promise };
     }
-    return resolved;
+    return resolved.promise;
   }
 
   return {

@@ -20,7 +20,7 @@ export function registerRateStatus(api: any, runtime: InkboxRuntime): void {
         return runTool(async () => {
           const identity = await runtime.getIdentity();
           const snapshot = {
-            identityHandle: identity.handle,
+            identityHandle: identity.agentHandle,
             mailbox: identity.mailbox
               ? {
                   emailAddress: identity.mailbox.emailAddress,

@@ -3,6 +3,7 @@ import { handleInkboxWebhook } from "./handler.js";
 import { RequestIdDedup } from "./dedup.js";
 import type { InboundHandlers } from "./dispatch.js";
 import type { PluginLogger } from "../client.js";
+import type { InkboxWsHandler } from "@inkbox/sdk/tunnels/connect";
 
 export interface OpenTunnelOptions {
   inkbox: Inkbox;
@@ -12,13 +13,15 @@ export interface OpenTunnelOptions {
   // stable across restarts.
   tunnelName?: string;
   handlers: InboundHandlers;
+  wsHandler?: InkboxWsHandler;
   logger?: PluginLogger;
   allowedContactIds?: string[];
+  serve?: boolean;
 }
 
 // Open an Inkbox tunnel that terminates at our in-process Fetch handler.
-// Returns the listener — caller is responsible for awaiting `.wait()` or
-// keeping the reference alive for as long as inbound delivery is wanted.
+// Returns the listener. By default this starts `.serveForever()` in the
+// background; pass `serve: false` when the caller wants to drive it manually.
 // Loaded via dynamic import because the tunnel data-plane runtime lives on
 // a separate package subpath (POSIX-only, not browser-safe) — keeping it
 // out of the main require graph means tool-only sessions don't pay the cost.
@@ -50,7 +53,16 @@ export async function openInkboxTunnel(opts: OpenTunnelOptions) {
   const listener = await connect(opts.inkbox, {
     name: opts.tunnelName ?? opts.identityHandle,
     handler,
+    wsHandler: opts.wsHandler,
+    installSignalHandlers: false,
   });
   opts.logger?.info?.(`Inkbox tunnel open at ${listener.publicUrl}`);
+  if (opts.serve !== false) {
+    listener.wait().catch((err: unknown) => {
+      opts.logger?.warn?.(
+        `Inkbox tunnel stopped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
   return listener;
 }

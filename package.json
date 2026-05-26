@@ -22,21 +22,73 @@
     "typebox": "^1.1.38"
   },
   "devDependencies": {
-    "@openclaw/plugin-sdk": "*",
+    "@types/node": "^22.0.0",
+    "openclaw": ">=2026.5.19",
     "typescript": "^5.4.0",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.9"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.19"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   },
   "openclaw": {
     "extensions": [
       "./index.ts"
     ],
+    "channel": {
+      "id": "inkbox",
+      "label": "Inkbox",
+      "selectionLabel": "Inkbox (Email, SMS, Voice)",
+      "detailLabel": "Inkbox",
+      "docsPath": "/plugins/inkbox",
+      "docsLabel": "inkbox",
+      "blurb": "Inkbox email, SMS, and voice identities.",
+      "order": 90,
+      "aliases": [
+        "email",
+        "sms",
+        "phone"
+      ],
+      "markdownCapable": false,
+      "exposure": {
+        "configured": true,
+        "setup": true,
+        "docs": true
+      },
+      "cliAddOptions": [
+        {
+          "flags": "--identity <handle>",
+          "description": "Inkbox agent identity handle"
+        },
+        {
+          "flags": "--public-url <url>",
+          "description": "Public OpenClaw URL for Inkbox webhooks"
+        },
+        {
+          "flags": "--tunnel-name <name>",
+          "description": "Inkbox tunnel name"
+        },
+        {
+          "flags": "--allowed-recipient <target>",
+          "description": "Allowed outbound recipient (repeatable)"
+        },
+        {
+          "flags": "--allowed-inbound-contact <id>",
+          "description": "Allowed inbound Inkbox contact id (repeatable)"
+        }
+      ]
+    },
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.5.19",
+      "minGatewayVersion": "2026.5.19"
     },
     "build": {
-      "openclawVersion": "2026.3.24-beta.2",
-      "pluginSdkVersion": "2026.3.24-beta.2"
+      "openclawVersion": "2026.5.19",
+      "pluginSdkVersion": "2026.5.19"
     }
   }
 }

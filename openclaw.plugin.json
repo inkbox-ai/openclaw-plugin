@@ -23,6 +23,9 @@
       "inkbox_lookup_contact",
       "inkbox_get_contact",
       "inkbox_list_contacts",
+      "inkbox_create_contact",
+      "inkbox_update_contact",
+      "inkbox_delete_contact",
       "inkbox_export_contact_vcard",
       "inkbox_list_notes",
       "inkbox_get_note",
@@ -39,6 +42,115 @@
       "inkbox_rate_status"
     ]
   },
+  "skills": ["./skills"],
+  "channels": ["inkbox"],
+  "channelConfigs": {
+    "inkbox": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "name": { "type": "string" },
+          "defaultAccount": { "type": "string" },
+          "defaultTo": {
+            "type": "string",
+            "description": "Default target for outbound messages, such as email:user@example.com or sms:+14155550123."
+          },
+          "apiKey": {
+            "type": "string",
+            "description": "Inkbox API key (ApiKey_... format)."
+          },
+          "identity": {
+            "type": "string",
+            "description": "Agent identity handle to send from."
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "Override Inkbox API base URL."
+          },
+          "signingKey": {
+            "type": "string",
+            "description": "Webhook HMAC signing secret."
+          },
+          "tunnelName": {
+            "type": "string",
+            "description": "Override the Inkbox tunnel name."
+          },
+          "publicUrl": {
+            "type": "string",
+            "description": "Public OpenClaw URL. If omitted, the plugin uses an Inkbox tunnel."
+          },
+          "allowedRecipients": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "allowedInboundContactIds": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "sms": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "batchDelayMs": { "type": "integer", "minimum": 0 },
+              "maxMessages": { "type": "integer", "minimum": 1 },
+              "maxChars": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "vault": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "keyEnvVar": { "type": "string" }
+            }
+          },
+          "accounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "name": { "type": "string" },
+                "defaultTo": { "type": "string" },
+                "apiKey": { "type": "string" },
+                "identity": { "type": "string" },
+                "baseUrl": { "type": "string" },
+                "signingKey": { "type": "string" },
+                "tunnelName": { "type": "string" },
+                "publicUrl": { "type": "string" },
+                "allowedRecipients": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "allowedInboundContactIds": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "sms": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "batchDelayMs": { "type": "integer", "minimum": 0 },
+                    "maxMessages": { "type": "integer", "minimum": 1 },
+                    "maxChars": { "type": "integer", "minimum": 1 }
+                  }
+                },
+                "vault": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "keyEnvVar": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
   "toolMetadata": {
     "inkbox_forward_email": { "optional": true },
     "inkbox_mark_emails_read": { "optional": true },
@@ -46,6 +158,8 @@
     "inkbox_get_text": { "optional": true },
     "inkbox_mark_text_read": { "optional": true },
     "inkbox_mark_text_conversation_read": { "optional": true },
+    "inkbox_update_contact": { "optional": true },
+    "inkbox_delete_contact": { "optional": true },
     "inkbox_export_contact_vcard": { "optional": true },
     "inkbox_update_note": { "optional": true },
     "inkbox_delete_note": { "optional": true },
@@ -64,7 +178,6 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["apiKey", "identity"],
     "properties": {
       "apiKey": {
         "type": "string",

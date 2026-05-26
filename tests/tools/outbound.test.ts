@@ -208,4 +208,27 @@ describe("registerPlaceCall", () => {
     expect(out.isError).toBe(true);
     expect(placeCall).not.toHaveBeenCalled();
   });
+
+  it("uses the resolver WebSocket URL when the caller omits one", async () => {
+    const { api, tools } = createApi();
+    const placeCall = vi.fn().mockResolvedValue({
+      id: "call-10",
+      status: "queued",
+    });
+    registerPlaceCall(
+      api,
+      createMockRuntime({ placeCall }),
+      undefined,
+      () => "wss://derived.example/ws",
+    );
+    const tool = tools.get("inkbox_place_call")!;
+    const out = await tool.execute("turn-1", {
+      toNumber: "+15551234567",
+    });
+    expect(placeCall).toHaveBeenCalledWith({
+      toNumber: "+15551234567",
+      clientWebsocketUrl: "wss://derived.example/ws",
+    });
+    expect(out.content[0].text).toContain("call-10");
+  });
 });

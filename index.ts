@@ -1,5 +1,13 @@
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  defineChannelPluginEntry,
+  type ChannelPlugin,
+  type OpenClawPluginApi,
+  type PluginRuntime,
+} from "openclaw/plugin-sdk/channel-core";
 import { createInkboxRuntime, type InkboxPluginConfig } from "./src/client.js";
+import { inkboxPlugin } from "./src/channel.js";
+import { registerInkboxPublicUrlInboundRoutes } from "./src/gateway.js";
+import { resolveInkboxAccount, resolveInkboxToolsConfig } from "./src/accounts.js";
 import { registerSendEmail } from "./src/tools/send-email.js";
 import { registerSendSms } from "./src/tools/send-sms.js";
 import { registerForwardEmail } from "./src/tools/forward-email.js";
@@ -13,111 +21,120 @@ import { registerWhoami } from "./src/tools/whoami.js";
 import { registerPlaceCall } from "./src/tools/place-call.js";
 import { registerRateStatus } from "./src/tools/rate-status.js";
 import { createVaultRuntime } from "./src/vault.js";
-import { startInbound } from "./src/inbound/index.js";
+import { registerInkboxVoiceToolGuard } from "./src/voice-guard.js";
+import { deriveConfiguredCallWebsocketUrl } from "./src/call-websocket.js";
+
+type OpenClawChannelEntry = {
+  id: string;
+  name: string;
+  description: string;
+  configSchema: ChannelPlugin["configSchema"];
+  register: (api: OpenClawPluginApi) => void;
+  channelPlugin: ChannelPlugin;
+  setChannelRuntime?: (runtime: PluginRuntime) => void;
+};
 
 // CLI registrar is lazy-imported via api.registerCli so we don't pay the
 // commander/Inkbox SDK cost on every plugin load.
 
-export default definePluginEntry({
+function registerInkboxCli(api: any): void {
+  api.registerCli?.(
+    async ({ program }: { program: any }) => {
+      const { registerInkboxCli } = await import("./src/cli.js");
+      registerInkboxCli(program, {
+        pluginConfig: api.pluginConfig,
+        readCurrentConfig: () => api.runtime?.config?.current?.(),
+      });
+    },
+    {
+      descriptors: [
+        {
+          name: "inkbox",
+          description: "Inkbox plugin commands (setup, doctor, whoami)",
+          hasSubcommands: true,
+        },
+      ],
+    },
+  );
+}
+
+function registerInkboxTools(api: any): void {
+  const resolveCfg = () =>
+    resolveInkboxToolsConfig({
+      pluginConfig: api.pluginConfig,
+      readCurrentConfig: () => api.runtime?.config?.current?.(),
+    }) as Partial<InkboxPluginConfig>;
+  const cfg = resolveCfg();
+  if (!cfg.apiKey || !cfg.identity) {
+    api.logger?.warn?.(
+      "Inkbox plugin enabled but apiKey/identity missing; tools will return an error until configured. Set plugins.entries.inkbox.config or channels.inkbox.",
+    );
+  }
+
+  const runtime = createInkboxRuntime(resolveCfg, api.logger);
+
+  // Required outbound tools — registered without { optional: true } so they
+  // light up as soon as the plugin is enabled. Recipient allowlist is
+  // threaded through; when undefined, no filtering applies.
+  registerSendEmail(api, runtime, cfg.allowedRecipients);
+  registerSendSms(api, runtime, cfg.allowedRecipients);
+
+  // Optional outbound tools — require explicit opt-in via tools.allow.
+  registerForwardEmail(api, runtime, cfg.allowedRecipients);
+  registerPlaceCall(api, runtime, cfg.allowedRecipients, () => {
+    let currentCfg: unknown;
+    try {
+      currentCfg = api.runtime?.config?.current?.();
+    } catch {
+      currentCfg = undefined;
+    }
+    const account = resolveInkboxAccount({
+      cfg: currentCfg,
+      pluginConfig: api.pluginConfig,
+    });
+    const context = api.runtime?.channel?.runtimeContexts?.get?.({
+      channelId: "inkbox",
+      accountId: account.accountId,
+      capability: "call-websocket",
+    }) as { url?: string } | undefined;
+    return context?.url ?? deriveConfiguredCallWebsocketUrl(account);
+  });
+
+  // Read/lifecycle tools for email, SMS, and calls. Required tools light up
+  // by default; optional ones (mark-read, raw text list/get) require opt-in.
+  registerEmailReads(api, runtime);
+  registerSmsReads(api, runtime);
+  registerCallReads(api, runtime);
+
+  // Access-scoped contact + note tools. With an agent-scoped key the SDK
+  // filters list/lookup/get to entries this identity has access to.
+  registerContactTools(api, runtime);
+  registerNoteTools(api, runtime);
+
+  // Vault tools. All optional; user must opt in via tools.allow. Vault
+  // unlock key is read once on first use from $INKBOX_VAULT_KEY (or a
+  // custom env var when vault.keyEnvVar is configured).
+  const vault = createVaultRuntime(runtime, {
+    keyEnvVar: (cfg as any).vault?.keyEnvVar,
+  });
+  registerVaultTools(api, runtime, vault);
+
+  // Diagnostic / introspection tools.
+  registerWhoami(api, runtime);
+  registerRateStatus(api, runtime);
+}
+
+const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   id: "inkbox",
   name: "Inkbox",
   description: "Adds Inkbox messaging tools (email, SMS, voice) to OpenClaw",
-  register(api: any) {
-    // Pull plugin-scoped config injected by OpenClaw. We pass it through to
-    // the lazy runtime — actual validation happens on first tool call.
-    const cfg = (api.pluginConfig ?? {}) as Partial<InkboxPluginConfig>;
-    if (!cfg.apiKey || !cfg.identity) {
-      api.logger?.warn?.(
-        "Inkbox plugin enabled but apiKey/identity missing — tools will return an error until configured. Run `openclaw inkbox setup` (Phase 3) or set the values directly in plugins.entries.inkbox.config.",
-      );
-    }
-
-    const runtime = createInkboxRuntime(cfg, api.logger);
-
-    // Required outbound tools — registered without { optional: true } so they
-    // light up as soon as the plugin is enabled. Recipient allowlist is
-    // threaded through; when undefined, no filtering applies.
-    registerSendEmail(api, runtime, cfg.allowedRecipients);
-    registerSendSms(api, runtime, cfg.allowedRecipients);
-
-    // Optional outbound tools — require explicit opt-in via tools.allow.
-    registerForwardEmail(api, runtime, cfg.allowedRecipients);
-    registerPlaceCall(api, runtime, cfg.allowedRecipients);
-
-    // Read/lifecycle tools for email, SMS, and calls. Required tools light up
-    // by default; optional ones (mark-read, raw text list/get) require opt-in.
-    registerEmailReads(api, runtime);
-    registerSmsReads(api, runtime);
-    registerCallReads(api, runtime);
-
-    // Access-scoped contact + note tools. With an agent-scoped key the SDK
-    // filters list/lookup/get to entries this identity has access to.
-    registerContactTools(api, runtime);
-    registerNoteTools(api, runtime);
-
-    // Vault tools. All optional; user must opt in via tools.allow. Vault
-    // unlock key is read once on first use from $INKBOX_VAULT_KEY (or a
-    // custom env var when vault.keyEnvVar is configured).
-    const vault = createVaultRuntime(runtime, {
-      keyEnvVar: (cfg as any).vault?.keyEnvVar,
-    });
-    registerVaultTools(api, runtime, vault);
-
-    // Diagnostic / introspection tools.
-    registerWhoami(api, runtime);
-    registerRateStatus(api, runtime);
-
-    // CLI subcommand group: `openclaw inkbox {setup,doctor,whoami}`. Lazy-
-    // loaded — the cli module is only imported when a user actually runs an
-    // inkbox subcommand.
-    api.registerCli?.(
-      async ({ program }: { program: any }) => {
-        const { registerInkboxCli } = await import("./src/cli.js");
-        registerInkboxCli(program);
-      },
-      {
-        descriptors: [
-          {
-            name: "inkbox",
-            description: "Inkbox plugin commands (setup, doctor, whoami)",
-            hasSubcommands: true,
-          },
-        ],
-      },
-    );
-
-    // Inbound delivery. Skipped when signingKey is missing; failures are
-    // non-fatal (outbound still works). Phase 2c will replace these stub
-    // handlers with real session ingress via defineChannelPluginEntry.
-    startInbound({
-      api,
-      cfg,
-      runtime,
-      logger: api.logger,
-      handlers: {
-        onMail(event) {
-          api.logger?.info?.(
-            `Inkbox mail event: ${event.event_type}`,
-          );
-        },
-        onText(event) {
-          api.logger?.info?.(
-            `Inkbox text event: ${event.event_type}`,
-          );
-        },
-        onCall() {
-          // Phase 2c will return { action: "answer", clientWebsocketUrl }
-          // once the realtime audio bridge is wired.
-          api.logger?.info?.("Inkbox inbound call — rejecting (no audio bridge yet)");
-          return { action: "reject" };
-        },
-      },
-    });
-
-    // TODO Phase 2c: promote to defineChannelPluginEntry + wire session ingress.
-    // TODO Phase 2 (after channel promotion): registerPlaceCall.
-    // TODO Phase 3: registerCli for `openclaw inkbox setup`.
-    // TODO Phase 4: read tools (lists, threads, conversations, contacts, notes).
-    // TODO Phase 5: vault + credentials + TOTP.
+  plugin: inkboxPlugin,
+  registerCliMetadata: registerInkboxCli,
+  registerFull(api: any) {
+    registerInkboxVoiceToolGuard(api);
+    registerInkboxTools(api);
+    registerInkboxPublicUrlInboundRoutes(api);
   },
 });
+
+export default entry;

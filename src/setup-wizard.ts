@@ -91,12 +91,12 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     const identities = await client.listIdentities();
     if (identities.length > 0) {
       console.log("Existing identities:");
-      identities.forEach((i, idx) => console.log(`  ${idx + 1}. ${i.handle}`));
+      identities.forEach((i, idx) => console.log(`  ${idx + 1}. ${i.agentHandle}`));
       console.log("  N. Create a new identity");
       const pick = await prompter.ask("Pick (1..N)", "N");
       const idx = parseInt(pick, 10);
       if (!Number.isNaN(idx) && idx >= 1 && idx <= identities.length) {
-        identityHandle = identities[idx - 1].handle;
+        identityHandle = identities[idx - 1].agentHandle;
       } else {
         identityHandle = await prompter.ask("New identity handle (lowercase, 3-63 chars, alphanum+dash)");
         await client.createIdentity(identityHandle);
@@ -182,14 +182,14 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     savedAt: new Date().toISOString(),
   });
 
-  // Step 7 — print the config snippet.
+  // Step 7 — print the channel config snippet.
   const snippet = {
     apiKey: agentApiKey,
     identity: identityHandle,
     ...(signingKey ? { signingKey } : {}),
   };
   console.log(
-    "\n✅ Setup complete. Add this to your OpenClaw config under plugins.entries.inkbox.config:\n",
+    "\n✅ Setup complete. Add this to your OpenClaw config under channels.inkbox:\n",
   );
   console.log(JSON.stringify(snippet, null, 2));
   console.log(
