@@ -116,7 +116,13 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
     expect(channelRuntime.turn.runAssembled).toHaveBeenCalledWith(
       expect.objectContaining({
-        replyOptions: { sourceReplyDeliveryMode: "automatic" },
+        routeSessionKey: "agent:main:inkbox:call:call-1",
+        replyOptions: expect.objectContaining({
+          sourceReplyDeliveryMode: "automatic",
+          bootstrapContextMode: "lightweight",
+          fastModeOverride: true,
+          thinkingLevelOverride: "minimal",
+        }),
       }),
     );
     expect(sendText).not.toHaveBeenCalled();
@@ -191,9 +197,15 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       expect(
         shouldBlockInkboxOutboundToolDuringVoice(
           "inkbox_send_sms",
-          "agent:main:inkbox:direct:+15551234567",
+          "agent:main:inkbox:call:call-1",
         ),
       ).toBe(true);
+      expect(
+        shouldBlockInkboxOutboundToolDuringVoice(
+          "inkbox_send_sms",
+          "agent:main:inkbox:direct:+15551234567",
+        ),
+      ).toBe(false);
       await params.delivery.deliver({ text: "Still on the call." });
     });
     const channelRuntime = {
@@ -231,7 +243,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     expect(
       shouldBlockInkboxOutboundToolDuringVoice(
         "inkbox_send_sms",
-        "agent:main:inkbox:direct:+15551234567",
+        "agent:main:inkbox:call:call-1",
       ),
     ).toBe(false);
   });

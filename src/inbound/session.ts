@@ -243,6 +243,15 @@ function callIdFromTurn(turn: InkboxInboundTurn): string | undefined {
   return callId || undefined;
 }
 
+function sessionKeySegment(value: string | undefined): string {
+  const normalized = value?.trim().replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+  return normalized || "unknown";
+}
+
+function voiceSessionKey(agentId: string, turn: InkboxInboundTurn): string {
+  return `agent:${agentId}:inkbox:call:${sessionKeySegment(callIdFromTurn(turn) ?? turn.contactKey)}`;
+}
+
 function findActiveCall(
   activeCalls: Map<string, ActiveCall>,
   turn: InkboxInboundTurn,
@@ -292,6 +301,7 @@ async function deliverReply(
     text: string;
     runtime: InkboxRuntime;
     activeCalls: Map<string, ActiveCall>;
+    logger?: PluginLogger;
   },
 ): Promise<string | undefined> {
   const text = params.text.trim();
@@ -301,10 +311,14 @@ async function deliverReply(
   if (params.turn.mode === "voice") {
     const call = findActiveCall(params.activeCalls, params.turn);
     if (!call) {
+      params.logger?.warn?.("Inkbox voice reply dropped; no active call WebSocket matched.");
       return undefined;
     }
     const turnId = params.turn.replyToId ?? params.turn.messageId;
     await sendVoiceText(call, text, turnId);
+    params.logger?.info?.(
+      `Inkbox voice TTS sent: call_id=${call.callId} turn_id=${turnId} chars=${text.length}`,
+    );
     return undefined;
   }
 
@@ -365,6 +379,9 @@ async function dispatchInboundTurn(
   const timestamp = opts.turn.timestamp ?? Date.now();
   const routeAccountId =
     (route as { accountId?: string | null }).accountId ?? opts.account.accountId;
+  const baseSessionKey = route.sessionKey;
+  const effectiveSessionKey =
+    opts.turn.mode === "voice" ? voiceSessionKey(route.agentId, opts.turn) : baseSessionKey;
   const { storePath, body } = buildEnvelope({
     channel: "Inkbox",
     from: opts.turn.fromLabel,
@@ -395,7 +412,8 @@ async function dispatchInboundTurn(
     route: {
       agentId: route.agentId,
       accountId: routeAccountId,
-      routeSessionKey: route.sessionKey,
+      routeSessionKey: effectiveSessionKey,
+      ...(opts.turn.mode === "voice" ? { modelParentSessionKey: baseSessionKey } : {}),
     },
     reply: {
       to:
@@ -431,7 +449,7 @@ async function dispatchInboundTurn(
 
   const clearVoiceGuard =
     opts.turn.mode === "voice"
-      ? markInkboxVoiceTurnActive(route.sessionKey, {
+      ? markInkboxVoiceTurnActive(effectiveSessionKey, {
           callId: callIdFromTurn(opts.turn),
         })
       : undefined;
@@ -441,14 +459,26 @@ async function dispatchInboundTurn(
       channel: "inkbox",
       accountId: opts.account.accountId,
       agentId: route.agentId,
-      routeSessionKey: route.sessionKey,
+      routeSessionKey: effectiveSessionKey,
       storePath,
       ctxPayload,
       recordInboundSession: core.session.recordInboundSession,
       dispatchReplyWithBufferedBlockDispatcher:
         core.reply.dispatchReplyWithBufferedBlockDispatcher,
       ...(opts.turn.mode === "voice"
-        ? { replyOptions: { sourceReplyDeliveryMode: "automatic" as const } }
+        ? {
+            replyOptions: {
+              sourceReplyDeliveryMode: "automatic" as const,
+              bootstrapContextMode: "lightweight" as const,
+              fastModeOverride: true,
+              thinkingLevelOverride: "minimal",
+              skillFilter: [
+                "inkbox-call-handler",
+                "inkbox-contact-lookup",
+                "inkbox-notes-memory",
+              ],
+            },
+          }
         : {}),
       delivery: {
         deliver: async (payload: unknown) => {
@@ -461,6 +491,7 @@ async function dispatchInboundTurn(
             text,
             runtime: opts.runtime,
             activeCalls: opts.activeCalls,
+            logger: opts.logger,
           });
           return {
             visibleReplySent: Boolean(messageId || opts.turn.mode === "voice"),
