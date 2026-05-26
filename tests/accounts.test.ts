@@ -17,6 +17,9 @@ describe("inkbox account config", () => {
                 identity: "plugin-agent",
                 signingKey: "sign_plugin",
                 voiceTranscriptCoalesceMs: 900,
+                voiceAgentPrewarm: false,
+                voiceAgentPrewarmTtlMs: 120000,
+                voiceAgentPrewarmTimeoutMs: 45000,
               },
             },
           },
@@ -30,6 +33,9 @@ describe("inkbox account config", () => {
     expect(account.identity).toBe("plugin-agent");
     expect(account.signingKey).toBe("sign_plugin");
     expect(account.config.voiceTranscriptCoalesceMs).toBe(900);
+    expect(account.config.voiceAgentPrewarm).toBe(false);
+    expect(account.config.voiceAgentPrewarmTtlMs).toBe(120000);
+    expect(account.config.voiceAgentPrewarmTimeoutMs).toBe(45000);
   });
 
   it("lets channel account config override plugin config", () => {

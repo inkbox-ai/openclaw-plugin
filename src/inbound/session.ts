@@ -14,7 +14,7 @@ import { markInkboxVoiceTurnActive } from "../voice-guard.js";
 
 type ChannelRuntime = any;
 
-type InboundMode = "email" | "sms" | "voice";
+type InboundMode = "email" | "sms" | "voice" | "warmup";
 
 type ContactSummary = {
   id?: string;
@@ -79,6 +79,16 @@ export interface ConfigureIdentityDeliveryOptions {
 }
 
 const DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS = 1200;
+const DEFAULT_VOICE_AGENT_PREWARM_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_VOICE_AGENT_PREWARM_TIMEOUT_MS = 70 * 1000;
+
+const voiceAgentPrewarmState = new Map<
+  string,
+  {
+    promise?: Promise<void>;
+    lastCompletedAt?: number;
+  }
+>();
 
 function parseTimestamp(value: string | null | undefined): number | undefined {
   if (!value) {
@@ -321,6 +331,9 @@ async function deliverReply(
   if (!text || text.toUpperCase() === "[SILENT]") {
     return undefined;
   }
+  if (params.turn.mode === "warmup") {
+    return undefined;
+  }
   if (params.turn.mode === "voice") {
     const call = findActiveCall(params.activeCalls, params.turn);
     if (!call) {
@@ -510,6 +523,11 @@ async function dispatchInboundTurn(
     activeCalls: Map<string, ActiveCall>;
     dispatchAbortSignal?: AbortSignal;
     shouldDeliverReply?: () => boolean;
+    deliveryOverride?: {
+      deliver: (payload: unknown) => Promise<{ visibleReplySent?: boolean } | void>;
+      onError?: (error: unknown) => void;
+    };
+    replyOptionsOverride?: Record<string, unknown>;
   },
 ): Promise<void> {
   const core = opts.channelRuntime;
@@ -574,10 +592,14 @@ async function dispatchInboundTurn(
       to:
         opts.turn.mode === "voice"
           ? `inkbox-call:${callIdFromTurn(opts.turn) ?? opts.turn.contactKey}`
-          : opts.turn.remoteAddress ?? opts.turn.contactKey,
+          : opts.turn.mode === "warmup"
+            ? `inkbox-warmup:${opts.account.accountId}`
+            : opts.turn.remoteAddress ?? opts.turn.contactKey,
       originatingTo:
         opts.turn.mode === "voice"
           ? `inkbox-call:${callIdFromTurn(opts.turn) ?? opts.turn.contactKey}`
+          : opts.turn.mode === "warmup"
+            ? `inkbox-warmup:${opts.account.accountId}`
           : opts.turn.remoteAddress ?? opts.turn.contactKey,
       replyToId: opts.turn.replyToId,
       messageThreadId: opts.turn.threadId,
@@ -599,6 +621,7 @@ async function dispatchInboundTurn(
       InkboxContactId: opts.turn.contact?.id,
       MessageThreadId: opts.turn.threadId,
       InkboxVoiceReplyOnly: opts.turn.mode === "voice" ? true : undefined,
+      InkboxWarmup: opts.turn.mode === "warmup" ? true : undefined,
     },
   });
 
@@ -608,6 +631,54 @@ async function dispatchInboundTurn(
           callId: callIdFromTurn(opts.turn),
         })
       : undefined;
+  const replyOptions =
+    opts.replyOptionsOverride ??
+    (opts.turn.mode === "voice"
+      ? {
+          sourceReplyDeliveryMode: "automatic" as const,
+          bootstrapContextMode: "lightweight" as const,
+          fastModeOverride: true,
+          thinkingLevelOverride: "minimal",
+          abortSignal: opts.dispatchAbortSignal,
+          skillFilter: [
+            "inkbox-call-handler",
+            "inkbox-contact-lookup",
+            "inkbox-notes-memory",
+          ],
+        }
+      : undefined);
+  const delivery = opts.deliveryOverride ?? {
+    deliver: async (payload: unknown) => {
+      const text = payloadText(payload);
+      if (!text.trim()) {
+        return { visibleReplySent: false };
+      }
+      if (opts.turn.mode === "voice" && opts.shouldDeliverReply?.() === false) {
+        opts.logger?.info?.(
+          `Inkbox voice reply suppressed; newer caller transcript superseded call_id=${callIdFromTurn(opts.turn) ?? "unknown"}`,
+        );
+        return { visibleReplySent: false };
+      }
+      const messageId = await deliverReply({
+        turn: opts.turn,
+        text,
+        runtime: opts.runtime,
+        activeCalls: opts.activeCalls,
+        logger: opts.logger,
+      });
+      return {
+        visibleReplySent: Boolean(messageId || opts.turn.mode === "voice"),
+        ...(messageId ? { messageIds: [messageId] } : {}),
+        ...(opts.turn.threadId ? { threadId: opts.turn.threadId } : {}),
+        ...(opts.turn.replyToId ? { replyToId: opts.turn.replyToId } : {}),
+      };
+    },
+    onError: (error: unknown) => {
+      opts.logger?.warn?.(
+        `Inkbox reply delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    },
+  };
   try {
     await core.turn.runAssembled({
       cfg: opts.cfg as any,
@@ -620,54 +691,8 @@ async function dispatchInboundTurn(
       recordInboundSession: core.session.recordInboundSession,
       dispatchReplyWithBufferedBlockDispatcher:
         core.reply.dispatchReplyWithBufferedBlockDispatcher,
-      ...(opts.turn.mode === "voice"
-        ? {
-            replyOptions: {
-              sourceReplyDeliveryMode: "automatic" as const,
-              bootstrapContextMode: "lightweight" as const,
-              fastModeOverride: true,
-              thinkingLevelOverride: "minimal",
-              abortSignal: opts.dispatchAbortSignal,
-              skillFilter: [
-                "inkbox-call-handler",
-                "inkbox-contact-lookup",
-                "inkbox-notes-memory",
-              ],
-            },
-          }
-        : {}),
-      delivery: {
-        deliver: async (payload: unknown) => {
-          const text = payloadText(payload);
-          if (!text.trim()) {
-            return { visibleReplySent: false };
-          }
-          if (opts.turn.mode === "voice" && opts.shouldDeliverReply?.() === false) {
-            opts.logger?.info?.(
-              `Inkbox voice reply suppressed; newer caller transcript superseded call_id=${callIdFromTurn(opts.turn) ?? "unknown"}`,
-            );
-            return { visibleReplySent: false };
-          }
-          const messageId = await deliverReply({
-            turn: opts.turn,
-            text,
-            runtime: opts.runtime,
-            activeCalls: opts.activeCalls,
-            logger: opts.logger,
-          });
-          return {
-            visibleReplySent: Boolean(messageId || opts.turn.mode === "voice"),
-            ...(messageId ? { messageIds: [messageId] } : {}),
-            ...(opts.turn.threadId ? { threadId: opts.turn.threadId } : {}),
-            ...(opts.turn.replyToId ? { replyToId: opts.turn.replyToId } : {}),
-          };
-        },
-        onError: (error: unknown) => {
-          opts.logger?.warn?.(
-            `Inkbox reply delivery failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        },
-      },
+      ...(replyOptions ? { replyOptions } : {}),
+      delivery,
       replyPipeline: {},
       record: {
         onRecordError: (error: unknown) => {
@@ -679,6 +704,121 @@ async function dispatchInboundTurn(
     });
   } finally {
     clearVoiceGuard?.();
+  }
+}
+
+function prewarmStateKey(account: ResolvedInkboxAccount): string {
+  return `${account.accountId}:${account.config.identity ?? ""}`;
+}
+
+function resolveVoiceAgentPrewarmTtlMs(account: ResolvedInkboxAccount): number {
+  const raw = account.config.voiceAgentPrewarmTtlMs;
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0
+    ? raw
+    : DEFAULT_VOICE_AGENT_PREWARM_TTL_MS;
+}
+
+function resolveVoiceAgentPrewarmTimeoutMs(account: ResolvedInkboxAccount): number {
+  const raw = account.config.voiceAgentPrewarmTimeoutMs;
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0
+    ? raw
+    : DEFAULT_VOICE_AGENT_PREWARM_TIMEOUT_MS;
+}
+
+export async function prewarmInkboxAgent(
+  opts: InkboxSessionBridgeOptions & {
+    reason?: string;
+  },
+): Promise<void> {
+  const core = opts.channelRuntime;
+  if (!core?.turn?.runAssembled || opts.account.config.voiceAgentPrewarm === false) {
+    return;
+  }
+
+  const key = prewarmStateKey(opts.account);
+  const state = voiceAgentPrewarmState.get(key) ?? {};
+  const now = Date.now();
+  const ttlMs = resolveVoiceAgentPrewarmTtlMs(opts.account);
+  if (state.promise) {
+    try {
+      await state.promise;
+    } catch {
+      // The owning warmup call logs the failure; callers joining an in-flight
+      // warmup should not surface an unhandled rejection.
+    }
+    return;
+  }
+  if (state.lastCompletedAt && ttlMs > 0 && now - state.lastCompletedAt < ttlMs) {
+    return;
+  }
+
+  const startedAt = Date.now();
+  const abortController = new AbortController();
+  const timeoutMs = resolveVoiceAgentPrewarmTimeoutMs(opts.account);
+  const timeout = setTimeout(() => {
+    abortController.abort("inkbox voice agent prewarm timed out");
+  }, timeoutMs);
+  const nextState = { ...state };
+  const promise = (async () => {
+    const reason = opts.reason?.trim() || "gateway-start";
+    opts.logger?.info?.(
+      `Inkbox voice agent prewarm started: account=${opts.account.accountId} reason=${reason}`,
+    );
+    await dispatchInboundTurn({
+      ...opts,
+      activeCalls: new Map(),
+      dispatchAbortSignal: abortController.signal,
+      replyOptionsOverride: {
+        sourceReplyDeliveryMode: "automatic",
+        bootstrapContextMode: "lightweight",
+        fastModeOverride: true,
+        thinkingLevelOverride: "minimal",
+        abortSignal: abortController.signal,
+        suppressDefaultToolProgressMessages: true,
+        skillFilter: ["inkbox-call-handler"],
+      },
+      deliveryOverride: {
+        deliver: async () => ({ visibleReplySent: false }),
+        onError: (error: unknown) => {
+          opts.logger?.warn?.(
+            `Inkbox voice agent prewarm delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      },
+      turn: {
+        mode: "warmup",
+        contactKey: `__inkbox_warmup__:${opts.account.accountId}`,
+        fromLabel: "Inkbox voice warmup",
+        body:
+          `[inkbox:warmup account_id=${opts.account.accountId}${renderIdentityMarker(opts.account)} reason=${JSON.stringify(reason)}]\n` +
+          `Warm up the Inkbox voice-call agent path. Reply with exactly "[SILENT]". Do not use tools and do not contact the user.`,
+        messageId: `inkbox-warmup:${opts.account.accountId}:${startedAt}`,
+        threadId: `inkbox-warmup:${opts.account.accountId}`,
+        timestamp: startedAt,
+        raw: { event: "inkbox.voice_agent_prewarm", reason },
+      },
+    });
+    nextState.lastCompletedAt = Date.now();
+    opts.logger?.info?.(
+      `Inkbox voice agent prewarm completed: account=${opts.account.accountId} duration_ms=${Date.now() - startedAt}`,
+    );
+  })();
+
+  nextState.promise = promise;
+  voiceAgentPrewarmState.set(key, nextState);
+  try {
+    await promise;
+  } catch (error) {
+    opts.logger?.warn?.(
+      `Inkbox voice agent prewarm failed: account=${opts.account.accountId} error=${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    clearTimeout(timeout);
+    const current = voiceAgentPrewarmState.get(key);
+    if (current?.promise === promise) {
+      delete current.promise;
+      voiceAgentPrewarmState.set(key, current);
+    }
   }
 }
 

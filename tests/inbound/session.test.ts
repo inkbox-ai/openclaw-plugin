@@ -18,7 +18,7 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
   })),
 }));
 
-import { createInkboxSessionBridge } from "../../src/inbound/session.js";
+import { createInkboxSessionBridge, prewarmInkboxAgent } from "../../src/inbound/session.js";
 import { shouldBlockInkboxOutboundToolDuringVoice } from "../../src/voice-guard.js";
 
 class FakeInkboxWebSocket {
@@ -85,6 +85,42 @@ function parseSentTextFrames(ws: FakeInkboxWebSocket) {
 }
 
 describe("createInkboxSessionBridge call WebSocket", () => {
+  it("prewarms the voice agent path without delivering a visible reply", async () => {
+    const { runtime, sendText } = createRuntime();
+    const channelRuntime = createChannelRuntime("ready");
+
+    await prewarmInkboxAgent({
+      cfg: {},
+      account: {
+        accountId: "warmup-test",
+        config: {
+          identity: "smoke-agent",
+          voiceAgentPrewarmTtlMs: 0,
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      reason: "unit-test",
+    });
+
+    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
+    expect(run.ctxPayload.extra.InkboxWarmup).toBe(true);
+    expect(run.ctxPayload.reply.to).toBe("inkbox-warmup:warmup-test");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("[inkbox:warmup");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("inkbox_identity=smoke-agent");
+    expect(run.replyOptions).toEqual(
+      expect.objectContaining({
+        sourceReplyDeliveryMode: "automatic",
+        bootstrapContextMode: "lightweight",
+        fastModeOverride: true,
+        thinkingLevelOverride: "minimal",
+        suppressDefaultToolProgressMessages: true,
+      }),
+    );
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
   it("speaks greeting and agent replies over TTS, not SMS", async () => {
     const { runtime, sendText } = createRuntime();
     const channelRuntime = createChannelRuntime();

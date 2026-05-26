@@ -16,6 +16,7 @@ import { registerInboundHttpRoute } from "./inbound/http-route.js";
 import {
   configureInkboxIdentityDelivery,
   createInkboxSessionBridge,
+  prewarmInkboxAgent,
 } from "./inbound/session.js";
 
 type ChannelGatewayContext = {
@@ -34,6 +35,21 @@ type ChannelGatewayContext = {
 };
 
 const registeredPublicRoutes = new Set<string>();
+
+function scheduleInkboxAgentPrewarm(
+  ctx: ChannelGatewayContext,
+  runtime: ReturnType<typeof createInkboxRuntime>,
+  reason: string,
+): void {
+  void prewarmInkboxAgent({
+    cfg: ctx.cfg,
+    account: ctx.account,
+    runtime,
+    channelRuntime: ctx.channelRuntime,
+    logger: ctx.log,
+    reason,
+  });
+}
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
@@ -138,6 +154,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
       webhookUrl,
       mode: "public-url",
     });
+    scheduleInkboxAgentPrewarm(ctx, runtime, "public-url-gateway-start");
     await waitForAbort(ctx.abortSignal);
     ctx.setStatus({
       accountId: account.accountId,
@@ -183,6 +200,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
     webhookUrl,
     mode: "inkbox-tunnel",
   });
+  scheduleInkboxAgentPrewarm(ctx, runtime, "tunnel-gateway-start");
 
   const closeOnAbort = () => {
     void listener.close();

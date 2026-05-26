@@ -154,6 +154,15 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
   ) {
     out.voiceTranscriptCoalesceMs = value.voiceTranscriptCoalesceMs;
   }
+  if (typeof value.voiceAgentPrewarm === "boolean") {
+    out.voiceAgentPrewarm = value.voiceAgentPrewarm;
+  }
+  for (const field of ["voiceAgentPrewarmTtlMs", "voiceAgentPrewarmTimeoutMs"] as const) {
+    const raw = value[field];
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
+      out[field] = raw;
+    }
+  }
   const allowedRecipients = stringArray(value.allowedRecipients);
   if (allowedRecipients) {
     out.allowedRecipients = allowedRecipients;

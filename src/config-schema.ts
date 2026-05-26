@@ -83,6 +83,23 @@ export const inkboxAccountConfigJsonSchema = {
       description:
         "Wait this many ms before dispatching final voice transcript segments so clipped caller phrases can be coalesced. Defaults to 1200.",
     },
+    voiceAgentPrewarm: {
+      type: "boolean",
+      description:
+        "Run a hidden no-delivery agent turn when the gateway starts so the first caller turn does not pay OpenClaw/Codex cold-start latency. Defaults to true.",
+    },
+    voiceAgentPrewarmTtlMs: {
+      type: "integer",
+      minimum: 0,
+      description:
+        "Minimum time between hidden voice agent warmups. Defaults to 600000.",
+    },
+    voiceAgentPrewarmTimeoutMs: {
+      type: "integer",
+      minimum: 1,
+      description:
+        "Maximum time to let the hidden voice agent warmup run before aborting. Defaults to 70000.",
+    },
     vault: vaultSchema,
     allowedRecipients: {
       type: "array",
