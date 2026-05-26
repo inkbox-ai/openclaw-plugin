@@ -55,11 +55,24 @@ export function registerPlaceCall(
           const block = checkOutboundRecipient(params.toNumber, allowedRecipients);
           if (block) return toolError(block);
 
+          const purpose =
+            typeof params.purpose === "string" ? params.purpose.trim() : "";
+          if (!purpose) {
+            return toolError(
+              "inkbox_place_call requires a purpose so the live call can start with the right context. If the user did not give a topic, set purpose to 'The user asked for a general call.'",
+            );
+          }
+          const openingMessage =
+            typeof params.openingMessage === "string"
+              ? params.openingMessage.trim() || undefined
+              : undefined;
+          const context =
+            typeof params.context === "string" ? params.context.trim() || undefined : undefined;
           const callContext = registerOutboundCallContext({
             toNumber: params.toNumber,
-            purpose: params.purpose,
-            openingMessage: params.openingMessage,
-            context: params.context,
+            purpose,
+            openingMessage,
+            context,
           });
           const clientWebsocketUrl =
             params.clientWebsocketUrl ?? resolveClientWebsocketUrl?.(callContext);

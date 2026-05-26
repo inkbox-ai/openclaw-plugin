@@ -10,7 +10,6 @@ import { resolveInboundRouteEnvelopeBuilderWithRuntime } from "openclaw/plugin-s
 import {
   buildRealtimeVoiceAgentConsultChatMessage,
   buildRealtimeVoiceAgentConsultPolicyInstructions,
-  buildRealtimeVoiceAgentConsultWorkingResponse,
   createRealtimeVoiceBridgeSession,
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
@@ -19,6 +18,7 @@ import {
   resolveRealtimeVoiceAgentConsultTools,
   type RealtimeVoiceBridgeSession,
   type RealtimeVoiceToolCallEvent,
+  type RealtimeVoiceTool,
 } from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
@@ -39,6 +39,8 @@ type ContactSummary = {
   emails?: string[];
   phones?: string[];
   company?: string | null;
+  jobTitle?: string | null;
+  notes?: string | null;
 };
 
 type InkboxInboundTurn = {
@@ -75,6 +77,14 @@ type VoiceTranscriptSegment = {
 type RealtimeTranscriptEntry = {
   role: "user" | "assistant";
   text: string;
+};
+
+type RealtimePostCallAction = {
+  id: string;
+  action: string;
+  details?: string;
+  requestedBy?: string;
+  createdAt: number;
 };
 
 type RealtimeCallMeta = {
@@ -115,6 +125,10 @@ const DEFAULT_VOICE_AGENT_PREWARM_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_VOICE_AGENT_PREWARM_TIMEOUT_MS = 70 * 1000;
 const TELEPHONY_CHUNK_BYTES = 160;
 const TELEPHONY_CHUNK_MS = 20;
+const REALTIME_AUDIO_START_BUFFER_CHUNKS = 4;
+const REALTIME_AUDIO_MAX_CATCHUP_CHUNKS = 6;
+const REALTIME_AUDIO_MAX_START_BUFFER_MS = 80;
+const REALTIME_POST_CALL_ACTION_TOOL_NAME = "inkbox_register_post_call_action";
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
 const REALTIME_REQUIRED_QUIET_CHUNKS = 12;
@@ -190,7 +204,11 @@ class InkboxRealtimeAudioPacer {
   private queue: Array<Buffer | "done"> = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private closed = false;
+  private draining = false;
   private queuedAudioBytes = 0;
+  private started = false;
+  private bufferingSince = 0;
+  private nextSendAt = 0;
 
   constructor(
     private readonly send: (payload: Record<string, unknown>) => Promise<void>,
@@ -218,6 +236,10 @@ class InkboxRealtimeAudioPacer {
       return;
     }
     this.queue.push("done");
+    if (this.timer && !this.started) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
     this.pump();
   }
 
@@ -231,6 +253,9 @@ class InkboxRealtimeAudioPacer {
     }
     this.queue = [];
     this.queuedAudioBytes = 0;
+    this.started = false;
+    this.bufferingSince = 0;
+    this.nextSendAt = 0;
     void this.send({ event: "clear" }).catch(() => {});
   }
 
@@ -242,44 +267,118 @@ class InkboxRealtimeAudioPacer {
     }
     this.queue = [];
     this.queuedAudioBytes = 0;
+    this.draining = false;
+    this.started = false;
+    this.bufferingSince = 0;
+    this.nextSendAt = 0;
+  }
+
+  private countQueuedAudioChunks(): number {
+    let chunks = 0;
+    for (const item of this.queue) {
+      if (item !== "done") {
+        chunks += 1;
+      }
+    }
+    return chunks;
+  }
+
+  private hasQueuedAudioDone(): boolean {
+    return this.queue.includes("done");
   }
 
   private pump(): void {
-    if (this.closed || this.timer || this.queue.length === 0) {
+    if (this.closed || this.draining || this.timer || this.queue.length === 0) {
       return;
     }
-    const item = this.queue.shift();
-    if (!item) {
+    if (!this.started) {
+      const audioChunks = this.countQueuedAudioChunks();
+      if (
+        audioChunks > 0 &&
+        audioChunks < REALTIME_AUDIO_START_BUFFER_CHUNKS &&
+        !this.hasQueuedAudioDone()
+      ) {
+        this.bufferingSince ||= Date.now();
+        if (Date.now() - this.bufferingSince >= REALTIME_AUDIO_MAX_START_BUFFER_MS) {
+          this.started = true;
+          this.nextSendAt = Date.now();
+        } else {
+          this.timer = setTimeout(() => {
+            this.timer = undefined;
+            this.pump();
+          }, TELEPHONY_CHUNK_MS);
+          return;
+        }
+      } else {
+        this.started = true;
+        this.nextSendAt = Date.now();
+      }
+      this.bufferingSince = 0;
+    }
+    const now = Date.now();
+    if (this.nextSendAt > now) {
+      this.timer = setTimeout(() => {
+        this.timer = undefined;
+        this.pump();
+      }, this.nextSendAt - now);
       return;
     }
-    if (item === "done") {
-      const message: Record<string, unknown> = { event: "audio_done" };
+    const dueChunks =
+      1 + Math.min(
+        REALTIME_AUDIO_MAX_CATCHUP_CHUNKS - 1,
+        Math.floor(Math.max(0, now - this.nextSendAt) / TELEPHONY_CHUNK_MS),
+      );
+    this.draining = true;
+    void this.drainDue(dueChunks)
+      .catch(() => {})
+      .finally(() => {
+        this.draining = false;
+        this.pump();
+      });
+  }
+
+  private async drainDue(maxChunks: number): Promise<void> {
+    let sentChunks = 0;
+    while (!this.closed && sentChunks < maxChunks && this.queue.length > 0) {
+      const item = this.queue.shift();
+      if (!item) {
+        return;
+      }
+      if (item === "done") {
+        const message: Record<string, unknown> = { event: "audio_done" };
+        const streamId = this.streamId();
+        if (streamId) {
+          message.stream_id = streamId;
+        }
+        await this.send(message);
+        this.started = false;
+        this.nextSendAt = 0;
+        continue;
+      }
+
+      this.queuedAudioBytes = Math.max(0, this.queuedAudioBytes - item.length);
+      const message: Record<string, unknown> = {
+        event: "media",
+        media: {
+          payload: item.toString("base64"),
+          track: "outbound",
+        },
+      };
       const streamId = this.streamId();
       if (streamId) {
         message.stream_id = streamId;
       }
-      void this.send(message).finally(() => this.pump());
-      return;
+      await this.send(message);
+      sentChunks += 1;
+      this.nextSendAt += TELEPHONY_CHUNK_MS;
     }
-
-    this.queuedAudioBytes = Math.max(0, this.queuedAudioBytes - item.length);
-    const message: Record<string, unknown> = {
-      event: "media",
-      media: {
-        payload: item.toString("base64"),
-        track: "outbound",
-      },
-    };
-    const streamId = this.streamId();
-    if (streamId) {
-      message.stream_id = streamId;
-    }
-    void this.send(message).finally(() => {
+    if (!this.closed && this.queue.length > 0) {
+      const delay = Math.max(0, this.nextSendAt - Date.now());
       this.timer = setTimeout(() => {
         this.timer = undefined;
         this.pump();
-      }, TELEPHONY_CHUNK_MS);
-    });
+      }, delay);
+    }
   }
 }
 
@@ -300,6 +399,8 @@ function contactSummary(
     id: c.id ?? fallback.id,
     name,
     company: c.companyName ?? fallback.company,
+    jobTitle: c.jobTitle ?? fallback.jobTitle,
+    notes: c.notes ?? fallback.notes,
     emails: Array.isArray(c.emails)
       ? c.emails.map((entry) => entry.value).filter(Boolean)
       : fallback.emails,
@@ -324,11 +425,17 @@ function renderContactMarker(contact: ContactSummary | undefined): string {
   if (contact.company) {
     parts.push(`contact_company=${JSON.stringify(contact.company)}`);
   }
+  if (contact.jobTitle) {
+    parts.push(`contact_job_title=${JSON.stringify(contact.jobTitle)}`);
+  }
   if (contact.emails?.length) {
     parts.push(`contact_emails=${contact.emails.join(",")}`);
   }
   if (contact.phones?.length) {
     parts.push(`contact_phones=${contact.phones.join(",")}`);
+  }
+  if (contact.notes) {
+    parts.push(`contact_notes=${JSON.stringify(contact.notes)}`);
   }
   return parts.join(" ");
 }
@@ -598,6 +705,52 @@ function resolveRealtimeConfig(account: ResolvedInkboxAccount) {
   };
 }
 
+function renderRealtimeContactInfo(contact: ContactSummary | undefined): string | undefined {
+  if (!contact) {
+    return undefined;
+  }
+  return [
+    contact.name ? `name=${contact.name}` : undefined,
+    contact.id ? `inkbox_contact_id=${contact.id}` : undefined,
+    contact.company ? `company=${contact.company}` : undefined,
+    contact.jobTitle ? `job_title=${contact.jobTitle}` : undefined,
+    contact.emails?.length ? `emails=${contact.emails.join(", ")}` : undefined,
+    contact.phones?.length ? `phones=${contact.phones.join(", ")}` : undefined,
+    contact.notes ? `notes=${contact.notes}` : undefined,
+  ]
+    .filter(Boolean)
+    .join("; ");
+}
+
+function realtimePostCallActionTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_POST_CALL_ACTION_TOOL_NAME,
+    description:
+      "Register work the main OpenClaw Inkbox agent must do after this phone call ends, such as sending an email/SMS follow-up, creating a note, or updating a contact. Use this instead of claiming you sent something yourself.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          description:
+            "Plain-English task for the main agent to perform after the call. Include the requested channel, recipient, and outcome.",
+        },
+        details: {
+          type: "string",
+          description:
+            "Optional extra details, draft text, recipient hints, or constraints from the call.",
+        },
+        requestedBy: {
+          type: "string",
+          description: "Optional short label for who requested this action.",
+        },
+      },
+      required: ["action"],
+    },
+  };
+}
+
 function buildRealtimeInstructions(
   account: ResolvedInkboxAccount,
   meta: RealtimeCallMeta,
@@ -607,6 +760,7 @@ function buildRealtimeInstructions(
     toolPolicy: config.toolPolicy,
     consultPolicy: config.consultPolicy,
   });
+  const contactInfo = renderRealtimeContactInfo(meta.contact);
   return [
     "You are the configured OpenClaw agent speaking on a live Inkbox phone call.",
     "Use natural, concise spoken replies. Keep most answers to one or two short sentences.",
@@ -616,6 +770,11 @@ function buildRealtimeInstructions(
       : undefined,
     meta.remotePhoneNumber ? `Caller phone number: ${meta.remotePhoneNumber}.` : undefined,
     meta.contact?.name ? `Caller contact name: ${meta.contact.name}.` : undefined,
+    contactInfo
+      ? `Known Inkbox contact info is already loaded: ${contactInfo}`
+      : "No matching Inkbox contact record is loaded; use the phone number or a neutral greeting.",
+    "Do not perform a context lookup before greeting or identifying the caller. Do not say you are waiting for context, waiting on a lookup, or checking context.",
+    "For contact identity at call start, use only the Inkbox identity, phone number, and known contact info above.",
     meta.outboundContext?.purpose
       ? `This is an outbound call you placed. Purpose: ${meta.outboundContext.purpose}`
       : undefined,
@@ -628,7 +787,9 @@ function buildRealtimeInstructions(
     meta.outboundContext
       ? "For outbound calls, do not open with a generic offer to help. Start by explaining why you are calling, then ask the next specific question or give the requested update."
       : undefined,
-    "When the caller asks for contact, note, email, SMS, call-history, workspace, memory, current-info, or tool work, call openclaw_agent_consult and speak the returned result.",
+    `If the caller asks for work to happen after the call, call ${REALTIME_POST_CALL_ACTION_TOOL_NAME}. Tell the caller the action is queued for after the call; do not claim it has already been completed.`,
+    "Call openclaw_agent_consult only after the caller asks for contact edits, notes, email/SMS/call-history reads, workspace/memory/current-info, or other tool work that must happen during the call.",
+    "Do not call openclaw_agent_consult just to greet, identify yourself, identify the caller, or fill call-start context.",
     config.instructions,
     policyInstructions,
   ]
@@ -1129,6 +1290,137 @@ async function runRealtimeAgentConsult(
   };
 }
 
+function readPostCallStringArg(args: unknown, key: string): string | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  const value = (args as Record<string, unknown>)[key];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function registerRealtimePostCallAction(
+  actions: RealtimePostCallAction[],
+  toolEvent: RealtimeVoiceToolCallEvent,
+): Record<string, unknown> {
+  const action =
+    readPostCallStringArg(toolEvent.args, "action") ??
+    readPostCallStringArg(toolEvent.args, "task") ??
+    readPostCallStringArg(toolEvent.args, "summary");
+  if (!action) {
+    return { error: "action required" };
+  }
+  const value: RealtimePostCallAction = {
+    id: toolEvent.callId || toolEvent.itemId || `${Date.now()}`,
+    action,
+    details: readPostCallStringArg(toolEvent.args, "details"),
+    requestedBy: readPostCallStringArg(toolEvent.args, "requestedBy"),
+    createdAt: Date.now(),
+  };
+  actions.push(value);
+  return {
+    status: "registered",
+    actionId: value.id,
+    message:
+      "Post-call action registered. Tell the caller it is queued for after the call, not completed yet.",
+  };
+}
+
+function realtimeAgentConsultWorkingResponse(): Record<string, unknown> {
+  return {
+    status: "working",
+    tool: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+    message:
+      "If you need to acknowledge the caller, say only 'One moment.' Do not mention context lookup, waiting for context, or checking context.",
+  };
+}
+
+function renderPostCallActions(actions: RealtimePostCallAction[]): string {
+  return actions
+    .map((action, index) =>
+      [
+        `${index + 1}. ${action.action}`,
+        action.details ? `Details: ${action.details}` : undefined,
+        action.requestedBy ? `Requested by: ${action.requestedBy}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+    .join("\n\n");
+}
+
+async function runRealtimePostCallActions(
+  opts: InkboxSessionBridgeOptions & {
+    activeCalls: Map<string, ActiveCall>;
+    meta: RealtimeCallMeta;
+    transcript: RealtimeTranscriptEntry[];
+    actions: RealtimePostCallAction[];
+  },
+): Promise<void> {
+  if (opts.actions.length === 0) {
+    return;
+  }
+  const recentTranscript = renderRealtimeTranscript(opts.transcript);
+  const visibleText: string[] = [];
+  await dispatchInboundTurn({
+    ...opts,
+    activeCalls: opts.activeCalls,
+    replyOptionsOverride: {
+      sourceReplyDeliveryMode: "automatic",
+      bootstrapContextMode: "lightweight",
+      fastModeOverride: true,
+      thinkingLevelOverride: "minimal",
+      suppressDefaultToolProgressMessages: true,
+    },
+    deliveryOverride: {
+      deliver: async (payload: unknown) => {
+        const text = payloadText(payload).trim();
+        if (text) {
+          visibleText.push(text);
+        }
+        return { visibleReplySent: false };
+      },
+      onError: (error: unknown) => {
+        opts.logger?.warn?.(
+          `Inkbox realtime post-call delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    },
+    turn: {
+      mode: "sms",
+      contactKey: opts.meta.contactKey,
+      contact: opts.meta.contact,
+      fromLabel: opts.meta.fromLabel,
+      remoteAddress: opts.meta.remotePhoneNumber,
+      body: [
+        `[inkbox:voice_post_call_actions call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
+        "The realtime voice call ended. Execute these post-call actions now using Inkbox tools where appropriate.",
+        "Do not merely say they are impossible. If an email/SMS/note/contact update was requested and enough recipient/content info is present, perform it.",
+        "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
+        "Only if required information is missing, ask the caller for the missing information. Try SMS first; if SMS is unavailable or not opted in, try email; if email is unavailable, place a follow-up call with the question.",
+        renderPostCallActions(opts.actions),
+        recentTranscript ? `Recent live-call transcript:\n${recentTranscript}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      messageId: `call:${opts.meta.callId}:post-call-actions`,
+      replyToId: opts.meta.callId,
+      threadId: opts.meta.direction === "outbound" ? undefined : `call:${opts.meta.callId}`,
+      timestamp: Date.now(),
+      raw: {
+        event: "realtime_post_call_actions",
+        actions: opts.actions,
+      },
+    },
+  });
+  opts.logger?.info?.(
+    `Inkbox realtime post-call actions dispatched: call_id=${opts.meta.callId} actions=${opts.actions.length} captured_reply_chars=${visibleText.join("\n").length}`,
+  );
+}
+
 function handleRealtimeToolCall(
   opts: InkboxSessionBridgeOptions & {
     activeCalls: Map<string, ActiveCall>;
@@ -1136,12 +1428,30 @@ function handleRealtimeToolCall(
     session: RealtimeVoiceBridgeSession;
     toolEvent: RealtimeVoiceToolCallEvent;
     transcript: RealtimeTranscriptEntry[];
+    postCallActions: RealtimePostCallAction[];
   },
 ): void {
   const callId = opts.toolEvent.callId || opts.toolEvent.itemId;
+  if (opts.toolEvent.name === REALTIME_POST_CALL_ACTION_TOOL_NAME) {
+    opts.session.submitToolResult(
+      callId,
+      registerRealtimePostCallAction(opts.postCallActions, opts.toolEvent),
+    );
+    return;
+  }
   if (opts.toolEvent.name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
     opts.session.submitToolResult(callId, {
       error: `Tool "${opts.toolEvent.name}" is not available in Inkbox realtime calls.`,
+    });
+    return;
+  }
+
+  const hasUserTranscript = opts.transcript.some((entry) => entry.role === "user");
+  if (!hasUserTranscript) {
+    opts.session.submitToolResult(callId, {
+      status: "not_needed",
+      result:
+        "Use the already-loaded Inkbox identity, phone number, and contact metadata. Do not say you are waiting on a context lookup.",
     });
     return;
   }
@@ -1150,7 +1460,7 @@ function handleRealtimeToolCall(
     if (opts.session.bridge.supportsToolResultContinuation) {
       opts.session.submitToolResult(
         callId,
-        buildRealtimeVoiceAgentConsultWorkingResponse("caller"),
+        realtimeAgentConsultWorkingResponse(),
         { willContinue: true },
       );
     }
@@ -1487,6 +1797,7 @@ async function runRealtimeCallWebSocket(
   let streamId: string | undefined;
   let closed = false;
   const transcript: RealtimeTranscriptEntry[] = [];
+  const postCallActions: RealtimePostCallAction[] = [];
   const sendJson = async (payload: Record<string, unknown>) => {
     if (closed) {
       return;
@@ -1506,7 +1817,9 @@ async function runRealtimeCallWebSocket(
     autoRespondToAudio: true,
     interruptResponseOnInputAudio: true,
     markStrategy: "ack-immediately",
-    tools: resolveRealtimeVoiceAgentConsultTools(realtime.toolPolicy),
+    tools: resolveRealtimeVoiceAgentConsultTools(realtime.toolPolicy, [
+      realtimePostCallActionTool(),
+    ]),
     audioSink: {
       isOpen: () => !closed,
       sendAudio: (audio) => {
@@ -1543,6 +1856,7 @@ async function runRealtimeCallWebSocket(
         session: realtimeSession,
         toolEvent,
         transcript,
+        postCallActions,
       });
     },
     onReady: () => {
@@ -1635,6 +1949,16 @@ async function runRealtimeCallWebSocket(
     unregisterActiveCall(opts.activeCalls, opts.active);
     await opts.ws.close().catch(() => {});
     opts.logger?.info?.(`Inkbox call WebSocket closed: call_id=${opts.meta.callId}`);
+    void runRealtimePostCallActions({
+      ...opts,
+      activeCalls: opts.activeCalls,
+      transcript,
+      actions: [...postCallActions],
+    }).catch((error) => {
+      opts.logger?.warn?.(
+        `Inkbox realtime post-call actions failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   }
 }
 

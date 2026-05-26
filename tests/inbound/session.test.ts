@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const realtimeMock = vi.hoisted(() => ({
   available: true,
   sessions: [] as any[],
-  toolCallOnAudio: false,
+  toolCallOnAudio: false as false | true | "consult" | "post_call",
 }));
 
 vi.mock("@inkbox/sdk", () => ({
@@ -37,8 +37,8 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
     status: "working",
   })),
   resolveRealtimeVoiceAgentConsultToolPolicy: vi.fn((value: any, fallback: any) => value ?? fallback),
-  resolveRealtimeVoiceAgentConsultTools: vi.fn((policy: string) =>
-    policy === "none"
+  resolveRealtimeVoiceAgentConsultTools: vi.fn((policy: string, customTools: any[] = []) => [
+    ...(policy === "none"
       ? []
       : [
           {
@@ -47,8 +47,9 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
             description: "Consult OpenClaw",
             parameters: { type: "object", properties: {}, required: [] },
           },
-        ],
-  ),
+        ]),
+    ...customTools,
+  ]),
   resolveConfiguredRealtimeVoiceProvider: vi.fn(() => {
     if (!realtimeMock.available) {
       throw new Error("Realtime voice provider \"openai\" is not configured");
@@ -68,12 +69,23 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
       sendAudio: vi.fn((audio: Buffer) => {
         if (realtimeMock.toolCallOnAudio && !toolCalled) {
           toolCalled = true;
+          params.onTranscript?.("user", "Please handle this request.", true);
+          const toolName =
+            realtimeMock.toolCallOnAudio === "post_call"
+              ? "inkbox_register_post_call_action"
+              : "openclaw_agent_consult";
           params.onToolCall?.(
             {
               itemId: "item-1",
               callId: "tool-1",
-              name: "openclaw_agent_consult",
-              args: { question: "Save this as a note." },
+              name: toolName,
+              args:
+                toolName === "inkbox_register_post_call_action"
+                  ? {
+                      action: "Send a follow-up email to Dima about the launch checklist.",
+                      details: "Include that staging is still pending.",
+                    }
+                  : { question: "Save this as a note." },
             },
             session,
           );
@@ -82,6 +94,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
       setMediaTimestamp: vi.fn(),
       triggerGreeting: vi.fn(() => {
         params.audioSink.sendAudio(Buffer.from([0xff, 0xff]));
+        params.onEvent?.({ type: "response.done" });
       }),
       handleBargeIn: vi.fn(),
       submitToolResult: vi.fn(),
@@ -572,7 +585,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
   });
 
   it("delegates realtime tool calls to the OpenClaw Inkbox session", async () => {
-    realtimeMock.toolCallOnAudio = true;
+    realtimeMock.toolCallOnAudio = "consult";
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime("Saved that note.");
     const bridge = createInkboxSessionBridge({
@@ -609,12 +622,68 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
       "tool-1",
-      { status: "working" },
+      expect.objectContaining({
+        status: "working",
+        message: expect.stringContaining("One moment"),
+      }),
       { willContinue: true },
     );
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
       status: "ok",
       result: "Saved that note.",
     });
+  });
+
+  it("runs registered realtime post-call actions after the call closes", async () => {
+    realtimeMock.toolCallOnAudio = "post_call";
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Follow-up sent.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({
+        event: "media",
+        stream_id: "stream-1",
+        media: { payload: Buffer.from([0x01]).toString("base64") },
+      }),
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
+      status: "registered",
+      actionId: "tool-1",
+      message:
+        "Post-call action registered. Tell the caller it is queued for after the call, not completed yet.",
+    });
+    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:voice_post_call_actions",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Send a follow-up email to Dima about the launch checklist.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Try SMS first; if SMS is unavailable or not opted in, try email; if email is unavailable, place a follow-up call",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
+    );
+    expect(run.ctxPayload.extra.InkboxMode).toBe("sms");
   });
 });

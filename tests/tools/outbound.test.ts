@@ -186,11 +186,12 @@ describe("registerPlaceCall", () => {
     const tool = tools.get("inkbox_place_call")!;
     const out = await tool.execute("turn-1", {
       toNumber: "+15551234567",
+      purpose: "The user asked for a general call.",
       clientWebsocketUrl: "wss://example.com/ws",
     });
     expect(placeCall).toHaveBeenCalledWith({
       toNumber: "+15551234567",
-      clientWebsocketUrl: "wss://example.com/ws",
+      clientWebsocketUrl: expect.stringContaining("wss://example.com/ws"),
     });
     expect(out.content[0].text).toContain("call-9");
     expect(out.content[0].text).toContain("callsRemaining=3");
@@ -203,6 +204,7 @@ describe("registerPlaceCall", () => {
     const tool = tools.get("inkbox_place_call")!;
     const out = await tool.execute("turn-1", {
       toNumber: "+15559999999",
+      purpose: "The user asked for a general call.",
       clientWebsocketUrl: "wss://example.com/ws",
     });
     expect(out.isError).toBe(true);
@@ -224,12 +226,32 @@ describe("registerPlaceCall", () => {
     const tool = tools.get("inkbox_place_call")!;
     const out = await tool.execute("turn-1", {
       toNumber: "+15551234567",
+      purpose: "The user asked for a general call.",
     });
     expect(placeCall).toHaveBeenCalledWith({
       toNumber: "+15551234567",
-      clientWebsocketUrl: "wss://derived.example/ws",
+      clientWebsocketUrl: expect.stringContaining("wss://derived.example/ws"),
     });
     expect(out.content[0].text).toContain("call-10");
+  });
+
+  it("requires a purpose so outbound calls start with context", async () => {
+    const { api, tools } = createApi();
+    const placeCall = vi.fn();
+    registerPlaceCall(
+      api,
+      createMockRuntime({ placeCall }),
+      undefined,
+      () => "wss://derived.example/ws",
+    );
+    const tool = tools.get("inkbox_place_call")!;
+    const out = await tool.execute("turn-1", {
+      toNumber: "+15551234567",
+    });
+
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("requires a purpose");
+    expect(placeCall).not.toHaveBeenCalled();
   });
 
   it("attaches outbound call context to the resolved WebSocket URL", async () => {
