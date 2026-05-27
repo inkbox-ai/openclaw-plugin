@@ -133,6 +133,21 @@ export interface ConfigureIdentityDeliveryOptions {
   logger?: PluginLogger;
 }
 
+const MAIL_WEBHOOK_EVENT_TYPES = [
+  "message.received",
+  "message.sent",
+  "message.forwarded",
+  "message.delivered",
+  "message.bounced",
+  "message.failed",
+];
+const TEXT_WEBHOOK_EVENT_TYPES = [
+  "text.received",
+  "text.sent",
+  "text.delivered",
+  "text.delivery_failed",
+  "text.delivery_unconfirmed",
+];
 const DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS = 1200;
 const DEFAULT_VOICE_AGENT_PREWARM_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_VOICE_AGENT_PREWARM_TIMEOUT_MS = 70 * 1000;
@@ -427,6 +442,48 @@ function contactSummary(
 
 function webhookContactSummary(contact: { id: string; name: string } | null | undefined) {
   return contact ? { id: contact.id, name: contact.name } : undefined;
+}
+
+function firstWebhookContactSummary(value: unknown): ContactSummary | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const contact = value.find(
+    (entry) =>
+      entry &&
+      typeof entry === "object" &&
+      typeof (entry as any).id === "string" &&
+      typeof (entry as any).name === "string",
+  );
+  return contact
+    ? {
+        id: (contact as { id: string }).id,
+        name: (contact as { name: string }).name,
+      }
+    : undefined;
+}
+
+function textWebhookContactSummary(event: TextWebhookPayload): ContactSummary | undefined {
+  const data = event.data as unknown as {
+    contacts?: unknown;
+    contact?: { id: string; name: string } | null;
+  };
+  return firstWebhookContactSummary(data.contacts) ?? webhookContactSummary(data.contact);
+}
+
+function callWebhookContactSummary(
+  event: PhoneIncomingCallWebhookPayload,
+): ContactSummary | undefined {
+  const payload = event as unknown as {
+    contacts?: unknown;
+    contact?: { id: string; name: string } | null;
+  };
+  return firstWebhookContactSummary(payload.contacts) ?? webhookContactSummary(payload.contact);
+}
+
+function inboundCallId(event: PhoneIncomingCallWebhookPayload): string {
+  const payload = event as unknown as { id?: string; call_id?: string };
+  return payload.id ?? payload.call_id ?? "unknown";
 }
 
 function renderContactMarker(contact: ContactSummary | undefined): string {
@@ -1692,7 +1749,7 @@ async function buildTextTurn(
     return null;
   }
   const contact =
-    (await hydrateContact(runtime, webhookContactSummary(event.data.contact))) ??
+    (await hydrateContact(runtime, textWebhookContactSummary(event))) ??
     (await lookupContact(runtime, "phone", remote));
   const contactKey = contact?.id ?? remote;
   const mediaMarkers = textMediaMarkers(message.media);
@@ -2034,24 +2091,25 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         opts.logger?.warn?.("Inkbox inbound call rejected; no call WebSocket URL is available.");
         return { action: "reject" };
       }
+      const callId = inboundCallId(event);
       const contact =
-        (await hydrateContact(opts.runtime, webhookContactSummary(event.contact))) ??
+        (await hydrateContact(opts.runtime, callWebhookContactSummary(event))) ??
         (await lookupContact(opts.runtime, "phone", event.remote_phone_number));
-      callMetaById.set(event.id, {
+      callMetaById.set(callId, {
         mode: "voice",
-        callId: event.id,
+        callId,
         contact,
         contactKey: contact?.id ?? event.remote_phone_number,
         fromLabel: contact?.name ?? event.remote_phone_number,
         remoteAddress: event.remote_phone_number,
         localAddress: event.local_phone_number,
-        messageId: `call:${event.id}`,
-        threadId: `call:${event.id}`,
+        messageId: `call:${callId}`,
+        threadId: `call:${callId}`,
         timestamp: parseTimestamp(event.created_at),
         raw: event,
       });
       const separator = wsUrl.includes("?") ? "&" : "?";
-      return { action: "answer", clientWebsocketUrl: `${wsUrl}${separator}call_id=${event.id}` };
+      return { action: "answer", clientWebsocketUrl: `${wsUrl}${separator}call_id=${callId}` };
     },
   };
 
@@ -2215,6 +2273,132 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   return { handlers, wsHandler, activeCalls };
 }
 
+type InkboxClient = Awaited<ReturnType<InkboxRuntime["getClient"]>>;
+type WebhookSubscriptionLike = {
+  id: string;
+  eventTypes: string[];
+};
+type WebhookSubscriptionsClient = {
+  list(filters: {
+    mailboxId?: string;
+    phoneNumberId?: string;
+    url?: string;
+  }): Promise<WebhookSubscriptionLike[]>;
+  create(options: {
+    mailboxId?: string;
+    phoneNumberId?: string;
+    url: string;
+    eventTypes: string[];
+  }): Promise<WebhookSubscriptionLike>;
+  update(id: string, options: { eventTypes?: string[]; url?: string }): Promise<unknown>;
+};
+
+function sameEventTypes(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const expected = new Set(right);
+  return left.every((value) => expected.has(value));
+}
+
+function errorStatusCode(error: unknown): number | undefined {
+  const candidate = error as { statusCode?: unknown; status?: unknown };
+  if (typeof candidate.statusCode === "number") {
+    return candidate.statusCode;
+  }
+  return typeof candidate.status === "number" ? candidate.status : undefined;
+}
+
+async function resolveMailboxIdForWebhookSubscriptions(
+  identity: AgentIdentity,
+  inkbox: InkboxClient,
+  logger?: PluginLogger,
+): Promise<string | undefined> {
+  const mailbox = identity.mailbox as { id?: string; emailAddress?: string | null } | null;
+  if (mailbox?.id) {
+    return mailbox.id;
+  }
+  const emailAddress = mailbox?.emailAddress ?? identity.emailAddress ?? undefined;
+  if (!emailAddress) {
+    return undefined;
+  }
+  try {
+    const resolved = await inkbox.mailboxes.get(emailAddress);
+    return resolved.id;
+  } catch (error) {
+    logger?.warn?.(
+      `Inkbox mailbox lookup for webhook subscriptions failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
+}
+
+async function ensureWebhookSubscription(opts: {
+  inkbox: InkboxClient;
+  mailboxId?: string;
+  phoneNumberId?: string;
+  url: string;
+  eventTypes: readonly string[];
+  label: string;
+  logger?: PluginLogger;
+}): Promise<void> {
+  if ((opts.mailboxId ? 1 : 0) + (opts.phoneNumberId ? 1 : 0) !== 1) {
+    throw new Error("Exactly one webhook subscription owner is required.");
+  }
+  const subscriptions = (opts.inkbox as any).webhooks?.subscriptions as
+    | WebhookSubscriptionsClient
+    | undefined;
+  if (!subscriptions) {
+    throw new Error(
+      "Inkbox SDK 0.4.6 or newer is required for webhook subscriptions.",
+    );
+  }
+  const filters = opts.mailboxId
+    ? { mailboxId: opts.mailboxId, url: opts.url }
+    : { phoneNumberId: opts.phoneNumberId!, url: opts.url };
+  const owner = opts.mailboxId
+    ? { mailboxId: opts.mailboxId }
+    : { phoneNumberId: opts.phoneNumberId! };
+  const eventTypes = [...opts.eventTypes];
+
+  const findCurrent = async (): Promise<WebhookSubscriptionLike | undefined> =>
+    (await subscriptions.list(filters))[0];
+
+  let subscription = await findCurrent();
+  if (!subscription) {
+    try {
+      subscription = await subscriptions.create({
+        ...owner,
+        url: opts.url,
+        eventTypes,
+      });
+      opts.logger?.info?.(
+        `Inkbox ${opts.label} webhook subscription created for ${opts.url}`,
+      );
+    } catch (error) {
+      if (errorStatusCode(error) !== 409) {
+        throw error;
+      }
+      subscription = await findCurrent();
+      if (!subscription) {
+        throw error;
+      }
+    }
+  }
+
+  if (!sameEventTypes(subscription.eventTypes, eventTypes)) {
+    await subscriptions.update(subscription.id, { eventTypes });
+    opts.logger?.info?.(
+      `Inkbox ${opts.label} webhook subscription updated for ${opts.url}`,
+    );
+    return;
+  }
+
+  opts.logger?.info?.(
+    `Inkbox ${opts.label} webhook subscription active for ${opts.url}`,
+  );
+}
+
 export async function configureInkboxIdentityDelivery(
   opts: ConfigureIdentityDeliveryOptions,
 ): Promise<void> {
@@ -2222,22 +2406,42 @@ export async function configureInkboxIdentityDelivery(
     opts.runtime.getIdentity(),
     opts.runtime.getClient(),
   ]);
-  if (identity.mailbox?.emailAddress) {
+  const mailboxId = await resolveMailboxIdForWebhookSubscriptions(identity, inkbox, opts.logger);
+  if (mailboxId) {
     try {
-      await inkbox.mailboxes.update(identity.mailbox.emailAddress, {
-        webhookUrl: opts.webhookUrl,
+      await ensureWebhookSubscription({
+        inkbox,
+        mailboxId,
+        url: opts.webhookUrl,
+        eventTypes: MAIL_WEBHOOK_EVENT_TYPES,
+        label: "mail",
+        logger: opts.logger,
       });
-      opts.logger?.info?.(`Inkbox mailbox webhook set to ${opts.webhookUrl}`);
     } catch (error) {
       opts.logger?.warn?.(
-        `Inkbox mailbox webhook update failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Inkbox mail webhook subscription sync failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  } else if (identity.mailbox?.emailAddress || identity.emailAddress) {
+    opts.logger?.warn?.("Inkbox mail webhook subscription skipped; mailbox id is unavailable.");
   }
   if (identity.phoneNumber?.id) {
     try {
+      await ensureWebhookSubscription({
+        inkbox,
+        phoneNumberId: identity.phoneNumber.id,
+        url: opts.webhookUrl,
+        eventTypes: TEXT_WEBHOOK_EVENT_TYPES,
+        label: "text",
+        logger: opts.logger,
+      });
+    } catch (error) {
+      opts.logger?.warn?.(
+        `Inkbox text webhook subscription sync failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
       await inkbox.phoneNumbers.update(identity.phoneNumber.id, {
-        incomingTextWebhookUrl: opts.webhookUrl,
         incomingCallAction: opts.callWebsocketUrl ? "auto_accept" : "webhook",
         clientWebsocketUrl: opts.callWebsocketUrl ?? null,
         incomingCallWebhookUrl: opts.callWebsocketUrl
@@ -2245,11 +2449,11 @@ export async function configureInkboxIdentityDelivery(
           : (opts.callWebhookUrl ?? opts.webhookUrl),
       });
       opts.logger?.info?.(
-        `Inkbox phone webhooks set to text=${opts.webhookUrl} call=${opts.callWebsocketUrl ?? opts.callWebhookUrl ?? opts.webhookUrl}`,
+        `Inkbox phone call delivery set to ${opts.callWebsocketUrl ?? opts.callWebhookUrl ?? opts.webhookUrl}`,
       );
     } catch (error) {
       opts.logger?.warn?.(
-        `Inkbox phone webhook update failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Inkbox phone call delivery update failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

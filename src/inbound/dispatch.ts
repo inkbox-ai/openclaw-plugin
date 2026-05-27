@@ -11,10 +11,21 @@ export interface InboundCallDecision {
   clientWebsocketUrl?: string;
 }
 
+function firstContactId(value: unknown): string | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const contact = value.find(
+    (entry) => entry && typeof entry === "object" && typeof (entry as any).id === "string",
+  );
+  return contact ? (contact as { id: string }).id : null;
+}
+
 // Resolve the "remote party" contact id from a webhook payload. Mail events
 // carry an array of contacts with `bucket` (from/cc/to/bcc); we use the
-// from-bucket for the allowlist decision. Text and call payloads have a
-// singular `contact` field.
+// from-bucket for the allowlist decision. New text/call payloads carry
+// plural `contacts` arrays. Legacy singular `contact` is still accepted so
+// older fixtures and in-flight deployments fail open to the same behavior.
 function resolveRemoteContactId(parsed: any, kind: "mail" | "text" | "call"): string | null {
   if (kind === "mail") {
     const contacts = parsed?.data?.contacts;
@@ -23,10 +34,10 @@ function resolveRemoteContactId(parsed: any, kind: "mail" | "text" | "call"): st
     return fromContact?.id ?? null;
   }
   if (kind === "text") {
-    return parsed?.data?.contact?.id ?? null;
+    return firstContactId(parsed?.data?.contacts) ?? parsed?.data?.contact?.id ?? null;
   }
-  // call: flat payload, contact at top level.
-  return parsed?.contact?.id ?? null;
+  // call: flat payload, contacts at top level.
+  return firstContactId(parsed?.contacts) ?? parsed?.contact?.id ?? null;
 }
 
 export interface InboundHandlers {

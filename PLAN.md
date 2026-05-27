@@ -49,7 +49,7 @@ This separation matches Inkbox's own auth model (`AUTH_SUBTYPE_API_KEY_ADMIN_SCO
 
 ### Inbound delivery: tunnel-first
 
-Most OpenClaw users run on a laptop without a public URL. We default to opening an **Inkbox tunnel** (`@inkbox/sdk/tunnels/connect`) from inside the plugin runtime — the tunnel terminates at `https://{identity}.inkboxwire.com` and forwards into our in-process Fetch handler. The mailbox/phone webhook URLs and the call WebSocket URL all point at the tunnel. Users with a public URL can override via `publicUrl` in config and skip the tunnel.
+Most OpenClaw users run on a laptop without a public URL. We default to opening an **Inkbox tunnel** (`@inkbox/sdk/tunnels/connect`) from inside the plugin runtime — the tunnel terminates at `https://{identity}.inkboxwire.com` and forwards into our in-process Fetch handler. Mail/text webhook subscriptions and the call WebSocket URL point at the tunnel. Users with a public URL can override via `publicUrl` in config and skip the tunnel.
 
 ---
 
@@ -161,7 +161,7 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 - [ ] `api.registerCli(registrar => registrar.command("inkbox").command("setup").action(...))`
 - [ ] Subcommands:
   - `openclaw inkbox setup` — full guided flow
-  - `openclaw inkbox doctor` — print resolved config, whoami, tunnel status, webhook URLs
+  - `openclaw inkbox doctor` — print resolved config, whoami, tunnel status, and delivery URLs
   - `openclaw inkbox whoami` — short status
 
 ### Setup flow branches
@@ -188,7 +188,7 @@ Branch B — Existing agent-scoped key
   2. Confirm handle, mailbox address, phone status
   3. Offer phone provision if missing
   4. Generate signing key via inkbox.createSigningKey()
-  5. Update mailbox + phone webhook URLs to tunnel URL
+  5. Sync mail/text webhook subscriptions to the tunnel URL and configure phone call delivery
 ```
 
 ### What gets persisted
@@ -205,7 +205,7 @@ Branch B — Existing agent-scoped key
 
 - [ ] Mock signup flow end-to-end
 - [ ] Re-run idempotent: running setup twice doesn't corrupt config or rotate keys
-- [ ] Doctor: detects missing signing key, missing webhook URLs, expired tunnel cert
+- [ ] Doctor: detects missing signing key, missing delivery setup, expired tunnel cert
 
 ---
 
@@ -499,8 +499,8 @@ Reference: `/home/ec2-user/repos/inkbox/skills/inkbox-ts/SKILL.md:761-771`.
 
 | Source URL | Events | Envelope shape | What we do |
 |---|---|---|---|
-| `mailbox.webhookUrl` | `message.received/sent/forwarded/delivered/bounced/failed` | envelope: `event_type` + `data` | route `received` → session ingress; others → telemetry |
-| `phoneNumber.incomingTextWebhookUrl` | `text.received/sent/delivered/delivery_failed/delivery_unconfirmed` | envelope | route `received` → session ingress; others → telemetry |
+| `webhooks.subscriptions` on mailbox | `message.received/sent/forwarded/delivered/bounced/failed` | envelope: `event_type` + `data` | route `received` → session ingress; others → telemetry |
+| `webhooks.subscriptions` on phone number | `text.received/sent/delivered/delivery_failed/delivery_unconfirmed` | envelope | route `received` → session ingress; others → telemetry |
 | `phoneNumber.incomingCallWebhookUrl` | (flat) inbound call | flat `PhoneIncomingCallWebhookPayload` | sync response `{action: "answer", clientWebsocketUrl}` or `{action: "reject"}` |
 | `phoneNumber.clientWebsocketUrl` | WS audio for accepted call | binary frames | bridge to OpenClaw realtime |
 
@@ -523,7 +523,7 @@ Reference: `/home/ec2-user/repos/inkbox/skills/inkbox-ts/SKILL.md:761-771`.
 - [ ] **Single agent identity per plugin instance, or many?** Phase 1–7 assume one. Multi-identity is a Phase 9 thing if ever.
 - [ ] **Skill packaging.** OpenClaw's `skills/` directory in the main repo vs. ClawHub-published skills — figure out which path the bundled skills take.
 - [ ] **Realtime voice bridge.** OpenClaw's realtime audio surface for `placeCall` — needs investigation. Might block Phase 2c.
-- [ ] **Reading mailbox webhook config.** Can an agent-scoped key update its own mailbox.webhookUrl? Or does the wizard need admin briefly to set webhook? (`mailboxes.update` is admin-only per the skill doc, but the *initial* mailbox is created by `createIdentity` and may take the webhook there.) Verify before Phase 3.
+- [x] **Webhook setup moved to subscriptions.** Mail and text delivery use `inkbox.webhooks.subscriptions`; inbound-call routing stays on `phoneNumber.incomingCallWebhookUrl` / `clientWebsocketUrl`.
 
 ### F. Files we'll create
 

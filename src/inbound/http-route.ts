@@ -13,10 +13,11 @@ export interface RegisterHttpRouteOptions {
 }
 
 // Alternative inbound path for users whose OpenClaw is already on a publicly
-// reachable URL. Skips the Inkbox tunnel entirely — webhook URLs on the
-// mailbox + phone number must point at `<publicUrl><path>` (default path
-// `/inkbox/webhook`). The same pure handler is used as for the tunnel path,
-// so HMAC verify + dedup + dispatch behave identically.
+// reachable URL. Skips the Inkbox tunnel entirely. Mail/text webhook
+// subscriptions and phone incoming-call delivery must point at
+// `<publicUrl><path>` (default path `/inkbox/webhook`). The same pure handler
+// is used as for the tunnel path, so HMAC verify + dedup + dispatch behave
+// identically.
 export function registerInboundHttpRoute(opts: RegisterHttpRouteOptions): void {
   const dedup = new RequestIdDedup(10000);
   const path = opts.path ?? "/inkbox/webhook";

@@ -97,7 +97,7 @@ export function startInbound(opts: StartInboundOptions): void {
         logger,
       });
       logger?.info?.(
-        `Inkbox inbound at ${cfg.publicUrl}/inkbox/webhook — point mailbox + phone webhook URLs here.`,
+        `Inkbox inbound at ${cfg.publicUrl}/inkbox/webhook; configure mail/text webhook subscriptions to this URL and phone incoming-call delivery separately.`,
       );
       return;
     }

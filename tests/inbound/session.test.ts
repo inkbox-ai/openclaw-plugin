@@ -107,6 +107,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
 
 import {
   InkboxRealtimeAudioPacer,
+  configureInkboxIdentityDelivery,
   createInkboxSessionBridge,
   prewarmInkboxAgent,
 } from "../../src/inbound/session.js";
@@ -193,6 +194,143 @@ function createChannelRuntime(replyText = "I can hear you on the call.") {
 function parseSentTextFrames(ws: FakeInkboxWebSocket) {
   return ws.sent.map((message) => JSON.parse(message));
 }
+
+describe("configureInkboxIdentityDelivery", () => {
+  it("syncs mail/text subscriptions and keeps call delivery on the phone number", async () => {
+    const subscriptions = {
+      list: vi.fn(async () => []),
+      create: vi.fn(async (input: any) => ({
+        id: `${input.mailboxId ? "mail" : "text"}-sub`,
+        mailboxId: input.mailboxId ?? null,
+        phoneNumberId: input.phoneNumberId ?? null,
+        url: input.url,
+        eventTypes: input.eventTypes,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })),
+      update: vi.fn(),
+    };
+    const phoneUpdate = vi.fn();
+    const mailboxUpdate = vi.fn();
+    const runtime = {
+      getIdentity: vi.fn(async () => ({
+        agentHandle: "smoke-agent",
+        id: "identity-1",
+        displayName: "Smoke Agent",
+        emailAddress: "smoke-agent@inkboxmail.com",
+        mailbox: { id: "mailbox-1", emailAddress: "smoke-agent@inkboxmail.com" },
+        phoneNumber: { id: "phone-1", number: "+16282028580" },
+        tunnel: null,
+      })),
+      getClient: vi.fn(async () => ({
+        webhooks: { subscriptions },
+        phoneNumbers: { update: phoneUpdate },
+        mailboxes: { update: mailboxUpdate },
+      })),
+    };
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://agent.inkboxwire.com/inkbox/webhook",
+      callWebsocketUrl: "wss://agent.inkboxwire.com/inkbox/phone/media/ws",
+    });
+
+    expect(subscriptions.create).toHaveBeenCalledWith({
+      mailboxId: "mailbox-1",
+      url: "https://agent.inkboxwire.com/inkbox/webhook",
+      eventTypes: [
+        "message.received",
+        "message.sent",
+        "message.forwarded",
+        "message.delivered",
+        "message.bounced",
+        "message.failed",
+      ],
+    });
+    expect(subscriptions.create).toHaveBeenCalledWith({
+      phoneNumberId: "phone-1",
+      url: "https://agent.inkboxwire.com/inkbox/webhook",
+      eventTypes: [
+        "text.received",
+        "text.sent",
+        "text.delivered",
+        "text.delivery_failed",
+        "text.delivery_unconfirmed",
+      ],
+    });
+    expect(mailboxUpdate).not.toHaveBeenCalled();
+    expect(phoneUpdate).toHaveBeenCalledWith("phone-1", {
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://agent.inkboxwire.com/inkbox/phone/media/ws",
+      incomingCallWebhookUrl: null,
+    });
+  });
+
+  it("updates existing subscriptions instead of creating duplicate owner/url rows", async () => {
+    const subscriptions = {
+      list: vi.fn(async (filters: any) => [
+        {
+          id: filters.mailboxId ? "mail-sub" : "text-sub",
+          mailboxId: filters.mailboxId ?? null,
+          phoneNumberId: filters.phoneNumberId ?? null,
+          url: filters.url,
+          eventTypes: [filters.mailboxId ? "message.received" : "text.received"],
+          status: "active",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ]),
+      create: vi.fn(),
+      update: vi.fn(async () => ({})),
+    };
+    const runtime = {
+      getIdentity: vi.fn(async () => ({
+        agentHandle: "smoke-agent",
+        id: "identity-1",
+        displayName: "Smoke Agent",
+        emailAddress: "smoke-agent@inkboxmail.com",
+        mailbox: { emailAddress: "smoke-agent@inkboxmail.com" },
+        phoneNumber: { id: "phone-1", number: "+16282028580" },
+        tunnel: null,
+      })),
+      getClient: vi.fn(async () => ({
+        webhooks: { subscriptions },
+        phoneNumbers: { update: vi.fn() },
+        mailboxes: {
+          get: vi.fn(async () => ({ id: "mailbox-1" })),
+        },
+      })),
+    };
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://agent.inkboxwire.com/inkbox/webhook",
+      callWebhookUrl: "https://agent.inkboxwire.com/inkbox/webhook",
+    });
+
+    expect(subscriptions.create).not.toHaveBeenCalled();
+    expect(subscriptions.update).toHaveBeenCalledWith("mail-sub", {
+      eventTypes: [
+        "message.received",
+        "message.sent",
+        "message.forwarded",
+        "message.delivered",
+        "message.bounced",
+        "message.failed",
+      ],
+    });
+    expect(subscriptions.update).toHaveBeenCalledWith("text-sub", {
+      eventTypes: [
+        "text.received",
+        "text.sent",
+        "text.delivered",
+        "text.delivery_failed",
+        "text.delivery_unconfirmed",
+      ],
+    });
+  });
+});
 
 describe("createInkboxSessionBridge call WebSocket", () => {
   beforeEach(() => {

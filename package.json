@@ -19,7 +19,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@inkbox/sdk": "^0.4.3",
+    "@inkbox/sdk": "file:../inkbox/sdk/typescript",
     "typebox": "^1.1.38"
   },
   "devDependencies": {
