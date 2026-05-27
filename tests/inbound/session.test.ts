@@ -143,7 +143,18 @@ function createRuntime() {
   const sendText = vi.fn();
   const runtime = {
     getIdentity: vi.fn(async () => ({
-      phoneNumber: { id: "phone-1" },
+      agentHandle: "smoke-agent",
+      id: "identity-1",
+      displayName: "Smoke Agent",
+      emailAddress: "smoke-agent@inkboxmail.com",
+      mailbox: { emailAddress: "smoke-agent@inkboxmail.com" },
+      phoneNumber: {
+        id: "phone-1",
+        number: "+16282028580",
+        type: "local",
+        smsStatus: "ready",
+      },
+      tunnel: { publicHost: "smoke-agent.inkboxwire.com" },
       sendText,
     })),
     getClient: vi.fn(async () => ({
@@ -395,6 +406,12 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
     expect(run.ctxPayload.message.bodyForAgent).toContain("segments=2");
     expect(run.ctxPayload.message.bodyForAgent).toContain("inkbox_identity=smoke-agent");
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Your Inkbox agent email address: smoke-agent@inkboxmail.com.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Your Inkbox agent phone number: +16282028580.",
+    );
     expect(run.ctxPayload.message.bodyForAgent).toContain("What is it");
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "take you so long to respond to my first message?",
@@ -492,7 +509,15 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       ],
     });
     const realtimeSession = realtimeMock.sessions[0].session;
+    const params = realtimeMock.sessions[0].params;
     expect(realtimeSession.connect).toHaveBeenCalledTimes(1);
+    expect(params.instructions).toContain(
+      "Your Inkbox agent email address: smoke-agent@inkboxmail.com.",
+    );
+    expect(params.instructions).toContain("Your Inkbox agent phone number: +16282028580.");
+    expect(params.instructions).toContain(
+      "Do not deny that you have an agent email or phone number.",
+    );
     expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
       "Greet there in one short sentence and ask how you can help.",
     );

@@ -1,5 +1,6 @@
 import { verifyWebhook } from "@inkbox/sdk";
 import type {
+  AgentIdentity,
   Contact,
   MailWebhookPayload,
   PhoneIncomingCallWebhookPayload,
@@ -86,10 +87,23 @@ type RealtimePostCallAction = {
   createdAt: number;
 };
 
+type RealtimeAgentIdentityInfo = {
+  handle?: string;
+  id?: string;
+  displayName?: string | null;
+  emailAddress?: string | null;
+  phoneNumber?: string | null;
+  phoneNumberId?: string | null;
+  phoneNumberType?: string | null;
+  smsStatus?: string | null;
+  tunnelPublicHost?: string | null;
+};
+
 type RealtimeCallMeta = {
   callId: string;
   remotePhoneNumber: string;
   direction: string;
+  agentIdentity: RealtimeAgentIdentityInfo;
   contact?: ContactSummary;
   contactKey: string;
   fromLabel: string;
@@ -446,6 +460,42 @@ function renderIdentityMarker(account: ResolvedInkboxAccount): string {
   return identity ? ` inkbox_identity=${identity}` : "";
 }
 
+function defaultAgentIdentityInfo(account: ResolvedInkboxAccount): RealtimeAgentIdentityInfo {
+  return {
+    handle: account.config.identity?.trim() || account.identity,
+  };
+}
+
+function agentIdentityInfoFromIdentity(identity: AgentIdentity): RealtimeAgentIdentityInfo {
+  return {
+    handle: identity.agentHandle,
+    id: identity.id,
+    displayName: identity.displayName,
+    emailAddress: identity.mailbox?.emailAddress ?? identity.emailAddress ?? null,
+    phoneNumber: identity.phoneNumber?.number ?? null,
+    phoneNumberId: identity.phoneNumber?.id ?? null,
+    phoneNumberType: identity.phoneNumber?.type ?? null,
+    smsStatus: identity.phoneNumber?.smsStatus ? String(identity.phoneNumber.smsStatus) : null,
+    tunnelPublicHost: identity.tunnel?.publicHost ?? null,
+  };
+}
+
+function renderAgentIdentityLines(identity: RealtimeAgentIdentityInfo): string[] {
+  const lines = [
+    identity.handle ? `Your Inkbox identity handle: ${identity.handle}.` : undefined,
+    identity.displayName ? `Your Inkbox display name: ${identity.displayName}.` : undefined,
+    identity.emailAddress ? `Your Inkbox agent email address: ${identity.emailAddress}.` : undefined,
+    identity.phoneNumber ? `Your Inkbox agent phone number: ${identity.phoneNumber}.` : undefined,
+    identity.tunnelPublicHost ? `Your Inkbox tunnel host: ${identity.tunnelPublicHost}.` : undefined,
+  ].filter((line): line is string => Boolean(line));
+  if (identity.emailAddress || identity.phoneNumber) {
+    lines.push(
+      "If the caller asks for your agent email address, phone number, handle, or full Inkbox identity, answer from the fields above. Do not deny that you have an agent email or phone number.",
+    );
+  }
+  return lines;
+}
+
 async function hydrateContact(
   runtime: InkboxRuntime,
   summary: ContactSummary | undefined,
@@ -766,9 +816,7 @@ function buildRealtimeInstructions(
     "You are the configured OpenClaw agent speaking on a live Inkbox phone call.",
     "Use natural, concise spoken replies. Keep most answers to one or two short sentences.",
     "Do not mention implementation details unless the caller asks.",
-    account.config.identity
-      ? `Inkbox identity handle: ${account.config.identity}.`
-      : undefined,
+    ...renderAgentIdentityLines(meta.agentIdentity),
     meta.remotePhoneNumber ? `Caller phone number: ${meta.remotePhoneNumber}.` : undefined,
     meta.contact?.name ? `Caller contact name: ${meta.contact.name}.` : undefined,
     contactInfo
@@ -1729,9 +1777,11 @@ async function resolveCallMeta(
     outboundContext?.toNumber ||
     (typeof context.remote_phone_number === "string" ? context.remote_phone_number : "");
   let direction = typeof context.direction === "string" ? context.direction : "";
+  let agentIdentity = defaultAgentIdentityInfo(opts.account);
 
   try {
     const identity = await opts.runtime.getIdentity();
+    agentIdentity = agentIdentityInfoFromIdentity(identity);
     const phoneNumberId = identity.phoneNumber?.id;
     if (phoneNumberId && callId !== "unknown") {
       const inkbox = await opts.runtime.getClient();
@@ -1753,6 +1803,7 @@ async function resolveCallMeta(
     callId,
     remotePhoneNumber,
     direction: direction || (outboundContext ? "outbound" : "inbound"),
+    agentIdentity,
     contact,
     contactKey,
     fromLabel: contact?.name ?? remotePhoneNumber ?? callId,
@@ -2069,6 +2120,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         const text = mergeVoiceTranscriptSegments(segments);
         const body = [
           `[inkbox:voice_call call_id=${meta.callId}${renderIdentityMarker(opts.account)} segments=${segments.length} reply_mode=voice_tts allow_separate_followup_tools_when_caller_explicitly_asks=true | ${renderContactMarker(meta.contact)}]`,
+          ...renderAgentIdentityLines(meta.agentIdentity),
           "You are on a live Inkbox phone call. Reply normally in text so the plugin speaks it over the active call. Do not substitute SMS or email for the spoken call response unless the caller explicitly asks you to send a separate follow-up/message.",
           text,
         ].join("\n");
