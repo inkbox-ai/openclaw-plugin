@@ -1,23 +1,79 @@
 # @inkbox/openclaw-plugin
 
-[Inkbox](https://inkbox.ai) plugin for [OpenClaw](https://openclaw.ai). Gives the agent a working mailbox, phone number, and contact/note/credential access under an Inkbox agent identity — outbound and inbound — without forking OpenClaw.
+[Inkbox](https://inkbox.ai) channel plugin for [OpenClaw](https://openclaw.ai). It gives an OpenClaw agent its own Inkbox identity: mailbox, phone number, SMS, voice calls, contacts, notes, contact rules, identity access, and optional credential vault access without forking OpenClaw.
 
-> **Status:** outbound tools, reads, vault, bundled skills, SMS batching, setup wizard, OpenClaw doctor checks, and real OpenClaw channel ingress for Inkbox email/SMS/voice are shipped. **Not yet:** ClawHub publish. See [PLAN.md](./PLAN.md) for the full roadmap.
+Status: outbound tools, read tools, bundled skills, setup wizard, doctor checks, SMS batching, inbound email/SMS/voice, realtime phone calls, post-call actions, and package-included skills are implemented. ClawHub publishing is still pending.
 
-## Install (development)
+## Quick Start
+
+Use OpenClaw `2026.5.19` or newer. If your global `openclaw` is older, run the same commands through `npx openclaw` from this checkout after `npm install`.
 
 ```bash
 git clone https://github.com/inkbox-ai/openclaw-plugin.git
 cd openclaw-plugin
 npm install
-openclaw plugins install --link ./
+npm run build
+openclaw --version
+openclaw plugins install -l ./
 ```
 
-Edits to `index.ts` and `src/**` are picked up on the next session reload — no reinstall needed.
+Authenticate OpenClaw with any model provider the agent should use:
 
-## Configure
+```bash
+openclaw configure --section model
+```
 
-Preferred channel config:
+Configure Inkbox:
+
+```bash
+openclaw inkbox setup
+openclaw inkbox doctor
+```
+
+Allow the required Inkbox tools:
+
+```bash
+openclaw config set tools.allow '["inkbox"]' --strict-json
+```
+
+Start the gateway:
+
+```bash
+openclaw gateway run --allow-unconfigured --force --verbose --compact
+```
+
+Keep that process running. On startup the plugin opens an Inkbox tunnel, sets mailbox and phone webhooks, and routes inbound email, SMS, and calls into OpenClaw sessions.
+
+## Development Profile
+
+For an isolated smoke profile:
+
+```bash
+openclaw --profile inkbox-smoke plugins install -l ./
+openclaw --profile inkbox-smoke configure --section model
+openclaw --profile inkbox-smoke inkbox setup
+openclaw --profile inkbox-smoke config set tools.allow '["inkbox"]' --strict-json
+openclaw --profile inkbox-smoke inkbox doctor
+openclaw --profile inkbox-smoke gateway run --allow-unconfigured --force --verbose --compact
+```
+
+Use `openclaw --profile inkbox-smoke config file` to see the profile's config path.
+
+## Setup Wizard
+
+`openclaw inkbox setup` mirrors the Hermes Inkbox setup flow:
+
+1. No API key: runs Inkbox agent self-signup and verification.
+2. Agent-scoped API key: resolves the bound identity.
+3. Admin-scoped API key: lets you pick or create an identity, then mints an agent-scoped key so the gateway does not keep the admin key.
+
+The wizard can provision a local phone number, waits for `START` only when it just provisioned a new local number, generates or accepts the webhook signing key, seeds `~/.openclaw/inkbox/identity-state.json`, and prints the final handle/mailbox/phone summary.
+
+Inkbox reachability is controlled server-side with mailbox and phone contact rules in the Inkbox Console. The plugin does not create a second local inbound allowlist unless you explicitly set `allowedInboundContactIds`.
+
+## Manual Config
+
+Preferred config shape:
 
 ```json
 {
@@ -27,147 +83,235 @@ Preferred channel config:
       "identity": "my-agent-handle",
       "signingKey": "whsec_xxxxxxxxxxxx"
     }
+  },
+  "tools": {
+    "allow": ["inkbox"]
   }
 }
 ```
 
-Legacy plugin-scoped config is still supported for tools and the default channel account:
+Equivalent config commands:
 
-```json
-{
-  "plugins": {
-    "entries": {
-      "inkbox": {
-        "config": {
-          "apiKey": "ApiKey_xxxxxxxxxxxx",
-          "identity": "my-agent-handle",
-          "signingKey": "whsec_xxxxxxxxxxxx"
-        }
-      }
-    }
-  }
-}
+```bash
+openclaw config set channels.inkbox.apiKey "ApiKey_xxxxxxxxxxxx"
+openclaw config set channels.inkbox.identity "my-agent-handle"
+openclaw config set channels.inkbox.signingKey "whsec_xxxxxxxxxxxx"
+openclaw config set tools.allow '["inkbox"]' --strict-json
+openclaw config validate
 ```
 
-| Field | Required | Default | Description |
-|---|---|---|---|
-| `apiKey` | yes | — | Agent-scoped Inkbox API key. Mint one in the [Inkbox Console](https://inkbox.ai/console). |
-| `identity` | yes | — | Agent identity handle (3–63 lowercase alphanum/dash). |
-| `signingKey` | for inbound | — | Webhook HMAC secret. Required to receive inbound email/SMS/calls. |
-| `baseUrl` | no | `https://inkbox.ai` | Override API base URL. |
-| `tunnelName` | no | identity handle | Override the Inkbox tunnel name. |
-| `publicUrl` | no | — | If set, skip the tunnel and assume webhooks land here. |
-| `allowedRecipients` | no | — | Outbound allowlist. Empty = no filtering. |
-| `allowedInboundContactIds` | no | — | Inbound allowlist by contact UUID. Empty = no filtering. |
-| `sms.batchDelayMs` | no | `0` | Inbound SMS fragment batching window. |
-| `voiceRealtime.enabled` | no | `false` | Use Inkbox raw call media with an OpenClaw realtime voice provider instead of Inkbox STT/TTS. |
-| `voiceRealtime.provider` | no | runtime default | Realtime provider id, for example `openai`. |
-| `voiceRealtime.model` | no | provider default | Realtime model override, for example `gpt-realtime`. |
-| `voiceRealtime.fallbackToInkboxSttTts` | no | `true` | Fall back to Inkbox STT/TTS when realtime auth/provider config is unavailable. |
-| `vault.keyEnvVar` | no | `INKBOX_VAULT_KEY` | Env var the vault unlock key is read from. |
+Env vars are also supported by the plugin and CLI:
 
-Realtime voice example:
-
-```json5
-{
-  "channels": {
-    "inkbox": {
-      "apiKey": "ApiKey_xxxxxxxxxxxx",
-      "identity": "my-agent-handle",
-      "signingKey": "whsec_xxxxxxxxxxxx",
-      "voiceRealtime": {
-        "enabled": true,
-        "provider": "openai",
-        "model": "gpt-realtime",
-        "voice": "cedar",
-        "toolPolicy": "owner",
-        "consultPolicy": "substantive"
-      }
-    }
-  }
-}
+```bash
+export INKBOX_API_KEY="ApiKey_xxxxxxxxxxxx"
+export INKBOX_IDENTITY="my-agent-handle"
+export INKBOX_SIGNING_KEY="whsec_xxxxxxxxxxxx"
+export INKBOX_BASE_URL="https://inkbox.ai"
 ```
 
-## Tools
+Legacy plugin-scoped config under `plugins.entries.inkbox.config` still works, but new installs should use `channels.inkbox`.
 
-**Outbound** — required by default:
-- `inkbox_send_email`, `inkbox_send_sms`
+## Optional Tools
 
-**Outbound** — optional, opt-in via `tools.allow`:
-- `inkbox_forward_email`, `inkbox_place_call`
+`"inkbox"` in `tools.allow` enables the required tools. Optional tools must be listed by name.
 
-**Read / lifecycle** (email, SMS, voice, contacts, notes) — required by default unless noted optional:
-- Email: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`, `inkbox_mark_emails_read` *(opt)*
-- SMS: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_texts` *(opt)*, `inkbox_get_text` *(opt)*, `inkbox_mark_text_read` *(opt)*, `inkbox_mark_text_conversation_read` *(opt)*
-- Voice: `inkbox_list_calls`, `inkbox_list_call_transcripts`
-- Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact` *(opt)*, `inkbox_delete_contact` *(opt)*, `inkbox_export_contact_vcard` *(opt)*
-- Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`, `inkbox_update_note` *(opt)*, `inkbox_delete_note` *(opt)*
-- Contact rules: `inkbox_list_mail_contact_rules` *(opt)*, `inkbox_create_mail_contact_rule` *(opt)*, `inkbox_update_mail_contact_rule` *(opt)*, `inkbox_delete_mail_contact_rule` *(opt)*, `inkbox_list_phone_contact_rules` *(opt)*, `inkbox_create_phone_contact_rule` *(opt)*, `inkbox_update_phone_contact_rule` *(opt)*, `inkbox_delete_phone_contact_rule` *(opt)*
-- Identity access: `inkbox_list_contact_access` *(opt)*, `inkbox_grant_contact_access` *(opt)*, `inkbox_revoke_contact_access` *(opt)*, `inkbox_list_note_access` *(opt)*, `inkbox_grant_note_access` *(opt)*, `inkbox_revoke_note_access` *(opt)*
+Common full-access smoke allowlist, excluding vault plaintext tools:
 
-**Vault** — all optional, gate plaintext access:
-- `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
-
-**Diagnostic** — optional:
-- `inkbox_whoami`
-
-Enable in OpenClaw config:
-
-```json5
-{
-  tools: { allow: ["inkbox"] }  // allow every required tool from this plugin
-}
+```bash
+openclaw config set tools.allow '[
+  "inkbox",
+  "inkbox_forward_email",
+  "inkbox_place_call",
+  "inkbox_mark_emails_read",
+  "inkbox_list_texts",
+  "inkbox_get_text",
+  "inkbox_mark_text_read",
+  "inkbox_mark_text_conversation_read",
+  "inkbox_update_contact",
+  "inkbox_delete_contact",
+  "inkbox_export_contact_vcard",
+  "inkbox_update_note",
+  "inkbox_delete_note",
+  "inkbox_list_mail_contact_rules",
+  "inkbox_create_mail_contact_rule",
+  "inkbox_update_mail_contact_rule",
+  "inkbox_delete_mail_contact_rule",
+  "inkbox_list_phone_contact_rules",
+  "inkbox_create_phone_contact_rule",
+  "inkbox_update_phone_contact_rule",
+  "inkbox_delete_phone_contact_rule",
+  "inkbox_list_contact_access",
+  "inkbox_grant_contact_access",
+  "inkbox_revoke_contact_access",
+  "inkbox_list_note_access",
+  "inkbox_grant_note_access",
+  "inkbox_revoke_note_access",
+  "inkbox_whoami"
+]' --strict-json
 ```
 
-To enable optional tools, list them by name (`tools: { allow: ["inkbox", "inkbox_forward_email", "inkbox_totp_code"] }`).
+Add vault tools only when the identity has vault access and the gateway environment has the vault unlock key:
+
+```bash
+export INKBOX_VAULT_KEY="..."
+openclaw config set tools.allow '[
+  "inkbox",
+  "inkbox_credentials_list",
+  "inkbox_credentials_get_login",
+  "inkbox_credentials_get_api_key",
+  "inkbox_credentials_get_ssh_key",
+  "inkbox_totp_code"
+]' --strict-json
+```
+
+## Realtime Calls
+
+Default calls use Inkbox STT/TTS. To use raw Inkbox call media through an OpenClaw realtime voice provider, first configure a realtime-capable provider. For OpenAI Realtime, use either an OpenAI API key in the gateway environment or an OpenClaw auth profile that the OpenAI provider can use.
+
+```bash
+export OPENAI_API_KEY="sk-..."
+openclaw configure --section model
+openclaw config set channels.inkbox.voiceRealtime.enabled true --strict-json
+openclaw config set channels.inkbox.voiceRealtime.provider openai
+openclaw config set channels.inkbox.voiceRealtime.model gpt-realtime
+openclaw config set channels.inkbox.voiceRealtime.voice cedar
+openclaw config set channels.inkbox.voiceRealtime.toolPolicy owner
+openclaw config set channels.inkbox.voiceRealtime.consultPolicy substantive
+openclaw gateway run --allow-unconfigured --force --verbose --compact
+```
+
+Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. If realtime auth/provider config is unavailable, calls fall back to Inkbox STT/TTS unless `voiceRealtime.fallbackToInkboxSttTts` is set to `false`.
+
+Disable realtime:
+
+```bash
+openclaw config set channels.inkbox.voiceRealtime.enabled false --strict-json
+```
 
 ## CLI
 
+```bash
+openclaw inkbox setup
+openclaw inkbox doctor
+openclaw inkbox whoami
+openclaw doctor
+openclaw status
 ```
-openclaw inkbox doctor    # diagnose config + connection
-openclaw inkbox whoami    # one-line auth/identity summary
-openclaw inkbox setup     # interactive setup wizard
+
+Useful OpenClaw commands while iterating:
+
+```bash
+openclaw config file
+openclaw config get channels.inkbox
+openclaw config validate
+openclaw plugins list
+openclaw skills list
+openclaw logs
 ```
 
-`doctor` and `whoami` read `INKBOX_API_KEY` / `INKBOX_IDENTITY` / `INKBOX_BASE_URL` / `INKBOX_SIGNING_KEY` from env. The plugin also registers structured `openclaw doctor` checks under the `inkbox/*` namespace.
+Optional provider-specific auth examples:
 
-## Bundled skills
+```bash
+openclaw models auth login --provider openai --set-default
+openclaw models auth login --provider openai-codex --set-default
+```
 
-Eleven SKILL.md files under `skills/`:
+## Smoke Test
 
-| Skill | Triggers when… |
+After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mailbox webhook set, and phone webhook set:
+
+1. Run `openclaw inkbox doctor`.
+2. Text `START` to the agent's Inkbox phone number from every phone the agent should text.
+3. Send the agent an SMS and verify it replies in the same SMS thread.
+4. Send the agent an email and verify it replies from its Inkbox mailbox.
+5. Call the agent phone number and ask for its handle, email, and phone.
+6. Ask during a call for a post-call SMS or email follow-up, then verify it sends after hangup.
+7. Ask the agent to save a contact and an Inkbox note, then ask it to read them back.
+
+## Config Reference
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `apiKey` | yes | - | Agent-scoped Inkbox API key. Admin keys are accepted by setup only so it can mint an agent-scoped key. |
+| `identity` | yes | - | Inkbox agent identity handle. |
+| `signingKey` | inbound | - | Webhook HMAC secret. Required for inbound email/SMS/calls. |
+| `baseUrl` | no | `https://inkbox.ai` | Override Inkbox API base URL. |
+| `tunnelName` | no | identity handle | Override Inkbox tunnel name. |
+| `publicUrl` | no | - | Public OpenClaw URL. If omitted, the plugin opens an Inkbox tunnel. |
+| `allowedRecipients` | no | - | Outbound recipient allowlist. Empty means no local outbound filtering. |
+| `allowedInboundContactIds` | no | - | Optional local inbound allowlist by Inkbox contact UUID. Empty means Inkbox contact rules decide reachability. |
+| `sms.batchDelayMs` | no | `0` | Inbound SMS fragment batching window. |
+| `voiceTranscriptCoalesceMs` | no | plugin default | Non-realtime voice transcript coalescing window. |
+| `voiceAgentPrewarm` | no | plugin default | Prewarm the voice path when the gateway starts. |
+| `voiceRealtime.enabled` | no | `false` | Use raw phone media with an OpenClaw realtime voice provider. |
+| `voiceRealtime.provider` | no | runtime default | Realtime provider id, for example `openai`. |
+| `voiceRealtime.model` | no | provider default | Realtime model override, for example `gpt-realtime`. |
+| `voiceRealtime.voice` | no | provider default | Realtime voice name. |
+| `voiceRealtime.toolPolicy` | no | `owner` | Tool policy for realtime `openclaw_agent_consult`. |
+| `voiceRealtime.consultPolicy` | no | `substantive` | When realtime calls should consult the main OpenClaw agent. |
+| `voiceRealtime.fallbackToInkboxSttTts` | no | `true` | Fall back to Inkbox STT/TTS when realtime is unavailable. |
+| `vault.keyEnvVar` | no | `INKBOX_VAULT_KEY` | Env var containing the vault unlock key. |
+
+## Tools
+
+Required by default:
+
+- Outbound: `inkbox_send_email`, `inkbox_send_sms`
+- Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
+- SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`
+- Voice reads: `inkbox_list_calls`, `inkbox_list_call_transcripts`
+- Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`
+- Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`
+
+Optional:
+
+- Outbound: `inkbox_forward_email`, `inkbox_place_call`
+- Lifecycle: `inkbox_mark_emails_read`, `inkbox_list_texts`, `inkbox_get_text`, `inkbox_mark_text_read`, `inkbox_mark_text_conversation_read`
+- Contacts: `inkbox_update_contact`, `inkbox_delete_contact`, `inkbox_export_contact_vcard`
+- Notes: `inkbox_update_note`, `inkbox_delete_note`
+- Contact rules: `inkbox_list_mail_contact_rules`, `inkbox_create_mail_contact_rule`, `inkbox_update_mail_contact_rule`, `inkbox_delete_mail_contact_rule`, `inkbox_list_phone_contact_rules`, `inkbox_create_phone_contact_rule`, `inkbox_update_phone_contact_rule`, `inkbox_delete_phone_contact_rule`
+- Identity access: `inkbox_list_contact_access`, `inkbox_grant_contact_access`, `inkbox_revoke_contact_access`, `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`
+- Vault: `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
+- Diagnostic: `inkbox_whoami`
+
+## Bundled Skills
+
+The package includes all `skills/*/SKILL.md` files in npm tarballs.
+
+| Skill | Trigger |
 |---|---|
-| `inkbox-troubleshooting` | runtime/config errors, failed tools, readiness issues |
-| `inkbox-email-triage` | checking email, processing unread, replying on threads |
-| `inkbox-sms-responder` | sending or replying to SMS |
-| `inkbox-outbound-calling` | placing calls to numbers or contacts |
-| `inkbox-call-review` | reviewing call history or transcripts |
-| `inkbox-contact-lookup` | "who is X" / resolving names to contacts |
-| `inkbox-contact-rules` | managing mail/phone allow and block rules |
-| `inkbox-identity-access` | granting/revoking contact or note visibility across identities |
-| `inkbox-notes-memory` | saving, retrieving, or updating persistent Inkbox notes |
-| `inkbox-credential-use` | "log into X" / fetching a TOTP code |
-| `inkbox-outreach-sequence` | multi-step outreach across email/SMS |
+| `inkbox-troubleshooting` | Runtime/config errors, failed tools, readiness issues |
+| `inkbox-email-triage` | Checking or replying to Inkbox email |
+| `inkbox-sms-responder` | Sending, replying to, or triaging SMS |
+| `inkbox-outbound-calling` | Placing calls to numbers or contacts |
+| `inkbox-call-review` | Reviewing calls and transcripts |
+| `inkbox-contact-lookup` | Resolving, creating, or updating contacts |
+| `inkbox-contact-rules` | Managing mail/phone allow and block rules |
+| `inkbox-identity-access` | Granting/revoking contact or note visibility |
+| `inkbox-notes-memory` | Saving, retrieving, or updating Inkbox notes |
+| `inkbox-credential-use` | Fetching vault credentials or TOTP codes |
+| `inkbox-outreach-sequence` | Multi-step outreach over email/SMS |
 
-Each skill ends with a pointer to `https://inkbox.ai/llms.txt` and `https://inkbox.ai/docs/all.md` as a raw-docs fallback when behavior questions go past what's bundled.
+## Development Commands
 
-## Architecture
+```bash
+npm run typecheck
+npm test
+npm run build
+npm_config_cache=/tmp/npm-cache npm pack --dry-run
+```
 
-- **Plugin, not fork.** OpenClaw's plugin SDK does everything we need (`defineChannelPluginEntry`, channel gateway, tools, HTTP routes, CLI).
-- **Agent-scoped.** Authenticates with an agent-scoped Inkbox API key. Admin operations are deliberately not exposed.
-- **Tunnel-first inbound.** When `signingKey` is set, opens an Inkbox tunnel at `https://<identity>.inkboxwire.com`, patches the identity mailbox/phone webhook URLs, and routes inbound webhooks into OpenClaw sessions with HMAC verification and dedup.
-- **Voice bridge.** Incoming and plugin-placed calls use Inkbox STT/TTS over the tunnel WebSocket by default; final transcripts become OpenClaw turns and replies stream back as Inkbox TTS text frames.
-- **Realtime voice bridge.** When `voiceRealtime.enabled` is true, the call WebSocket requests raw G.711 u-law media from Inkbox, bridges it through an OpenClaw realtime voice provider, and delegates OpenClaw/Inkbox tool work through `openclaw_agent_consult`. If realtime auth or provider config is unavailable, calls fall back to Inkbox STT/TTS unless disabled.
-- **Lazy SDK client.** The Inkbox SDK is constructed on first tool call, never at registration.
-- **Allowlists.** Optional outbound recipient allowlist and inbound contact-id allowlist for stricter deployments.
+## Architecture Notes
 
-See [PLAN.md](./PLAN.md) for the full architecture write-up and 8-phase roadmap.
+- Plugin, not fork: uses OpenClaw plugin SDK, channel gateway, tools, HTTP routes, CLI, and bundled skills.
+- Agent-scoped: runtime should use an Inkbox agent-scoped API key.
+- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel and patches mailbox/phone webhooks.
+- Voice: Inkbox STT/TTS fallback path and realtime raw-media path both route through the same call WebSocket.
+- Post-call actions: realtime calls can register work for the main OpenClaw agent after hangup.
+- Identity-aware calls: call prompts include agent handle/mailbox/phone/tunnel and known caller contact metadata.
 
-## Roadmap (what's still ahead)
-
-- ClawHub publishing (`clawhub:inkbox/openclaw-plugin`)
-- More end-to-end coverage against a live Inkbox tunnel
+See [PLAN.md](./PLAN.md) for the longer architecture history and roadmap.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT - see [LICENSE](./LICENSE).
