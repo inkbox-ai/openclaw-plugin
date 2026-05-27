@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const realtimeMock = vi.hoisted(() => ({
   available: true,
@@ -105,7 +105,11 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
   }),
 }));
 
-import { createInkboxSessionBridge, prewarmInkboxAgent } from "../../src/inbound/session.js";
+import {
+  InkboxRealtimeAudioPacer,
+  createInkboxSessionBridge,
+  prewarmInkboxAgent,
+} from "../../src/inbound/session.js";
 import {
   decorateCallWebsocketUrlWithContext,
   registerOutboundCallContext,
@@ -184,6 +188,38 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     realtimeMock.available = true;
     realtimeMock.sessions = [];
     realtimeMock.toolCallOnAudio = false;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not burst-catch up realtime audio after an outbound under-run", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const sent: Array<{ payload: any; at: number }> = [];
+    const pacer = new InkboxRealtimeAudioPacer(
+      async (payload) => {
+        sent.push({ payload, at: Date.now() });
+      },
+      () => "stream-1",
+    );
+    const eightTelephonyChunks = Buffer.alloc(160 * 8, 0xff);
+
+    pacer.sendAudio(eightTelephonyChunks);
+    await vi.advanceTimersByTimeAsync(200);
+    const firstRunMedia = sent.filter((entry) => entry.payload.event === "media");
+    expect(firstRunMedia).toHaveLength(8);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    pacer.sendAudio(eightTelephonyChunks);
+    await Promise.resolve();
+
+    const mediaAfterSecondRunStarts = sent.filter((entry) => entry.payload.event === "media");
+    expect(mediaAfterSecondRunStarts).toHaveLength(9);
+    expect(mediaAfterSecondRunStarts[8].at).toBe(Date.now());
+    pacer.close();
   });
 
   it("prewarms the voice agent path without delivering a visible reply", async () => {

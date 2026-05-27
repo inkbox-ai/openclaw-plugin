@@ -124,9 +124,9 @@ const DEFAULT_VOICE_AGENT_PREWARM_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_VOICE_AGENT_PREWARM_TIMEOUT_MS = 70 * 1000;
 const TELEPHONY_CHUNK_BYTES = 160;
 const TELEPHONY_CHUNK_MS = 20;
-const REALTIME_AUDIO_START_BUFFER_CHUNKS = 4;
-const REALTIME_AUDIO_MAX_CATCHUP_CHUNKS = 6;
-const REALTIME_AUDIO_MAX_START_BUFFER_MS = 80;
+const REALTIME_AUDIO_START_BUFFER_CHUNKS = 8;
+const REALTIME_AUDIO_MAX_START_BUFFER_MS = 160;
+const REALTIME_AUDIO_STALE_CLOCK_MS = TELEPHONY_CHUNK_MS * 2;
 const REALTIME_POST_CALL_ACTION_TOOL_NAME = "inkbox_register_post_call_action";
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
@@ -199,7 +199,7 @@ class RealtimeMulawSpeechStartDetector {
   }
 }
 
-class InkboxRealtimeAudioPacer {
+export class InkboxRealtimeAudioPacer {
   private queue: Array<Buffer | "done"> = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private closed = false;
@@ -322,13 +322,11 @@ class InkboxRealtimeAudioPacer {
       }, this.nextSendAt - now);
       return;
     }
-    const dueChunks =
-      1 + Math.min(
-        REALTIME_AUDIO_MAX_CATCHUP_CHUNKS - 1,
-        Math.floor(Math.max(0, now - this.nextSendAt) / TELEPHONY_CHUNK_MS),
-      );
+    if (now - this.nextSendAt > REALTIME_AUDIO_STALE_CLOCK_MS) {
+      this.nextSendAt = now;
+    }
     this.draining = true;
-    void this.drainDue(dueChunks)
+    void this.drainDue(1)
       .catch(() => {})
       .finally(() => {
         this.draining = false;
@@ -377,6 +375,10 @@ class InkboxRealtimeAudioPacer {
         this.timer = undefined;
         this.pump();
       }, delay);
+    } else if (!this.closed) {
+      this.started = false;
+      this.bufferingSince = 0;
+      this.nextSendAt = 0;
     }
   }
 }
