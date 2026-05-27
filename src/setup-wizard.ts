@@ -1,5 +1,7 @@
 import {
+  InkboxAPIError,
   Inkbox,
+  type AgentIdentity,
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_CLAIMED,
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED,
   AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED,
@@ -25,8 +27,142 @@ export interface WizardResult {
   };
 }
 
+const SMS_OPT_IN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+const SMS_OPT_IN_POLL_MS = 3000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isStartText(text: string | null | undefined): boolean {
+  return text?.trim().toUpperCase() === "START";
+}
+
+function normalizeOptional(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function summarizeIdentity(identity: {
+  agentHandle: string;
+  displayName?: string | null;
+  emailAddress?: string | null;
+}): string {
+  const parts = [identity.agentHandle];
+  if (identity.displayName) parts.push(`display=${identity.displayName}`);
+  if (identity.emailAddress) parts.push(`email=${identity.emailAddress}`);
+  return parts.join("  ");
+}
+
+async function discoverAgentIdentityHandle(
+  client: Inkbox,
+  env: NodeJS.ProcessEnv,
+  prompter: Prompter,
+): Promise<string> {
+  const fromEnv = env.INKBOX_IDENTITY?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  try {
+    const identities = await client.listIdentities();
+    if (identities.length === 1) {
+      return identities[0].agentHandle;
+    }
+    if (identities.length > 1) {
+      console.log("This key can see multiple identities:");
+      identities.forEach((i, idx) => console.log(`  ${idx + 1}. ${i.agentHandle}`));
+      const pick = await prompter.ask("Pick identity (1..N)", "1");
+      const idx = parseInt(pick, 10);
+      if (!Number.isNaN(idx) && idx >= 1 && idx <= identities.length) {
+        return identities[idx - 1].agentHandle;
+      }
+    }
+  } catch {
+    // Some key states may not allow listIdentities; fall back to prompt.
+  }
+  return prompter.ask("Identity handle this key is bound to (lowercase, 3-63 chars)");
+}
+
+async function waitForSmsStart(params: {
+  identity: AgentIdentity;
+  ownerNumber?: string;
+}): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < SMS_OPT_IN_WAIT_TIMEOUT_MS) {
+    const texts = await params.identity.listTexts({ limit: 25 });
+    const found = texts.some((text) => {
+      if (text.direction !== "inbound" || !isStartText(text.text)) {
+        return false;
+      }
+      return !params.ownerNumber || text.remotePhoneNumber === params.ownerNumber;
+    });
+    if (found) {
+      console.log("Received START opt-in text.");
+      return;
+    }
+    await sleep(SMS_OPT_IN_POLL_MS);
+  }
+  console.log(
+    "Did not observe START before the wait timed out. SMS may still fail with recipient_not_opted_in until the recipient texts START to the Inkbox number.",
+  );
+}
+
+async function runSelfSignup(params: {
+  env: NodeJS.ProcessEnv;
+  prompter: Prompter;
+}): Promise<{ apiKey: string; identityHandle: string }> {
+  const humanEmail = await params.prompter.ask("Your email address for Inkbox verification");
+  const agentHandle = normalizeOptional(
+    await params.prompter.ask("Requested agent handle (optional)"),
+  );
+  const displayName = normalizeOptional(
+    await params.prompter.ask("Agent display name (optional)"),
+  );
+  const noteToHuman =
+    normalizeOptional(
+      await params.prompter.ask(
+        "Verification email note",
+        "OpenClaw Inkbox plugin setup",
+      ),
+    ) ?? "OpenClaw Inkbox plugin setup";
+  try {
+    const signup = await Inkbox.signup(
+      {
+        humanEmail,
+        noteToHuman,
+        ...(agentHandle ? { agentHandle } : {}),
+        ...(displayName ? { displayName } : {}),
+      },
+      { baseUrl: params.env.INKBOX_BASE_URL },
+    );
+    console.log(`Created Inkbox agent ${signup.agentHandle} (${signup.emailAddress}).`);
+    console.log(signup.message);
+    const code = normalizeOptional(
+      await params.prompter.ask("Verification code from email (leave blank to verify later)"),
+    );
+    if (code) {
+      await Inkbox.verifySignup(
+        signup.apiKey,
+        { verificationCode: code },
+        { baseUrl: params.env.INKBOX_BASE_URL },
+      );
+      console.log("Signup verified.");
+    } else {
+      console.log("Signup is unverified. Verify from email before relying on unrestricted delivery.");
+    }
+    return { apiKey: signup.apiKey, identityHandle: signup.agentHandle };
+  } catch (error) {
+    if (error instanceof InkboxAPIError && (error.statusCode === 409 || error.statusCode === 422)) {
+      throw new Error(
+        `Self-signup failed (${error.statusCode}). The handle/email may be unavailable or invalid: ${typeof error.detail === "string" ? error.detail : JSON.stringify(error.detail)}`,
+      );
+    }
+    throw error;
+  }
+}
+
 // Three-branch wizard:
-//   A. No apiKey yet  → direct to web signup (self-signup SDK flow lands later)
+//   A. No apiKey yet  → self-signup or prompt for an existing key
 //   B. apiKey + admin → pick an existing identity or create one, then mint
 //                       an agent-scoped key bound to it; rest of flow runs on
 //                       the agent-scoped key
@@ -38,22 +174,39 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
 
   console.log("Inkbox plugin setup\n");
 
+  const existingApiKey = env.INKBOX_API_KEY?.trim();
+  const existingIdentity = env.INKBOX_IDENTITY?.trim();
+  if (existingApiKey && existingIdentity) {
+    const reconfigure = await prompter.confirm(
+      `Inkbox is already configured for identity ${existingIdentity}. Reconfigure?`,
+      false,
+    );
+    if (!reconfigure) {
+      return {
+        ok: true,
+        message: "existing config kept",
+        config: {
+          apiKey: existingApiKey,
+          identity: existingIdentity,
+          ...(env.INKBOX_SIGNING_KEY ? { signingKey: env.INKBOX_SIGNING_KEY } : {}),
+        },
+      };
+    }
+  }
+
   // Step 1 — read or prompt for API key.
-  let apiKey = env.INKBOX_API_KEY?.trim();
+  let apiKey = existingApiKey;
+  let signupIdentityHandle: string | undefined;
   if (!apiKey) {
     console.log("No INKBOX_API_KEY in env.");
     const hasAccount = await prompter.confirm("Do you have an Inkbox account?", true);
     if (!hasAccount) {
-      console.log(
-        "\nThe in-CLI signup flow isn't wired yet. For now, please:\n" +
-          "  1. Open https://inkbox.ai/console\n" +
-          "  2. Sign up (email-verified, ~1 min).\n" +
-          "  3. Mint an agent-scoped API key.\n" +
-          "  4. Re-run `openclaw inkbox setup` with INKBOX_API_KEY set.\n",
-      );
-      return { ok: false, message: "self-signup not yet implemented in CLI" };
+      const signup = await runSelfSignup({ env, prompter });
+      apiKey = signup.apiKey;
+      signupIdentityHandle = signup.identityHandle;
+    } else {
+      apiKey = await prompter.ask("Paste your Inkbox API key (starts with ApiKey_)");
     }
-    apiKey = await prompter.ask("Paste your Inkbox API key (starts with ApiKey_)");
     if (!apiKey || !apiKey.startsWith("ApiKey_")) {
       return { ok: false, message: "Invalid API key format. Expected an ApiKey_... string." };
     }
@@ -91,7 +244,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     const identities = await client.listIdentities();
     if (identities.length > 0) {
       console.log("Existing identities:");
-      identities.forEach((i, idx) => console.log(`  ${idx + 1}. ${i.agentHandle}`));
+      identities.forEach((i, idx) => console.log(`  ${idx + 1}. ${summarizeIdentity(i)}`));
       console.log("  N. Create a new identity");
       const pick = await prompter.ask("Pick (1..N)", "N");
       const idx = parseInt(pick, 10);
@@ -99,12 +252,18 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
         identityHandle = identities[idx - 1].agentHandle;
       } else {
         identityHandle = await prompter.ask("New identity handle (lowercase, 3-63 chars, alphanum+dash)");
-        await client.createIdentity(identityHandle);
+        const displayName = normalizeOptional(await prompter.ask("Display name (optional)"));
+        await client.createIdentity(identityHandle, {
+          ...(displayName ? { displayName } : {}),
+        });
         console.log(`Created identity ${identityHandle}.`);
       }
     } else {
       identityHandle = await prompter.ask("New identity handle (lowercase, 3-63 chars, alphanum+dash)");
-      await client.createIdentity(identityHandle);
+      const displayName = normalizeOptional(await prompter.ask("Display name (optional)"));
+      await client.createIdentity(identityHandle, {
+        ...(displayName ? { displayName } : {}),
+      });
       console.log(`Created identity ${identityHandle}.`);
     }
     // Mint an agent-scoped key bound to this identity. The plugin should use
@@ -121,14 +280,8 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     subtype === AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED
   ) {
     // Branch C — agent scoped (preferred).
-    const fromEnv = env.INKBOX_IDENTITY?.trim();
-    if (fromEnv) {
-      identityHandle = fromEnv;
-    } else {
-      identityHandle = await prompter.ask(
-        "Identity handle this key is bound to (lowercase, 3-63 chars)",
-      );
-    }
+    identityHandle =
+      signupIdentityHandle ?? (await discoverAgentIdentityHandle(client, env, prompter));
   } else {
     return {
       ok: false,
@@ -141,7 +294,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   const agentClient = subtype === AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED
     ? new Inkbox({ apiKey: agentApiKey, baseUrl })
     : client;
-  const identity = await agentClient.getIdentity(identityHandle);
+  let identity = await agentClient.getIdentity(identityHandle);
 
   // Step 4 — optional phone provision.
   if (!identity.phoneNumber) {
@@ -150,30 +303,68 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       true,
     );
     if (wantPhone) {
-      const phone = await identity.provisionPhoneNumber({ type: "local" });
+      const state = normalizeOptional(
+        await prompter.ask("US state for the local number (optional, e.g. NY)"),
+      );
+      const phone = await identity.provisionPhoneNumber({
+        type: "local",
+        ...(state ? { state } : {}),
+      });
       console.log(
         `Provisioned ${phone.number}. SMS will be ready in ~10–15 min once 10DLC carrier propagation completes.`,
       );
+      identity = await identity.refresh();
+    }
+  }
+
+  if (identity.phoneNumber) {
+    const ownerNumber = normalizeOptional(
+      await prompter.ask(
+        "Owner phone number to wait for START opt-in (optional E.164, e.g. +15551234567)",
+      ),
+    );
+    const shouldWaitForStart = await prompter.confirm(
+      "Wait up to 5 minutes for that recipient to text START to this Inkbox number?",
+      Boolean(ownerNumber),
+    );
+    if (shouldWaitForStart) {
+      await waitForSmsStart({ identity, ownerNumber });
     }
   }
 
   // Step 5 — signing key for inbound webhooks.
-  const wantSigningKey = await prompter.confirm(
-    "Generate a webhook signing key now? (Required to receive inbound email/SMS/calls.)",
-    true,
-  );
-  let signingKey: string | undefined;
-  if (wantSigningKey) {
-    const sk = await agentClient.createSigningKey();
-    signingKey = (sk as any).signingKey ?? (sk as any).key;
-    if (!signingKey) {
-      console.log("⚠️  Signing key call succeeded but the response shape was unexpected — fall back to creating one in the Console.");
-    } else {
-      console.log(`Signing key: ${signingKey.slice(0, 14)}…  (save this — it won't be shown again).\n`);
+  let signingKey = normalizeOptional(env.INKBOX_SIGNING_KEY ?? "");
+  if (signingKey) {
+    const keepExisting = await prompter.confirm("Use existing INKBOX_SIGNING_KEY?", true);
+    if (!keepExisting) signingKey = undefined;
+  }
+  if (!signingKey) {
+    const pasteExisting = await prompter.confirm(
+      "Do you already have a webhook signing key to keep using?",
+      false,
+    );
+    if (pasteExisting) {
+      signingKey = normalizeOptional(await prompter.ask("Paste webhook signing key"));
+    }
+  }
+  if (!signingKey) {
+    const wantSigningKey = await prompter.confirm(
+      "Generate/rotate the org webhook signing key now? This is required for inbound email/SMS/calls and replaces the previous org-level signing secret.",
+      true,
+    );
+    if (wantSigningKey) {
+      const sk = await agentClient.createSigningKey();
+      signingKey = (sk as any).signingKey ?? (sk as any).key;
+      if (!signingKey) {
+        console.log("⚠️  Signing key call succeeded but the response shape was unexpected — fall back to creating one in the Console.");
+      } else {
+        console.log(`Signing key: ${signingKey.slice(0, 14)}…  (save this — it won't be shown again).\n`);
+      }
     }
   }
 
   // Step 6 — persist non-secret state for future doctor/CLI runs.
+  identity = await identity.refresh();
   await writeIdentityState({
     identityHandle,
     emailAddress: identity.mailbox?.emailAddress ?? null,

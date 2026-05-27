@@ -27,7 +27,6 @@ import {
   type OutboundCallContext,
 } from "../outbound-call-context.js";
 import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
-import { markInkboxVoiceTurnActive } from "../voice-guard.js";
 
 type ChannelRuntime = any;
 
@@ -1133,12 +1132,6 @@ async function dispatchInboundTurn(
     },
   });
 
-  const clearVoiceGuard =
-    opts.turn.mode === "voice"
-      ? markInkboxVoiceTurnActive(effectiveSessionKey, {
-          callId: callIdFromTurn(opts.turn),
-        })
-      : undefined;
   const replyOptions =
     opts.replyOptionsOverride ??
     (opts.turn.mode === "voice"
@@ -1149,9 +1142,12 @@ async function dispatchInboundTurn(
           thinkingLevelOverride: "minimal",
           abortSignal: opts.dispatchAbortSignal,
           skillFilter: [
-            "inkbox-call-handler",
+            "inkbox-outbound-calling",
+            "inkbox-call-review",
             "inkbox-contact-lookup",
             "inkbox-notes-memory",
+            "inkbox-sms-responder",
+            "inkbox-email-triage",
           ],
         }
       : undefined);
@@ -1187,32 +1183,28 @@ async function dispatchInboundTurn(
       );
     },
   };
-  try {
-    await core.turn.runAssembled({
-      cfg: opts.cfg as any,
-      channel: "inkbox",
-      accountId: opts.account.accountId,
-      agentId: route.agentId,
-      routeSessionKey: effectiveSessionKey,
-      storePath,
-      ctxPayload,
-      recordInboundSession: core.session.recordInboundSession,
-      dispatchReplyWithBufferedBlockDispatcher:
-        core.reply.dispatchReplyWithBufferedBlockDispatcher,
-      ...(replyOptions ? { replyOptions } : {}),
-      delivery,
-      replyPipeline: {},
-      record: {
-        onRecordError: (error: unknown) => {
-          opts.logger?.warn?.(
-            `Inkbox session record failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        },
+  await core.turn.runAssembled({
+    cfg: opts.cfg as any,
+    channel: "inkbox",
+    accountId: opts.account.accountId,
+    agentId: route.agentId,
+    routeSessionKey: effectiveSessionKey,
+    storePath,
+    ctxPayload,
+    recordInboundSession: core.session.recordInboundSession,
+    dispatchReplyWithBufferedBlockDispatcher:
+      core.reply.dispatchReplyWithBufferedBlockDispatcher,
+    ...(replyOptions ? { replyOptions } : {}),
+    delivery,
+    replyPipeline: {},
+    record: {
+      onRecordError: (error: unknown) => {
+        opts.logger?.warn?.(
+          `Inkbox session record failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
       },
-    });
-  } finally {
-    clearVoiceGuard?.();
-  }
+    },
+  });
 }
 
 async function runRealtimeAgentConsult(
@@ -1547,7 +1539,7 @@ export async function prewarmInkboxAgent(
         thinkingLevelOverride: "minimal",
         abortSignal: abortController.signal,
         suppressDefaultToolProgressMessages: true,
-        skillFilter: ["inkbox-call-handler"],
+        skillFilter: ["inkbox-call-review"],
       },
       deliveryOverride: {
         deliver: async () => ({ visibleReplySent: false }),
@@ -2073,7 +2065,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       dispatch: async (segments, abortSignal, shouldDeliverReply) => {
         const turnId = lastVoiceTranscriptTurnId(segments);
         const text = mergeVoiceTranscriptSegments(segments);
-        const body = `[inkbox:voice_call call_id=${meta.callId}${renderIdentityMarker(opts.account)} segments=${segments.length} | ${renderContactMarker(meta.contact)}]\n${text}`;
+        const body = [
+          `[inkbox:voice_call call_id=${meta.callId}${renderIdentityMarker(opts.account)} segments=${segments.length} reply_mode=voice_tts allow_separate_followup_tools_when_caller_explicitly_asks=true | ${renderContactMarker(meta.contact)}]`,
+          "You are on a live Inkbox phone call. Reply normally in text so the plugin speaks it over the active call. Do not substitute SMS or email for the spoken call response unless the caller explicitly asks you to send a separate follow-up/message.",
+          text,
+        ].join("\n");
         await dispatchInboundTurn({
           ...opts,
           activeCalls,

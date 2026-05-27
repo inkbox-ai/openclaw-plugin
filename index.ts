@@ -16,13 +16,14 @@ import { registerSmsReads } from "./src/tools/sms-reads.js";
 import { registerCallReads } from "./src/tools/call-reads.js";
 import { registerContactTools } from "./src/tools/contacts.js";
 import { registerNoteTools } from "./src/tools/notes.js";
+import { registerContactRuleTools } from "./src/tools/contact-rules.js";
+import { registerIdentityAccessTools } from "./src/tools/access.js";
 import { registerVaultTools } from "./src/tools/vault.js";
 import { registerWhoami } from "./src/tools/whoami.js";
 import { registerPlaceCall } from "./src/tools/place-call.js";
-import { registerRateStatus } from "./src/tools/rate-status.js";
 import { createVaultRuntime } from "./src/vault.js";
-import { registerInkboxVoiceToolGuard } from "./src/voice-guard.js";
 import { deriveConfiguredCallWebsocketUrl } from "./src/call-websocket.js";
+import { registerInkboxHealthChecks } from "./src/health.js";
 
 type OpenClawChannelEntry = {
   id: string;
@@ -36,6 +37,8 @@ type OpenClawChannelEntry = {
 
 // CLI registrar is lazy-imported via api.registerCli so we don't pay the
 // commander/Inkbox SDK cost on every plugin load.
+
+registerInkboxHealthChecks();
 
 function registerInkboxCli(api: any): void {
   api.registerCli?.(
@@ -110,6 +113,8 @@ function registerInkboxTools(api: any): void {
   // filters list/lookup/get to entries this identity has access to.
   registerContactTools(api, runtime);
   registerNoteTools(api, runtime);
+  registerContactRuleTools(api, runtime);
+  registerIdentityAccessTools(api, runtime);
 
   // Vault tools. All optional; user must opt in via tools.allow. Vault
   // unlock key is read once on first use from $INKBOX_VAULT_KEY (or a
@@ -121,7 +126,6 @@ function registerInkboxTools(api: any): void {
 
   // Diagnostic / introspection tools.
   registerWhoami(api, runtime);
-  registerRateStatus(api, runtime);
 }
 
 const entry: OpenClawChannelEntry = defineChannelPluginEntry({
@@ -131,7 +135,6 @@ const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   plugin: inkboxPlugin,
   registerCliMetadata: registerInkboxCli,
   registerFull(api: any) {
-    registerInkboxVoiceToolGuard(api);
     registerInkboxTools(api);
     registerInkboxPublicUrlInboundRoutes(api);
   },

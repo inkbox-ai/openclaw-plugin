@@ -2,7 +2,7 @@
 
 [Inkbox](https://inkbox.ai) plugin for [OpenClaw](https://openclaw.ai). Gives the agent a working mailbox, phone number, and contact/note/credential access under an Inkbox agent identity — outbound and inbound — without forking OpenClaw.
 
-> **Status:** outbound tools, reads, vault, bundled skills, SMS batching, and real OpenClaw channel ingress for Inkbox email/SMS/voice are shipped. **Not yet:** full interactive setup wizard and ClawHub publish. See [PLAN.md](./PLAN.md) for the full roadmap.
+> **Status:** outbound tools, reads, vault, bundled skills, SMS batching, setup wizard, OpenClaw doctor checks, and real OpenClaw channel ingress for Inkbox email/SMS/voice are shipped. **Not yet:** ClawHub publish. See [PLAN.md](./PLAN.md) for the full roadmap.
 
 ## Install (development)
 
@@ -102,12 +102,14 @@ Realtime voice example:
 - Voice: `inkbox_list_calls`, `inkbox_list_call_transcripts`
 - Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact` *(opt)*, `inkbox_delete_contact` *(opt)*, `inkbox_export_contact_vcard` *(opt)*
 - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`, `inkbox_update_note` *(opt)*, `inkbox_delete_note` *(opt)*
+- Contact rules: `inkbox_list_mail_contact_rules` *(opt)*, `inkbox_create_mail_contact_rule` *(opt)*, `inkbox_update_mail_contact_rule` *(opt)*, `inkbox_delete_mail_contact_rule` *(opt)*, `inkbox_list_phone_contact_rules` *(opt)*, `inkbox_create_phone_contact_rule` *(opt)*, `inkbox_update_phone_contact_rule` *(opt)*, `inkbox_delete_phone_contact_rule` *(opt)*
+- Identity access: `inkbox_list_contact_access` *(opt)*, `inkbox_grant_contact_access` *(opt)*, `inkbox_revoke_contact_access` *(opt)*, `inkbox_list_note_access` *(opt)*, `inkbox_grant_note_access` *(opt)*, `inkbox_revoke_note_access` *(opt)*
 
 **Vault** — all optional, gate plaintext access:
 - `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
 
 **Diagnostic** — optional:
-- `inkbox_whoami`, `inkbox_rate_status`
+- `inkbox_whoami`
 
 Enable in OpenClaw config:
 
@@ -124,24 +126,28 @@ To enable optional tools, list them by name (`tools: { allow: ["inkbox", "inkbox
 ```
 openclaw inkbox doctor    # diagnose config + connection
 openclaw inkbox whoami    # one-line auth/identity summary
-openclaw inkbox setup     # interactive wizard (stub — prints manual flow)
+openclaw inkbox setup     # interactive setup wizard
 ```
 
-`doctor` and `whoami` read `INKBOX_API_KEY` / `INKBOX_IDENTITY` / `INKBOX_BASE_URL` / `INKBOX_SIGNING_KEY` from env.
+`doctor` and `whoami` read `INKBOX_API_KEY` / `INKBOX_IDENTITY` / `INKBOX_BASE_URL` / `INKBOX_SIGNING_KEY` from env. The plugin also registers structured `openclaw doctor` checks under the `inkbox/*` namespace.
 
 ## Bundled skills
 
-Seven SKILL.md files under `skills/`:
+Eleven SKILL.md files under `skills/`:
 
 | Skill | Triggers when… |
 |---|---|
-| `inkbox-onboarding` | first-time setup, "Inkbox plugin is not configured" |
+| `inkbox-troubleshooting` | runtime/config errors, failed tools, readiness issues |
 | `inkbox-email-triage` | checking email, processing unread, replying on threads |
 | `inkbox-sms-responder` | sending or replying to SMS |
-| `inkbox-call-handler` | reviewing call history or transcripts |
+| `inkbox-outbound-calling` | placing calls to numbers or contacts |
+| `inkbox-call-review` | reviewing call history or transcripts |
 | `inkbox-contact-lookup` | "who is X" / resolving names to contacts |
+| `inkbox-contact-rules` | managing mail/phone allow and block rules |
+| `inkbox-identity-access` | granting/revoking contact or note visibility across identities |
 | `inkbox-notes-memory` | saving, retrieving, or updating persistent Inkbox notes |
 | `inkbox-credential-use` | "log into X" / fetching a TOTP code |
+| `inkbox-outreach-sequence` | multi-step outreach across email/SMS |
 
 Each skill ends with a pointer to `https://inkbox.ai/llms.txt` and `https://inkbox.ai/docs/all.md` as a raw-docs fallback when behavior questions go past what's bundled.
 
@@ -159,7 +165,6 @@ See [PLAN.md](./PLAN.md) for the full architecture write-up and 8-phase roadmap.
 
 ## Roadmap (what's still ahead)
 
-- Interactive `openclaw inkbox setup` wizard (port of the 3-branch Hermes Agent flow)
 - ClawHub publishing (`clawhub:inkbox/openclaw-plugin`)
 - More end-to-end coverage against a live Inkbox tunnel
 

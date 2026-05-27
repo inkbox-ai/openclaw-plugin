@@ -110,7 +110,6 @@ import {
   decorateCallWebsocketUrlWithContext,
   registerOutboundCallContext,
 } from "../../src/outbound-call-context.js";
-import { shouldBlockInkboxOutboundToolDuringVoice } from "../../src/voice-guard.js";
 
 class FakeInkboxWebSocket {
   readonly headers = new Map<string, string>();
@@ -265,12 +264,6 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     );
     expect(sendText).not.toHaveBeenCalled();
     expect(bridge.activeCalls.size).toBe(0);
-    expect(
-      shouldBlockInkboxOutboundToolDuringVoice(
-        "inkbox_send_sms",
-        "agent:main:inkbox:direct:+15551234567",
-      ),
-    ).toBe(false);
 
     const frames = parseSentTextFrames(ws);
     expect(frames.filter((frame) => frame.event === "text" && frame.delta)).toEqual([
@@ -382,21 +375,16 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     ]);
   });
 
-  it("marks the route session as voice-active during agent processing", async () => {
+  it("puts voice reply mode instructions in the agent-visible turn body", async () => {
     const { runtime } = createRuntime();
     const runAssembled = vi.fn(async (params: any) => {
-      expect(
-        shouldBlockInkboxOutboundToolDuringVoice(
-          "inkbox_send_sms",
-          "agent:main:inkbox:call:call-1",
-        ),
-      ).toBe(true);
-      expect(
-        shouldBlockInkboxOutboundToolDuringVoice(
-          "inkbox_send_sms",
-          "agent:main:inkbox:direct:+15551234567",
-        ),
-      ).toBe(false);
+      expect(params.ctxPayload.message.bodyForAgent).toContain("reply_mode=voice_tts");
+      expect(params.ctxPayload.message.bodyForAgent).toContain(
+        "allow_separate_followup_tools_when_caller_explicitly_asks=true",
+      );
+      expect(params.ctxPayload.message.bodyForAgent).toContain(
+        "Do not substitute SMS or email for the spoken call response unless the caller explicitly asks",
+      );
       await params.delivery.deliver({ text: "Still on the call." });
     });
     const channelRuntime = {
@@ -431,12 +419,6 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     await bridge.wsHandler(ws as any);
 
     expect(runAssembled).toHaveBeenCalledTimes(1);
-    expect(
-      shouldBlockInkboxOutboundToolDuringVoice(
-        "inkbox_send_sms",
-        "agent:main:inkbox:call:call-1",
-      ),
-    ).toBe(false);
   });
 
   it("bridges raw Inkbox media through the OpenClaw realtime voice provider", async () => {

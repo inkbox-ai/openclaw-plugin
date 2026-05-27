@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdir, readFile, writeFile, chmod } from "node:fs/promises";
+import { mkdir, readFile, writeFile, chmod, rename } from "node:fs/promises";
 
 // Plugin-local state persisted across sessions. Captures the resolved
 // identity properties so non-gateway processes (the CLI, future doctor
@@ -46,9 +46,12 @@ export async function readIdentityState(): Promise<InkboxIdentityState | null> {
 export async function writeIdentityState(state: InkboxIdentityState): Promise<void> {
   const paths = statePaths();
   await ensureStateDir(paths);
-  await writeFile(paths.identityState, JSON.stringify(state, null, 2), "utf8");
+  const tmp = `${paths.identityState}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, JSON.stringify(state, null, 2), "utf8");
   // 0600 because the file path itself can leak the identity handle (e.g.
   // shoulder-surfing of `ls ~/.openclaw/inkbox/`). State contents aren't
   // secret but this matches the dir mode.
+  await chmod(tmp, 0o600);
+  await rename(tmp, paths.identityState);
   await chmod(paths.identityState, 0o600);
 }

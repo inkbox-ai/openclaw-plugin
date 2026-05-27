@@ -31,9 +31,19 @@ export function registerWhoami(api: any, runtime: InkboxRuntime): void {
             organizationId: info.organizationId,
             identity: {
               handle: identity.agentHandle,
+              id: identity.id,
+              displayName: identity.displayName,
               emailAddress: identity.mailbox?.emailAddress ?? null,
+              sendingDomain: identity.mailbox?.sendingDomain ?? null,
+              mailboxFilterMode: identity.mailbox?.filterMode ?? null,
               phoneNumber: identity.phoneNumber?.number ?? null,
+              phoneNumberId: identity.phoneNumber?.id ?? null,
+              phoneNumberType: identity.phoneNumber?.type ?? null,
               smsStatus: identity.phoneNumber?.smsStatus ?? null,
+              smsErrorCode: identity.phoneNumber?.smsErrorCode ?? null,
+              incomingCallAction: identity.phoneNumber?.incomingCallAction ?? null,
+              phoneFilterMode: identity.phoneNumber?.filterMode ?? null,
+              tunnelPublicHost: identity.tunnel?.publicHost ?? null,
             },
           };
           return toolText(formatJson(summary));

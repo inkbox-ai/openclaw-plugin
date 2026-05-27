@@ -7,9 +7,17 @@ All notable changes to `@inkbox/openclaw-plugin` are listed here. The format fol
 ### Added
 
 - Inbound HTTP `publicUrl` override path (skip the Inkbox tunnel when OpenClaw is already publicly reachable).
-- `inkbox_rate_status` diagnostic tool — surfaces phone-number SMS status and provisioning state.
 - `inkbox_place_call` outbound voice tool (caller provides `clientWebsocketUrl` until the in-plugin audio bridge lands).
 - `inkbox-outreach-sequence` skill covering multi-step outreach over email + SMS.
+- Interactive `openclaw inkbox setup` flow using Inkbox signup, identity discovery/creation, phone provisioning, SMS START opt-in polling, and signing-key handling.
+- Structured `openclaw doctor` health checks under `inkbox/*`.
+- Mail/phone contact-rule tools plus contact/note identity-access grant tools.
+
+### Changed
+
+- `inkbox_whoami` now includes the useful readiness fields that were previously split into `inkbox_rate_status`; the redundant `inkbox_rate_status` tool was removed.
+- `inkbox-onboarding` was re-scoped as `inkbox-troubleshooting`.
+- `inkbox-call-handler` was split into `inkbox-outbound-calling` and `inkbox-call-review`, with active voice-reply rules carried in the call turn itself.
 
 ## [0.1.0] - 2026-05-20
 

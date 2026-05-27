@@ -44,11 +44,10 @@ The Inkbox plugin gives the agent access to contacts visible to the configured i
 - Contact reads are **filtered server-side** by per-identity grants. If a contact doesn't appear in your list/lookup results, this identity doesn't have access — not necessarily that the contact doesn't exist.
 - Contacts created through `inkbox_create_contact` are Inkbox address-book records, not workspace memories.
 - Lookup may return zero results. Don't retry with the same filter; either widen (try `emailDomain` instead of `email`) or fall back to a free-text `list` query.
-- Grant management is admin-only. If the user complains "I can see this contact in the Console but not here," recommend they grant the identity access in the Inkbox Console.
+- Grant management is handled by the `inkbox-identity-access` skill when the user asks to share contacts across Inkbox identities.
 
 ## What this skill does NOT cover
 
-- Granting / revoking contact access (admin-only).
 - Bulk vCard import — that's an admin flow, not exposed as an agent tool.
 - Arbitrary workspace memory. Use Inkbox notes for persistent notes and Inkbox contacts for address-book facts.
 

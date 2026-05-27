@@ -1,6 +1,6 @@
 ---
 name: inkbox-email-triage
-description: Use when the user asks to check email, triage their inbox, reply to messages, or when an inbound `message.received` event has just arrived from Inkbox. Covers reading unread mail, deciding reply vs forward vs archive, and clearing the unread queue.
+description: Use when an inbound email arrives at the agent's Inkbox mailbox, when the user asks the agent to triage its Inkbox inbox or unread queue, or when the user asks the agent to reply/forward/archive mail on its Inkbox identity. Does not cover the human owner's personal email.
 user-invocable: false
 ---
 
@@ -38,12 +38,6 @@ The Inkbox plugin gives you a working mailbox under an agent identity. Use this 
 
 - 403 with `recipient_not_opted_in` — only applies to SMS, not email. If you see this on email, surface it as-is.
 - 404 — message id is wrong or the message has been deleted; skip and move on.
-
-## What this skill does NOT cover
-
-- Granting other identities access to contacts/notes (admin-only, do via the Inkbox Console).
-- Domain-level rule changes (admin-only).
-- Inbound webhook handling — that happens at the plugin level, you just see the events as session input.
 
 ## When you need more — raw Inkbox docs
 

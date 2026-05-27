@@ -316,8 +316,11 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 |---|---|---|
 | `inkbox-email-triage` | "check email", "what's in my inbox", inbound `message.received` event | Walks: list unread → categorize → reply/archive/forward |
 | `inkbox-sms-responder` | "text X", inbound `text.received` event | Conversational SMS reply, conversation-history-aware |
-| `inkbox-call-handler` | inbound call accept | Live call protocol — handle audio bridge, transcript, summary |
+| `inkbox-outbound-calling` | "call X", "place a call to Y" | Place calls from the configured Inkbox phone number |
+| `inkbox-call-review` | "what happened on the call", "show transcripts" | Review call history and transcript segments |
 | `inkbox-contact-lookup` | "who is X", "find email for Y" | Lookup-first; surfaces vcard + notes if access-granted |
+| `inkbox-contact-rules` | "block/allow this sender/number" | Manage mailbox and phone contact rules |
+| `inkbox-identity-access` | "share this contact/note with identity X" | Manage contact/note access grants |
 | `inkbox-credential-use` | "log into X", "I need the TOTP for Y" | Gates plaintext credential access with explicit confirmation |
 | `inkbox-outreach-sequence` | "follow up with X over 3 days" | Multi-step outbound (email + SMS) with delay scheduling |
 
@@ -336,7 +339,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 
 - [ ] `config.allowedRecipients` — array of `+E164` or `email` strings; outbound tools reject any recipient not on the list when set
 - [ ] `config.allowedInboundContactIds` — only open sessions for contacts on this list; others get an auto-reject/auto-ignore
-- [ ] Outbound rate caps surfaced from `placeCall().rateLimit` and SMS 24h limit; expose as a `inkbox_rate_status` tool
+- [x] Phone/mailbox readiness fields surfaced from `inkbox_whoami`; actual rate caps remain attached to send/place-call responses.
 
 ### Idempotency & dedup
 
@@ -350,11 +353,15 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 
 ### Diagnostics
 
-- [ ] `openclaw inkbox doctor` checks:
+- [x] Structured `openclaw doctor` checks under `inkbox/*` for:
   - whoami returns agent-scoped key
-  - tunnel is open and `publicHost` matches mailbox/phone webhook URLs
-  - signing key matches what the SDK would verify
-  - vault status (if vault tools enabled)
+  - required config presence
+  - identity lookup
+  - phone/SMS readiness
+  - cached state freshness
+  - tunnel config conflicts
+- [ ] `openclaw inkbox doctor` parity with the structured checks for tunnel/webhook deep validation
+- [ ] vault status (if vault tools enabled)
 - [ ] Verbose log mode that NEVER prints `apiKey`, `signingKey`, or vault keys
 
 ### Misc
@@ -431,8 +438,23 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 - `inkbox_totp_code` ✱
 
 **Phase 7 — Diagnostics**
-- `inkbox_rate_status` ✱
 - `inkbox_whoami` ✱
+
+**Contact rules + access grants**
+- `inkbox_list_mail_contact_rules` ✱
+- `inkbox_create_mail_contact_rule` ✱
+- `inkbox_update_mail_contact_rule` ✱
+- `inkbox_delete_mail_contact_rule` ✱
+- `inkbox_list_phone_contact_rules` ✱
+- `inkbox_create_phone_contact_rule` ✱
+- `inkbox_update_phone_contact_rule` ✱
+- `inkbox_delete_phone_contact_rule` ✱
+- `inkbox_list_contact_access` ✱
+- `inkbox_grant_contact_access` ✱
+- `inkbox_revoke_contact_access` ✱
+- `inkbox_list_note_access` ✱
+- `inkbox_grant_note_access` ✱
+- `inkbox_revoke_note_access` ✱
 
 ### B. Configuration reference (target state)
 
@@ -526,6 +548,8 @@ openclaw-plugin/
 │   │   ├── reads-calls.ts         # Phase 4
 │   │   ├── contacts.ts            # Phase 4
 │   │   ├── notes.ts               # Phase 4
+│   │   ├── contact-rules.ts       # Phase 7
+│   │   ├── access.ts              # Phase 7
 │   │   └── vault.ts               # Phase 5
 │   ├── inbound/
 │   │   ├── tunnel.ts              # Phase 2a
@@ -542,13 +566,18 @@ openclaw-plugin/
 │   │   ├── setup.ts               # Phase 3
 │   │   ├── doctor.ts              # Phase 3
 │   │   └── whoami.ts              # Phase 3
+│   ├── health.ts                  # Phase 7 — openclaw doctor checks
 │   └── state.ts                   # Phase 3 — ~/.openclaw/inkbox/identity-state.json
 ├── skills/                        # Phase 6
 │   ├── inkbox-email-triage/SKILL.md
 │   ├── inkbox-sms-responder/SKILL.md
-│   ├── inkbox-call-handler/SKILL.md
+│   ├── inkbox-outbound-calling/SKILL.md
+│   ├── inkbox-call-review/SKILL.md
 │   ├── inkbox-contact-lookup/SKILL.md
+│   ├── inkbox-contact-rules/SKILL.md
+│   ├── inkbox-identity-access/SKILL.md
 │   ├── inkbox-credential-use/SKILL.md
+│   ├── inkbox-troubleshooting/SKILL.md
 │   └── inkbox-outreach-sequence/SKILL.md
 └── tests/
     ├── tools/                     # one file per tool group
