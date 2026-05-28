@@ -11,10 +11,10 @@ export interface InboundCallDecision {
   clientWebsocketUrl?: string;
 }
 
-// Resolve the "remote party" contact id from a webhook payload. Mail events
-// carry an array of contacts with `bucket` (from/cc/to/bcc); we use the
-// from-bucket for the allowlist decision. Text and call payloads have a
-// singular `contact` field.
+// Resolve the "remote party" contact id from a webhook payload. Mail
+// events surface contacts per recipient bucket; we pick the from-bucket
+// for the allowlist decision. Text and call events surface a list of
+// peer contacts; we use the first entry.
 function resolveRemoteContactId(parsed: any, kind: "mail" | "text" | "call"): string | null {
   if (kind === "mail") {
     const contacts = parsed?.data?.contacts;
@@ -23,10 +23,15 @@ function resolveRemoteContactId(parsed: any, kind: "mail" | "text" | "call"): st
     return fromContact?.id ?? null;
   }
   if (kind === "text") {
-    return parsed?.data?.contact?.id ?? null;
+    const contacts = parsed?.data?.contacts;
+    return Array.isArray(contacts) && contacts.length > 0
+      ? (contacts[0]?.id ?? null)
+      : null;
   }
-  // call: flat payload, contact at top level.
-  return parsed?.contact?.id ?? null;
+  const contacts = parsed?.contacts;
+  return Array.isArray(contacts) && contacts.length > 0
+    ? (contacts[0]?.id ?? null)
+    : null;
 }
 
 export interface InboundHandlers {

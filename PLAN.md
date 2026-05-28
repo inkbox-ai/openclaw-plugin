@@ -73,7 +73,7 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 
 - [x] **Phase 0** — Scaffold (initial commit)
 - [x] **Phase 1** — Outbound tools: `send_email` ✅, `send_sms` ✅, `forward_email` ✅, `place_call` ✅ (caller-provided WS until in-plugin bridge lands)
-- [~] **Phase 2** — Inbound: tunnel ✅, webhook signature verify ✅, dedup ✅, event dispatch ✅, channel plugin promotion ⏳
+- [~] **Phase 2** — Inbound: tunnel ✅, webhook signature verify ✅, dedup ✅, event dispatch ✅, channel plugin promotion ⏳ (now uses the `webhook_subscriptions` API for mail/text; incoming-call URL stays on the phone number)
 - [~] **Phase 3** — Setup wizard: CLI scaffold ✅, doctor ✅ (now surfaces cached state), whoami ✅, interactive setup ✅ (3-branch flow minus self-signup which still directs to web Console)
 - [x] **Phase 4** — Read/lifecycle tools: 22 tools across email reads, SMS reads, call reads, contacts, notes
 - [x] **Phase 5** — Vault + credentials + TOTP — 5 optional tools, env-var unlock

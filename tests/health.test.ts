@@ -18,8 +18,19 @@ const sdk = vi.hoisted(() => {
 
   const whoami = vi.fn();
   const getIdentity = vi.fn();
-  const Inkbox = vi.fn(() => ({ whoami, getIdentity }));
-  return { Inkbox, InkboxAPIError: MockInkboxAPIError, whoami, getIdentity };
+  const subscriptionsList = vi.fn();
+  const Inkbox = vi.fn(() => ({
+    whoami,
+    getIdentity,
+    webhooks: { subscriptions: { list: subscriptionsList } },
+  }));
+  return {
+    Inkbox,
+    InkboxAPIError: MockInkboxAPIError,
+    whoami,
+    getIdentity,
+    subscriptionsList,
+  };
 });
 
 vi.mock("@inkbox/sdk", () => ({
@@ -35,6 +46,8 @@ beforeEach(async () => {
   sdk.Inkbox.mockClear();
   sdk.whoami.mockReset();
   sdk.getIdentity.mockReset();
+  sdk.subscriptionsList.mockReset();
+  sdk.subscriptionsList.mockResolvedValue([]);
 });
 
 afterEach(async () => {
@@ -132,5 +145,169 @@ describe("detectInkboxHealthFindings", () => {
     expect(ids(findings)).toEqual(["inkbox/identity-not-found"]);
     expect(findings[0].severity).toBe("error");
     expect(findings[0].message).toContain("missing-agent");
+  });
+
+  it("emits no subscription findings when mail + text subs are wired correctly", async () => {
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "api_key.agent_scoped.claimed",
+      organizationId: "org-1",
+    });
+    const expectedUrl = "https://example.com/hooks/inkbox/webhook";
+    sdk.getIdentity.mockResolvedValue({
+      mailbox: { id: "mb-1", emailAddress: "agent@inkboxmail.com" },
+      phoneNumber: {
+        id: "phone-1",
+        number: "+15551234567",
+        smsStatus: "ready",
+        incomingCallAction: "auto_accept",
+        clientWebsocketUrl: "wss://example.com/hooks/inkbox/phone/media/ws",
+      },
+      tunnel: { publicHost: "agent.inkboxwire.com" },
+    });
+    sdk.subscriptionsList.mockImplementation(async (filter: any) => [
+      {
+        id: filter.mailboxId ? "sub-mail" : "sub-text",
+        organizationId: "org-1",
+        mailboxId: filter.mailboxId ?? null,
+        phoneNumberId: filter.phoneNumberId ?? null,
+        url: expectedUrl,
+        eventTypes: filter.mailboxId
+          ? ["message.received", "message.sent"]
+          : ["text.received", "text.delivered"],
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+
+    const findings = await detectInkboxHealthFindings(
+      {
+        cfg: {
+          channels: {
+            inkbox: {
+              apiKey: "ApiKey_test",
+              identity: "agent",
+              signingKey: "whsec_test",
+              publicUrl: "https://example.com/hooks",
+            },
+          },
+        } as any,
+      },
+      {},
+    );
+
+    const subIds = ids(findings).filter((id) => id.startsWith("inkbox/webhook-subscription-") || id === "inkbox/incoming-call-route");
+    expect(subIds).toEqual([]);
+  });
+
+  it("warns when mail and text subscriptions are missing", async () => {
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "api_key.agent_scoped.claimed",
+      organizationId: "org-1",
+    });
+    sdk.getIdentity.mockResolvedValue({
+      mailbox: { id: "mb-1", emailAddress: "agent@inkboxmail.com" },
+      phoneNumber: {
+        id: "phone-1",
+        number: "+15551234567",
+        smsStatus: "ready",
+        incomingCallAction: "auto_accept",
+        clientWebsocketUrl: "wss://example.com/hooks/inkbox/phone/media/ws",
+      },
+      tunnel: { publicHost: "agent.inkboxwire.com" },
+    });
+    sdk.subscriptionsList.mockResolvedValue([]);
+
+    const findings = await detectInkboxHealthFindings(
+      {
+        cfg: {
+          channels: {
+            inkbox: {
+              apiKey: "ApiKey_test",
+              identity: "agent",
+              signingKey: "whsec_test",
+              publicUrl: "https://example.com/hooks",
+            },
+          },
+        } as any,
+      },
+      {},
+    );
+
+    const subFindings = findings.filter((f) =>
+      f.checkId === "inkbox/webhook-subscription-mailbox" ||
+      f.checkId === "inkbox/webhook-subscription-phone-text",
+    );
+    expect(subFindings.map((f) => f.checkId).sort()).toEqual([
+      "inkbox/webhook-subscription-mailbox",
+      "inkbox/webhook-subscription-phone-text",
+    ]);
+    expect(subFindings.every((f) => f.severity === "warning")).toBe(true);
+  });
+
+  it("warns when a subscription is wired but the receive event is missing", async () => {
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "api_key.agent_scoped.claimed",
+      organizationId: "org-1",
+    });
+    const expectedUrl = "https://example.com/hooks/inkbox/webhook";
+    sdk.getIdentity.mockResolvedValue({
+      mailbox: { id: "mb-1", emailAddress: "agent@inkboxmail.com" },
+      phoneNumber: {
+        id: "phone-1",
+        number: "+15551234567",
+        smsStatus: "ready",
+        incomingCallAction: "auto_accept",
+        clientWebsocketUrl: "wss://example.com/hooks/inkbox/phone/media/ws",
+      },
+      tunnel: { publicHost: "agent.inkboxwire.com" },
+    });
+    sdk.subscriptionsList.mockImplementation(async (filter: any) => [
+      {
+        id: filter.mailboxId ? "sub-mail" : "sub-text",
+        organizationId: "org-1",
+        mailboxId: filter.mailboxId ?? null,
+        phoneNumberId: filter.phoneNumberId ?? null,
+        url: expectedUrl,
+        eventTypes: filter.mailboxId
+          ? ["message.sent"]
+          : ["text.delivered"],
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+
+    const findings = await detectInkboxHealthFindings(
+      {
+        cfg: {
+          channels: {
+            inkbox: {
+              apiKey: "ApiKey_test",
+              identity: "agent",
+              signingKey: "whsec_test",
+              publicUrl: "https://example.com/hooks",
+            },
+          },
+        } as any,
+      },
+      {},
+    );
+
+    const subFindings = findings.filter((f) =>
+      f.checkId === "inkbox/webhook-subscription-mailbox" ||
+      f.checkId === "inkbox/webhook-subscription-phone-text",
+    );
+    expect(subFindings.map((f) => f.checkId).sort()).toEqual([
+      "inkbox/webhook-subscription-mailbox",
+      "inkbox/webhook-subscription-phone-text",
+    ]);
+    expect(subFindings.find((f) => f.checkId === "inkbox/webhook-subscription-mailbox")?.message)
+      .toContain("message.received");
+    expect(subFindings.find((f) => f.checkId === "inkbox/webhook-subscription-phone-text")?.message)
+      .toContain("text.received");
   });
 });

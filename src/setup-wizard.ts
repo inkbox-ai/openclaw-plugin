@@ -20,6 +20,11 @@ import {
   publicUrl,
   websocketUrl,
 } from "./call-websocket.js";
+import {
+  MAIL_EVENT_TYPES,
+  TEXT_EVENT_TYPES,
+  reconcileWebhookSubscription,
+} from "./inbound/subscriptions.js";
 
 export interface WizardConfig {
   apiKey: string;
@@ -311,21 +316,46 @@ async function configureIdentityGatewayDelivery(params: {
     inkboxCallWebsocketPath(DEFAULT_ACCOUNT_ID),
   );
 
-  if (params.identity.mailbox?.emailAddress) {
-    await params.client.mailboxes.update(params.identity.mailbox.emailAddress, {
-      webhookUrl,
+  const mailboxId = params.identity.mailbox?.id;
+  if (mailboxId) {
+    const mailSub = await reconcileWebhookSubscription(params.client, {
+      mailboxId,
+      url: webhookUrl,
+      eventTypes: MAIL_EVENT_TYPES,
     });
-    console.log(`Mailbox webhook points at ${webhookUrl}.`);
+    if (mailSub) {
+      console.log(`Mailbox events subscribed at ${webhookUrl}.`);
+    } else {
+      console.log(
+        `Mailbox subscription was not created — see the warning above. Inbound email will not arrive at ${webhookUrl} until that is resolved.`,
+      );
+    }
+  } else if (params.identity.mailbox?.emailAddress) {
+    console.log(
+      `Mailbox ${params.identity.mailbox.emailAddress} has no id yet; skipping mail subscription.`,
+    );
   }
 
   if (params.identity.phoneNumber?.id) {
+    const textSub = await reconcileWebhookSubscription(params.client, {
+      phoneNumberId: params.identity.phoneNumber.id,
+      url: webhookUrl,
+      eventTypes: TEXT_EVENT_TYPES,
+    });
     await params.client.phoneNumbers.update(params.identity.phoneNumber.id, {
-      incomingTextWebhookUrl: webhookUrl,
       incomingCallAction: "auto_accept",
       clientWebsocketUrl: callWebsocketUrl,
       incomingCallWebhookUrl: null,
     });
-    console.log(`Phone SMS + call delivery points at ${webhookUrl} / ${callWebsocketUrl}.`);
+    if (textSub) {
+      console.log(
+        `Phone text events subscribed at ${webhookUrl}; incoming calls bridge to ${callWebsocketUrl}.`,
+      );
+    } else {
+      console.log(
+        `Phone text subscription was not created — see the warning above. Incoming calls still bridge to ${callWebsocketUrl}.`,
+      );
+    }
   }
 
   const tunnelName = deriveTunnelName(params.identity, params.identityHandle);
