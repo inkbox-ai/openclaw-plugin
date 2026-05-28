@@ -14,6 +14,22 @@ When the user installs this plugin and runs `openclaw inkbox setup`, their agent
 - Inbound emails, SMS, and incoming calls land as OpenClaw channel events — same session model as Telegram/Slack/Discord.
 - "Conversations flow" — a contact who emails today and texts tomorrow shows up as the same session, keyed by contact UUID.
 
+## User Prerequisites
+
+The plugin docs should treat OpenClaw itself as an explicit prerequisite, not an implied dependency. Point users to [openclaw.ai](https://openclaw.ai/) and the [OpenClaw install docs](https://docs.openclaw.ai/install/index), then show the recommended installer:
+
+```bash
+curl -fsSL https://openclaw.ai/install.sh | bash
+openclaw --version
+```
+
+For users who already manage Node globally, document the supported npm path:
+
+```bash
+npm install -g openclaw@latest
+openclaw onboard --install-daemon
+```
+
 ## Architecture
 
 ### Plugin, not fork

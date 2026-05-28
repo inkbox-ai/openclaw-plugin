@@ -15,6 +15,7 @@ All notable changes to `@inkbox/openclaw-plugin` are listed here. The format fol
 
 ### Changed
 
+- README and project docs now call out OpenClaw itself as a prerequisite, with links to the OpenClaw homepage/install docs and the installer/npm commands.
 - `inkbox_whoami` now includes the useful readiness fields that were previously split into `inkbox_rate_status`; the redundant `inkbox_rate_status` tool was removed.
 - `inkbox-onboarding` was re-scoped as `inkbox-troubleshooting`.
 - `inkbox-call-handler` was split into `inkbox-outbound-calling` and `inkbox-call-review`, with active voice-reply rules carried in the call turn itself.

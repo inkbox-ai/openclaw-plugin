@@ -4,9 +4,28 @@
 
 Status: outbound tools, read tools, bundled skills, setup wizard, doctor checks, SMS batching, inbound email/SMS/voice, realtime phone calls, post-call actions, and package-included skills are implemented. ClawHub publishing is still pending.
 
+## Prerequisites
+
+- An installed OpenClaw agent, `2026.5.19` or newer. Start at [openclaw.ai](https://openclaw.ai/) or follow the [OpenClaw install docs](https://docs.openclaw.ai/install/index).
+- The recommended OpenClaw installer for macOS, Linux, or WSL2:
+
+```bash
+curl -fsSL https://openclaw.ai/install.sh | bash
+openclaw --version
+```
+
+If you already manage Node yourself, the OpenClaw docs also support:
+
+```bash
+npm install -g openclaw@latest
+openclaw onboard --install-daemon
+```
+
+- An Inkbox account or API key. `openclaw inkbox setup` can guide a new agent identity through signup/setup.
+
 ## Quick Start
 
-Use OpenClaw `2026.5.19` or newer. If your global `openclaw` is older, run the same commands through `npx openclaw` from this checkout after `npm install`.
+Run these from the plugin checkout after the OpenClaw prerequisite above is installed:
 
 ```bash
 git clone https://github.com/inkbox-ai/openclaw-plugin.git
