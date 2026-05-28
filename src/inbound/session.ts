@@ -141,6 +141,7 @@ const TELEPHONY_CHUNK_MS = 20;
 const REALTIME_AUDIO_START_BUFFER_CHUNKS = 8;
 const REALTIME_AUDIO_MAX_START_BUFFER_MS = 160;
 const REALTIME_AUDIO_STALE_CLOCK_MS = TELEPHONY_CHUNK_MS * 2;
+const REALTIME_GREETING_INPUT_SUPPRESSION_MS = 700;
 const REALTIME_POST_CALL_ACTION_TOOL_NAME = "inkbox_register_post_call_action";
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
@@ -900,6 +901,18 @@ function payloadMedia(record: Record<string, unknown>): Record<string, unknown> 
   return media && typeof media === "object" && !Array.isArray(media)
     ? (media as Record<string, unknown>)
     : undefined;
+}
+
+function isCallerMediaPayload(
+  record: Record<string, unknown>,
+  media: Record<string, unknown> | undefined,
+): boolean {
+  const rawTrack = media?.track ?? record.track;
+  if (typeof rawTrack !== "string") {
+    return true;
+  }
+  const track = rawTrack.trim().toLowerCase();
+  return !["outbound", "local", "agent", "assistant"].includes(track);
 }
 
 function payloadTimestampMs(record: Record<string, unknown>): number | undefined {
@@ -1858,6 +1871,9 @@ async function runRealtimeCallWebSocket(
   };
   const audioPacer = new InkboxRealtimeAudioPacer(sendJson, () => streamId);
   const speechDetector = new RealtimeMulawSpeechStartDetector();
+  let initialGreetingActive = false;
+  let initialGreetingOutputStarted = false;
+  let suppressInputUntil = 0;
   const session = createRealtimeVoiceBridgeSession({
     provider: resolved.provider,
     cfg: opts.cfg as any,
@@ -1875,6 +1891,10 @@ async function runRealtimeCallWebSocket(
     audioSink: {
       isOpen: () => !closed,
       sendAudio: (audio) => {
+        if (initialGreetingActive && !initialGreetingOutputStarted) {
+          initialGreetingOutputStarted = true;
+          suppressInputUntil = Date.now() + REALTIME_GREETING_INPUT_SUPPRESSION_MS;
+        }
         audioPacer.sendAudio(audio);
       },
       clearAudio: () => {
@@ -1888,6 +1908,9 @@ async function runRealtimeCallWebSocket(
     },
     onEvent: (event) => {
       if (event.type === "response.done") {
+        if (initialGreetingActive) {
+          initialGreetingActive = false;
+        }
         audioPacer.sendAudioDone();
       }
       if (event.type === "error") {
@@ -1955,6 +1978,7 @@ async function runRealtimeCallWebSocket(
         streamId = typeof payload.stream_id === "string" ? payload.stream_id : streamId;
         if (!greetingTriggered) {
           greetingTriggered = true;
+          initialGreetingActive = true;
           session.triggerGreeting(buildRealtimeGreeting(opts.meta));
         }
         continue;
@@ -1962,8 +1986,14 @@ async function runRealtimeCallWebSocket(
 
       if (event === "media") {
         const media = payloadMedia(payload);
+        if (!isCallerMediaPayload(payload, media)) {
+          continue;
+        }
         const audio = parseBase64AudioPayload(media?.payload);
         if (!audio) {
+          continue;
+        }
+        if (suppressInputUntil > Date.now()) {
           continue;
         }
         if (audioPacer.hasQueuedAudio && speechDetector.accept(audio)) {

@@ -118,6 +118,8 @@ import {
   registerOutboundCallContext,
 } from "../../src/outbound-call-context.js";
 
+type FakeInkboxWebSocketMessage = string | { message: string; advanceMs?: number };
+
 class FakeInkboxWebSocket {
   readonly headers = new Map<string, string>();
   readonly url: string;
@@ -129,15 +131,22 @@ class FakeInkboxWebSocket {
   readonly close = vi.fn(async () => undefined);
 
   constructor(
-    private readonly messages: string[],
+    private readonly messages: FakeInkboxWebSocketMessage[],
     url = "wss://example.com/inkbox/phone/media/ws?call_id=call-1",
   ) {
     this.url = url;
   }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<string> {
-    for (const message of this.messages) {
-      yield message;
+    for (const entry of this.messages) {
+      if (typeof entry === "string") {
+        yield entry;
+        continue;
+      }
+      if (entry.advanceMs) {
+        vi.advanceTimersByTime(entry.advanceMs);
+      }
+      yield entry.message;
     }
   }
 }
@@ -480,6 +489,9 @@ describe("createInkboxSessionBridge call WebSocket", () => {
   });
 
   it("bridges raw Inkbox media through the OpenClaw realtime voice provider", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime();
     const bridge = createInkboxSessionBridge({
@@ -494,12 +506,25 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       channelRuntime,
     });
     const inboundAudio = Buffer.from([0x01, 0x02, 0x03]);
+    const echoedOutboundAudio = Buffer.from([0x09, 0x09, 0x09]);
     const ws = new FakeInkboxWebSocket([
       JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: {
+            payload: echoedOutboundAudio.toString("base64"),
+            timestamp: "20",
+            track: "outbound",
+          },
+        }),
+      },
       JSON.stringify({
         event: "media",
         stream_id: "stream-1",
-        media: { payload: inboundAudio.toString("base64"), timestamp: "40" },
+        media: { payload: inboundAudio.toString("base64"), timestamp: "40", track: "inbound" },
       }),
       JSON.stringify({ event: "stop" }),
     ]);
@@ -531,6 +556,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
       "Greet there in one short sentence and ask how you can help.",
     );
+    expect(realtimeSession.sendAudio).not.toHaveBeenCalledWith(echoedOutboundAudio);
     expect(realtimeSession.sendAudio).toHaveBeenCalledWith(inboundAudio);
     expect(realtimeSession.setMediaTimestamp).toHaveBeenCalledWith(40);
     expect(channelRuntime.turn.runAssembled).not.toHaveBeenCalled();
@@ -545,6 +571,50 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         media: expect.objectContaining({ track: "outbound" }),
       }),
     );
+  });
+
+  it("suppresses early caller media during realtime greeting startup", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const setupNoise = Buffer.from([0x01]);
+    const callerAudio = Buffer.from([0x02]);
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({
+        event: "media",
+        stream_id: "stream-1",
+        media: { payload: setupNoise.toString("base64"), timestamp: "20", track: "inbound" },
+      }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: callerAudio.toString("base64"), timestamp: "820", track: "inbound" },
+        }),
+      },
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.sendAudio).not.toHaveBeenCalledWith(setupNoise);
+    expect(realtimeSession.sendAudio).toHaveBeenCalledWith(callerAudio);
   });
 
   it("loads outbound call purpose into realtime greeting instructions", async () => {
@@ -683,6 +753,9 @@ describe("createInkboxSessionBridge call WebSocket", () => {
   });
 
   it("delegates realtime tool calls to the OpenClaw Inkbox session", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
     realtimeMock.toolCallOnAudio = "consult";
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime("Saved that note.");
@@ -700,16 +773,20 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     });
     const ws = new FakeInkboxWebSocket([
       JSON.stringify({ event: "start", stream_id: "stream-1" }),
-      JSON.stringify({
-        event: "media",
-        stream_id: "stream-1",
-        media: { payload: Buffer.from([0x01]).toString("base64") },
-      }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
       JSON.stringify({ event: "stop" }),
     ]);
 
     await bridge.wsHandler(ws as any);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
     const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
@@ -733,6 +810,9 @@ describe("createInkboxSessionBridge call WebSocket", () => {
   });
 
   it("runs registered realtime post-call actions after the call closes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
     realtimeMock.toolCallOnAudio = "post_call";
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime("Follow-up sent.");
@@ -750,16 +830,20 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     });
     const ws = new FakeInkboxWebSocket([
       JSON.stringify({ event: "start", stream_id: "stream-1" }),
-      JSON.stringify({
-        event: "media",
-        stream_id: "stream-1",
-        media: { payload: Buffer.from([0x01]).toString("base64") },
-      }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
       JSON.stringify({ event: "stop" }),
     ]);
 
     await bridge.wsHandler(ws as any);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+    await Promise.resolve();
 
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
