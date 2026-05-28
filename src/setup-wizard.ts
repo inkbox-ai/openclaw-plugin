@@ -6,11 +6,11 @@ import {
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED,
   AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED,
 } from "@inkbox/sdk";
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import JSON5 from "json5";
 import type { Prompter } from "./prompt.js";
 import { writeIdentityState, readIdentityState } from "./state.js";
 import { resolveInkboxAccount } from "./accounts.js";
@@ -85,6 +85,32 @@ function addUniqueString(value: unknown, entry: string): string[] {
   return existing.includes(entry) ? existing : [...existing, entry];
 }
 
+function resolveHome(env: NodeJS.ProcessEnv): string {
+  return env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir();
+}
+
+function resolveUserPath(input: string, env: NodeJS.ProcessEnv): string {
+  const trimmed = input.trim();
+  if (trimmed === "~") {
+    return resolveHome(env);
+  }
+  if (trimmed.startsWith("~/")) {
+    return join(resolveHome(env), trimmed.slice(2));
+  }
+  return isAbsolute(trimmed) ? trimmed : resolve(trimmed);
+}
+
+function resolveOpenClawConfigPath(env: NodeJS.ProcessEnv): string {
+  const explicitConfig = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (explicitConfig) {
+    return resolveUserPath(explicitConfig, env);
+  }
+  const stateDir = env.OPENCLAW_STATE_DIR?.trim()
+    ? resolveUserPath(env.OPENCLAW_STATE_DIR, env)
+    : join(resolveHome(env), ".openclaw");
+  return join(stateDir, "openclaw.json");
+}
+
 function toolAllowOperation(currentConfig: unknown): { path: string; value: string[] } {
   const allow = readPath(currentConfig, ["tools", "allow"]);
   if (Array.isArray(allow)) {
@@ -120,65 +146,57 @@ export function buildOpenClawConfigBatch(
   return batch;
 }
 
-function resolveOpenClawInvocation(): { command: string; args: string[] } {
-  const entrypoint = process.argv[1];
-  if (entrypoint && existsSync(entrypoint)) {
-    return { command: process.execPath, args: [entrypoint] };
+function setConfigPath(root: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split(".").filter(Boolean);
+  let cur: Record<string, unknown> = root;
+  for (const part of parts.slice(0, -1)) {
+    const existing = cur[part];
+    if (!isRecord(existing)) {
+      cur[part] = {};
+    }
+    cur = cur[part] as Record<string, unknown>;
   }
-  return { command: "openclaw", args: [] };
+  cur[parts[parts.length - 1]!] = value;
 }
 
-function runCommand(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<WizardPersistResult> {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, {
-      env: { ...process.env, ...env, NO_COLOR: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", (error) => {
-      resolve({ ok: false, message: error.message });
-    });
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({ ok: true, message: stdout.trim() || undefined });
-        return;
-      }
-      const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
-      resolve({
-        ok: false,
-        message: detail || `${command} exited with status ${code ?? "unknown"}`,
-      });
-    });
-  });
+async function readOpenClawConfig(path: string): Promise<Record<string, unknown>> {
+  if (!existsSync(path)) {
+    return {};
+  }
+  const raw = await readFile(path, "utf8");
+  if (!raw.trim()) {
+    return {};
+  }
+  const parsed = JSON5.parse(raw);
+  if (!isRecord(parsed)) {
+    throw new Error(`OpenClaw config at ${path} must contain a JSON object.`);
+  }
+  return parsed;
 }
 
-export async function persistOpenClawConfigWithCli(
+export async function persistOpenClawConfigFile(
   config: WizardConfig,
   context: { currentConfig?: unknown; env: NodeJS.ProcessEnv },
 ): Promise<WizardPersistResult> {
-  const batch = buildOpenClawConfigBatch(config, context.currentConfig);
-  const dir = await mkdtemp(join(tmpdir(), "openclaw-inkbox-config-"));
-  const batchFile = join(dir, "batch.json");
+  const configPath = resolveOpenClawConfigPath(context.env);
   try {
-    await writeFile(batchFile, JSON.stringify(batch, null, 2), { mode: 0o600 });
-    await chmod(batchFile, 0o600).catch(() => {});
-    const invocation = resolveOpenClawInvocation();
-    return await runCommand(
-      invocation.command,
-      [...invocation.args, "config", "set", "--batch-file", batchFile],
-      context.env,
-    );
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    const next = await readOpenClawConfig(configPath);
+    const batch = buildOpenClawConfigBatch(config, context.currentConfig ?? next);
+    for (const entry of batch) {
+      setConfigPath(next, entry.path, entry.value);
+    }
+    await mkdir(dirname(configPath), { recursive: true });
+    const tempPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    await chmod(tempPath, 0o600).catch(() => {});
+    await rename(tempPath, configPath);
+    await chmod(configPath, 0o600).catch(() => {});
+    return { ok: true, message: `Updated ${configPath}` };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -668,7 +686,7 @@ export async function runSetupWizardCli(options: {
       prompter,
       currentConfig: options.currentConfig,
       env: options.env,
-      persistConfig: options.persistConfig ?? persistOpenClawConfigWithCli,
+      persistConfig: options.persistConfig ?? persistOpenClawConfigFile,
     });
     if (!result.ok) {
       console.error(`\n❌ Setup did not complete: ${result.message}`);

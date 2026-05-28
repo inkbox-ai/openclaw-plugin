@@ -14,11 +14,17 @@ curl -fsSL https://openclaw.ai/install.sh | bash
 openclaw --version
 ```
 
-If you already manage Node yourself, the OpenClaw docs also support:
+Then onboard OpenClaw and configure a model provider. We recommend using either an OpenAI API key or a ChatGPT/Codex subscription:
+
+```bash
+openclaw onboard --install-daemon
+openclaw configure --section model
+```
+
+If you already manage Node yourself, the OpenClaw docs also support installing the CLI with npm before running the same onboard/configure commands:
 
 ```bash
 npm install -g openclaw@latest
-openclaw onboard --install-daemon
 ```
 
 - An Inkbox account or API key. `openclaw inkbox setup` can guide a new agent identity through signup/setup.
@@ -34,12 +40,6 @@ npm install
 npm run build
 openclaw --version
 openclaw plugins install -l ./
-```
-
-Authenticate OpenClaw with any model provider the agent should use:
-
-```bash
-openclaw configure --section model
 ```
 
 Configure Inkbox:

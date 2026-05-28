@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildOpenClawConfigBatch, runSetupWizard } from "../src/setup-wizard.js";
+import {
+  buildOpenClawConfigBatch,
+  persistOpenClawConfigFile,
+  runSetupWizard,
+} from "../src/setup-wizard.js";
 import type { Prompter } from "../src/prompt.js";
 
 const sdk = vi.hoisted(() => {
@@ -125,6 +129,42 @@ describe("runSetupWizard", () => {
         },
       ).at(-1),
     ).toEqual({ path: "tools.allow", value: ["fs", "inkbox"] });
+  });
+
+  it("persists channel config directly to the active OpenClaw config file", async () => {
+    const configPath = join(tempHome, "profile", "openclaw.json");
+    await mkdir(join(tempHome, "profile"), { recursive: true });
+    await writeFile(
+      configPath,
+      `{
+        // JSON5 config should be readable.
+        tools: { profile: "coding" }
+      }\n`,
+    );
+
+    const result = await persistOpenClawConfigFile(
+      {
+        apiKey: "ApiKey_test",
+        identity: "smoke-agent",
+        signingKey: "whsec_test",
+      },
+      {
+        env: { HOME: tempHome, OPENCLAW_CONFIG_PATH: configPath } as any,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const saved = JSON.parse(await readFile(configPath, "utf8"));
+    expect(saved.channels.inkbox).toEqual({
+      enabled: true,
+      apiKey: "ApiKey_test",
+      identity: "smoke-agent",
+      signingKey: "whsec_test",
+    });
+    expect(saved.tools).toEqual({
+      profile: "coding",
+      alsoAllow: ["inkbox"],
+    });
   });
 
   it("persists setup output when a config persister is supplied", async () => {

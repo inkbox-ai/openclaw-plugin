@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@inkbox/sdk": "^0.4.3",
+    "json5": "^2.2.3",
     "typebox": "^1.1.38"
   },
   "devDependencies": {
