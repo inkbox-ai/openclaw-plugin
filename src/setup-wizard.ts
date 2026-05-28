@@ -644,7 +644,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       label: `openclaw-plugin-${identityHandle}`,
     });
     agentApiKey = newKey.apiKey ?? newKey.api_key;
-    console.log(`Minted agent-scoped key: ${agentApiKey.slice(0, 12)}…  (save this — it won't be shown again).\n`);
+    console.log("Minted an agent-scoped key for this identity.\n");
   } else if (
     subtype === AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_CLAIMED ||
     subtype === AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED
@@ -716,7 +716,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       if (!signingKey) {
         console.log("⚠️  Signing key call succeeded but the response shape was unexpected — fall back to creating one in the Console.");
       } else {
-        console.log(`Signing key: ${signingKey.slice(0, 14)}…  (save this — it won't be shown again).\n`);
+        console.log("Generated webhook signing key.\n");
       }
     }
   }
