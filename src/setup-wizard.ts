@@ -364,6 +364,18 @@ function printAgentSummary(identity: AgentIdentity): void {
   console.log("  Use mailbox and phone contact rules for email senders, domains, and phone numbers.");
 }
 
+function printProvisionedPhoneStatus(phone: { number?: string | null; smsStatus?: string | null }): void {
+  const smsStatus = phone.smsStatus?.trim().toLowerCase();
+  if (smsStatus === "ready") {
+    console.log(`Provisioned ${phone.number}. SMS is ready.`);
+    return;
+  }
+  const statusLabel = smsStatus ? ` Current SMS status: ${smsStatus}.` : "";
+  console.log(
+    `Provisioned ${phone.number}. SMS will be ready in ~10-15 min once 10DLC carrier propagation completes.${statusLabel}`,
+  );
+}
+
 async function maybeProvisionPhoneNumber(
   identity: AgentIdentity,
   prompter: Prompter,
@@ -380,9 +392,7 @@ async function maybeProvisionPhoneNumber(
   }
   try {
     const phone = await identity.provisionPhoneNumber({ type: "local" });
-    console.log(
-      `Provisioned ${phone.number}. SMS will be ready in ~10-15 min once 10DLC carrier propagation completes.`,
-    );
+    printProvisionedPhoneStatus(phone);
     return { identity: await identity.refresh(), didProvisionPhone: true };
   } catch (error) {
     console.log(`Phone provisioning failed: ${messageFromError(error)}`);
@@ -422,7 +432,6 @@ async function discoverAgentIdentityHandle(
 
 async function waitForSmsStart(params: {
   identity: AgentIdentity;
-  ownerNumber: string;
 }): Promise<void> {
   if (params.identity.phoneNumber?.type !== "local") {
     return;
@@ -434,7 +443,7 @@ async function waitForSmsStart(params: {
       if (text.direction !== "inbound" || !isStartText(text.text)) {
         return false;
       }
-      return !params.ownerNumber || text.remotePhoneNumber === params.ownerNumber;
+      return true;
     });
     if (found) {
       console.log("Received START opt-in text.");
@@ -443,20 +452,8 @@ async function waitForSmsStart(params: {
     await sleep(SMS_OPT_IN_POLL_MS);
   }
   throw new Error(
-    `Did not observe START from ${params.ownerNumber} before the wait timed out. Text START to ${params.identity.phoneNumber.number} from that phone, then re-run setup.`,
+    `Did not observe START before the wait timed out. Text START to ${params.identity.phoneNumber.number}, then re-run setup.`,
   );
-}
-
-async function askRequiredOwnerPhoneNumber(prompter: Prompter): Promise<string> {
-  for (;;) {
-    const ownerNumber = normalizeOptional(
-      await prompter.ask("Owner phone number that must text START (E.164, e.g. +15551234567)"),
-    );
-    if (ownerNumber) {
-      return ownerNumber;
-    }
-    console.log("Owner phone number is required so setup can verify SMS opt-in.");
-  }
 }
 
 async function askRequiredVerificationCode(prompter: Prompter): Promise<string> {
@@ -694,12 +691,9 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   }
 
   if (didProvisionPhone && identity.phoneNumber) {
-    const ownerNumber = await askRequiredOwnerPhoneNumber(prompter);
-    console.log(
-      `Text START to ${identity.phoneNumber.number} from ${ownerNumber}. Waiting up to 5 minutes...`,
-    );
+    console.log(`Text START to ${identity.phoneNumber.number}. Waiting up to 5 minutes...`);
     try {
-      await waitForSmsStart({ identity, ownerNumber });
+      await waitForSmsStart({ identity });
     } catch (error) {
       return {
         ok: false,

@@ -382,7 +382,7 @@ describe("runSetupWizard", () => {
     expect(identity.provisionPhoneNumber).toHaveBeenCalledWith({ type: "local" });
   });
 
-  it("provisions a phone without a state prompt and verifies owner START opt-in", async () => {
+  it("provisions a phone without a state or owner prompt and waits for any START opt-in", async () => {
     const identity = createIdentity({ phoneNumber: null });
     const provisionedPhone = {
       id: "phone-2",
@@ -409,7 +409,6 @@ describe("runSetupWizard", () => {
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
     const prompter = createPrompter({
-      asks: ["+15167251294"],
       confirms: [true, false, true],
     });
 
@@ -421,7 +420,7 @@ describe("runSetupWizard", () => {
     expect(result.ok).toBe(true);
     expect(identity.provisionPhoneNumber).toHaveBeenCalledWith({ type: "local" });
     expect(identity.listTexts).toHaveBeenCalledWith({ limit: 25 });
-    expect(prompter.ask.mock.calls.map(([question]) => question)).toContain(
+    expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
       "Owner phone number that must text START (E.164, e.g. +15551234567)",
     );
     expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(

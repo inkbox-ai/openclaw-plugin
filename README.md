@@ -72,7 +72,7 @@ Keep that process running. On startup the plugin opens an Inkbox tunnel, sets ma
    Existing phone numbers are configured the same way as freshly provisioned numbers: inbound SMS goes to the gateway webhook, and calls use `auto_accept` with the gateway media WebSocket.
 6. Prints the final mailbox/phone summary.
 
-If setup provisions a new local phone number, it requires the owner's E.164 phone number and waits for that phone to send SMS `START` before finishing. It also seeds `~/.openclaw/inkbox/identity-state.json` so `openclaw inkbox doctor` can show useful channel state.
+If setup provisions a new local phone number, it waits for any inbound SMS `START` to that number before finishing. It also seeds `~/.openclaw/inkbox/identity-state.json` so `openclaw inkbox doctor` can show useful channel state.
 
 Inkbox reachability is controlled server-side with mailbox and phone contact rules in the Inkbox Console. The plugin does not create a second local inbound allowlist unless you explicitly set `allowedInboundContactIds`.
 
