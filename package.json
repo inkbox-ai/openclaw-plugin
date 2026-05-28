@@ -25,12 +25,12 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "openclaw": ">=2026.5.19",
+    "openclaw": ">=2026.5.27",
     "typescript": "^5.4.0",
     "vitest": "^2.1.9"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.5.19"
+    "openclaw": ">=2026.5.27"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -85,12 +85,12 @@
       ]
     },
     "compat": {
-      "pluginApi": ">=2026.5.19",
-      "minGatewayVersion": "2026.5.19"
+      "pluginApi": ">=2026.5.27",
+      "minGatewayVersion": "2026.5.27"
     },
     "build": {
-      "openclawVersion": "2026.5.19",
-      "pluginSdkVersion": "2026.5.19"
+      "openclawVersion": "2026.5.27",
+      "pluginSdkVersion": "2026.5.27"
     }
   }
 }
