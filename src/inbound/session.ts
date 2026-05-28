@@ -858,8 +858,9 @@ function buildRealtimeGreeting(meta: RealtimeCallMeta): string {
   const name = meta.contact?.name?.split(/\s+/)[0] || "there";
   if (meta.outboundContext?.openingMessage) {
     return [
-      `Greet ${name} briefly, then say this opening message naturally:`,
+      "Say this opening message naturally as the first thing you say:",
       meta.outboundContext.openingMessage,
+      `Do not add another greeting before it. If the opening message already greets ${name}, do not repeat the name.`,
       "Do not ask a generic how-can-I-help question.",
     ].join("\n");
   }
@@ -876,7 +877,7 @@ function buildRealtimeGreeting(meta: RealtimeCallMeta): string {
 function buildInkboxTtsGreeting(meta: RealtimeCallMeta): string {
   const name = meta.contact?.name?.split(/\s+/)[0] || "there";
   if (meta.outboundContext?.openingMessage) {
-    return `Hi ${name}. ${meta.outboundContext.openingMessage}`;
+    return meta.outboundContext.openingMessage;
   }
   if (meta.outboundContext?.purpose) {
     return `Hi ${name}. I'm calling about ${meta.outboundContext.purpose}`;
@@ -1904,6 +1905,16 @@ async function runRealtimeCallWebSocket(
     onTranscript: (role, text, isFinal) => {
       if (isFinal) {
         appendRealtimeTranscript(transcript, { role, text });
+        void sendJson({
+          event: "transcript",
+          party: role === "user" ? "remote" : "local",
+          text,
+          is_final: true,
+        }).catch((error) => {
+          opts.logger?.warn?.(
+            `Inkbox realtime transcript persist event failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       }
     },
     onEvent: (event) => {

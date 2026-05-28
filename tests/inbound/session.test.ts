@@ -562,8 +562,15 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     expect(channelRuntime.turn.runAssembled).not.toHaveBeenCalled();
 
     const frames = parseSentTextFrames(ws);
-    expect(frames.some((frame) => frame.event === "transcript")).toBe(false);
     expect(frames.some((frame) => frame.event === "text")).toBe(false);
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        event: "transcript",
+        party: "local",
+        text: "Hi there.",
+        is_final: true,
+      }),
+    );
     expect(frames).toContainEqual(
       expect.objectContaining({
         event: "media",
@@ -660,6 +667,98 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     );
     expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
       expect.not.stringContaining("how you can help"),
+    );
+    expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
+      expect.not.stringContaining("Greet there briefly"),
+    );
+  });
+
+  it("does not add a second greeting before an outbound realtime opening message", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const context = registerOutboundCallContext({
+      toNumber: "+15551234567",
+      purpose: "the Boston weather update",
+      openingMessage: "Hi Dima, I am calling because you asked for the Boston weather.",
+    })!;
+    const ws = new FakeInkboxWebSocket(
+      [
+        JSON.stringify({ event: "start", stream_id: "stream-1" }),
+        JSON.stringify({ event: "stop" }),
+      ],
+      decorateCallWebsocketUrlWithContext(
+        "wss://example.com/inkbox/phone/media/ws?call_id=call-out-greeting",
+        context,
+      ),
+    );
+
+    await bridge.wsHandler(ws as any);
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    const greeting = realtimeSession.triggerGreeting.mock.calls[0][0];
+    expect(greeting).toContain("Hi Dima, I am calling because you asked");
+    expect(greeting).toContain("Do not add another greeting before it.");
+    expect(greeting).not.toContain("Greet there briefly");
+  });
+
+  it("does not prefix outbound fallback TTS when opening message already greets", async () => {
+    realtimeMock.available = false;
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Fallback reply.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const context = registerOutboundCallContext({
+      toNumber: "+15551234567",
+      purpose: "the Boston weather update",
+      openingMessage: "Hi Dima, I am calling because you asked for the Boston weather.",
+    })!;
+    const ws = new FakeInkboxWebSocket(
+      [
+        JSON.stringify({ event: "start", stream_id: "stream-1" }),
+        JSON.stringify({ event: "stop" }),
+      ],
+      decorateCallWebsocketUrlWithContext(
+        "wss://example.com/inkbox/phone/media/ws?call_id=call-out-fallback",
+        context,
+      ),
+    );
+
+    await bridge.wsHandler(ws as any);
+
+    const frames = parseSentTextFrames(ws);
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        event: "text",
+        delta: "Hi Dima, I am calling because you asked for the Boston weather.",
+        turn_id: "greeting",
+      }),
+    );
+    expect(frames).not.toContainEqual(
+      expect.objectContaining({
+        event: "text",
+        delta: expect.stringContaining("Hi there. Hi Dima"),
+      }),
     );
   });
 
@@ -807,6 +906,15 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       status: "ok",
       result: "Saved that note.",
     });
+    const frames = parseSentTextFrames(ws);
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        event: "transcript",
+        party: "remote",
+        text: "Please handle this request.",
+        is_final: true,
+      }),
+    );
   });
 
   it("runs registered realtime post-call actions after the call closes", async () => {
