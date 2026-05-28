@@ -13,13 +13,20 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import JSON5 from "json5";
 import type { Prompter } from "./prompt.js";
 import { writeIdentityState, readIdentityState } from "./state.js";
-import { resolveInkboxAccount } from "./accounts.js";
+import { DEFAULT_ACCOUNT_ID, resolveInkboxAccount } from "./accounts.js";
+import {
+  inkboxCallWebsocketPath,
+  inkboxWebhookPath,
+  publicUrl,
+  websocketUrl,
+} from "./call-websocket.js";
 
 export interface WizardConfig {
   apiKey: string;
   identity: string;
   signingKey?: string;
   baseUrl?: string;
+  tunnelName?: string;
 }
 
 export interface WizardPersistResult {
@@ -142,6 +149,9 @@ export function buildOpenClawConfigBatch(
   if (config.baseUrl) {
     batch.push({ path: "channels.inkbox.baseUrl", value: config.baseUrl });
   }
+  if (config.tunnelName) {
+    batch.push({ path: "channels.inkbox.tunnelName", value: config.tunnelName });
+  }
   batch.push(toolAllowOperation(currentConfig));
   return batch;
 }
@@ -225,6 +235,88 @@ function messageFromError(error: unknown): string {
     return `HTTP ${error.statusCode} ${detail}`;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+function hostFromPublicHost(publicHost: string | null | undefined): string | undefined {
+  const trimmed = publicHost?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`).host;
+  } catch {
+    return undefined;
+  }
+}
+
+function deriveTunnelName(identity: AgentIdentity, identityHandle: string): string | undefined {
+  const explicitName =
+    typeof (identity.tunnel as any)?.name === "string"
+      ? (identity.tunnel as any).name.trim()
+      : "";
+  if (explicitName) {
+    return explicitName;
+  }
+  const host = hostFromPublicHost(identity.tunnel?.publicHost);
+  const suffix = ".inkboxwire.com";
+  if (host?.endsWith(suffix)) {
+    const name = host.slice(0, -suffix.length);
+    return name || undefined;
+  }
+  return identityHandle;
+}
+
+function identityTunnelBaseUrl(identity: AgentIdentity, identityHandle: string): string | undefined {
+  const host = hostFromPublicHost(identity.tunnel?.publicHost);
+  if (host) {
+    return `https://${host}`;
+  }
+  const tunnelName = deriveTunnelName(identity, identityHandle);
+  return tunnelName ? `https://${tunnelName}.inkboxwire.com` : undefined;
+}
+
+async function configureIdentityGatewayDelivery(params: {
+  client: Inkbox;
+  identity: AgentIdentity;
+  identityHandle: string;
+}): Promise<{ webhookUrl?: string; callWebsocketUrl?: string; tunnelName?: string }> {
+  const baseUrl = identityTunnelBaseUrl(params.identity, params.identityHandle);
+  if (!baseUrl) {
+    console.log(
+      "Skipping automatic inbound delivery setup because this identity has no Inkbox tunnel.",
+    );
+    return {};
+  }
+
+  const webhookUrl = publicUrl(baseUrl, inkboxWebhookPath(DEFAULT_ACCOUNT_ID));
+  const callWebsocketUrl = websocketUrl(
+    baseUrl,
+    inkboxCallWebsocketPath(DEFAULT_ACCOUNT_ID),
+  );
+
+  if (params.identity.mailbox?.emailAddress) {
+    await params.client.mailboxes.update(params.identity.mailbox.emailAddress, {
+      webhookUrl,
+    });
+    console.log(`Mailbox webhook points at ${webhookUrl}.`);
+  }
+
+  if (params.identity.phoneNumber?.id) {
+    await params.client.phoneNumbers.update(params.identity.phoneNumber.id, {
+      incomingTextWebhookUrl: webhookUrl,
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: callWebsocketUrl,
+      incomingCallWebhookUrl: null,
+    });
+    console.log(`Phone SMS + call delivery points at ${webhookUrl} / ${callWebsocketUrl}.`);
+  }
+
+  const tunnelName = deriveTunnelName(params.identity, params.identityHandle);
+  return {
+    webhookUrl,
+    callWebsocketUrl,
+    ...(tunnelName && tunnelName !== params.identityHandle ? { tunnelName } : {}),
+  };
 }
 
 function printInkboxAuthorizationInfo(): void {
@@ -419,6 +511,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   const existingIdentity = existingAccount.identity?.trim();
   const existingSigningKey = existingAccount.signingKey?.trim();
   const existingBaseUrl = existingAccount.baseUrl?.trim();
+  let reconfigureExisting = false;
   if (existingApiKey && existingIdentity) {
     const reconfigure = await prompter.confirm(
       `Inkbox is already configured for identity ${existingIdentity}. Reconfigure?`,
@@ -437,13 +530,18 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
         },
       };
     }
+    reconfigureExisting = true;
   }
 
-  // Step 1 — read or prompt for API key.
-  let apiKey = existingApiKey;
+  // Step 1 — read or prompt for API key. If the operator chose to
+  // reconfigure, run the full setup flow again instead of silently reusing
+  // the profile's old key/identity/signing key.
+  let apiKey = reconfigureExisting ? undefined : existingApiKey;
   let signupIdentityHandle: string | undefined;
   if (!apiKey) {
-    console.log("No INKBOX_API_KEY in env.");
+    console.log(
+      existingApiKey ? "Switching to a different Inkbox API key." : "No INKBOX_API_KEY in env.",
+    );
     const hasAccount = await prompter.confirm("Do you have an Inkbox account?", true);
     if (!hasAccount) {
       const signup = await runSelfSignup({ env, prompter });
@@ -457,7 +555,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     }
   }
 
-  const baseUrl = existingBaseUrl ?? env.INKBOX_BASE_URL;
+  const baseUrl = reconfigureExisting ? env.INKBOX_BASE_URL : (existingBaseUrl ?? env.INKBOX_BASE_URL);
   const client = new Inkbox({ apiKey, baseUrl });
 
   // Step 2 — whoami to discover scope.
@@ -593,7 +691,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   printInkboxAuthorizationInfo();
 
   // Step 5 — signing key for inbound webhooks.
-  let signingKey = normalizeOptional(existingSigningKey ?? "");
+  let signingKey = normalizeOptional((reconfigureExisting ? undefined : existingSigningKey) ?? "");
   if (signingKey) {
     const keepExisting = await prompter.confirm("Use existing webhook signing key?", true);
     if (!keepExisting) signingKey = undefined;
@@ -622,8 +720,33 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       }
     }
   }
+  if (!signingKey) {
+    return {
+      ok: false,
+      message:
+        "Webhook signing key is required for inbound email/SMS/calls. Re-run setup and paste or generate a signing key.",
+    };
+  }
 
-  // Step 6 — persist non-secret state for future doctor/CLI runs.
+  // Step 6 — point the identity's mailbox and phone at this OpenClaw gateway.
+  // This is intentionally done for existing identities too; a pre-existing
+  // phone number must be routed exactly like a newly provisioned number.
+  let tunnelName: string | undefined;
+  try {
+    const delivery = await configureIdentityGatewayDelivery({
+      client: agentClient,
+      identity,
+      identityHandle,
+    });
+    tunnelName = delivery.tunnelName;
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Inkbox delivery setup failed: ${messageFromError(error)}`,
+    };
+  }
+
+  // Step 7 — persist non-secret state for future doctor/CLI runs.
   identity = await identity.refresh();
   await writeIdentityState({
     identityHandle,
@@ -634,7 +757,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   });
   printAgentSummary(identity);
 
-  // Step 7 — persist the channel config in the active OpenClaw profile when
+  // Step 8 — persist the channel config in the active OpenClaw profile when
   // the CLI provided a config persister. Tests and direct library callers can
   // omit it and still receive the snippet.
   const snippet: WizardConfig = {
@@ -642,6 +765,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     identity: identityHandle,
     ...(signingKey ? { signingKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
+    ...(tunnelName ? { tunnelName } : {}),
   };
   if (opts.persistConfig) {
     const persisted = await opts.persistConfig(snippet, {

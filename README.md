@@ -67,7 +67,10 @@ Keep that process running. On startup the plugin opens an Inkbox tunnel, sets ma
 1. Authenticates to Inkbox or uses the API key already present in config.
 2. Resolves or creates the Inkbox agent identity for this OpenClaw agent.
 3. Stores an agent-scoped API key, the identity handle, and webhook signing key in `channels.inkbox`.
-4. Optionally provisions a phone number and prints the final mailbox/phone summary.
+4. Optionally provisions a phone number.
+5. Points the identity's mailbox and phone number at the agent-owned Inkbox tunnel.
+   Existing phone numbers are configured the same way as freshly provisioned numbers: inbound SMS goes to the gateway webhook, and calls use `auto_accept` with the gateway media WebSocket.
+6. Prints the final mailbox/phone summary.
 
 If setup provisions a new local phone number, it waits for SMS `START` opt-in before finishing. It also seeds `~/.openclaw/inkbox/identity-state.json` so `openclaw inkbox doctor` can show useful channel state.
 

@@ -25,8 +25,26 @@ const sdk = vi.hoisted(() => {
   const listIdentities = vi.fn();
   const getIdentity = vi.fn();
   const createSigningKey = vi.fn();
-  const Inkbox = vi.fn(() => ({ whoami, listIdentities, getIdentity, createSigningKey }));
-  return { Inkbox, InkboxAPIError: MockInkboxAPIError, whoami, listIdentities, getIdentity, createSigningKey };
+  const mailboxesUpdate = vi.fn();
+  const phoneNumbersUpdate = vi.fn();
+  const Inkbox = vi.fn(() => ({
+    whoami,
+    listIdentities,
+    getIdentity,
+    createSigningKey,
+    mailboxes: { update: mailboxesUpdate },
+    phoneNumbers: { update: phoneNumbersUpdate },
+  }));
+  return {
+    Inkbox,
+    InkboxAPIError: MockInkboxAPIError,
+    whoami,
+    listIdentities,
+    getIdentity,
+    createSigningKey,
+    mailboxesUpdate,
+    phoneNumbersUpdate,
+  };
 });
 
 vi.mock("@inkbox/sdk", () => ({
@@ -84,6 +102,11 @@ beforeEach(async () => {
   sdk.listIdentities.mockReset();
   sdk.getIdentity.mockReset();
   sdk.createSigningKey.mockReset();
+  sdk.createSigningKey.mockResolvedValue({ signingKey: "whsec_test" });
+  sdk.mailboxesUpdate.mockReset();
+  sdk.phoneNumbersUpdate.mockReset();
+  sdk.mailboxesUpdate.mockResolvedValue({});
+  sdk.phoneNumbersUpdate.mockResolvedValue({});
 });
 
 afterEach(async () => {
@@ -176,7 +199,7 @@ describe("runSetupWizard", () => {
     });
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
-    const prompter = createPrompter({ confirms: [false, false] });
+    const prompter = createPrompter({ confirms: [true] });
     const persistConfig = vi.fn(async () => ({ ok: true }));
     const currentConfig = { tools: { profile: "coding" } };
 
@@ -184,7 +207,7 @@ describe("runSetupWizard", () => {
       prompter,
       currentConfig,
       persistConfig,
-      env: { INKBOX_API_KEY: "ApiKey_test" } as any,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
     });
 
     expect(result.ok).toBe(true);
@@ -193,10 +216,67 @@ describe("runSetupWizard", () => {
       {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
+        signingKey: "whsec_test",
       },
       {
         currentConfig,
-        env: { INKBOX_API_KEY: "ApiKey_test" },
+        env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" },
+      },
+    );
+  });
+
+  it("starts the full setup flow again when reconfiguring an existing profile", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      asks: ["ApiKey_new"],
+      confirms: [true, true, false, true],
+    });
+    const persistConfig = vi.fn(async () => ({ ok: true }));
+
+    const result = await runSetupWizard({
+      prompter,
+      currentConfig: {
+        channels: {
+          inkbox: {
+            apiKey: "ApiKey_old",
+            identity: "human-agent",
+            signingKey: "whsec_old",
+          },
+        },
+      },
+      persistConfig,
+      env: {} as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(prompter.ask.mock.calls.map(([question]) => question)).toContain(
+      "Paste your Inkbox API key (starts with ApiKey_)",
+    );
+    expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_new", baseUrl: undefined });
+    expect(persistConfig).toHaveBeenCalledWith(
+      {
+        apiKey: "ApiKey_new",
+        identity: "smoke-agent",
+        signingKey: "whsec_test",
+      },
+      {
+        currentConfig: {
+          channels: {
+            inkbox: {
+              apiKey: "ApiKey_old",
+              identity: "human-agent",
+              signingKey: "whsec_old",
+            },
+          },
+        },
+        env: {},
       },
     );
   });
@@ -210,7 +290,7 @@ describe("runSetupWizard", () => {
     });
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
-    const prompter = createPrompter({ confirms: [false, false] });
+    const prompter = createPrompter({ confirms: [false, true] });
 
     const result = await runSetupWizard({
       prompter,
@@ -234,7 +314,7 @@ describe("runSetupWizard", () => {
     });
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
-    const prompter = createPrompter({ asks: [""], confirms: [true, false, false] });
+    const prompter = createPrompter({ asks: [""], confirms: [true, false, true] });
 
     const result = await runSetupWizard({
       prompter,
@@ -247,8 +327,37 @@ describe("runSetupWizard", () => {
       config: {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
+        signingKey: "whsec_test",
       },
     });
     expect(identity.provisionPhoneNumber).toHaveBeenCalledWith({ type: "local" });
+  });
+
+  it("routes an existing phone through the identity tunnel during setup", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ confirms: [true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sdk.mailboxesUpdate).toHaveBeenCalledWith("smoke-agent@inkboxmail.com", {
+      webhookUrl: "https://smoke-agent.inkboxwire.com/inkbox/webhook",
+    });
+    expect(sdk.phoneNumbersUpdate).toHaveBeenCalledWith("phone-1", {
+      incomingTextWebhookUrl: "https://smoke-agent.inkboxwire.com/inkbox/webhook",
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://smoke-agent.inkboxwire.com/inkbox/phone/media/ws",
+      incomingCallWebhookUrl: null,
+    });
   });
 });
