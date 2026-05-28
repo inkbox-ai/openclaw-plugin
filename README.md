@@ -253,9 +253,9 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mailbox webh
 | `voiceTranscriptCoalesceMs` | no | plugin default | Non-realtime voice transcript coalescing window. |
 | `voiceAgentPrewarm` | no | plugin default | Prewarm the voice path when the gateway starts. |
 | `voiceRealtime.enabled` | no | auto | Use raw phone media with an OpenClaw realtime voice provider. Set `false` to force Inkbox STT/TTS. |
-| `voiceRealtime.provider` | no | auto | Realtime provider id, for example `openai`. |
+| `voiceRealtime.provider` | no | `openai` | Realtime provider id, for example `openai`. |
 | `voiceRealtime.model` | no | provider default | Realtime model override, for example `gpt-realtime`. |
-| `voiceRealtime.voice` | no | provider default | Realtime voice name. |
+| `voiceRealtime.voice` | no | `cedar` | Realtime voice name. |
 | `voiceRealtime.toolPolicy` | no | `owner` | Tool policy for realtime `openclaw_agent_consult`. |
 | `voiceRealtime.consultPolicy` | no | `substantive` | When realtime calls should consult the main OpenClaw agent. |
 | `voiceRealtime.fallbackToInkboxSttTts` | no | `true` | Fall back to Inkbox STT/TTS when realtime is unavailable. |

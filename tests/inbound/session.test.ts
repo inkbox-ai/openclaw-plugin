@@ -4,6 +4,7 @@ const realtimeMock = vi.hoisted(() => ({
   available: true,
   sessions: [] as any[],
   toolCallOnAudio: false as false | true | "consult" | "post_call",
+  resolveCalls: [] as any[],
 }));
 
 vi.mock("@inkbox/sdk", () => ({
@@ -50,10 +51,11 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
         ]),
     ...customTools,
   ]),
-  resolveConfiguredRealtimeVoiceProvider: vi.fn(() => {
+  resolveConfiguredRealtimeVoiceProvider: vi.fn((params: any) => {
     if (!realtimeMock.available) {
       throw new Error("Realtime voice provider \"openai\" is not configured");
     }
+    realtimeMock.resolveCalls.push(params);
     return {
       provider: { id: "openai", label: "OpenAI" },
       providerConfig: { model: "gpt-realtime" },
@@ -93,6 +95,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
       }),
       setMediaTimestamp: vi.fn(),
       triggerGreeting: vi.fn(() => {
+        params.onTranscript?.("assistant", "Hi there.", true);
         params.audioSink.sendAudio(Buffer.from([0xff, 0xff]));
         params.onEvent?.({ type: "response.done" });
       }),
@@ -199,6 +202,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     realtimeMock.available = true;
     realtimeMock.sessions = [];
     realtimeMock.toolCallOnAudio = false;
+    realtimeMock.resolveCalls = [];
   });
 
   afterEach(() => {
@@ -511,6 +515,12 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     const realtimeSession = realtimeMock.sessions[0].session;
     const params = realtimeMock.sessions[0].params;
     expect(realtimeSession.connect).toHaveBeenCalledTimes(1);
+    expect(realtimeMock.resolveCalls.at(-1)).toEqual(
+      expect.objectContaining({
+        configuredProviderId: "openai",
+        providerConfigOverrides: { voice: "cedar" },
+      }),
+    );
     expect(params.instructions).toContain(
       "Your Inkbox agent email address: smoke-agent@inkboxmail.com.",
     );
@@ -526,6 +536,8 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     expect(channelRuntime.turn.runAssembled).not.toHaveBeenCalled();
 
     const frames = parseSentTextFrames(ws);
+    expect(frames.some((frame) => frame.event === "transcript")).toBe(false);
+    expect(frames.some((frame) => frame.event === "text")).toBe(false);
     expect(frames).toContainEqual(
       expect.objectContaining({
         event: "media",

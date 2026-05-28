@@ -747,12 +747,15 @@ function shouldFallbackToInkboxSttTts(account: ResolvedInkboxAccount): boolean {
   return account.config.voiceRealtime?.fallbackToInkboxSttTts !== false;
 }
 
+const DEFAULT_REALTIME_PROVIDER = "openai";
+const DEFAULT_REALTIME_VOICE = "cedar";
+
 function resolveRealtimeConfig(account: ResolvedInkboxAccount) {
   const config = account.config.voiceRealtime ?? {};
   return {
-    provider: config.provider,
+    provider: config.provider ?? DEFAULT_REALTIME_PROVIDER,
     model: config.model,
-    voice: config.voice,
+    voice: config.voice ?? DEFAULT_REALTIME_VOICE,
     instructions: config.instructions,
     providers: config.providers,
     toolPolicy: resolveRealtimeVoiceAgentConsultToolPolicy(config.toolPolicy, "owner"),
@@ -1882,12 +1885,6 @@ async function runRealtimeCallWebSocket(
       if (isFinal) {
         appendRealtimeTranscript(transcript, { role, text });
       }
-      void sendJson({
-        event: "transcript",
-        party: role === "user" ? "remote" : "local",
-        text,
-        is_final: isFinal,
-      }).catch(() => {});
     },
     onEvent: (event) => {
       if (event.type === "response.done") {
