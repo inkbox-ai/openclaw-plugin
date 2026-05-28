@@ -55,7 +55,7 @@ The setup wizard writes `channels.inkbox` into the active OpenClaw profile and a
 Start the gateway:
 
 ```bash
-openclaw gateway run --allow-unconfigured --force --verbose --compact
+openclaw gateway run
 ```
 
 Keep that process running. On startup the plugin opens an Inkbox tunnel, sets mailbox and phone webhooks, and routes inbound email, SMS, and calls into OpenClaw sessions.
@@ -183,7 +183,7 @@ openclaw config set channels.inkbox.voiceRealtime.model gpt-realtime
 openclaw config set channels.inkbox.voiceRealtime.voice cedar
 openclaw config set channels.inkbox.voiceRealtime.toolPolicy owner
 openclaw config set channels.inkbox.voiceRealtime.consultPolicy substantive
-openclaw gateway run --allow-unconfigured --force --verbose --compact
+openclaw gateway run
 ```
 
 Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. If realtime auth/provider config is unavailable, calls fall back to Inkbox STT/TTS unless `voiceRealtime.fallbackToInkboxSttTts` is set to `false`.
