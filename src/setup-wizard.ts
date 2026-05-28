@@ -6,11 +6,36 @@ import {
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED,
   AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED,
 } from "@inkbox/sdk";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Prompter } from "./prompt.js";
 import { writeIdentityState, readIdentityState } from "./state.js";
+import { resolveInkboxAccount } from "./accounts.js";
+
+export interface WizardConfig {
+  apiKey: string;
+  identity: string;
+  signingKey?: string;
+  baseUrl?: string;
+}
+
+export interface WizardPersistResult {
+  ok: boolean;
+  message?: string;
+}
+
+export type WizardConfigPersister = (
+  config: WizardConfig,
+  context: { currentConfig?: unknown; env: NodeJS.ProcessEnv },
+) => Promise<WizardPersistResult>;
 
 export interface WizardOptions {
   prompter: Prompter;
+  currentConfig?: unknown;
+  persistConfig?: WizardConfigPersister;
   // Lets tests inject env without poking process.env.
   env?: NodeJS.ProcessEnv;
 }
@@ -18,13 +43,8 @@ export interface WizardOptions {
 export interface WizardResult {
   ok: boolean;
   message?: string;
-  // Final values to drop into plugins.entries.inkbox.config — printed at the
-  // end so the user can copy/paste.
-  config?: {
-    apiKey: string;
-    identity: string;
-    signingKey?: string;
-  };
+  config?: WizardConfig;
+  persisted?: boolean;
 }
 
 const SMS_OPT_IN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -41,6 +61,125 @@ function isStartText(text: string | null | undefined): boolean {
 function normalizeOptional(value: string): string | undefined {
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readPath(root: unknown, path: string[]): unknown {
+  let cur = root;
+  for (const part of path) {
+    if (!isRecord(cur)) {
+      return undefined;
+    }
+    cur = cur[part];
+  }
+  return cur;
+}
+
+function addUniqueString(value: unknown, entry: string): string[] {
+  const existing = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  return existing.includes(entry) ? existing : [...existing, entry];
+}
+
+function toolAllowOperation(currentConfig: unknown): { path: string; value: string[] } {
+  const allow = readPath(currentConfig, ["tools", "allow"]);
+  if (Array.isArray(allow)) {
+    return { path: "tools.allow", value: addUniqueString(allow, "inkbox") };
+  }
+  const alsoAllow = readPath(currentConfig, ["tools", "alsoAllow"]);
+  if (Array.isArray(alsoAllow)) {
+    return { path: "tools.alsoAllow", value: addUniqueString(alsoAllow, "inkbox") };
+  }
+  const profile = readPath(currentConfig, ["tools", "profile"]);
+  if (typeof profile === "string" && profile.trim()) {
+    return { path: "tools.alsoAllow", value: ["inkbox"] };
+  }
+  return { path: "tools.allow", value: ["inkbox"] };
+}
+
+export function buildOpenClawConfigBatch(
+  config: WizardConfig,
+  currentConfig?: unknown,
+): Array<{ path: string; value: unknown }> {
+  const batch: Array<{ path: string; value: unknown }> = [
+    { path: "channels.inkbox.enabled", value: true },
+    { path: "channels.inkbox.apiKey", value: config.apiKey },
+    { path: "channels.inkbox.identity", value: config.identity },
+  ];
+  if (config.signingKey) {
+    batch.push({ path: "channels.inkbox.signingKey", value: config.signingKey });
+  }
+  if (config.baseUrl) {
+    batch.push({ path: "channels.inkbox.baseUrl", value: config.baseUrl });
+  }
+  batch.push(toolAllowOperation(currentConfig));
+  return batch;
+}
+
+function resolveOpenClawInvocation(): { command: string; args: string[] } {
+  const entrypoint = process.argv[1];
+  if (entrypoint && existsSync(entrypoint)) {
+    return { command: process.execPath, args: [entrypoint] };
+  }
+  return { command: "openclaw", args: [] };
+}
+
+function runCommand(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<WizardPersistResult> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      env: { ...process.env, ...env, NO_COLOR: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      resolve({ ok: false, message: error.message });
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ ok: true, message: stdout.trim() || undefined });
+        return;
+      }
+      const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+      resolve({
+        ok: false,
+        message: detail || `${command} exited with status ${code ?? "unknown"}`,
+      });
+    });
+  });
+}
+
+export async function persistOpenClawConfigWithCli(
+  config: WizardConfig,
+  context: { currentConfig?: unknown; env: NodeJS.ProcessEnv },
+): Promise<WizardPersistResult> {
+  const batch = buildOpenClawConfigBatch(config, context.currentConfig);
+  const dir = await mkdtemp(join(tmpdir(), "openclaw-inkbox-config-"));
+  const batchFile = join(dir, "batch.json");
+  try {
+    await writeFile(batchFile, JSON.stringify(batch, null, 2), { mode: 0o600 });
+    await chmod(batchFile, 0o600).catch(() => {});
+    const invocation = resolveOpenClawInvocation();
+    return await runCommand(
+      invocation.command,
+      [...invocation.args, "config", "set", "--batch-file", batchFile],
+      context.env,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function summarizeIdentity(identity: {
@@ -254,8 +393,14 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
 
   console.log("Inkbox plugin setup\n");
 
-  const existingApiKey = env.INKBOX_API_KEY?.trim();
-  const existingIdentity = env.INKBOX_IDENTITY?.trim();
+  const existingAccount = resolveInkboxAccount({
+    cfg: opts.currentConfig,
+    env,
+  });
+  const existingApiKey = existingAccount.apiKey?.trim();
+  const existingIdentity = existingAccount.identity?.trim();
+  const existingSigningKey = existingAccount.signingKey?.trim();
+  const existingBaseUrl = existingAccount.baseUrl?.trim();
   if (existingApiKey && existingIdentity) {
     const reconfigure = await prompter.confirm(
       `Inkbox is already configured for identity ${existingIdentity}. Reconfigure?`,
@@ -265,10 +410,12 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       return {
         ok: true,
         message: "existing config kept",
+        persisted: Boolean(existingAccount.configured),
         config: {
           apiKey: existingApiKey,
           identity: existingIdentity,
-          ...(env.INKBOX_SIGNING_KEY ? { signingKey: env.INKBOX_SIGNING_KEY } : {}),
+          ...(existingSigningKey ? { signingKey: existingSigningKey } : {}),
+          ...(existingBaseUrl ? { baseUrl: existingBaseUrl } : {}),
         },
       };
     }
@@ -292,7 +439,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     }
   }
 
-  const baseUrl = env.INKBOX_BASE_URL;
+  const baseUrl = existingBaseUrl ?? env.INKBOX_BASE_URL;
   const client = new Inkbox({ apiKey, baseUrl });
 
   // Step 2 — whoami to discover scope.
@@ -428,9 +575,9 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   printInkboxAuthorizationInfo();
 
   // Step 5 — signing key for inbound webhooks.
-  let signingKey = normalizeOptional(env.INKBOX_SIGNING_KEY ?? "");
+  let signingKey = normalizeOptional(existingSigningKey ?? "");
   if (signingKey) {
-    const keepExisting = await prompter.confirm("Use existing INKBOX_SIGNING_KEY?", true);
+    const keepExisting = await prompter.confirm("Use existing webhook signing key?", true);
     if (!keepExisting) signingKey = undefined;
   }
   if (!signingKey) {
@@ -469,30 +616,60 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   });
   printAgentSummary(identity);
 
-  // Step 7 — print the channel config snippet.
-  const snippet = {
+  // Step 7 — persist the channel config in the active OpenClaw profile when
+  // the CLI provided a config persister. Tests and direct library callers can
+  // omit it and still receive the snippet.
+  const snippet: WizardConfig = {
     apiKey: agentApiKey,
     identity: identityHandle,
     ...(signingKey ? { signingKey } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
   };
-  console.log(
-    "\n✅ Setup complete. Add this to your OpenClaw config under channels.inkbox:\n",
-  );
-  console.log(JSON.stringify(snippet, null, 2));
-  console.log(
-    "\nThen run `openclaw inkbox doctor` to verify the connection.\n",
-  );
+  if (opts.persistConfig) {
+    const persisted = await opts.persistConfig(snippet, {
+      currentConfig: opts.currentConfig,
+      env,
+    });
+    if (!persisted.ok) {
+      console.log("\n❌ Inkbox setup completed, but OpenClaw config was not updated.");
+      console.log(persisted.message ?? "Unknown config write error.");
+      console.log("\nManual fallback for channels.inkbox:\n");
+      console.log(JSON.stringify(snippet, null, 2));
+      return {
+        ok: false,
+        message: "OpenClaw config write failed.",
+        config: snippet,
+        persisted: false,
+      };
+    }
+    console.log("\n✅ Setup complete. Saved Inkbox settings to the active OpenClaw config.");
+    console.log("Run `openclaw inkbox doctor` to verify the connection.\n");
+    return { ok: true, config: snippet, persisted: true };
+  }
 
-  return { ok: true, config: snippet };
+  console.log("\n✅ Setup complete. Add this to your OpenClaw config under channels.inkbox:\n");
+  console.log(JSON.stringify(snippet, null, 2));
+  console.log("\nThen run `openclaw inkbox doctor` to verify the connection.\n");
+
+  return { ok: true, config: snippet, persisted: false };
 }
 
 // Light wrapper used by the CLI command — instantiates a readline prompter,
 // runs the wizard, and ensures the prompter is closed even on error.
-export async function runSetupWizardCli(): Promise<void> {
+export async function runSetupWizardCli(options: {
+  currentConfig?: unknown;
+  env?: NodeJS.ProcessEnv;
+  persistConfig?: WizardConfigPersister;
+} = {}): Promise<void> {
   const { createReadlinePrompter } = await import("./prompt.js");
   const prompter = createReadlinePrompter();
   try {
-    const result = await runSetupWizard({ prompter });
+    const result = await runSetupWizard({
+      prompter,
+      currentConfig: options.currentConfig,
+      env: options.env,
+      persistConfig: options.persistConfig ?? persistOpenClawConfigWithCli,
+    });
     if (!result.ok) {
       console.error(`\n❌ Setup did not complete: ${result.message}`);
       process.exitCode = 1;

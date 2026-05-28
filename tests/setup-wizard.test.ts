@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSetupWizard } from "../src/setup-wizard.js";
+import { buildOpenClawConfigBatch, runSetupWizard } from "../src/setup-wizard.js";
 import type { Prompter } from "../src/prompt.js";
 
 const sdk = vi.hoisted(() => {
@@ -88,6 +88,79 @@ afterEach(async () => {
 });
 
 describe("runSetupWizard", () => {
+  it("builds an OpenClaw config batch for channel config and tool access", () => {
+    expect(
+      buildOpenClawConfigBatch(
+        {
+          apiKey: "ApiKey_test",
+          identity: "smoke-agent",
+          signingKey: "whsec_test",
+        },
+        {
+          tools: {
+            profile: "coding",
+          },
+        },
+      ),
+    ).toEqual([
+      { path: "channels.inkbox.enabled", value: true },
+      { path: "channels.inkbox.apiKey", value: "ApiKey_test" },
+      { path: "channels.inkbox.identity", value: "smoke-agent" },
+      { path: "channels.inkbox.signingKey", value: "whsec_test" },
+      { path: "tools.alsoAllow", value: ["inkbox"] },
+    ]);
+  });
+
+  it("merges Inkbox into an existing tools.allow array", () => {
+    expect(
+      buildOpenClawConfigBatch(
+        {
+          apiKey: "ApiKey_test",
+          identity: "smoke-agent",
+        },
+        {
+          tools: {
+            allow: ["fs"],
+          },
+        },
+      ).at(-1),
+    ).toEqual({ path: "tools.allow", value: ["fs", "inkbox"] });
+  });
+
+  it("persists setup output when a config persister is supplied", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ confirms: [false, false] });
+    const persistConfig = vi.fn(async () => ({ ok: true }));
+    const currentConfig = { tools: { profile: "coding" } };
+
+    const result = await runSetupWizard({
+      prompter,
+      currentConfig,
+      persistConfig,
+      env: { INKBOX_API_KEY: "ApiKey_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.persisted).toBe(true);
+    expect(persistConfig).toHaveBeenCalledWith(
+      {
+        apiKey: "ApiKey_test",
+        identity: "smoke-agent",
+      },
+      {
+        currentConfig,
+        env: { INKBOX_API_KEY: "ApiKey_test" },
+      },
+    );
+  });
+
   it("does not wait for START when the identity already had a phone number", async () => {
     const identity = createIdentity();
     sdk.whoami.mockResolvedValue({
@@ -130,6 +203,7 @@ describe("runSetupWizard", () => {
 
     expect(result).toEqual({
       ok: true,
+      persisted: false,
       config: {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",

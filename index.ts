@@ -42,11 +42,11 @@ registerInkboxHealthChecks();
 
 function registerInkboxCli(api: any): void {
   api.registerCli?.(
-    async ({ program }: { program: any }) => {
+    async ({ program, config }: { program: any; config?: unknown }) => {
       const { registerInkboxCli } = await import("./src/cli.js");
       registerInkboxCli(program, {
         pluginConfig: api.pluginConfig,
-        readCurrentConfig: () => api.runtime?.config?.current?.(),
+        readCurrentConfig: () => api.runtime?.config?.current?.() ?? config,
       });
     },
     {

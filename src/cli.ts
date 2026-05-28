@@ -36,7 +36,10 @@ export function registerInkboxCli(program: any, options: InkboxCliOptions = {}):
       // Lazy import so the readline prompter isn't pulled into doctor/whoami
       // command paths that don't need it.
       const { runSetupWizardCli } = await import("./setup-wizard.js");
-      await runSetupWizardCli();
+      await runSetupWizardCli({
+        currentConfig: options.readCurrentConfig?.(),
+        env: options.env ?? process.env,
+      });
     });
 }
 

@@ -49,11 +49,8 @@ openclaw inkbox setup
 openclaw inkbox doctor
 ```
 
-Allow the required Inkbox tools:
+The setup wizard writes `channels.inkbox` into the active OpenClaw profile and adds the Inkbox tool group to the profile's tool policy.
 
-```bash
-openclaw config set tools.allow '["inkbox"]' --strict-json
-```
 
 Start the gateway:
 
@@ -98,6 +95,7 @@ Preferred config shape:
 Equivalent config commands:
 
 ```bash
+openclaw config set channels.inkbox.enabled true --strict-json
 openclaw config set channels.inkbox.apiKey "ApiKey_xxxxxxxxxxxx"
 openclaw config set channels.inkbox.identity "my-agent-handle"
 openclaw config set channels.inkbox.signingKey "whsec_xxxxxxxxxxxx"
