@@ -27,6 +27,19 @@ export interface WizardConfig {
   signingKey?: string;
   baseUrl?: string;
   tunnelName?: string;
+  voiceRealtime?: WizardVoiceRealtimeConfig;
+}
+
+export interface WizardVoiceRealtimeConfig {
+  enabled: boolean;
+  provider: string;
+  model?: string;
+  voice?: string;
+  instructions?: string;
+  toolPolicy: "safe-read-only" | "owner" | "none";
+  consultPolicy: "auto" | "substantive" | "always";
+  providers?: Record<string, Record<string, unknown>>;
+  fallbackToInkboxSttTts: boolean;
 }
 
 export interface WizardPersistResult {
@@ -56,6 +69,15 @@ export interface WizardResult {
 
 const SMS_OPT_IN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const SMS_OPT_IN_POLL_MS = 3000;
+const SELF_SIGNUP_VERIFICATION_NOTE = "OpenClaw Inkbox plugin setup";
+const DEFAULT_VOICE_REALTIME_CONFIG: WizardVoiceRealtimeConfig = {
+  enabled: true,
+  provider: "openai",
+  voice: "cedar",
+  toolPolicy: "owner",
+  consultPolicy: "substantive",
+  fallbackToInkboxSttTts: true,
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -134,6 +156,49 @@ function toolAllowOperation(currentConfig: unknown): { path: string; value: stri
   return { path: "tools.allow", value: ["inkbox"] };
 }
 
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function setupVoiceRealtimeConfig(currentConfig?: unknown): WizardVoiceRealtimeConfig {
+  const existing = readPath(currentConfig, ["channels", "inkbox", "voiceRealtime"]);
+  if (!isRecord(existing)) {
+    return { ...DEFAULT_VOICE_REALTIME_CONFIG };
+  }
+
+  const out: WizardVoiceRealtimeConfig = { ...DEFAULT_VOICE_REALTIME_CONFIG };
+  if (typeof existing.enabled === "boolean") {
+    out.enabled = existing.enabled;
+  }
+  for (const field of ["provider", "model", "voice", "instructions"] as const) {
+    const resolved = nonEmptyString(existing[field]);
+    if (resolved) {
+      out[field] = resolved;
+    }
+  }
+  if (
+    existing.toolPolicy === "safe-read-only" ||
+    existing.toolPolicy === "owner" ||
+    existing.toolPolicy === "none"
+  ) {
+    out.toolPolicy = existing.toolPolicy;
+  }
+  if (
+    existing.consultPolicy === "auto" ||
+    existing.consultPolicy === "substantive" ||
+    existing.consultPolicy === "always"
+  ) {
+    out.consultPolicy = existing.consultPolicy;
+  }
+  if (isRecord(existing.providers)) {
+    out.providers = existing.providers as Record<string, Record<string, unknown>>;
+  }
+  if (typeof existing.fallbackToInkboxSttTts === "boolean") {
+    out.fallbackToInkboxSttTts = existing.fallbackToInkboxSttTts;
+  }
+  return out;
+}
+
 export function buildOpenClawConfigBatch(
   config: WizardConfig,
   currentConfig?: unknown,
@@ -152,6 +217,10 @@ export function buildOpenClawConfigBatch(
   if (config.tunnelName) {
     batch.push({ path: "channels.inkbox.tunnelName", value: config.tunnelName });
   }
+  batch.push({
+    path: "channels.inkbox.voiceRealtime",
+    value: config.voiceRealtime ?? setupVoiceRealtimeConfig(currentConfig),
+  });
   batch.push(toolAllowOperation(currentConfig));
   return batch;
 }
@@ -361,14 +430,8 @@ async function maybeProvisionPhoneNumber(
   if (!wantPhone) {
     return { identity, didProvisionPhone: false };
   }
-  const state = normalizeOptional(
-    await prompter.ask("US state for the local number (optional, e.g. NY)"),
-  );
   try {
-    const phone = await identity.provisionPhoneNumber({
-      type: "local",
-      ...(state ? { state } : {}),
-    });
+    const phone = await identity.provisionPhoneNumber({ type: "local" });
     console.log(
       `Provisioned ${phone.number}. SMS will be ready in ~10-15 min once 10DLC carrier propagation completes.`,
     );
@@ -411,7 +474,7 @@ async function discoverAgentIdentityHandle(
 
 async function waitForSmsStart(params: {
   identity: AgentIdentity;
-  ownerNumber?: string;
+  ownerNumber: string;
 }): Promise<void> {
   if (params.identity.phoneNumber?.type !== "local") {
     return;
@@ -431,9 +494,21 @@ async function waitForSmsStart(params: {
     }
     await sleep(SMS_OPT_IN_POLL_MS);
   }
-  console.log(
-    "Did not observe START before the wait timed out. SMS may still fail with recipient_not_opted_in until the recipient texts START to the Inkbox number.",
+  throw new Error(
+    `Did not observe START from ${params.ownerNumber} before the wait timed out. Text START to ${params.identity.phoneNumber.number} from that phone, then re-run setup.`,
   );
+}
+
+async function askRequiredOwnerPhoneNumber(prompter: Prompter): Promise<string> {
+  for (;;) {
+    const ownerNumber = normalizeOptional(
+      await prompter.ask("Owner phone number that must text START (E.164, e.g. +15551234567)"),
+    );
+    if (ownerNumber) {
+      return ownerNumber;
+    }
+    console.log("Owner phone number is required so setup can verify SMS opt-in.");
+  }
 }
 
 async function runSelfSignup(params: {
@@ -447,18 +522,11 @@ async function runSelfSignup(params: {
   const displayName = normalizeOptional(
     await params.prompter.ask("Agent display name (optional)"),
   );
-  const noteToHuman =
-    normalizeOptional(
-      await params.prompter.ask(
-        "Verification email note",
-        "OpenClaw Inkbox plugin setup",
-      ),
-    ) ?? "OpenClaw Inkbox plugin setup";
   try {
     const signup = await Inkbox.signup(
       {
         humanEmail,
-        noteToHuman,
+        noteToHuman: SELF_SIGNUP_VERIFICATION_NOTE,
         ...(agentHandle ? { agentHandle } : {}),
         ...(displayName ? { displayName } : {}),
       },
@@ -674,17 +742,17 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   }
 
   if (didProvisionPhone && identity.phoneNumber) {
-    const ownerNumber = normalizeOptional(
-      await prompter.ask(
-        "Owner phone number to wait for START opt-in (optional E.164, e.g. +15551234567)",
-      ),
+    const ownerNumber = await askRequiredOwnerPhoneNumber(prompter);
+    console.log(
+      `Text START to ${identity.phoneNumber.number} from ${ownerNumber}. Waiting up to 5 minutes...`,
     );
-    const shouldWaitForStart = await prompter.confirm(
-      "Wait up to 5 minutes for that recipient to text START to this Inkbox number?",
-      Boolean(ownerNumber),
-    );
-    if (shouldWaitForStart) {
+    try {
       await waitForSmsStart({ identity, ownerNumber });
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 
@@ -766,6 +834,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     ...(signingKey ? { signingKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(tunnelName ? { tunnelName } : {}),
+    voiceRealtime: setupVoiceRealtimeConfig(opts.currentConfig),
   };
   if (opts.persistConfig) {
     const persisted = await opts.persistConfig(snippet, {

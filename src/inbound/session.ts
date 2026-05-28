@@ -2098,7 +2098,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       opts.logger?.warn?.(
         `Inkbox realtime call bridge unavailable; falling back to Inkbox STT/TTS: ${realtimeUnavailable instanceof Error ? realtimeUnavailable.message : String(realtimeUnavailable)}`,
-        );
+      );
+    } else {
+      opts.logger?.info?.(
+        "Inkbox realtime call bridge disabled; using Inkbox STT/TTS. Set channels.inkbox.voiceRealtime.enabled=true to use realtime.",
+      );
     }
 
     await ws.accept({

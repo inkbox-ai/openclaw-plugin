@@ -25,16 +25,24 @@ const sdk = vi.hoisted(() => {
   const listIdentities = vi.fn();
   const getIdentity = vi.fn();
   const createSigningKey = vi.fn();
+  const signup = vi.fn();
+  const verifySignup = vi.fn();
   const mailboxesUpdate = vi.fn();
   const phoneNumbersUpdate = vi.fn();
-  const Inkbox = vi.fn(() => ({
-    whoami,
-    listIdentities,
-    getIdentity,
-    createSigningKey,
-    mailboxes: { update: mailboxesUpdate },
-    phoneNumbers: { update: phoneNumbersUpdate },
-  }));
+  const Inkbox = Object.assign(
+    vi.fn(() => ({
+      whoami,
+      listIdentities,
+      getIdentity,
+      createSigningKey,
+      mailboxes: { update: mailboxesUpdate },
+      phoneNumbers: { update: phoneNumbersUpdate },
+    })),
+    {
+      signup,
+      verifySignup,
+    },
+  );
   return {
     Inkbox,
     InkboxAPIError: MockInkboxAPIError,
@@ -42,6 +50,8 @@ const sdk = vi.hoisted(() => {
     listIdentities,
     getIdentity,
     createSigningKey,
+    signup,
+    verifySignup,
     mailboxesUpdate,
     phoneNumbersUpdate,
   };
@@ -94,6 +104,15 @@ function createIdentity(overrides: Record<string, unknown> = {}) {
   return identity;
 }
 
+const defaultVoiceRealtime = {
+  enabled: true,
+  provider: "openai",
+  voice: "cedar",
+  toolPolicy: "owner",
+  consultPolicy: "substantive",
+  fallbackToInkboxSttTts: true,
+};
+
 beforeEach(async () => {
   tempHome = await mkdtemp(join(tmpdir(), "inkbox-setup-test-"));
   vi.stubEnv("HOME", tempHome);
@@ -103,6 +122,8 @@ beforeEach(async () => {
   sdk.getIdentity.mockReset();
   sdk.createSigningKey.mockReset();
   sdk.createSigningKey.mockResolvedValue({ signingKey: "whsec_test" });
+  sdk.signup.mockReset();
+  sdk.verifySignup.mockReset();
   sdk.mailboxesUpdate.mockReset();
   sdk.phoneNumbersUpdate.mockReset();
   sdk.mailboxesUpdate.mockResolvedValue({});
@@ -134,8 +155,41 @@ describe("runSetupWizard", () => {
       { path: "channels.inkbox.apiKey", value: "ApiKey_test" },
       { path: "channels.inkbox.identity", value: "smoke-agent" },
       { path: "channels.inkbox.signingKey", value: "whsec_test" },
+      { path: "channels.inkbox.voiceRealtime", value: defaultVoiceRealtime },
       { path: "tools.alsoAllow", value: ["inkbox"] },
     ]);
+  });
+
+  it("preserves explicit realtime call overrides while filling setup defaults", () => {
+    expect(
+      buildOpenClawConfigBatch(
+        {
+          apiKey: "ApiKey_test",
+          identity: "smoke-agent",
+        },
+        {
+          channels: {
+            inkbox: {
+              voiceRealtime: {
+                enabled: false,
+                provider: "google",
+                model: "custom-realtime",
+                fallbackToInkboxSttTts: false,
+              },
+            },
+          },
+        },
+      ),
+    ).toContainEqual({
+      path: "channels.inkbox.voiceRealtime",
+      value: {
+        ...defaultVoiceRealtime,
+        enabled: false,
+        provider: "google",
+        model: "custom-realtime",
+        fallbackToInkboxSttTts: false,
+      },
+    });
   });
 
   it("merges Inkbox into an existing tools.allow array", () => {
@@ -183,6 +237,7 @@ describe("runSetupWizard", () => {
       apiKey: "ApiKey_test",
       identity: "smoke-agent",
       signingKey: "whsec_test",
+      voiceRealtime: defaultVoiceRealtime,
     });
     expect(saved.tools).toEqual({
       profile: "coding",
@@ -217,6 +272,7 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceRealtime: defaultVoiceRealtime,
       },
       {
         currentConfig,
@@ -268,6 +324,7 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_new",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceRealtime: defaultVoiceRealtime,
       },
       {
         currentConfig: {
@@ -303,7 +360,7 @@ describe("runSetupWizard", () => {
     expect(result.ok).toBe(true);
     expect(identity.listTexts).not.toHaveBeenCalled();
     expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
-      "Owner phone number to wait for START opt-in (optional E.164, e.g. +15551234567)",
+      "Owner phone number that must text START (E.164, e.g. +15551234567)",
     );
   });
 
@@ -331,9 +388,105 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceRealtime: defaultVoiceRealtime,
       },
     });
     expect(identity.provisionPhoneNumber).toHaveBeenCalledWith({ type: "local" });
+  });
+
+  it("provisions a phone without a state prompt and verifies owner START opt-in", async () => {
+    const identity = createIdentity({ phoneNumber: null });
+    const provisionedPhone = {
+      id: "phone-2",
+      number: "+15559876543",
+      type: "local",
+      smsStatus: "ready",
+    };
+    identity.provisionPhoneNumber.mockImplementation(async () => {
+      identity.phoneNumber = provisionedPhone;
+      return provisionedPhone;
+    });
+    identity.listTexts.mockResolvedValue([
+      {
+        direction: "inbound",
+        text: "START",
+        remotePhoneNumber: "+15167251294",
+      },
+    ]);
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      asks: ["+15167251294"],
+      confirms: [true, false, true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(identity.provisionPhoneNumber).toHaveBeenCalledWith({ type: "local" });
+    expect(identity.listTexts).toHaveBeenCalledWith({ limit: 25 });
+    expect(prompter.ask.mock.calls.map(([question]) => question)).toContain(
+      "Owner phone number that must text START (E.164, e.g. +15551234567)",
+    );
+    expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
+      "US state for the local number (optional, e.g. NY)",
+    );
+    expect(prompter.confirm.mock.calls.map(([question]) => question)).not.toContain(
+      "Wait up to 5 minutes for that recipient to text START to this Inkbox number?",
+    );
+  });
+
+  it("hardcodes the self-signup verification email note", async () => {
+    const identity = createIdentity({
+      agentHandle: "new-agent",
+      emailAddress: "new-agent@inkboxmail.com",
+      mailbox: { emailAddress: "new-agent@inkboxmail.com" },
+      tunnel: { publicHost: "new-agent.inkboxwire.com" },
+    });
+    sdk.signup.mockResolvedValue({
+      apiKey: "ApiKey_signup",
+      agentHandle: "new-agent",
+      emailAddress: "new-agent@inkboxmail.com",
+      message: "Check your email.",
+    });
+    sdk.verifySignup.mockResolvedValue({});
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      asks: ["dima@example.com", "new-agent", "New Agent", "123456"],
+      confirms: [false],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: {} as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sdk.signup).toHaveBeenCalledWith(
+      {
+        humanEmail: "dima@example.com",
+        noteToHuman: "OpenClaw Inkbox plugin setup",
+        agentHandle: "new-agent",
+        displayName: "New Agent",
+      },
+      { baseUrl: undefined },
+    );
+    expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
+      "Verification email note",
+    );
   });
 
   it("routes an existing phone through the identity tunnel during setup", async () => {
