@@ -63,21 +63,6 @@ openclaw gateway run --allow-unconfigured --force --verbose --compact
 
 Keep that process running. On startup the plugin opens an Inkbox tunnel, sets mailbox and phone webhooks, and routes inbound email, SMS, and calls into OpenClaw sessions.
 
-## Development Profile
-
-For an isolated smoke profile:
-
-```bash
-openclaw --profile inkbox-smoke plugins install -l ./
-openclaw --profile inkbox-smoke configure --section model
-openclaw --profile inkbox-smoke inkbox setup
-openclaw --profile inkbox-smoke config set tools.allow '["inkbox"]' --strict-json
-openclaw --profile inkbox-smoke inkbox doctor
-openclaw --profile inkbox-smoke gateway run --allow-unconfigured --force --verbose --compact
-```
-
-Use `openclaw --profile inkbox-smoke config file` to see the profile's config path.
-
 ## Setup Wizard
 
 `openclaw inkbox setup` mirrors the Hermes Inkbox setup flow:
