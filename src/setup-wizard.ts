@@ -459,6 +459,16 @@ async function askRequiredOwnerPhoneNumber(prompter: Prompter): Promise<string> 
   }
 }
 
+async function askRequiredVerificationCode(prompter: Prompter): Promise<string> {
+  for (;;) {
+    const code = normalizeOptional(await prompter.ask("Verification code from email"));
+    if (code) {
+      return code;
+    }
+    console.log("Verification code is required to complete Inkbox setup.");
+  }
+}
+
 async function runSelfSignup(params: {
   env: NodeJS.ProcessEnv;
   prompter: Prompter;
@@ -482,19 +492,13 @@ async function runSelfSignup(params: {
     );
     console.log(`Created Inkbox agent ${signup.agentHandle} (${signup.emailAddress}).`);
     console.log(signup.message);
-    const code = normalizeOptional(
-      await params.prompter.ask("Verification code from email (leave blank to verify later)"),
+    const code = await askRequiredVerificationCode(params.prompter);
+    await Inkbox.verifySignup(
+      signup.apiKey,
+      { verificationCode: code },
+      { baseUrl: params.env.INKBOX_BASE_URL },
     );
-    if (code) {
-      await Inkbox.verifySignup(
-        signup.apiKey,
-        { verificationCode: code },
-        { baseUrl: params.env.INKBOX_BASE_URL },
-      );
-      console.log("Signup verified.");
-    } else {
-      console.log("Signup is unverified. Verify from email before relying on unrestricted delivery.");
-    }
+    console.log("Signup verified.");
     return { apiKey: signup.apiKey, identityHandle: signup.agentHandle };
   } catch (error) {
     if (error instanceof InkboxAPIError && (error.statusCode === 409 || error.statusCode === 422)) {

@@ -453,7 +453,7 @@ describe("runSetupWizard", () => {
     });
     sdk.getIdentity.mockResolvedValue(identity);
     const prompter = createPrompter({
-      asks: ["dima@example.com", "new-agent", "New Agent", "123456"],
+      asks: ["dima@example.com", "new-agent", "New Agent", "", "123456"],
       confirms: [false],
     });
 
@@ -474,6 +474,17 @@ describe("runSetupWizard", () => {
     );
     expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
       "Verification email note",
+    );
+    expect(
+      prompter.ask.mock.calls.some(([question]) => String(question).includes("leave blank")),
+    ).toBe(false);
+    expect(prompter.ask.mock.calls.map(([question]) => question)).toContain(
+      "Verification code from email",
+    );
+    expect(sdk.verifySignup).toHaveBeenCalledWith(
+      "ApiKey_signup",
+      { verificationCode: "123456" },
+      { baseUrl: undefined },
     );
   });
 
