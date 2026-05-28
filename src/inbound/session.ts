@@ -1109,7 +1109,7 @@ async function dispatchInboundTurn(
   },
 ): Promise<void> {
   const core = opts.channelRuntime;
-  if (!core?.turn?.runAssembled) {
+  if (!core?.inbound?.dispatchReply) {
     opts.logger?.warn?.(
       "Inkbox inbound event received, but OpenClaw channelRuntime is unavailable; dropping event.",
     );
@@ -1139,7 +1139,7 @@ async function dispatchInboundTurn(
     timestamp,
     body: opts.turn.body,
   });
-  const ctxPayload = core.turn.buildContext({
+  const ctxPayload = core.inbound.buildContext({
     channel: "inkbox",
     accountId: routeAccountId,
       messageId: opts.turn.messageId,
@@ -1254,7 +1254,7 @@ async function dispatchInboundTurn(
       );
     },
   };
-  await core.turn.runAssembled({
+  await core.inbound.dispatchReply({
     cfg: opts.cfg as any,
     channel: "inkbox",
     accountId: opts.account.accountId,
@@ -1566,7 +1566,7 @@ export async function prewarmInkboxAgent(
   },
 ): Promise<void> {
   const core = opts.channelRuntime;
-  if (!core?.turn?.runAssembled || opts.account.config.voiceAgentPrewarm === false) {
+  if (!core?.inbound?.dispatchReply || opts.account.config.voiceAgentPrewarm === false) {
     return;
   }
 
