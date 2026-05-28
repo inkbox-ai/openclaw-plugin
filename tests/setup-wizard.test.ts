@@ -104,15 +104,6 @@ function createIdentity(overrides: Record<string, unknown> = {}) {
   return identity;
 }
 
-const defaultVoiceRealtime = {
-  enabled: true,
-  provider: "openai",
-  voice: "cedar",
-  toolPolicy: "owner",
-  consultPolicy: "substantive",
-  fallbackToInkboxSttTts: true,
-};
-
 beforeEach(async () => {
   tempHome = await mkdtemp(join(tmpdir(), "inkbox-setup-test-"));
   vi.stubEnv("HOME", tempHome);
@@ -155,38 +146,39 @@ describe("runSetupWizard", () => {
       { path: "channels.inkbox.apiKey", value: "ApiKey_test" },
       { path: "channels.inkbox.identity", value: "smoke-agent" },
       { path: "channels.inkbox.signingKey", value: "whsec_test" },
-      { path: "channels.inkbox.voiceRealtime", value: defaultVoiceRealtime },
       { path: "tools.alsoAllow", value: ["inkbox"] },
     ]);
   });
 
-  it("preserves explicit realtime call overrides while filling setup defaults", () => {
+  it("writes explicit realtime call overrides when provided", () => {
     expect(
       buildOpenClawConfigBatch(
         {
           apiKey: "ApiKey_test",
           identity: "smoke-agent",
+          voiceRealtime: {
+            enabled: false,
+            provider: "google",
+            model: "custom-realtime",
+            toolPolicy: "owner",
+            consultPolicy: "substantive",
+            fallbackToInkboxSttTts: false,
+          },
         },
         {
           channels: {
-            inkbox: {
-              voiceRealtime: {
-                enabled: false,
-                provider: "google",
-                model: "custom-realtime",
-                fallbackToInkboxSttTts: false,
-              },
-            },
+            inkbox: {},
           },
         },
       ),
     ).toContainEqual({
       path: "channels.inkbox.voiceRealtime",
       value: {
-        ...defaultVoiceRealtime,
         enabled: false,
         provider: "google",
         model: "custom-realtime",
+        toolPolicy: "owner",
+        consultPolicy: "substantive",
         fallbackToInkboxSttTts: false,
       },
     });
@@ -237,7 +229,6 @@ describe("runSetupWizard", () => {
       apiKey: "ApiKey_test",
       identity: "smoke-agent",
       signingKey: "whsec_test",
-      voiceRealtime: defaultVoiceRealtime,
     });
     expect(saved.tools).toEqual({
       profile: "coding",
@@ -272,7 +263,6 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
-        voiceRealtime: defaultVoiceRealtime,
       },
       {
         currentConfig,
@@ -324,7 +314,6 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_new",
         identity: "smoke-agent",
         signingKey: "whsec_test",
-        voiceRealtime: defaultVoiceRealtime,
       },
       {
         currentConfig: {
@@ -388,7 +377,6 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
-        voiceRealtime: defaultVoiceRealtime,
       },
     });
     expect(identity.provisionPhoneNumber).toHaveBeenCalledWith({ type: "local" });

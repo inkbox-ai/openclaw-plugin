@@ -70,14 +70,6 @@ export interface WizardResult {
 const SMS_OPT_IN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const SMS_OPT_IN_POLL_MS = 3000;
 const SELF_SIGNUP_VERIFICATION_NOTE = "OpenClaw Inkbox plugin setup";
-const DEFAULT_VOICE_REALTIME_CONFIG: WizardVoiceRealtimeConfig = {
-  enabled: true,
-  provider: "openai",
-  voice: "cedar",
-  toolPolicy: "owner",
-  consultPolicy: "substantive",
-  fallbackToInkboxSttTts: true,
-};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -156,49 +148,6 @@ function toolAllowOperation(currentConfig: unknown): { path: string; value: stri
   return { path: "tools.allow", value: ["inkbox"] };
 }
 
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function setupVoiceRealtimeConfig(currentConfig?: unknown): WizardVoiceRealtimeConfig {
-  const existing = readPath(currentConfig, ["channels", "inkbox", "voiceRealtime"]);
-  if (!isRecord(existing)) {
-    return { ...DEFAULT_VOICE_REALTIME_CONFIG };
-  }
-
-  const out: WizardVoiceRealtimeConfig = { ...DEFAULT_VOICE_REALTIME_CONFIG };
-  if (typeof existing.enabled === "boolean") {
-    out.enabled = existing.enabled;
-  }
-  for (const field of ["provider", "model", "voice", "instructions"] as const) {
-    const resolved = nonEmptyString(existing[field]);
-    if (resolved) {
-      out[field] = resolved;
-    }
-  }
-  if (
-    existing.toolPolicy === "safe-read-only" ||
-    existing.toolPolicy === "owner" ||
-    existing.toolPolicy === "none"
-  ) {
-    out.toolPolicy = existing.toolPolicy;
-  }
-  if (
-    existing.consultPolicy === "auto" ||
-    existing.consultPolicy === "substantive" ||
-    existing.consultPolicy === "always"
-  ) {
-    out.consultPolicy = existing.consultPolicy;
-  }
-  if (isRecord(existing.providers)) {
-    out.providers = existing.providers as Record<string, Record<string, unknown>>;
-  }
-  if (typeof existing.fallbackToInkboxSttTts === "boolean") {
-    out.fallbackToInkboxSttTts = existing.fallbackToInkboxSttTts;
-  }
-  return out;
-}
-
 export function buildOpenClawConfigBatch(
   config: WizardConfig,
   currentConfig?: unknown,
@@ -217,10 +166,9 @@ export function buildOpenClawConfigBatch(
   if (config.tunnelName) {
     batch.push({ path: "channels.inkbox.tunnelName", value: config.tunnelName });
   }
-  batch.push({
-    path: "channels.inkbox.voiceRealtime",
-    value: config.voiceRealtime ?? setupVoiceRealtimeConfig(currentConfig),
-  });
+  if (config.voiceRealtime) {
+    batch.push({ path: "channels.inkbox.voiceRealtime", value: config.voiceRealtime });
+  }
   batch.push(toolAllowOperation(currentConfig));
   return batch;
 }
@@ -834,7 +782,6 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     ...(signingKey ? { signingKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(tunnelName ? { tunnelName } : {}),
-    voiceRealtime: setupVoiceRealtimeConfig(opts.currentConfig),
   };
   if (opts.persistConfig) {
     const persisted = await opts.persistConfig(snippet, {

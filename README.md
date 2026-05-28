@@ -17,8 +17,8 @@ openclaw --version
 Then onboard OpenClaw and configure a model provider. We recommend using either an OpenAI API key or a ChatGPT/Codex subscription:
 
 ```bash
-openclaw onboard --install-daemon
-openclaw configure --section model
+openclaw onboard
+openclaw configure
 ```
 
 If you already manage Node yourself, the OpenClaw docs also support installing the CLI with npm before running the same onboard/configure commands:
@@ -172,18 +172,18 @@ openclaw config set tools.allow '[
 
 ## Realtime Calls
 
-`openclaw inkbox setup` enables raw Inkbox call media through OpenAI Realtime by default. Use either an OpenAI API key in the gateway environment or an OpenClaw auth profile that the OpenAI provider can use.
+Calls auto-detect OpenClaw realtime voice providers. If OpenAI Realtime is available through `OPENAI_API_KEY` or an OpenClaw auth profile, the next call uses raw Inkbox call media through Realtime. If no realtime provider is available, the call uses Inkbox STT/TTS.
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-openclaw configure --section model
+openclaw configure
 openclaw inkbox setup
 openclaw gateway run
 ```
 
 Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. If realtime auth/provider config is unavailable, calls fall back to Inkbox STT/TTS unless `voiceRealtime.fallbackToInkboxSttTts` is set to `false`.
 
-Override the realtime provider, model, or voice:
+Optional realtime overrides:
 
 ```bash
 openclaw config set channels.inkbox.voiceRealtime.provider openai
@@ -252,10 +252,10 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mailbox webh
 | `sms.batchDelayMs` | no | `0` | Inbound SMS fragment batching window. |
 | `voiceTranscriptCoalesceMs` | no | plugin default | Non-realtime voice transcript coalescing window. |
 | `voiceAgentPrewarm` | no | plugin default | Prewarm the voice path when the gateway starts. |
-| `voiceRealtime.enabled` | no | setup writes `true` | Use raw phone media with an OpenClaw realtime voice provider. |
-| `voiceRealtime.provider` | no | setup writes `openai` | Realtime provider id, for example `openai`. |
+| `voiceRealtime.enabled` | no | auto | Use raw phone media with an OpenClaw realtime voice provider. Set `false` to force Inkbox STT/TTS. |
+| `voiceRealtime.provider` | no | auto | Realtime provider id, for example `openai`. |
 | `voiceRealtime.model` | no | provider default | Realtime model override, for example `gpt-realtime`. |
-| `voiceRealtime.voice` | no | setup writes `cedar` | Realtime voice name. |
+| `voiceRealtime.voice` | no | provider default | Realtime voice name. |
 | `voiceRealtime.toolPolicy` | no | `owner` | Tool policy for realtime `openclaw_agent_consult`. |
 | `voiceRealtime.consultPolicy` | no | `substantive` | When realtime calls should consult the main OpenClaw agent. |
 | `voiceRealtime.fallbackToInkboxSttTts` | no | `true` | Fall back to Inkbox STT/TTS when realtime is unavailable. |

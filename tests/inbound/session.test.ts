@@ -274,7 +274,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     const channelRuntime = createChannelRuntime();
     const bridge = createInkboxSessionBridge({
       cfg: {},
-      account: { accountId: "default", config: {} } as any,
+      account: { accountId: "default", config: { voiceRealtime: { enabled: false } } } as any,
       runtime: runtime as any,
       channelRuntime,
     });
@@ -336,7 +336,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     const channelRuntime = createChannelRuntime("Yes, I am here.");
     const bridge = createInkboxSessionBridge({
       cfg: {},
-      account: { accountId: "default", config: {} } as any,
+      account: { accountId: "default", config: { voiceRealtime: { enabled: false } } } as any,
       runtime: runtime as any,
       channelRuntime,
     });
@@ -378,6 +378,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         accountId: "default",
         config: {
           identity: "smoke-agent",
+          voiceRealtime: { enabled: false },
         },
       } as any,
       runtime: runtime as any,
@@ -454,7 +455,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     };
     const bridge = createInkboxSessionBridge({
       cfg: {},
-      account: { accountId: "default", config: {} } as any,
+      account: { accountId: "default", config: { voiceRealtime: { enabled: false } } } as any,
       runtime: runtime as any,
       channelRuntime,
     });
@@ -483,7 +484,6 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         accountId: "default",
         config: {
           identity: "smoke-agent",
-          voiceRealtime: { enabled: true, provider: "openai" },
         },
       } as any,
       runtime: runtime as any,
@@ -581,7 +581,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     );
   });
 
-  it("falls back to Inkbox STT/TTS when realtime auth is unavailable", async () => {
+  it("auto-detects realtime unavailability and falls back to Inkbox STT/TTS", async () => {
     realtimeMock.available = false;
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime("Fallback voice reply.");
@@ -589,9 +589,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       cfg: {},
       account: {
         accountId: "default",
-        config: {
-          voiceRealtime: { enabled: true, provider: "openai" },
-        },
+        config: {},
       } as any,
       runtime: runtime as any,
       channelRuntime,
@@ -623,6 +621,51 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         event: "text",
         delta: "Fallback voice reply.",
         turn_id: "turn-fallback",
+      }),
+    );
+  });
+
+  it("uses Inkbox STT/TTS when realtime is explicitly disabled", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Disabled realtime reply.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          voiceRealtime: { enabled: false },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({
+        event: "transcript",
+        text: "Use STT TTS.",
+        is_final: true,
+        turn_id: "turn-disabled",
+      }),
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+
+    expect(ws.accept).toHaveBeenCalledWith({
+      headers: [
+        ["x-use-inkbox-text-to-speech", "true"],
+        ["x-use-inkbox-speech-to-text", "true"],
+      ],
+    });
+    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    expect(realtimeMock.sessions).toHaveLength(0);
+    const frames = parseSentTextFrames(ws);
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        event: "text",
+        delta: "Disabled realtime reply.",
+        turn_id: "turn-disabled",
       }),
     );
   });

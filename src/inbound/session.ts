@@ -735,7 +735,11 @@ function resolveVoiceTranscriptCoalesceMs(account: ResolvedInkboxAccount): numbe
     : DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS;
 }
 
-function isVoiceRealtimeEnabled(account: ResolvedInkboxAccount): boolean {
+function isVoiceRealtimeExplicitlyDisabled(account: ResolvedInkboxAccount): boolean {
+  return account.config.voiceRealtime?.enabled === false;
+}
+
+function isVoiceRealtimeExplicitlyEnabled(account: ResolvedInkboxAccount): boolean {
   return account.config.voiceRealtime?.enabled === true;
 }
 
@@ -2063,7 +2067,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const meta = await resolveCallMeta(opts, ws, callMetaById);
     const active = createActiveCall(meta, ws);
 
-    if (isVoiceRealtimeEnabled(opts.account)) {
+    if (!isVoiceRealtimeExplicitlyDisabled(opts.account)) {
       let realtimeUnavailable: unknown;
       try {
         resolveRealtimeProvider(opts);
@@ -2096,12 +2100,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         await ws.close(1011, "realtime bridge unavailable");
         return;
       }
-      opts.logger?.warn?.(
-        `Inkbox realtime call bridge unavailable; falling back to Inkbox STT/TTS: ${realtimeUnavailable instanceof Error ? realtimeUnavailable.message : String(realtimeUnavailable)}`,
-      );
+      const unavailableMessage =
+        realtimeUnavailable instanceof Error ? realtimeUnavailable.message : String(realtimeUnavailable);
+      if (isVoiceRealtimeExplicitlyEnabled(opts.account)) {
+        opts.logger?.warn?.(
+          `Inkbox realtime call bridge unavailable; falling back to Inkbox STT/TTS: ${unavailableMessage}`,
+        );
+      } else {
+        opts.logger?.info?.(
+          `Inkbox realtime call bridge auto-detect unavailable; using Inkbox STT/TTS: ${unavailableMessage}`,
+        );
+      }
     } else {
       opts.logger?.info?.(
-        "Inkbox realtime call bridge disabled; using Inkbox STT/TTS. Set channels.inkbox.voiceRealtime.enabled=true to use realtime.",
+        "Inkbox realtime call bridge disabled by channels.inkbox.voiceRealtime.enabled=false; using Inkbox STT/TTS.",
       );
     }
 
