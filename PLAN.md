@@ -34,7 +34,7 @@ openclaw onboard --install-daemon
 
 ### Plugin, not fork
 
-OpenClaw has a first-class plugin SDK (`docs/plugins/`). Everything we need — tool registration, HTTP routes, CLI subcommands, channel plugin shape, setup entries — is documented surface. **We do not fork OpenClaw.** Contrast with the Hermes Agent fork at `inkbox-powered-hermes-agent/`, which had to bake Inkbox into core because Hermes lacked equivalent plugin hooks.
+OpenClaw has a first-class plugin SDK (`docs/plugins/`). Everything we need — tool registration, HTTP routes, CLI subcommands, channel plugin shape, setup entries — is documented surface. **We do not fork OpenClaw.** The Inkbox integration stays inside plugin boundaries rather than modifying OpenClaw core.
 
 ### Plugin shape: channel plugin, agent-scoped
 
@@ -170,7 +170,7 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 
 ## Phase 3 — Setup wizard: `openclaw inkbox setup`
 
-**Goal:** zero-to-running in one command. Mirrors the three-branch flow already proven in the Hermes fork's `_setup_inkbox()` (at `inkbox-powered-hermes-agent/hermes_cli/setup.py:1971`).
+**Goal:** zero-to-running in one command. The wizard should handle first-time signup, existing agent-scoped keys, and admin-scoped keys that need to mint an agent-scoped runtime key.
 
 ### CLI registration
 
@@ -364,7 +364,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 
 ### Batching
 
-- [ ] SMS fragment batching window (port `INKBOX_SMS_TEXT_BATCH_DELAY_SECONDS` knob from Hermes adapter)
+- [ ] Configurable SMS fragment batching window
 - [ ] Email iteration capped at `limit` to avoid runaway scans
 
 ### Diagnostics
@@ -611,4 +611,3 @@ openclaw-plugin/
 - Inkbox TS SDK source: `/home/ec2-user/repos/inkbox/sdk/typescript/src/`
 - OpenClaw plugin docs: `/home/ec2-user/repos/openclaw/docs/plugins/`
 - OpenClaw channel-plugin template: `/home/ec2-user/repos/openclaw/extensions/telegram/`
-- Hermes integration to learn from (NOT to copy code, just patterns): `/home/ec2-user/repos/inkbox-powered-hermes-agent/gateway/platforms/inkbox.py`, `/home/ec2-user/repos/inkbox-powered-hermes-agent/hermes_cli/setup.py:1971`

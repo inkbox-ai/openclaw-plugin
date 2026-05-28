@@ -65,13 +65,14 @@ Keep that process running. On startup the plugin opens an Inkbox tunnel, sets ma
 
 ## Setup Wizard
 
-`openclaw inkbox setup` mirrors the Hermes Inkbox setup flow:
+`openclaw inkbox setup` walks the current OpenClaw profile through Inkbox configuration:
 
-1. No API key: runs Inkbox agent self-signup and verification.
-2. Agent-scoped API key: resolves the bound identity.
-3. Admin-scoped API key: lets you pick or create an identity, then mints an agent-scoped key so the gateway does not keep the admin key.
+1. Authenticates to Inkbox or uses the API key already present in config.
+2. Resolves or creates the Inkbox agent identity for this OpenClaw agent.
+3. Stores an agent-scoped API key, the identity handle, and webhook signing key in `channels.inkbox`.
+4. Optionally provisions a phone number and prints the final mailbox/phone summary.
 
-The wizard can provision a local phone number, waits for `START` only when it just provisioned a new local number, generates or accepts the webhook signing key, seeds `~/.openclaw/inkbox/identity-state.json`, and prints the final handle/mailbox/phone summary.
+If setup provisions a new local phone number, it waits for SMS `START` opt-in before finishing. It also seeds `~/.openclaw/inkbox/identity-state.json` so `openclaw inkbox doctor` can show useful channel state.
 
 Inkbox reachability is controlled server-side with mailbox and phone contact rules in the Inkbox Console. The plugin does not create a second local inbound allowlist unless you explicitly set `allowedInboundContactIds`.
 
