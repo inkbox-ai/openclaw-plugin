@@ -542,8 +542,8 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     console.log(
       existingApiKey ? "Switching to a different Inkbox API key." : "No INKBOX_API_KEY in env.",
     );
-    const hasAccount = await prompter.confirm("Do you have an Inkbox account?", true);
-    if (!hasAccount) {
+    const hasApiKey = await prompter.confirm("Do you already have an Inkbox API key?", true);
+    if (!hasApiKey) {
       const signup = await runSelfSignup({ env, prompter });
       apiKey = signup.apiKey;
       signupIdentityHandle = signup.identityHandle;

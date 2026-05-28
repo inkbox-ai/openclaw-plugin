@@ -256,6 +256,9 @@ describe("runSetupWizard", () => {
     });
 
     expect(result.ok).toBe(true);
+    expect(prompter.confirm.mock.calls.map(([question]) => question)).toContain(
+      "Do you already have an Inkbox API key?",
+    );
     expect(prompter.ask.mock.calls.map(([question]) => question)).toContain(
       "Paste your Inkbox API key (starts with ApiKey_)",
     );
