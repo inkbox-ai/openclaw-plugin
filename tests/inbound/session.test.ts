@@ -185,13 +185,13 @@ function createRuntime() {
 }
 
 function createChannelRuntime(replyText = "I can hear you on the call.") {
-  const runAssembled = vi.fn(async (params: any) => {
+  const dispatchReply = vi.fn(async (params: any) => {
     await params.delivery.deliver({ text: replyText });
   });
   return {
-    turn: {
+    inbound: {
       buildContext: vi.fn((input) => input),
-      runAssembled,
+      dispatchReply,
     },
     session: {
       recordInboundSession: vi.fn(),
@@ -264,8 +264,8 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       reason: "unit-test",
     });
 
-    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
-    const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.extra.InkboxWarmup).toBe(true);
     expect(run.ctxPayload.reply.to).toBe("inkbox-warmup:warmup-test");
     expect(run.ctxPayload.message.bodyForAgent).toContain("[inkbox:warmup");
@@ -310,8 +310,8 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         ["x-use-inkbox-speech-to-text", "true"],
       ],
     });
-    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
-    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledWith(
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledWith(
       expect.objectContaining({
         routeSessionKey: "agent:main:inkbox:call:call-1",
         replyOptions: expect.objectContaining({
@@ -416,8 +416,8 @@ describe("createInkboxSessionBridge call WebSocket", () => {
 
     await bridge.wsHandler(ws as any);
 
-    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
-    const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.message.bodyForAgent).toContain("segments=2");
     expect(run.ctxPayload.message.bodyForAgent).toContain("inkbox_identity=smoke-agent");
     expect(run.ctxPayload.message.bodyForAgent).toContain(
@@ -444,7 +444,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
 
   it("puts voice reply mode instructions in the agent-visible turn body", async () => {
     const { runtime } = createRuntime();
-    const runAssembled = vi.fn(async (params: any) => {
+    const dispatchReply = vi.fn(async (params: any) => {
       expect(params.ctxPayload.message.bodyForAgent).toContain("reply_mode=voice_tts");
       expect(params.ctxPayload.message.bodyForAgent).toContain(
         "allow_separate_followup_tools_when_caller_explicitly_asks=true",
@@ -455,9 +455,9 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       await params.delivery.deliver({ text: "Still on the call." });
     });
     const channelRuntime = {
-      turn: {
+      inbound: {
         buildContext: vi.fn((input) => input),
-        runAssembled,
+        dispatchReply,
       },
       session: {
         recordInboundSession: vi.fn(),
@@ -485,7 +485,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
 
     await bridge.wsHandler(ws as any);
 
-    expect(runAssembled).toHaveBeenCalledTimes(1);
+    expect(dispatchReply).toHaveBeenCalledTimes(1);
   });
 
   it("bridges raw Inkbox media through the OpenClaw realtime voice provider", async () => {
@@ -559,7 +559,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     expect(realtimeSession.sendAudio).not.toHaveBeenCalledWith(echoedOutboundAudio);
     expect(realtimeSession.sendAudio).toHaveBeenCalledWith(inboundAudio);
     expect(realtimeSession.setMediaTimestamp).toHaveBeenCalledWith(40);
-    expect(channelRuntime.turn.runAssembled).not.toHaveBeenCalled();
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
 
     const frames = parseSentTextFrames(ws);
     expect(frames.some((frame) => frame.event === "text")).toBe(false);
@@ -794,7 +794,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         ["x-use-inkbox-speech-to-text", "true"],
       ],
     });
-    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     expect(realtimeMock.sessions).toHaveLength(0);
     const frames = parseSentTextFrames(ws);
     expect(frames).toContainEqual(
@@ -839,7 +839,7 @@ describe("createInkboxSessionBridge call WebSocket", () => {
         ["x-use-inkbox-speech-to-text", "true"],
       ],
     });
-    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     expect(realtimeMock.sessions).toHaveLength(0);
     const frames = parseSentTextFrames(ws);
     expect(frames).toContainEqual(
@@ -887,8 +887,8 @@ describe("createInkboxSessionBridge call WebSocket", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
-    const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.message.bodyForAgent).toContain("[inkbox:voice_realtime_consult");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Save this as a note.");
     expect(run.ctxPayload.extra.InkboxVoiceReplyOnly).toBe(true);
@@ -960,8 +960,8 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       message:
         "Post-call action registered. Tell the caller it is queued for after the call, not completed yet.",
     });
-    expect(channelRuntime.turn.runAssembled).toHaveBeenCalledTimes(1);
-    const run = channelRuntime.turn.runAssembled.mock.calls[0][0];
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "[inkbox:voice_post_call_actions",
     );
