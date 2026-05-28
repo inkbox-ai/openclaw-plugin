@@ -1,5 +1,5 @@
 {
-  "name": "@inkbox/openclaw-plugin",
+  "name": "@inkbox/inkbox",
   "version": "0.1.0",
   "description": "Inkbox plugin for OpenClaw — adds email, SMS, and voice messaging tools and inbound webhook handling",
   "license": "MIT",

@@ -1,4 +1,4 @@
-# @inkbox/openclaw-plugin
+# Inkbox OpenClaw Plugin
 
 [Inkbox](https://inkbox.ai) channel plugin for [OpenClaw](https://openclaw.ai). It gives an OpenClaw agent its own Inkbox identity: mailbox, phone number, SMS, voice calls, contacts, notes, contact rules, identity access, and optional credential vault access without forking OpenClaw.
 

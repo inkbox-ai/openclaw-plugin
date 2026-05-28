@@ -4,7 +4,7 @@
 
 ## TL;DR
 
-Ship `@inkbox/openclaw-plugin` as an OpenClaw plugin (no fork) that lets an agent send and receive **email**, **SMS**, and **calls** under its own Inkbox identity, manage its **contacts** and **notes**, and use its **vault credentials**. Scope is **agent-scoped only** — the plugin treats the identity as the unit of identity. Admin/org-wide capabilities (creating identities, flipping filter modes, managing domains, writing org-level opt-ins) are explicitly **out of scope** for now.
+Ship `@inkbox/inkbox` as an OpenClaw plugin (no fork) that lets an agent send and receive **email**, **SMS**, and **calls** under its own Inkbox identity, manage its **contacts** and **notes**, and use its **vault credentials**. Scope is **agent-scoped only** — the plugin treats the identity as the unit of identity. Admin/org-wide capabilities (creating identities, flipping filter modes, managing domains, writing org-level opt-ins) are explicitly **out of scope** for now.
 
 ## Vision
 
@@ -399,7 +399,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
   ```
 - [ ] **npm publish (secondary):**
   ```
-  npm publish --access public  # @inkbox/openclaw-plugin
+  npm publish --access public  # @inkbox/inkbox
   ```
 - [ ] GitHub release with changelog
 - [ ] Update the inkbox website docs (`website/docs/`) with an "OpenClaw" page that points at `clawhub:inkbox/openclaw-plugin`

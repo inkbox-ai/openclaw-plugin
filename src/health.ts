@@ -10,7 +10,7 @@ import {
 import { resolveInkboxAccount } from "./accounts.js";
 import { readIdentityState, writeIdentityState } from "./state.js";
 
-const SOURCE = "@inkbox/openclaw-plugin";
+const SOURCE = "@inkbox/inkbox";
 
 const CHECKS = [
   "inkbox/config-missing-api-key",

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@inkbox/openclaw-plugin` are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
+All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
@@ -15,6 +15,7 @@ All notable changes to `@inkbox/openclaw-plugin` are listed here. The format fol
 
 ### Changed
 
+- npm package name changed to `@inkbox/inkbox` so the unscoped package name matches the OpenClaw manifest id `inkbox`.
 - README and project docs now call out OpenClaw itself as a prerequisite, with links to the OpenClaw homepage/install docs and the installer/npm commands.
 - `inkbox_whoami` now includes the useful readiness fields that were previously split into `inkbox_rate_status`; the redundant `inkbox_rate_status` tool was removed.
 - `inkbox-onboarding` was re-scoped as `inkbox-troubleshooting`.
