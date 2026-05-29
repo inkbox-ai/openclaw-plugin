@@ -10,7 +10,11 @@ function mailEvent(eventType: string, fromContactId: string | null = "contact-fr
   return {
     event_type: eventType,
     timestamp: "2026-05-21T00:00:00Z",
-    data: { contacts, message: { id: "msg-1", subject: "hi", body_text: "hello" } },
+    data: {
+      contacts,
+      agent_identities: [],
+      message: { id: "msg-1", subject: "hi", body_text: "hello" },
+    },
   };
 }
 
@@ -19,7 +23,9 @@ function textEvent(eventType: string, contactId: string | null = "contact-text-1
     event_type: eventType,
     timestamp: "2026-05-21T00:00:00Z",
     data: {
-      contact: contactId ? { id: contactId, name: "Ada" } : null,
+      contacts: contactId ? [{ id: contactId, name: "Ada" }] : [],
+      agent_identities: [],
+      recipient_phone_number: null,
       text_message: { id: "txt-1", text: "hi" },
     },
   };
@@ -29,7 +35,8 @@ function callEvent(contactId: string | null = "contact-call-1") {
   return {
     call_id: "call-1",
     remote_phone_number: "+15551234567",
-    contact: contactId ? { id: contactId, name: "Ada" } : null,
+    contacts: contactId ? [{ id: contactId, name: "Ada" }] : [],
+    agent_identities: [],
   };
 }
 

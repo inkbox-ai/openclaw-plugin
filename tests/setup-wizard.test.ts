@@ -29,6 +29,9 @@ const sdk = vi.hoisted(() => {
   const verifySignup = vi.fn();
   const mailboxesUpdate = vi.fn();
   const phoneNumbersUpdate = vi.fn();
+  const subscriptionsList = vi.fn();
+  const subscriptionsCreate = vi.fn();
+  const subscriptionsUpdate = vi.fn();
   const Inkbox = Object.assign(
     vi.fn(() => ({
       whoami,
@@ -37,6 +40,13 @@ const sdk = vi.hoisted(() => {
       createSigningKey,
       mailboxes: { update: mailboxesUpdate },
       phoneNumbers: { update: phoneNumbersUpdate },
+      webhooks: {
+        subscriptions: {
+          list: subscriptionsList,
+          create: subscriptionsCreate,
+          update: subscriptionsUpdate,
+        },
+      },
     })),
     {
       signup,
@@ -54,6 +64,9 @@ const sdk = vi.hoisted(() => {
     verifySignup,
     mailboxesUpdate,
     phoneNumbersUpdate,
+    subscriptionsList,
+    subscriptionsCreate,
+    subscriptionsUpdate,
   };
 });
 
@@ -88,7 +101,7 @@ function createIdentity(overrides: Record<string, unknown> = {}) {
     agentHandle: "smoke-agent",
     displayName: "Smoke Agent",
     emailAddress: "smoke-agent@inkboxmail.com",
-    mailbox: { emailAddress: "smoke-agent@inkboxmail.com" },
+    mailbox: { id: "mailbox-1", emailAddress: "smoke-agent@inkboxmail.com" },
     phoneNumber: {
       id: "phone-1",
       number: "+15551234567",
@@ -119,6 +132,22 @@ beforeEach(async () => {
   sdk.phoneNumbersUpdate.mockReset();
   sdk.mailboxesUpdate.mockResolvedValue({});
   sdk.phoneNumbersUpdate.mockResolvedValue({});
+  sdk.subscriptionsList.mockReset();
+  sdk.subscriptionsCreate.mockReset();
+  sdk.subscriptionsUpdate.mockReset();
+  sdk.subscriptionsList.mockResolvedValue([]);
+  sdk.subscriptionsCreate.mockImplementation(async (opts: any) => ({
+    id: "sub-stub",
+    organizationId: "org-1",
+    mailboxId: opts.mailboxId ?? null,
+    phoneNumberId: opts.phoneNumberId ?? null,
+    url: opts.url,
+    eventTypes: opts.eventTypes,
+    status: "active",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }));
+  sdk.subscriptionsUpdate.mockResolvedValue({});
 });
 
 afterEach(async () => {
@@ -504,14 +533,84 @@ describe("runSetupWizard", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(sdk.mailboxesUpdate).toHaveBeenCalledWith("smoke-agent@inkboxmail.com", {
-      webhookUrl: "https://smoke-agent.inkboxwire.com/inkbox/webhook",
+    expect(sdk.subscriptionsCreate).toHaveBeenCalledWith({
+      mailboxId: "mailbox-1",
+      url: "https://smoke-agent.inkboxwire.com/inkbox/webhook",
+      eventTypes: [
+        "message.received",
+        "message.sent",
+        "message.forwarded",
+        "message.delivered",
+        "message.bounced",
+        "message.failed",
+      ],
+    });
+    expect(sdk.subscriptionsCreate).toHaveBeenCalledWith({
+      phoneNumberId: "phone-1",
+      url: "https://smoke-agent.inkboxwire.com/inkbox/webhook",
+      eventTypes: [
+        "text.received",
+        "text.sent",
+        "text.delivered",
+        "text.delivery_failed",
+        "text.delivery_unconfirmed",
+      ],
     });
     expect(sdk.phoneNumbersUpdate).toHaveBeenCalledWith("phone-1", {
-      incomingTextWebhookUrl: "https://smoke-agent.inkboxwire.com/inkbox/webhook",
       incomingCallAction: "auto_accept",
       clientWebsocketUrl: "wss://smoke-agent.inkboxwire.com/inkbox/phone/media/ws",
       incomingCallWebhookUrl: null,
     });
+    expect(sdk.mailboxesUpdate).not.toHaveBeenCalled();
+  });
+
+  it("reconciles existing subscriptions without re-creating on second setup", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const url = "https://smoke-agent.inkboxwire.com/inkbox/webhook";
+    sdk.subscriptionsList.mockImplementation(async (filter: any) => [
+      {
+        id: filter.mailboxId ? "sub-mail" : "sub-text",
+        organizationId: "org-1",
+        mailboxId: filter.mailboxId ?? null,
+        phoneNumberId: filter.phoneNumberId ?? null,
+        url,
+        eventTypes: filter.mailboxId
+          ? [
+              "message.received",
+              "message.sent",
+              "message.forwarded",
+              "message.delivered",
+              "message.bounced",
+              "message.failed",
+            ]
+          : [
+              "text.received",
+              "text.sent",
+              "text.delivered",
+              "text.delivery_failed",
+              "text.delivery_unconfirmed",
+            ],
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    const prompter = createPrompter({ confirms: [true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sdk.subscriptionsCreate).not.toHaveBeenCalled();
+    expect(sdk.subscriptionsUpdate).not.toHaveBeenCalled();
   });
 });

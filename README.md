@@ -58,7 +58,7 @@ Start the gateway:
 openclaw gateway run
 ```
 
-Keep that process running. On startup the plugin opens an Inkbox tunnel, sets mailbox and phone webhooks, and routes inbound email, SMS, and calls into OpenClaw sessions.
+Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, and calls into OpenClaw sessions.
 
 ## Setup Wizard
 
@@ -227,7 +227,7 @@ openclaw models auth login --provider openai-codex --set-default
 
 ## Smoke Test
 
-After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mailbox webhook set, and phone webhook set:
+After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text subscriptions configured, and the incoming-call URL wired:
 
 1. Run `openclaw inkbox doctor`.
 2. Text `START` to the agent's Inkbox phone number from every phone the agent should text.
@@ -314,7 +314,7 @@ npm_config_cache=/tmp/npm-cache npm pack --dry-run
 
 - Plugin, not fork: uses OpenClaw plugin SDK, channel gateway, tools, HTTP routes, CLI, and bundled skills.
 - Agent-scoped: runtime should use an Inkbox agent-scoped API key.
-- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel and patches mailbox/phone webhooks.
+- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions, and wires the incoming-call URL.
 - Voice: Inkbox STT/TTS fallback path and realtime raw-media path both route through the same call WebSocket.
 - Post-call actions: realtime calls can register work for the main OpenClaw agent after hangup.
 - Identity-aware calls: call prompts include agent handle/mailbox/phone/tunnel and known caller contact metadata.

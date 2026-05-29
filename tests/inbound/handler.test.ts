@@ -94,7 +94,8 @@ describe("handleInkboxWebhook", () => {
     const callBody = JSON.stringify({
       call_id: "c-1",
       remote_phone_number: "+15551234567",
-      contact: { id: "contact-1", name: "Ada" },
+      contacts: [{ id: "contact-1", name: "Ada" }],
+      agent_identities: [],
     });
     const onCall = vi.fn().mockReturnValue({
       action: "answer",

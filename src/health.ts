@@ -9,6 +9,7 @@ import {
 } from "openclaw/plugin-sdk/health";
 import { resolveInkboxAccount } from "./accounts.js";
 import { readIdentityState, writeIdentityState } from "./state.js";
+import { inkboxWebhookPath, publicUrl as composePublicUrl } from "./call-websocket.js";
 
 const SOURCE = "@inkbox/inkbox";
 
@@ -25,6 +26,9 @@ const CHECKS = [
   "inkbox/no-phone-number",
   "inkbox/sms-not-ready",
   "inkbox/tunnel-config-conflict",
+  "inkbox/webhook-subscription-mailbox",
+  "inkbox/webhook-subscription-phone-text",
+  "inkbox/incoming-call-route",
 ] as const;
 
 type InkboxCheckId = (typeof CHECKS)[number];
@@ -42,6 +46,9 @@ const DESCRIPTIONS: Record<InkboxCheckId, string> = {
   "inkbox/no-phone-number": "Inkbox identity has a phone number",
   "inkbox/sms-not-ready": "Inkbox identity phone number can send SMS",
   "inkbox/tunnel-config-conflict": "Inkbox public URL and tunnel config are not conflicting",
+  "inkbox/webhook-subscription-mailbox": "Inkbox mailbox events are subscribed at the expected URL",
+  "inkbox/webhook-subscription-phone-text": "Inkbox phone text events are subscribed at the expected URL",
+  "inkbox/incoming-call-route": "Inkbox phone number has an incoming-call route configured",
 };
 
 const OC_BASE = "oc://config/channels/inkbox";
@@ -257,7 +264,154 @@ export async function detectInkboxHealthFindings(
     );
   }
 
+  const expectedBase = resolveExpectedWebhookBase(account, identity, cached);
+  const expectedUrl = expectedBase
+    ? composePublicUrl(expectedBase, inkboxWebhookPath(account.accountId))
+    : undefined;
+
+  if (identity.mailbox?.id) {
+    if (!expectedUrl) {
+      findings.push(
+        finding(
+          "inkbox/webhook-subscription-mailbox",
+          "info",
+          "Cannot determine the expected mailbox webhook URL; set publicUrl or run setup so the tunnel host is cached.",
+          "channels.inkbox.publicUrl",
+          "Set channels.inkbox.publicUrl, or run `openclaw inkbox setup` so the tunnel host is recorded.",
+        ),
+      );
+    } else {
+      try {
+        const subs = await client.webhooks.subscriptions.list({
+          mailboxId: identity.mailbox.id,
+        });
+        const match = subs.find((sub) => sub.url === expectedUrl);
+        if (!match) {
+          findings.push(
+            finding(
+              "inkbox/webhook-subscription-mailbox",
+              "warning",
+              `No mailbox subscription is wired to ${expectedUrl}.`,
+              "channels.inkbox",
+              "Run `openclaw inkbox setup` to create or update the mailbox subscription.",
+            ),
+          );
+        } else if (!match.eventTypes.includes("message.received")) {
+          findings.push(
+            finding(
+              "inkbox/webhook-subscription-mailbox",
+              "warning",
+              `Mailbox subscription at ${expectedUrl} does not include message.received; inbound email will not be delivered.`,
+              "channels.inkbox",
+              "Run `openclaw inkbox setup` to refresh the subscription event types.",
+            ),
+          );
+        }
+      } catch (error) {
+        findings.push(
+          finding(
+            "inkbox/webhook-subscription-mailbox",
+            "info",
+            `Could not list mailbox subscriptions: ${messageFromError(error)}`,
+            "channels.inkbox",
+            "Re-check after the API is reachable.",
+          ),
+        );
+      }
+    }
+  }
+
+  if (identity.phoneNumber?.id) {
+    if (!expectedUrl) {
+      findings.push(
+        finding(
+          "inkbox/webhook-subscription-phone-text",
+          "info",
+          "Cannot determine the expected phone text webhook URL; set publicUrl or run setup so the tunnel host is cached.",
+          "channels.inkbox.publicUrl",
+          "Set channels.inkbox.publicUrl, or run `openclaw inkbox setup` so the tunnel host is recorded.",
+        ),
+      );
+    } else {
+      try {
+        const subs = await client.webhooks.subscriptions.list({
+          phoneNumberId: identity.phoneNumber.id,
+        });
+        const match = subs.find((sub) => sub.url === expectedUrl);
+        if (!match) {
+          findings.push(
+            finding(
+              "inkbox/webhook-subscription-phone-text",
+              "warning",
+              `No phone text subscription is wired to ${expectedUrl}.`,
+              "channels.inkbox",
+              "Run `openclaw inkbox setup` to create or update the phone text subscription.",
+            ),
+          );
+        } else if (!match.eventTypes.includes("text.received")) {
+          findings.push(
+            finding(
+              "inkbox/webhook-subscription-phone-text",
+              "warning",
+              `Phone text subscription at ${expectedUrl} does not include text.received; inbound SMS will not be delivered.`,
+              "channels.inkbox",
+              "Run `openclaw inkbox setup` to refresh the subscription event types.",
+            ),
+          );
+        }
+      } catch (error) {
+        findings.push(
+          finding(
+            "inkbox/webhook-subscription-phone-text",
+            "info",
+            `Could not list phone text subscriptions: ${messageFromError(error)}`,
+            "channels.inkbox",
+            "Re-check after the API is reachable.",
+          ),
+        );
+      }
+    }
+
+    const callAction = (identity.phoneNumber as any).incomingCallAction;
+    const callWebhookUrl = (identity.phoneNumber as any).incomingCallWebhookUrl;
+    const callWsUrl = (identity.phoneNumber as any).clientWebsocketUrl;
+    const callRouteOk =
+      callAction === "auto_accept"
+        ? Boolean(callWsUrl)
+        : callAction === "webhook"
+          ? Boolean(callWebhookUrl)
+          : callAction === "auto_reject";
+    if (!callRouteOk) {
+      findings.push(
+        finding(
+          "inkbox/incoming-call-route",
+          "warning",
+          `Phone number ${identity.phoneNumber.number} has incomingCallAction=${callAction ?? "(unset)"} without a matching URL.`,
+          "channels.inkbox",
+          "Run `openclaw inkbox setup` to wire the incoming-call route.",
+        ),
+      );
+    }
+  }
+
   return findings;
+}
+
+function resolveExpectedWebhookBase(
+  account: ReturnType<typeof resolveInkboxAccount>,
+  identity: { tunnel?: { publicHost?: string | null } | null },
+  cached: { tunnelPublicHost?: string | null } | null,
+): string | undefined {
+  if (account.publicUrl) {
+    return account.publicUrl;
+  }
+  const tunnelHost =
+    identity.tunnel?.publicHost ?? cached?.tunnelPublicHost ?? undefined;
+  if (tunnelHost) {
+    return `https://${tunnelHost}`;
+  }
+  const tunnelName = account.tunnelName ?? account.identity;
+  return tunnelName ? `https://${tunnelName}.inkboxwire.com` : undefined;
 }
 
 async function repairCachedState(
