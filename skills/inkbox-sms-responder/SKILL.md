@@ -6,13 +6,13 @@ user-invocable: false
 
 # Inkbox SMS responder
 
-The Inkbox plugin gives you a working phone number under an agent identity. Use this skill for any SMS conversation — short, conversational, opt-in-gated.
+The Inkbox plugin gives you a working phone number under an agent identity. Use this skill for any SMS or MMS conversation, including group chats — short, conversational, opt-in-gated.
 
 ## Required tools
 
-- `inkbox_list_text_conversations` — start here for triage; one row per remote number
-- `inkbox_get_text_conversation` — pull message history for one remote number before composing
-- `inkbox_send_sms` — outbound (E.164, ≤1600 chars)
+- `inkbox_list_text_conversations` — start here for triage; includes group chats and returns conversation IDs
+- `inkbox_get_text_conversation` — pull message history by `conversationId` or legacy `remotePhoneNumber`
+- `inkbox_send_sms` — outbound by `conversationId`, one E.164 recipient, or a 2-8 recipient group
 
 ## Optional (allowlist needed)
 
@@ -21,13 +21,13 @@ The Inkbox plugin gives you a working phone number under an agent identity. Use 
 
 ## Workflow
 
-1. **Pull conversations.** Call `inkbox_list_text_conversations` (defaults: `limit: 25`, newest-updated first). Each row shows `remotePhoneNumber`, `latestText`, `unreadCount`, `totalCount`.
+1. **Pull conversations.** Call `inkbox_list_text_conversations` (defaults: `limit: 25`, newest-updated first, groups included). Each row shows `id`, `participants`, `isGroup`, `remotePhoneNumber` for 1:1, `latestText`, `unreadCount`, `totalCount`.
 
-2. **Pick a conversation to handle.** Read the latest text in the row. If you need history, call `inkbox_get_text_conversation` with the remote number and a reasonable `limit` (50 is fine).
+2. **Pick a conversation to handle.** Read the latest text in the row. If you need history, call `inkbox_get_text_conversation` with `conversationId: row.id` and a reasonable `limit` (50 is fine). Use `remotePhoneNumber` only for old 1:1 rows that do not have an ID.
 
-3. **Compose and send.** Call `inkbox_send_sms` with `to` in E.164 (`+15551234567`) and `text` ≤1600 chars. Keep the tone conversational — SMS isn't email.
+3. **Compose and send.** Prefer `inkbox_send_sms` with `conversationId` when replying to an existing conversation, especially a group. For a new text, pass `to` as one E.164 number or a list of 2-8 E.164 numbers. Keep the tone conversational — SMS isn't email.
 
-4. **Mark as handled** if you have the optional tool allowlisted: `inkbox_mark_text_conversation_read` with the remote number.
+4. **Mark as handled** if you have the optional tool allowlisted: `inkbox_mark_text_conversation_read` with `conversationId`.
 
 ## Gates and errors
 
@@ -36,6 +36,7 @@ The Inkbox plugin gives you a working phone number under an agent identity. Use 
 - **Carrier propagation window.** Newly provisioned local numbers take ~10–15 min to propagate to carriers. During this window, sends return "Your Inkbox phone number is still propagating to carriers." Wait it out; don't retry tight-loop.
 - **Toll-free numbers cannot send SMS** today. If the identity's phone is toll-free, sends will fail — recommend the user provision a local number via the setup wizard.
 - **Rate cap.** Roughly 15 outbound sends per number per 24h. The plugin surfaces this as a 409. Pause sending and wait.
+- **Group chats.** Reply only when the sender clearly addresses this agent or asks it to act. Do not comment on every group message. If an inbound group turn says no visible reply is warranted, return exactly `[SILENT]`.
 
 ## SMS-specific style
 
@@ -47,7 +48,7 @@ The Inkbox plugin gives you a working phone number under an agent identity. Use 
 
 - Provisioning phone numbers (that's the setup wizard).
 - Org-level SMS opt-in registry writes (admin-only, customer-managed 10DLC campaigns only).
-- MMS sending (current SDK supports SMS only for outbound).
+- Creating a group with more than 8 recipients; carrier group MMS caps are lower than email-style threads.
 
 ## When you need more — raw Inkbox docs
 

@@ -55,6 +55,10 @@ type InkboxInboundTurn = {
   fromLabel: string;
   remoteAddress?: string;
   localAddress?: string;
+  conversationId?: string;
+  conversationKind?: "direct" | "group";
+  conversationLabel?: string;
+  conversationParticipants?: string[];
   subject?: string;
   body: string;
   messageId: string;
@@ -437,6 +441,33 @@ function firstWebhookContact(
   return Array.isArray(list) && list.length > 0 ? list[0] : undefined;
 }
 
+function webhookContacts(data: any): { id: string; name: string }[] {
+  if (Array.isArray(data?.contacts)) {
+    return data.contacts
+      .map((entry: any) => ({
+        id: typeof entry?.id === "string" ? entry.id : "",
+        name: typeof entry?.name === "string" ? entry.name : "",
+      }))
+      .filter((entry: { id: string }) => entry.id);
+  }
+  const contact = data?.contact;
+  if (contact && typeof contact.id === "string") {
+    return [
+      {
+        id: contact.id,
+        name: typeof contact.name === "string" ? contact.name : "",
+      },
+    ];
+  }
+  return [];
+}
+
+function webhookAgentIdentities(data: any): Array<{ id: string; agent_handle?: string; display_name?: string | null }> {
+  return Array.isArray(data?.agent_identities)
+    ? data.agent_identities.filter((entry: any) => typeof entry?.id === "string")
+    : [];
+}
+
 function renderContactMarker(contact: ContactSummary | undefined): string {
   if (!contact?.id) {
     return "contact=unknown_in_inkbox";
@@ -554,6 +585,39 @@ function textMediaMarkers(
 function isSmsControlWord(text: string): boolean {
   const normalized = text.trim().toUpperCase();
   return ["START", "STOP", "UNSTOP", "HELP"].includes(normalized);
+}
+
+function textConversationId(message: any): string | undefined {
+  const raw = message?.conversation_id ?? message?.conversationId;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
+function textSenderPhone(message: any): string | undefined {
+  const raw =
+    message?.sender_phone_number ??
+    message?.senderPhoneNumber ??
+    message?.remote_phone_number ??
+    message?.remotePhoneNumber;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
+async function lookupTextConversationSummary(
+  identity: AgentIdentity | undefined,
+  conversationId: string | undefined,
+): Promise<any | undefined> {
+  if (!identity || !conversationId) {
+    return undefined;
+  }
+  try {
+    const convos = await identity.listTextConversations({
+      limit: 200,
+      offset: 0,
+      includeGroups: true,
+    });
+    return convos.find((entry: any) => entry?.id === conversationId);
+  } catch {
+    return undefined;
+  }
 }
 
 function payloadText(payload: unknown): string {
@@ -701,11 +765,12 @@ async function deliverReply(
 
   const identity = await params.runtime.getIdentity();
   if (params.turn.mode === "sms") {
-    if (!params.turn.remoteAddress) {
+    const conversationId = params.turn.conversationId?.trim();
+    if (!conversationId && !params.turn.remoteAddress) {
       throw new Error("Inkbox SMS reply missing remote phone number.");
     }
     const msg = await identity.sendText({
-      to: params.turn.remoteAddress,
+      ...(conversationId ? { conversationId } : { to: params.turn.remoteAddress }),
       text,
     });
     return msg.id;
@@ -1123,13 +1188,16 @@ async function dispatchInboundTurn(
     return;
   }
 
+  const conversationKind = opts.turn.conversationKind ?? "direct";
+  const conversationRouteId =
+    opts.turn.conversationId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
   const { route, buildEnvelope } = resolveInboundRouteEnvelopeBuilderWithRuntime({
     cfg: opts.cfg as any,
     channel: "inkbox",
     accountId: opts.account.accountId,
     peer: {
-      kind: "direct" as const,
-      id: opts.turn.contactKey,
+      kind: conversationKind,
+      id: conversationRouteId,
     },
     runtime: core,
     sessionStore: (opts.cfg as any)?.session?.store,
@@ -1146,6 +1214,9 @@ async function dispatchInboundTurn(
     timestamp,
     body: opts.turn.body,
   });
+  const smsReplyTarget = opts.turn.conversationId
+    ? `sms:${opts.turn.conversationId}`
+    : opts.turn.remoteAddress ?? opts.turn.contactKey;
   const ctxPayload = core.inbound.buildContext({
     channel: "inkbox",
     accountId: routeAccountId,
@@ -1159,12 +1230,12 @@ async function dispatchInboundTurn(
       displayLabel: opts.turn.fromLabel,
     },
     conversation: {
-      kind: "direct",
-      id: opts.turn.contactKey,
-      label: opts.turn.fromLabel,
+      kind: conversationKind,
+      id: conversationRouteId,
+      label: opts.turn.conversationLabel ?? opts.turn.fromLabel,
       routePeer: {
-        kind: "direct",
-        id: opts.turn.contactKey,
+        kind: conversationKind,
+        id: conversationRouteId,
       },
     },
     route: {
@@ -1179,13 +1250,13 @@ async function dispatchInboundTurn(
           ? `inkbox-call:${callIdFromTurn(opts.turn) ?? opts.turn.contactKey}`
           : opts.turn.mode === "warmup"
             ? `inkbox-warmup:${opts.account.accountId}`
-            : opts.turn.remoteAddress ?? opts.turn.contactKey,
+            : smsReplyTarget,
       originatingTo:
         opts.turn.mode === "voice"
           ? `inkbox-call:${callIdFromTurn(opts.turn) ?? opts.turn.contactKey}`
           : opts.turn.mode === "warmup"
             ? `inkbox-warmup:${opts.account.accountId}`
-          : opts.turn.remoteAddress ?? opts.turn.contactKey,
+          : smsReplyTarget,
       replyToId: opts.turn.replyToId,
       messageThreadId: opts.turn.threadId,
     },
@@ -1203,6 +1274,9 @@ async function dispatchInboundTurn(
       InkboxMode: opts.turn.mode,
       InkboxRemoteAddress: opts.turn.remoteAddress,
       InkboxLocalAddress: opts.turn.localAddress,
+      InkboxConversationId: opts.turn.conversationId,
+      InkboxConversationKind: opts.turn.conversationKind,
+      InkboxConversationParticipants: opts.turn.conversationParticipants?.join(","),
       InkboxContactId: opts.turn.contact?.id,
       MessageThreadId: opts.turn.threadId,
       InkboxVoiceReplyOnly: opts.turn.mode === "voice" ? true : undefined,
@@ -1703,7 +1777,9 @@ async function buildMailTurn(
 
 async function buildTextTurn(
   runtime: InkboxRuntime,
+  account: ResolvedInkboxAccount,
   event: TextWebhookPayload,
+  logger?: PluginLogger,
 ): Promise<InkboxInboundTurn | null> {
   if (event.event_type !== "text.received") {
     return null;
@@ -1712,7 +1788,7 @@ async function buildTextTurn(
   if (message.direction && message.direction !== "inbound") {
     return null;
   }
-  const remote = message.remote_phone_number?.trim();
+  const remote = textSenderPhone(message);
   if (!remote) {
     return null;
   }
@@ -1720,13 +1796,49 @@ async function buildTextTurn(
   if (isSmsControlWord(rawText)) {
     return null;
   }
+  const conversationId = textConversationId(message);
+  let identity: AgentIdentity | undefined;
+  try {
+    identity = await runtime.getIdentity();
+  } catch {
+    identity = undefined;
+  }
+  const contacts = webhookContacts(event.data);
+  const agentIdentities = webhookAgentIdentities(event.data);
+  const summary = await lookupTextConversationSummary(identity, conversationId);
+  const participants = Array.isArray(summary?.participants)
+    ? summary.participants.filter((entry: unknown): entry is string => typeof entry === "string")
+    : [];
+  const isGroup = Boolean(summary?.isGroup) || participants.length > 1 ||
+    contacts.length > 1 || agentIdentities.length > 1;
   const contact =
-    (await hydrateContact(runtime, firstWebhookContact(event.data.contacts))) ??
+    (isGroup ? await lookupContact(runtime, "phone", remote) : undefined) ??
+    (await hydrateContact(runtime, firstWebhookContact(contacts))) ??
     (await lookupContact(runtime, "phone", remote));
   const contactKey = contact?.id ?? remote;
   const mediaMarkers = textMediaMarkers(message.media);
   const text = [rawText, ...mediaMarkers].filter(Boolean).join("\n");
-  const groupId = (message as { group_id?: string | null }).group_id;
+  const conversationLabel = isGroup
+    ? `Inkbox SMS group ${conversationId ?? remote}`
+    : contact?.name ?? remote;
+  const groupPolicy = isGroup
+    ? [
+        "Group SMS response policy: you receive every message in this group so you can track context.",
+        "Reply only when the latest message clearly addresses this Inkbox agent, asks it to act, or a visible answer would be expected from the agent.",
+        "Treat ordinary group chatter as context only.",
+        "If no visible reply is warranted, return exactly [SILENT].",
+      ].join("\n")
+    : undefined;
+  const marker = isGroup
+    ? [
+        `[inkbox:group_sms conversation_id=${conversationId ?? "unknown"}${renderIdentityMarker(account)}`,
+        `from=${remote}`,
+        message.local_phone_number ? `local=${message.local_phone_number}` : undefined,
+        participants.length ? `participants=${participants.join(",")}` : undefined,
+        `reply_mode=conversation_id`,
+        `| ${renderContactMarker(contact)}]`,
+      ].filter(Boolean).join(" ")
+    : `[inkbox:sms from=${remote} | ${renderContactMarker(contact)}]`;
   return {
     mode: "sms",
     contactKey,
@@ -1734,10 +1846,14 @@ async function buildTextTurn(
     fromLabel: contact?.name ?? remote,
     remoteAddress: remote,
     localAddress: message.local_phone_number,
-    body: `[inkbox:sms from=${remote} | ${renderContactMarker(contact)}]\n${text}`,
+    conversationId,
+    conversationKind: isGroup ? "group" : "direct",
+    conversationLabel,
+    conversationParticipants: participants.length ? participants : undefined,
+    body: [marker, groupPolicy, text].filter(Boolean).join("\n"),
     messageId: message.id,
     replyToId: message.id,
-    threadId: groupId ? `sms:${groupId}` : undefined,
+    threadId: conversationId ? `sms:${conversationId}` : undefined,
     timestamp: parseTimestamp(message.created_at ?? event.timestamp),
     raw: event,
   };
@@ -2071,7 +2187,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
     },
     async onText(event) {
-      const turn = await buildTextTurn(opts.runtime, event);
+      const turn = await buildTextTurn(opts.runtime, opts.account, event, opts.logger);
       if (!turn) {
         opts.logger?.info?.(`Inkbox text lifecycle event: ${event.event_type}`);
         return;
@@ -2085,7 +2201,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         return { action: "reject" };
       }
       const contact =
-        (await hydrateContact(opts.runtime, firstWebhookContact(event.contacts))) ??
+        (await hydrateContact(opts.runtime, firstWebhookContact(webhookContacts(event)))) ??
         (await lookupContact(opts.runtime, "phone", event.remote_phone_number));
       callMetaById.set(event.id, {
         mode: "voice",

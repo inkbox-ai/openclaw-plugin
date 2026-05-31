@@ -1,17 +1,32 @@
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText } from "../errors.js";
+import { runTool, toolError, toolText } from "../errors.js";
 import { formatJson, formatWithHeader } from "../format.js";
 
-// Read-side surface for SMS. Most agent flows want the conversation view
-// (one row per remote number) rather than the raw message list; that's why
-// list_text_conversations / get_text_conversation are required while
-// list_texts / get_text are optional.
+function resolveConversationKey(params: any): { key?: string; error?: string; label?: string } {
+  const conversationId =
+    typeof params.conversationId === "string" ? params.conversationId.trim() : "";
+  const remotePhoneNumber =
+    typeof params.remotePhoneNumber === "string" ? params.remotePhoneNumber.trim() : "";
+  const keyCount = Number(Boolean(conversationId)) + Number(Boolean(remotePhoneNumber));
+  if (keyCount !== 1) {
+    return {
+      error: "Specify exactly one of `conversationId` or `remotePhoneNumber`.",
+    };
+  }
+  if (conversationId) {
+    return { key: conversationId, label: `conversation ${conversationId}` };
+  }
+  return { key: remotePhoneNumber, label: `conversation with ${remotePhoneNumber}` };
+}
+
+// Read-side surface for SMS/MMS. The server's canonical thread key is now
+// conversationId, with remotePhoneNumber retained for 1:1 compatibility.
 export function registerSmsReads(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_list_text_conversations",
     description:
-      "List SMS conversation summaries for the configured Inkbox identity's phone number. One row per remote number, with latest message + unread count. Use as the entry point for SMS triage.",
+      "List text conversation summaries for the configured Inkbox identity's phone number. Includes group chats by default; each row carries `id`/`conversationId`-style UUID data, participants, latest message, unread count, and legacy `remotePhoneNumber` for 1:1 threads.",
     parameters: Type.Object({
       limit: Type.Optional(
         Type.Integer({
@@ -24,6 +39,13 @@ export function registerSmsReads(api: any, runtime: InkboxRuntime): void {
       offset: Type.Optional(
         Type.Integer({ minimum: 0, default: 0, description: "Pagination offset." }),
       ),
+      includeGroups: Type.Optional(
+        Type.Boolean({
+          default: true,
+          description:
+            "Include group conversations. Defaults to true so group SMS triage works.",
+        }),
+      ),
     }),
     async execute(_id: string, params: any) {
       return runTool(async () => {
@@ -31,6 +53,7 @@ export function registerSmsReads(api: any, runtime: InkboxRuntime): void {
         const convos = await identity.listTextConversations({
           limit: params.limit ?? 25,
           offset: params.offset ?? 0,
+          includeGroups: params.includeGroups ?? true,
         });
         return toolText(
           formatWithHeader(
@@ -45,11 +68,18 @@ export function registerSmsReads(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_get_text_conversation",
     description:
-      "Fetch messages in a specific SMS conversation, keyed by the remote E.164 number.",
+      "Fetch messages in a specific text conversation. Use `conversationId` for group chats or any canonical conversation row; `remotePhoneNumber` is the legacy 1:1 fallback.",
     parameters: Type.Object({
-      remotePhoneNumber: Type.String({
-        description: "Remote E.164 phone number identifying the conversation.",
-      }),
+      conversationId: Type.Optional(
+        Type.String({
+          description: "Inkbox text conversation UUID from `inkbox_list_text_conversations`.",
+        }),
+      ),
+      remotePhoneNumber: Type.Optional(
+        Type.String({
+          description: "Legacy 1:1 remote E.164 phone number identifying the conversation.",
+        }),
+      ),
       limit: Type.Optional(
         Type.Integer({
           minimum: 1,
@@ -62,14 +92,18 @@ export function registerSmsReads(api: any, runtime: InkboxRuntime): void {
     }),
     async execute(_id: string, params: any) {
       return runTool(async () => {
+        const resolved = resolveConversationKey(params);
+        if (resolved.error || !resolved.key) {
+          return toolError(resolved.error ?? "Missing conversation key.");
+        }
         const identity = await runtime.getIdentity();
         const msgs = await identity.getTextConversation(
-          params.remotePhoneNumber,
+          resolved.key,
           { limit: params.limit ?? 50, offset: params.offset ?? 0 },
         );
         return toolText(
           formatWithHeader(
-            `Returned ${msgs.length} text(s) with ${params.remotePhoneNumber}.`,
+            `Returned ${msgs.length} text(s) in ${resolved.label}.`,
             msgs,
           ),
         );
@@ -148,20 +182,31 @@ export function registerSmsReads(api: any, runtime: InkboxRuntime): void {
     {
       name: "inkbox_mark_text_conversation_read",
       description:
-        "Mark every message in a conversation as read, identified by the remote E.164 number.",
+        "Mark every message in a text conversation as read. Use `conversationId` for group chats; `remotePhoneNumber` is the legacy 1:1 fallback.",
       parameters: Type.Object({
-        remotePhoneNumber: Type.String({
-          description: "Remote E.164 phone number identifying the conversation.",
-        }),
+        conversationId: Type.Optional(
+          Type.String({
+            description: "Inkbox text conversation UUID from `inkbox_list_text_conversations`.",
+          }),
+        ),
+        remotePhoneNumber: Type.Optional(
+          Type.String({
+            description: "Legacy 1:1 remote E.164 phone number identifying the conversation.",
+          }),
+        ),
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
+          const resolved = resolveConversationKey(params);
+          if (resolved.error || !resolved.key) {
+            return toolError(resolved.error ?? "Missing conversation key.");
+          }
           const identity = await runtime.getIdentity();
           const result = await identity.markTextConversationRead(
-            params.remotePhoneNumber,
+            resolved.key,
           );
           return toolText(
-            `Marked ${result.updatedCount} message(s) as read in conversation with ${params.remotePhoneNumber}.`,
+            `Marked ${result.updatedCount} message(s) as read in ${resolved.label}.`,
           );
         });
       },

@@ -151,8 +151,9 @@ class FakeInkboxWebSocket {
   }
 }
 
-function createRuntime() {
-  const sendText = vi.fn();
+function createRuntime(options: { conversations?: any[] } = {}) {
+  const sendText = vi.fn(async () => ({ id: "txt-reply", deliveryStatus: "queued" }));
+  const listTextConversations = vi.fn(async () => options.conversations ?? []);
   const runtime = {
     getIdentity: vi.fn(async () => ({
       agentHandle: "smoke-agent",
@@ -168,6 +169,7 @@ function createRuntime() {
       },
       tunnel: { publicHost: "smoke-agent.inkboxwire.com" },
       sendText,
+      listTextConversations,
     })),
     getClient: vi.fn(async () => ({
       calls: {
@@ -181,7 +183,7 @@ function createRuntime() {
       },
     })),
   };
-  return { runtime, sendText };
+  return { runtime, sendText, listTextConversations };
 }
 
 function createChannelRuntime(replyText = "I can hear you on the call.") {
@@ -202,11 +204,49 @@ function createChannelRuntime(replyText = "I can hear you on the call.") {
   };
 }
 
+function textWebhookEvent(params: {
+  text: string;
+  conversationId?: string;
+  remote?: string;
+  local?: string;
+}): any {
+  return {
+    event_type: "text.received",
+    timestamp: "2026-05-21T00:00:00Z",
+    data: {
+      contacts: [],
+      agent_identities: [],
+      recipient_phone_number: null,
+      text_message: {
+        id: "txt-in-1",
+        direction: "inbound",
+        local_phone_number: params.local ?? "+16282028580",
+        remote_phone_number: params.remote ?? "+15551234567",
+        sender_phone_number: params.remote ?? "+15551234567",
+        conversation_id: params.conversationId,
+        text: params.text,
+        type: "mms",
+        media: null,
+        is_read: false,
+        delivery_status: null,
+        origin: "user_initiated",
+        error_code: null,
+        error_detail: null,
+        sent_at: null,
+        delivered_at: null,
+        failed_at: null,
+        created_at: "2026-05-21T00:00:00Z",
+        updated_at: "2026-05-21T00:00:00Z",
+      },
+    },
+  };
+}
+
 function parseSentTextFrames(ws: FakeInkboxWebSocket) {
   return ws.sent.map((message) => JSON.parse(message));
 }
 
-describe("createInkboxSessionBridge call WebSocket", () => {
+describe("createInkboxSessionBridge", () => {
   beforeEach(() => {
     realtimeMock.available = true;
     realtimeMock.sessions = [];
@@ -975,5 +1015,89 @@ describe("createInkboxSessionBridge call WebSocket", () => {
       "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
     );
     expect(run.ctxPayload.extra.InkboxMode).toBe("sms");
+  });
+
+  it("routes unaddressed group SMS to the agent and honors silent replies", async () => {
+    const { runtime, sendText } = createRuntime({
+      conversations: [
+        {
+          id: "conv-group",
+          participants: ["+15551234567", "+15557654321"],
+          isGroup: true,
+        },
+      ],
+    });
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onText?.(
+      textWebhookEvent({
+        conversationId: "conv-group",
+        text: "Dinner is at 7.",
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.conversation.kind).toBe("group");
+    expect(run.ctxPayload.conversation.id).toBe("conv-group");
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "you receive every message in this group so you can track context",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Treat ordinary group chatter as context only.",
+    );
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("routes addressed group SMS as a group conversation and replies by conversationId", async () => {
+    const { runtime, sendText } = createRuntime({
+      conversations: [
+        {
+          id: "conv-group",
+          participants: ["+15551234567", "+15557654321"],
+          isGroup: true,
+        },
+      ],
+    });
+    const channelRuntime = createChannelRuntime("Sure, I can help.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onText?.(
+      textWebhookEvent({
+        conversationId: "conv-group",
+        text: "smoke-agent can you help with dinner?",
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.conversation.kind).toBe("group");
+    expect(run.ctxPayload.conversation.id).toBe("conv-group");
+    expect(run.ctxPayload.reply.to).toBe("sms:conv-group");
+    expect(run.ctxPayload.extra.InkboxConversationId).toBe("conv-group");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Group SMS response policy");
+    expect(sendText).toHaveBeenCalledWith({
+      conversationId: "conv-group",
+      text: "Sure, I can help.",
+    });
   });
 });
