@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SmsBatcher } from "../../src/inbound/batch.js";
 
-function textEvent(remote: string, text: string): any {
+function textEvent(remote: string, text: string, conversationId?: string): any {
   return {
     event_type: "text.received",
     timestamp: "2026-05-21T00:00:00Z",
@@ -9,6 +9,7 @@ function textEvent(remote: string, text: string): any {
       text_message: {
         id: `t-${Math.random()}`,
         remote_phone_number: remote,
+        ...(conversationId ? { conversation_id: conversationId } : {}),
         text,
       },
     },
@@ -63,6 +64,17 @@ describe("SmsBatcher", () => {
     b.accept(textEvent("+15559999999", "hi from B"));
     await vi.advanceTimersByTimeAsync(110);
     expect(flush).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not merge different senders in the same group conversation", async () => {
+    const flush = vi.fn();
+    const b = new SmsBatcher({ batchDelayMs: 100, maxMessages: 8, maxChars: 4000 }, flush);
+    b.accept(textEvent("+15551234567", "hi from A", "conv-group"));
+    b.accept(textEvent("+15559999999", "hi from B", "conv-group"));
+    await vi.advanceTimersByTimeAsync(110);
+    expect(flush).toHaveBeenCalledTimes(2);
+    const first = flush.mock.calls[0][0];
+    expect(first.__batch.conversationId).toBe("conv-group");
   });
 
   it("respects maxMessages cap by flushing immediately", async () => {

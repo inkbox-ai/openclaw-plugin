@@ -31,6 +31,17 @@ function textEvent(eventType: string, contactId: string | null = "contact-text-1
   };
 }
 
+function legacyTextEvent(eventType: string, contactId: string | null = "contact-text-1") {
+  return {
+    event_type: eventType,
+    timestamp: "2026-05-21T00:00:00Z",
+    data: {
+      contact: contactId ? { id: contactId, name: "Ada" } : null,
+      text_message: { id: "txt-1", text: "hi" },
+    },
+  };
+}
+
 function callEvent(contactId: string | null = "contact-call-1") {
   return {
     call_id: "call-1",
@@ -92,6 +103,23 @@ describe("dispatchInbound", () => {
       const onText = vi.fn();
       await dispatchInbound(textEvent("text.received", "contact-blocked"), { onText }, ["contact-allowed"]);
       expect(onText).not.toHaveBeenCalled();
+    });
+
+    it("uses the first text contact for allowlist checks", async () => {
+      const onText = vi.fn();
+      const event = textEvent("text.received", null);
+      event.data.contacts = [
+        { id: "contact-blocked", name: "Blocked" },
+        { id: "contact-allowed", name: "Allowed" },
+      ];
+      await dispatchInbound(event, { onText }, ["contact-allowed"]);
+      expect(onText).not.toHaveBeenCalled();
+    });
+
+    it("supports legacy singular text contact payloads during rollout", async () => {
+      const onText = vi.fn();
+      await dispatchInbound(legacyTextEvent("text.received", "contact-allowed"), { onText }, ["contact-allowed"]);
+      expect(onText).toHaveBeenCalledTimes(1);
     });
 
     it("rejects call when contact is not on the list, ignoring handler", async () => {

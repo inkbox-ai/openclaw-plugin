@@ -2,7 +2,7 @@
 
 [Inkbox](https://inkbox.ai) channel plugin for [OpenClaw](https://openclaw.ai). It gives an OpenClaw agent its own Inkbox identity: mailbox, phone number, SMS, voice calls, contacts, notes, contact rules, identity access, and optional credential vault access without forking OpenClaw.
 
-Status: outbound tools, read tools, bundled skills, setup wizard, doctor checks, SMS batching, inbound email/SMS/voice, realtime phone calls, post-call actions, and package-included skills are implemented. ClawHub publishing is still pending.
+Status: outbound tools, read tools, bundled skills, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group text conversations, inbound email/SMS/voice, realtime phone calls, post-call actions, and package-included skills are implemented. ClawHub publishing is still pending.
 
 ## Prerequisites
 
@@ -267,7 +267,7 @@ Required by default:
 
 - Outbound: `inkbox_send_email`, `inkbox_send_sms`
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
-- SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`
+- SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - Voice reads: `inkbox_list_calls`, `inkbox_list_call_transcripts`
 - Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`
 - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`

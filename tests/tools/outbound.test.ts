@@ -122,6 +122,46 @@ describe("registerSendSms", () => {
     expect(out.content[0].text).toContain("queued");
   });
 
+  it("sends group texts with a recipient list", async () => {
+    const { api, tools } = createApi();
+    const sendText = vi.fn().mockResolvedValue({
+      id: "txt-group",
+      deliveryStatus: "queued",
+      recipients: [
+        { recipientPhoneNumber: "+15551234567" },
+        { recipientPhoneNumber: "+15557654321" },
+      ],
+    });
+    registerSendSms(api, createMockRuntime({ sendText }));
+    const tool = tools.get("inkbox_send_sms")!;
+    const out = await tool.execute("turn-1", {
+      to: ["+15551234567", "+15557654321"],
+      text: "group hello",
+    });
+    expect(sendText).toHaveBeenCalledWith({
+      to: ["+15551234567", "+15557654321"],
+      text: "group hello",
+    });
+    expect(out.content[0].text).toContain("txt-group");
+    expect(out.content[0].text).toContain("+15557654321");
+  });
+
+  it("sends replies by conversationId", async () => {
+    const { api, tools } = createApi();
+    const sendText = vi.fn().mockResolvedValue({ id: "txt-conv", deliveryStatus: "queued" });
+    registerSendSms(api, createMockRuntime({ sendText }));
+    const tool = tools.get("inkbox_send_sms")!;
+    const out = await tool.execute("turn-1", {
+      conversationId: "conv-1",
+      text: "replying in-thread",
+    });
+    expect(sendText).toHaveBeenCalledWith({
+      conversationId: "conv-1",
+      text: "replying in-thread",
+    });
+    expect(out.content[0].text).toContain("conversation=conv-1");
+  });
+
   it("blocks non-allowlisted recipient", async () => {
     const { api, tools } = createApi();
     const sendText = vi.fn();
@@ -129,6 +169,33 @@ describe("registerSendSms", () => {
     const tool = tools.get("inkbox_send_sms")!;
     const out = await tool.execute("turn-1", { to: "+15559999999", text: "spam" });
     expect(out.isError).toBe(true);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("checks every explicit group recipient against the allowlist", async () => {
+    const { api, tools } = createApi();
+    const sendText = vi.fn();
+    registerSendSms(api, createMockRuntime({ sendText }), ["+15551234567"]);
+    const tool = tools.get("inkbox_send_sms")!;
+    const out = await tool.execute("turn-1", {
+      to: ["+15551234567", "+15557654321"],
+      text: "group hello",
+    });
+    expect(out.isError).toBe(true);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("rejects conversationId sends when a local recipient allowlist is active", async () => {
+    const { api, tools } = createApi();
+    const sendText = vi.fn();
+    registerSendSms(api, createMockRuntime({ sendText }), ["+15551234567"]);
+    const tool = tools.get("inkbox_send_sms")!;
+    const out = await tool.execute("turn-1", {
+      conversationId: "conv-1",
+      text: "replying in-thread",
+    });
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("allowlist");
     expect(sendText).not.toHaveBeenCalled();
   });
 

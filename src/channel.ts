@@ -171,7 +171,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
     id: INKBOX_CHANNEL_ID,
     meta,
     capabilities: {
-      chatTypes: ["direct"],
+      chatTypes: ["direct", "group"],
       blockStreaming: true,
     },
     reload: {
@@ -251,19 +251,24 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         resolveInkboxAccount({ cfg, accountId }).defaultTo,
     },
     messaging: {
-      targetPrefixes: ["inkbox", "email", "mailto", "sms", "text", "phone"],
+      targetPrefixes: ["inkbox", "email", "mailto", "sms", "text", "phone", "conversation"],
       normalizeTarget: normalizeInkboxTarget,
       parseExplicitTarget: ({ raw }: { raw: string }) => {
         const parsed = parseInkboxTarget(raw);
         return parsed
           ? {
               to: parsed.value,
-              chatType: "direct" as const,
+              chatType:
+                parsed.mode === "sms-conversation" ? ("group" as const) : ("direct" as const),
             }
           : null;
       },
       inferTargetChatType: ({ to }: { to: string }) =>
-        parseInkboxTarget(to) ? "direct" : undefined,
+        parseInkboxTarget(to)?.mode === "sms-conversation"
+          ? "group"
+          : parseInkboxTarget(to)
+            ? "direct"
+            : undefined,
       targetResolver: {
         looksLikeId: (raw: string) => parseInkboxTarget(raw) !== null,
         hint: "<email:user@example.com|sms:+14155550123>",
@@ -281,17 +286,21 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         if (!parsed) {
           return null;
         }
+        const chatType = parsed.mode === "sms-conversation" ? "group" : "direct";
         const route = buildChannelOutboundSessionRoute({
           cfg,
           agentId,
           channel: INKBOX_CHANNEL_ID,
           accountId,
           peer: {
-            kind: "direct",
+            kind: chatType,
             id: parsed.value,
           },
-          chatType: "direct",
-          from: `inkbox:${accountId ?? resolveDefaultInkboxAccountId(cfg)}`,
+          chatType,
+          from:
+            chatType === "group"
+              ? `inkbox:conversation:${parsed.value}`
+              : `inkbox:${accountId ?? resolveDefaultInkboxAccountId(cfg)}`,
           to: parsed.value,
         });
         return buildThreadAwareOutboundSessionRoute({

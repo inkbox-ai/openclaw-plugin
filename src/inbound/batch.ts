@@ -26,22 +26,52 @@ export interface BatchedTextEvent extends TextWebhookPayload {
   __batch?: {
     fragments: TextWebhookPayload[];
     remotePhoneNumber: string;
+    conversationId?: string;
   };
 }
 
 export type FlushFn = (batched: BatchedTextEvent) => Promise<void> | void;
 
 interface PendingBatch {
+  key: string;
   remotePhoneNumber: string;
+  conversationId?: string;
   fragments: TextWebhookPayload[];
   totalChars: number;
   timer: NodeJS.Timeout | null;
 }
 
-// Keyed by remote phone number. Each pending batch flushes when the delay
-// elapses with no further fragments, or when a cap is hit. Designed so a
-// burst of fragments from the same sender becomes a single logical event
-// for the downstream handler.
+function textRemotePhone(event: TextWebhookPayload): string | undefined {
+  const message = (event as any)?.data?.text_message;
+  const remote = message?.sender_phone_number ??
+    message?.senderPhoneNumber ??
+    message?.remote_phone_number ??
+    message?.remotePhoneNumber;
+  return typeof remote === "string" && remote.trim() ? remote.trim() : undefined;
+}
+
+function textConversationId(event: TextWebhookPayload): string | undefined {
+  const message = (event as any)?.data?.text_message;
+  const conversationId = message?.conversation_id ?? message?.conversationId;
+  return typeof conversationId === "string" && conversationId.trim()
+    ? conversationId.trim()
+    : undefined;
+}
+
+function batchKey(event: TextWebhookPayload): { key: string; remote: string; conversationId?: string } | undefined {
+  const remote = textRemotePhone(event);
+  if (!remote) return undefined;
+  const conversationId = textConversationId(event);
+  return {
+    remote,
+    conversationId,
+    key: conversationId ? `${conversationId}:${remote}` : remote,
+  };
+}
+
+// Keyed by conversation + sender when a conversation id is available, otherwise
+// by remote phone number. This keeps split fragments from one sender together
+// without merging different people talking inside the same group chat.
 export class SmsBatcher {
   private pending = new Map<string, PendingBatch>();
 
@@ -61,20 +91,20 @@ export class SmsBatcher {
     if (!this.enabled()) return false;
     // Only batch text.received — delivery-status events fire-and-forget.
     if (event.event_type !== "text.received") return false;
-    const remote =
-      (event as any)?.data?.text_message?.remote_phone_number ??
-      (event as any)?.data?.text_message?.remotePhoneNumber;
-    if (!remote || typeof remote !== "string") return false;
+    const keyInfo = batchKey(event);
+    if (!keyInfo) return false;
 
-    let batch = this.pending.get(remote);
+    let batch = this.pending.get(keyInfo.key);
     if (!batch) {
       batch = {
-        remotePhoneNumber: remote,
+        key: keyInfo.key,
+        remotePhoneNumber: keyInfo.remote,
+        conversationId: keyInfo.conversationId,
         fragments: [],
         totalChars: 0,
         timer: null,
       };
-      this.pending.set(remote, batch);
+      this.pending.set(keyInfo.key, batch);
     }
 
     const text: string =
@@ -88,13 +118,13 @@ export class SmsBatcher {
       batch.totalChars >= this.cfg.maxChars
     ) {
       this.clearTimer(batch);
-      void this.flush(remote);
+      void this.flush(keyInfo.key);
       return true;
     }
 
     // Otherwise reset the inactivity timer.
     this.clearTimer(batch);
-    batch.timer = setTimeout(() => void this.flush(remote), this.cfg.batchDelayMs);
+    batch.timer = setTimeout(() => void this.flush(keyInfo.key), this.cfg.batchDelayMs);
     return true;
   }
 
@@ -105,10 +135,10 @@ export class SmsBatcher {
     }
   }
 
-  private async flush(remote: string): Promise<void> {
-    const batch = this.pending.get(remote);
+  private async flush(key: string): Promise<void> {
+    const batch = this.pending.get(key);
     if (!batch || batch.fragments.length === 0) return;
-    this.pending.delete(remote);
+    this.pending.delete(key);
     this.clearTimer(batch);
     const head = batch.fragments[0];
     const concatenated = batch.fragments
@@ -128,7 +158,8 @@ export class SmsBatcher {
       },
       __batch: {
         fragments: batch.fragments,
-        remotePhoneNumber: remote,
+        remotePhoneNumber: batch.remotePhoneNumber,
+        ...(batch.conversationId ? { conversationId: batch.conversationId } : {}),
       },
     };
     await this.flushFn(out);

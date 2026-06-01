@@ -11,27 +11,41 @@ export interface InboundCallDecision {
   clientWebsocketUrl?: string;
 }
 
-// Resolve the "remote party" contact id from a webhook payload. Mail
-// events surface contacts per recipient bucket; we pick the from-bucket
-// for the allowlist decision. Text and call events surface a list of
-// peer contacts; we use the first entry.
-function resolveRemoteContactId(parsed: any, kind: "mail" | "text" | "call"): string | null {
+// Resolve remote-party contact ids from a webhook payload. Mail events
+// surface contacts per recipient bucket; we use the from-bucket for the
+// allowlist decision. Text and call payloads have moved from singular
+// `contact` to plural `contacts`, so tolerate both during rollout. Text/call
+// keep the previous first-contact allowlist behavior.
+function resolveRemoteContactIds(parsed: any, kind: "mail" | "text" | "call"): string[] {
   if (kind === "mail") {
     const contacts = parsed?.data?.contacts;
-    if (!Array.isArray(contacts)) return null;
+    if (!Array.isArray(contacts)) return [];
     const fromContact = contacts.find((c: any) => c?.bucket === "from");
-    return fromContact?.id ?? null;
+    return typeof fromContact?.id === "string" ? [fromContact.id] : [];
   }
   if (kind === "text") {
     const contacts = parsed?.data?.contacts;
-    return Array.isArray(contacts) && contacts.length > 0
-      ? (contacts[0]?.id ?? null)
-      : null;
+    if (Array.isArray(contacts)) {
+      const first = contacts.find((c: any) => typeof c?.id === "string");
+      return first ? [first.id] : [];
+    }
+    const contact = parsed?.data?.contact;
+    return typeof contact?.id === "string" ? [contact.id] : [];
   }
   const contacts = parsed?.contacts;
-  return Array.isArray(contacts) && contacts.length > 0
-    ? (contacts[0]?.id ?? null)
-    : null;
+  if (Array.isArray(contacts)) {
+    const first = contacts.find((c: any) => typeof c?.id === "string");
+    return first ? [first.id] : [];
+  }
+  const contact = parsed?.contact;
+  return typeof contact?.id === "string" ? [contact.id] : [];
+}
+
+function anyInboundContactAllowed(contactIds: string[], allowedContactIds?: string[]): boolean {
+  if (!allowedContactIds?.length) {
+    return true;
+  }
+  return contactIds.some((id) => inboundContactAllowed(id, allowedContactIds));
 }
 
 export interface InboundHandlers {
@@ -80,16 +94,16 @@ export async function dispatchInbound(
   ) {
     const eventType = (parsed as { event_type: string }).event_type;
     if (eventType.startsWith("message.")) {
-      const contactId = resolveRemoteContactId(parsed, "mail");
-      if (!inboundContactAllowed(contactId, allowedContactIds)) {
+      const contactIds = resolveRemoteContactIds(parsed, "mail");
+      if (!anyInboundContactAllowed(contactIds, allowedContactIds)) {
         return { kind: "mail" };
       }
       await handlers.onMail?.(parsed as MailWebhookPayload);
       return { kind: "mail" };
     }
     if (eventType.startsWith("text.")) {
-      const contactId = resolveRemoteContactId(parsed, "text");
-      if (!inboundContactAllowed(contactId, allowedContactIds)) {
+      const contactIds = resolveRemoteContactIds(parsed, "text");
+      if (!anyInboundContactAllowed(contactIds, allowedContactIds)) {
         return { kind: "text" };
       }
       await handlers.onText?.(parsed as TextWebhookPayload);
@@ -98,8 +112,8 @@ export async function dispatchInbound(
   }
   // Flat call payload. Check allowlist before consulting the handler so
   // disallowed callers always get a reject regardless of handler logic.
-  const contactId = resolveRemoteContactId(parsed, "call");
-  if (!inboundContactAllowed(contactId, allowedContactIds)) {
+  const contactIds = resolveRemoteContactIds(parsed, "call");
+  if (!anyInboundContactAllowed(contactIds, allowedContactIds)) {
     return { kind: "call", callDecision: { action: "reject" } };
   }
   const decision =
