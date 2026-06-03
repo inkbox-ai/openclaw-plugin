@@ -80,6 +80,30 @@ vi.mock("@inkbox/sdk", () => ({
 
 let tempHome: string;
 
+const disabledOpenAiRealtime = {
+  enabled: false,
+  provider: "openai",
+  model: "gpt-realtime-2",
+  voice: "cedar",
+  toolPolicy: "owner",
+  consultPolicy: "substantive",
+  fallbackToInkboxSttTts: true,
+} as const;
+
+function enabledOpenAiRealtime(apiKey: string) {
+  return {
+    ...disabledOpenAiRealtime,
+    enabled: true,
+    providers: {
+      openai: {
+        apiKey,
+        model: "gpt-realtime-2",
+        voice: "cedar",
+      },
+    },
+  } as const;
+}
+
 function createPrompter(params: {
   asks?: string[];
   confirms?: boolean[];
@@ -274,7 +298,7 @@ describe("runSetupWizard", () => {
     });
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
-    const prompter = createPrompter({ confirms: [true] });
+    const prompter = createPrompter({ confirms: [false, true] });
     const persistConfig = vi.fn(async () => ({ ok: true }));
     const currentConfig = { tools: { profile: "coding" } };
 
@@ -292,12 +316,122 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceRealtime: disabledOpenAiRealtime,
       },
       {
         currentConfig,
         env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" },
       },
     );
+  });
+
+  it("uses an OpenClaw OpenAI API-key auth profile for realtime calls", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const authDir = join(tempHome, ".openclaw", "agents", "main", "agent");
+    await mkdir(authDir, { recursive: true });
+    await writeFile(
+      join(authDir, "auth-profiles.json"),
+      JSON.stringify({
+        version: 1,
+        profiles: {
+          "openai:default": {
+            type: "api_key",
+            provider: "openai",
+            key: "sk-profile",
+          },
+          "openai-codex:default": {
+            type: "oauth",
+            provider: "openai-codex",
+            token: "codex-token",
+          },
+        },
+      }),
+    );
+    const prompter = createPrompter({ confirms: [true, true] });
+    const validateOpenAiRealtimeApiKey = vi.fn(async () => ({ ok: true as const }));
+    const currentConfig = {
+      auth: {
+        order: { openai: ["openai:default"] },
+        profiles: {
+          "openai:default": { provider: "openai", mode: "api_key" },
+          "openai-codex:default": { provider: "openai-codex", mode: "oauth" },
+        },
+      },
+    };
+
+    const result = await runSetupWizard({
+      prompter,
+      currentConfig,
+      validateOpenAiRealtimeApiKey,
+      env: {
+        HOME: tempHome,
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceRealtime).toEqual({
+      ...disabledOpenAiRealtime,
+      enabled: true,
+    });
+    expect(validateOpenAiRealtimeApiKey).toHaveBeenCalledWith("sk-profile", "gpt-realtime-2");
+    expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
+      "Paste your OpenAI API key for Realtime calls",
+    );
+  });
+
+  it("re-asks the realtime opt-in question after a failed OpenAI key validation", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      asks: ["sk-bad", "sk-good"],
+      confirms: [true, true, true],
+    });
+    const validateOpenAiRealtimeApiKey = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, message: "invalid_api_key: sk-bad" })
+      .mockResolvedValueOnce({ ok: true });
+
+    const result = await runSetupWizard({
+      prompter,
+      validateOpenAiRealtimeApiKey,
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceRealtime).toEqual(enabledOpenAiRealtime("sk-good"));
+    expect(validateOpenAiRealtimeApiKey).toHaveBeenNthCalledWith(
+      1,
+      "sk-bad",
+      "gpt-realtime-2",
+    );
+    expect(validateOpenAiRealtimeApiKey).toHaveBeenNthCalledWith(
+      2,
+      "sk-good",
+      "gpt-realtime-2",
+    );
+    expect(
+      prompter.confirm.mock.calls.filter(
+        ([question]) => question === "Use OpenAI Realtime API for phone calls?",
+      ),
+    ).toHaveLength(2);
   });
 
   it("starts the full setup flow again when reconfiguring an existing profile", async () => {
@@ -311,7 +445,7 @@ describe("runSetupWizard", () => {
     sdk.getIdentity.mockResolvedValue(identity);
     const prompter = createPrompter({
       asks: ["ApiKey_new"],
-      confirms: [true, true, false, true],
+      confirms: [true, true, false, false, true],
     });
     const persistConfig = vi.fn(async () => ({ ok: true }));
 
@@ -343,6 +477,7 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_new",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceRealtime: disabledOpenAiRealtime,
       },
       {
         currentConfig: {
@@ -368,7 +503,7 @@ describe("runSetupWizard", () => {
     });
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
-    const prompter = createPrompter({ confirms: [false, true] });
+    const prompter = createPrompter({ confirms: [false, false, true] });
 
     const result = await runSetupWizard({
       prompter,
@@ -438,7 +573,7 @@ describe("runSetupWizard", () => {
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
     const prompter = createPrompter({
-      confirms: [true, false, true],
+      confirms: [true, false, false, true],
     });
 
     const result = await runSetupWizard({
@@ -525,7 +660,7 @@ describe("runSetupWizard", () => {
     });
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
-    const prompter = createPrompter({ confirms: [true] });
+    const prompter = createPrompter({ confirms: [false, true] });
 
     const result = await runSetupWizard({
       prompter,
@@ -602,7 +737,7 @@ describe("runSetupWizard", () => {
         updatedAt: new Date(),
       },
     ]);
-    const prompter = createPrompter({ confirms: [true] });
+    const prompter = createPrompter({ confirms: [false, true] });
 
     const result = await runSetupWizard({
       prompter,

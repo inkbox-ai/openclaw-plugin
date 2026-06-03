@@ -61,6 +61,7 @@ export interface WizardOptions {
   prompter: Prompter;
   currentConfig?: unknown;
   persistConfig?: WizardConfigPersister;
+  validateOpenAiRealtimeApiKey?: OpenAiRealtimeValidator;
   // Lets tests inject env without poking process.env.
   env?: NodeJS.ProcessEnv;
 }
@@ -75,6 +76,19 @@ export interface WizardResult {
 const SMS_OPT_IN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const SMS_OPT_IN_POLL_MS = 3000;
 const SELF_SIGNUP_VERIFICATION_NOTE = "OpenClaw Inkbox plugin setup";
+const OPENAI_REALTIME_MODEL = "gpt-realtime-2";
+const OPENAI_REALTIME_VOICE = "cedar";
+const OPENAI_REALTIME_CLIENT_SECRETS_URL =
+  "https://api.openai.com/v1/realtime/client_secrets";
+
+export type OpenAiRealtimeValidationResult =
+  | { ok: true; message?: string }
+  | { ok: false; message: string };
+
+export type OpenAiRealtimeValidator = (
+  apiKey: string,
+  model: string,
+) => Promise<OpenAiRealtimeValidationResult>;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -257,6 +271,336 @@ function messageFromError(error: unknown): string {
     return `HTTP ${error.statusCode} ${detail}`;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+function maskSecret(secret: string): string {
+  const trimmed = secret.trim();
+  if (trimmed.length <= 8) {
+    return "*".repeat(trimmed.length);
+  }
+  return `${trimmed.slice(0, 6)}${"*".repeat(Math.max(8, trimmed.length - 10))}${trimmed.slice(-4)}`;
+}
+
+function defaultVoiceRealtimeConfig(
+  enabled: boolean,
+  apiKey?: string,
+): WizardVoiceRealtimeConfig {
+  return {
+    enabled,
+    provider: "openai",
+    model: OPENAI_REALTIME_MODEL,
+    voice: OPENAI_REALTIME_VOICE,
+    toolPolicy: "owner",
+    consultPolicy: "substantive",
+    fallbackToInkboxSttTts: true,
+    ...(apiKey
+      ? {
+          providers: {
+            openai: {
+              apiKey,
+              model: OPENAI_REALTIME_MODEL,
+              voice: OPENAI_REALTIME_VOICE,
+            },
+          },
+        }
+      : {}),
+  };
+}
+
+function parseOpenAiRealtimeValidationMessage(payload: unknown): string | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  const error = payload.error;
+  if (isRecord(error)) {
+    const message = typeof error.message === "string" ? error.message : undefined;
+    const code = typeof error.code === "string" ? error.code : undefined;
+    const type = typeof error.type === "string" ? error.type : undefined;
+    return [code ?? type, message].filter(Boolean).join(": ") || undefined;
+  }
+  const message = payload.message;
+  return typeof message === "string" ? message : undefined;
+}
+
+export async function validateOpenAiRealtimeApiKey(
+  apiKey: string,
+  model = OPENAI_REALTIME_MODEL,
+): Promise<OpenAiRealtimeValidationResult> {
+  let response: Response;
+  try {
+    response = await fetch(OPENAI_REALTIME_CLIENT_SECRETS_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        expires_after: { seconds: 60 },
+        session: { model },
+      }),
+    });
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = undefined;
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      message:
+        parseOpenAiRealtimeValidationMessage(payload) ??
+        `HTTP ${response.status} ${response.statusText}`,
+    };
+  }
+  return { ok: true };
+}
+
+type DetectedOpenAiApiKey = {
+  apiKey: string;
+  source: string;
+  storeInVoiceRealtimeConfig: boolean;
+};
+
+function stringFromPath(root: unknown, path: string[]): string | undefined {
+  const value = readPath(root, path);
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function getExistingVoiceRealtimeConfig(existingAccount: {
+  config?: { voiceRealtime?: unknown };
+}): unknown {
+  return existingAccount.config?.voiceRealtime;
+}
+
+function resolveOpenClawStateDir(env: NodeJS.ProcessEnv): string {
+  const explicitStateDir = env.OPENCLAW_STATE_DIR?.trim();
+  return explicitStateDir
+    ? resolveUserPath(explicitStateDir, env)
+    : join(resolveHome(env), ".openclaw");
+}
+
+function resolveOpenClawAgentId(currentConfig: unknown, env: NodeJS.ProcessEnv): string {
+  const envAgentId = env.OPENCLAW_AGENT_ID?.trim();
+  if (envAgentId) {
+    return envAgentId;
+  }
+  const configAgentId =
+    stringFromPath(currentConfig, ["agents", "defaults", "id"]) ??
+    stringFromPath(currentConfig, ["agents", "default", "id"]);
+  return configAgentId ?? "main";
+}
+
+function resolveAuthProfilesPath(currentConfig: unknown, env: NodeJS.ProcessEnv): string {
+  const explicitPath = env.OPENCLAW_AUTH_PROFILES_PATH?.trim();
+  if (explicitPath) {
+    return resolveUserPath(explicitPath, env);
+  }
+  const agentId = resolveOpenClawAgentId(currentConfig, env);
+  return join(resolveOpenClawStateDir(env), "agents", agentId, "agent", "auth-profiles.json");
+}
+
+function configuredOpenAiProfileIds(currentConfig: unknown): string[] {
+  const ids: string[] = [];
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.trim() && !ids.includes(value.trim())) {
+      ids.push(value.trim());
+    }
+  };
+
+  const ordered = readPath(currentConfig, ["auth", "order", "openai"]);
+  if (Array.isArray(ordered)) {
+    ordered.forEach(add);
+  }
+
+  const configProfiles = readPath(currentConfig, ["auth", "profiles"]);
+  if (isRecord(configProfiles)) {
+    for (const [profileId, profile] of Object.entries(configProfiles)) {
+      if (!isRecord(profile)) {
+        continue;
+      }
+      const provider = typeof profile.provider === "string" ? profile.provider : "";
+      const mode = typeof profile.mode === "string" ? profile.mode : "";
+      if (provider === "openai" && mode === "api_key") {
+        add(profileId);
+      }
+    }
+  }
+
+  add("openai:default");
+  return ids;
+}
+
+function resolveProfileApiKey(profile: unknown, env: NodeJS.ProcessEnv): string | undefined {
+  if (!isRecord(profile)) {
+    return undefined;
+  }
+  if (profile.provider !== "openai" || profile.type !== "api_key") {
+    return undefined;
+  }
+  if (typeof profile.key === "string" && profile.key.trim()) {
+    return profile.key.trim();
+  }
+  const keyRef = profile.keyRef;
+  if (isRecord(keyRef) && keyRef.source === "env" && typeof keyRef.id === "string") {
+    const value = env[keyRef.id]?.trim();
+    return value || undefined;
+  }
+  return undefined;
+}
+
+async function detectOpenAiApiKeyFromAuthProfiles(
+  currentConfig: unknown,
+  env: NodeJS.ProcessEnv,
+): Promise<DetectedOpenAiApiKey | undefined> {
+  const profilesPath = resolveAuthProfilesPath(currentConfig, env);
+  if (!existsSync(profilesPath)) {
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(profilesPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+
+  const profiles = readPath(parsed, ["profiles"]);
+  if (!isRecord(profiles)) {
+    return undefined;
+  }
+
+  for (const profileId of configuredOpenAiProfileIds(currentConfig)) {
+    const apiKey = resolveProfileApiKey(profiles[profileId], env);
+    if (apiKey) {
+      return {
+        apiKey,
+        source: `OpenClaw auth profile ${profileId}`,
+        storeInVoiceRealtimeConfig: false,
+      };
+    }
+  }
+
+  for (const [profileId, profile] of Object.entries(profiles)) {
+    const apiKey = resolveProfileApiKey(profile, env);
+    if (apiKey) {
+      return {
+        apiKey,
+        source: `OpenClaw auth profile ${profileId}`,
+        storeInVoiceRealtimeConfig: false,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+async function detectOpenAiApiKey(params: {
+  currentConfig: unknown;
+  existingAccount: { config?: { voiceRealtime?: unknown } };
+  env: NodeJS.ProcessEnv;
+}): Promise<DetectedOpenAiApiKey | undefined> {
+  const explicitRealtimeKey =
+    stringFromPath(params.currentConfig, [
+      "channels",
+      "inkbox",
+      "voiceRealtime",
+      "providers",
+      "openai",
+      "apiKey",
+    ]) ??
+    stringFromPath(getExistingVoiceRealtimeConfig(params.existingAccount), [
+      "providers",
+      "openai",
+      "apiKey",
+    ]);
+  if (explicitRealtimeKey) {
+    return {
+      apiKey: explicitRealtimeKey,
+      source: "channels.inkbox.voiceRealtime.providers.openai.apiKey",
+      storeInVoiceRealtimeConfig: true,
+    };
+  }
+
+  const fromAuthProfile = await detectOpenAiApiKeyFromAuthProfiles(params.currentConfig, params.env);
+  if (fromAuthProfile) {
+    return fromAuthProfile;
+  }
+
+  const fromEnv = params.env.OPENAI_API_KEY?.trim();
+  if (fromEnv) {
+    return { apiKey: fromEnv, source: "OPENAI_API_KEY", storeInVoiceRealtimeConfig: true };
+  }
+
+  return undefined;
+}
+
+async function promptForOpenAiRealtimeConfig(params: {
+  currentConfig: unknown;
+  existingAccount: { config?: { voiceRealtime?: unknown } };
+  env: NodeJS.ProcessEnv;
+  prompter: Prompter;
+  validate: OpenAiRealtimeValidator;
+}): Promise<WizardVoiceRealtimeConfig | undefined> {
+  let detected = await detectOpenAiApiKey({
+    currentConfig: params.currentConfig,
+    existingAccount: params.existingAccount,
+    env: params.env,
+  });
+
+  console.log("\nOpenAI Realtime calls:");
+  console.log(
+    "  Phone calls can use raw Inkbox call media through OpenAI Realtime instead of Inkbox STT/TTS.",
+  );
+  if (detected) {
+    console.log(`  Found an OpenAI API key in ${detected.source}.`);
+  } else {
+    console.log("  No OpenAI API key was found for this OpenClaw agent.");
+    console.log(
+      "  If you enable Realtime calls, the next step will ask for an OpenAI API key and validate Realtime access.",
+    );
+  }
+
+  for (;;) {
+    const useRealtime = await params.prompter.confirm(
+      "Use OpenAI Realtime API for phone calls?",
+      Boolean(detected),
+    );
+    if (!useRealtime) {
+      console.log("OpenAI Realtime calls disabled. Calls will use Inkbox STT/TTS.");
+      return defaultVoiceRealtimeConfig(false);
+    }
+
+    const promptValue =
+      detected?.apiKey ??
+      normalizeOptional(await params.prompter.ask("Paste your OpenAI API key for Realtime calls"));
+    const apiKey = promptValue;
+    if (!apiKey) {
+      console.log("OpenAI API key is required to enable Realtime calls.");
+      detected = undefined;
+      continue;
+    }
+
+    console.log(`Testing OpenAI Realtime access with ${OPENAI_REALTIME_MODEL}...`);
+    const validation = await params.validate(apiKey, OPENAI_REALTIME_MODEL);
+    if (validation.ok) {
+      console.log("OpenAI Realtime validation passed. Calls will use OpenAI Realtime.");
+      return defaultVoiceRealtimeConfig(
+        true,
+        detected?.storeInVoiceRealtimeConfig === false ? undefined : apiKey,
+      );
+    }
+
+    console.log("OpenAI Realtime validation failed.");
+    console.log(`  ${validation.message.replaceAll(apiKey, maskSecret(apiKey))}`);
+    console.log("  Calls will use Inkbox STT/TTS until a working OpenAI API key is configured.");
+    detected = undefined;
+  }
 }
 
 function hostFromPublicHost(publicHost: string | null | undefined): string | undefined {
@@ -547,6 +891,8 @@ async function runSelfSignup(params: {
 export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult> {
   const env = opts.env ?? process.env;
   const prompter = opts.prompter;
+  const validateOpenAiRealtime =
+    opts.validateOpenAiRealtimeApiKey ?? validateOpenAiRealtimeApiKey;
 
   console.log("Inkbox plugin setup\n");
 
@@ -574,6 +920,9 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
           identity: existingIdentity,
           ...(existingSigningKey ? { signingKey: existingSigningKey } : {}),
           ...(existingBaseUrl ? { baseUrl: existingBaseUrl } : {}),
+          ...(existingAccount.config.voiceRealtime
+            ? { voiceRealtime: existingAccount.config.voiceRealtime as WizardVoiceRealtimeConfig }
+            : {}),
         },
       };
     }
@@ -732,6 +1081,16 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     }
   }
 
+  const voiceRealtime = identity.phoneNumber
+    ? await promptForOpenAiRealtimeConfig({
+        currentConfig: opts.currentConfig,
+        existingAccount,
+        env,
+        prompter,
+        validate: validateOpenAiRealtime,
+      })
+    : undefined;
+
   printInkboxAuthorizationInfo();
 
   // Step 5 — signing key for inbound webhooks.
@@ -810,6 +1169,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     ...(signingKey ? { signingKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(tunnelName ? { tunnelName } : {}),
+    ...(voiceRealtime ? { voiceRealtime } : {}),
   };
   if (opts.persistConfig) {
     const persisted = await opts.persistConfig(snippet, {
