@@ -335,8 +335,8 @@ export async function validateOpenAiRealtimeApiKey(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        expires_after: { seconds: 60 },
-        session: { model },
+        expires_after: { anchor: "created_at", seconds: 60 },
+        session: { type: "realtime", model },
       }),
     });
   } catch (error) {
@@ -364,7 +364,6 @@ export async function validateOpenAiRealtimeApiKey(
 type DetectedOpenAiApiKey = {
   apiKey: string;
   source: string;
-  storeInVoiceRealtimeConfig: boolean;
 };
 
 function stringFromPath(root: unknown, path: string[]): string | undefined {
@@ -481,7 +480,6 @@ async function detectOpenAiApiKeyFromAuthProfiles(
       return {
         apiKey,
         source: `OpenClaw auth profile ${profileId}`,
-        storeInVoiceRealtimeConfig: false,
       };
     }
   }
@@ -492,7 +490,6 @@ async function detectOpenAiApiKeyFromAuthProfiles(
       return {
         apiKey,
         source: `OpenClaw auth profile ${profileId}`,
-        storeInVoiceRealtimeConfig: false,
       };
     }
   }
@@ -523,7 +520,14 @@ async function detectOpenAiApiKey(params: {
     return {
       apiKey: explicitRealtimeKey,
       source: "channels.inkbox.voiceRealtime.providers.openai.apiKey",
-      storeInVoiceRealtimeConfig: true,
+    };
+  }
+
+  const fromRealtimeEnv = params.env.INKBOX_REALTIME_API_KEY?.trim();
+  if (fromRealtimeEnv) {
+    return {
+      apiKey: fromRealtimeEnv,
+      source: "INKBOX_REALTIME_API_KEY",
     };
   }
 
@@ -534,7 +538,7 @@ async function detectOpenAiApiKey(params: {
 
   const fromEnv = params.env.OPENAI_API_KEY?.trim();
   if (fromEnv) {
-    return { apiKey: fromEnv, source: "OPENAI_API_KEY", storeInVoiceRealtimeConfig: true };
+    return { apiKey: fromEnv, source: "OPENAI_API_KEY" };
   }
 
   return undefined;
@@ -557,6 +561,8 @@ async function promptForOpenAiRealtimeConfig(params: {
   console.log(
     "  Phone calls can use raw Inkbox call media through OpenAI Realtime instead of Inkbox STT/TTS.",
   );
+  let defaultOptIn = Boolean(detected);
+  let promptForKey = false;
   if (detected) {
     console.log(`  Found an OpenAI API key in ${detected.source}.`);
   } else {
@@ -576,29 +582,29 @@ async function promptForOpenAiRealtimeConfig(params: {
       return defaultVoiceRealtimeConfig(false);
     }
 
-    const promptValue =
-      detected?.apiKey ??
-      normalizeOptional(await params.prompter.ask("Paste your OpenAI API key for Realtime calls"));
-    const apiKey = promptValue;
+    const apiKey =
+      promptForKey || !detected?.apiKey
+        ? normalizeOptional(
+            await params.prompter.ask("Paste your OpenAI API key for Realtime calls"),
+          )
+        : detected.apiKey;
     if (!apiKey) {
-      console.log("OpenAI API key is required to enable Realtime calls.");
-      detected = undefined;
-      continue;
+      console.log("No OpenAI API key entered. Realtime disabled; calls will use Inkbox STT/TTS.");
+      return defaultVoiceRealtimeConfig(false);
     }
 
     console.log(`Testing OpenAI Realtime access with ${OPENAI_REALTIME_MODEL}...`);
     const validation = await params.validate(apiKey, OPENAI_REALTIME_MODEL);
     if (validation.ok) {
       console.log("OpenAI Realtime validation passed. Calls will use OpenAI Realtime.");
-      return defaultVoiceRealtimeConfig(
-        true,
-        detected?.storeInVoiceRealtimeConfig === false ? undefined : apiKey,
-      );
+      return defaultVoiceRealtimeConfig(true, apiKey);
     }
 
     console.log("OpenAI Realtime validation failed.");
     console.log(`  ${validation.message.replaceAll(apiKey, maskSecret(apiKey))}`);
-    console.log("  Calls will use Inkbox STT/TTS until a working OpenAI API key is configured.");
+    console.log("  Realtime remains disabled. Try another key, or answer no to use Inkbox STT/TTS.");
+    defaultOptIn = true;
+    promptForKey = true;
     detected = undefined;
   }
 }

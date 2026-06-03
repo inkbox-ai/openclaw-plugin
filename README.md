@@ -172,10 +172,10 @@ openclaw config set tools.allow '[
 
 ## Realtime Calls
 
-Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. If it finds one, it asks whether to enable Realtime calls and validates access to `gpt-realtime-2`. If no key is found, it can prompt for one and validate it before enabling Realtime.
+Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
 
 ```bash
-export OPENAI_API_KEY="sk-..."
+export INKBOX_REALTIME_API_KEY="sk-..."
 openclaw configure
 openclaw inkbox setup
 openclaw gateway run
@@ -258,6 +258,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `voiceRealtime.voice` | no | `cedar` | Realtime voice name. |
 | `voiceRealtime.toolPolicy` | no | `owner` | Tool policy for realtime `openclaw_agent_consult`. |
 | `voiceRealtime.consultPolicy` | no | `substantive` | When realtime calls should consult the main OpenClaw agent. |
+| `voiceRealtime.providers.openai.apiKey` | no | - | OpenAI API key validated by setup and used for Realtime calls. |
 | `voiceRealtime.fallbackToInkboxSttTts` | no | `true` | Fall back to Inkbox STT/TTS when realtime is unavailable. |
 | `vault.keyEnvVar` | no | `INKBOX_VAULT_KEY` | Env var containing the vault unlock key. |
 

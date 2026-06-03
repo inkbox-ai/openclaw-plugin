@@ -6,6 +6,7 @@ import {
   buildOpenClawConfigBatch,
   persistOpenClawConfigFile,
   runSetupWizard,
+  validateOpenAiRealtimeApiKey,
 } from "../src/setup-wizard.js";
 import type { Prompter } from "../src/prompt.js";
 
@@ -325,7 +326,7 @@ describe("runSetupWizard", () => {
     );
   });
 
-  it("uses an OpenClaw OpenAI API-key auth profile for realtime calls", async () => {
+  it("uses and stores an OpenClaw OpenAI API-key auth profile for realtime calls", async () => {
     const identity = createIdentity();
     sdk.whoami.mockResolvedValue({
       authType: "api_key",
@@ -378,11 +379,39 @@ describe("runSetupWizard", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.config?.voiceRealtime).toEqual({
-      ...disabledOpenAiRealtime,
-      enabled: true,
-    });
+    expect(result.config?.voiceRealtime).toEqual(enabledOpenAiRealtime("sk-profile"));
     expect(validateOpenAiRealtimeApiKey).toHaveBeenCalledWith("sk-profile", "gpt-realtime-2");
+    expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
+      "Paste your OpenAI API key for Realtime calls",
+    );
+  });
+
+  it("prefers the plugin-specific OpenAI realtime env key over OPENAI_API_KEY", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ confirms: [true, true] });
+    const validateOpenAiRealtimeApiKey = vi.fn(async () => ({ ok: true as const }));
+
+    const result = await runSetupWizard({
+      prompter,
+      validateOpenAiRealtimeApiKey,
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+        INKBOX_REALTIME_API_KEY: "sk-realtime",
+        OPENAI_API_KEY: "sk-openai",
+      } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceRealtime).toEqual(enabledOpenAiRealtime("sk-realtime"));
+    expect(validateOpenAiRealtimeApiKey).toHaveBeenCalledWith("sk-realtime", "gpt-realtime-2");
     expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
       "Paste your OpenAI API key for Realtime calls",
     );
@@ -432,6 +461,31 @@ describe("runSetupWizard", () => {
         ([question]) => question === "Use OpenAI Realtime API for phone calls?",
       ),
     ).toHaveLength(2);
+  });
+
+  it("validates OpenAI realtime access with the GA client-secret payload shape", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ value: "ek-test" })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(validateOpenAiRealtimeApiKey("sk-test", "gpt-realtime-2")).resolves.toEqual({
+      ok: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.openai.com/v1/realtime/client_secrets",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          Authorization: "Bearer sk-test",
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body).toEqual({
+      expires_after: { anchor: "created_at", seconds: 60 },
+      session: { type: "realtime", model: "gpt-realtime-2" },
+    });
   });
 
   it("starts the full setup flow again when reconfiguring an existing profile", async () => {
