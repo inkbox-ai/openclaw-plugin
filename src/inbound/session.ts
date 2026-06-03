@@ -152,6 +152,11 @@ const REALTIME_AUDIO_MAX_START_BUFFER_MS = 160;
 const REALTIME_AUDIO_STALE_CLOCK_MS = TELEPHONY_CHUNK_MS * 2;
 const REALTIME_GREETING_INPUT_SUPPRESSION_MS = 700;
 const REALTIME_POST_CALL_ACTION_TOOL_NAME = "inkbox_register_post_call_action";
+const REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME = "inkbox_edit_post_call_action";
+const REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME = "inkbox_delete_post_call_action";
+const REALTIME_HANG_UP_CALL_TOOL_NAME = "inkbox_hang_up_call";
+const REALTIME_HANGUP_CONFIRM_WINDOW_MS = 60 * 1000;
+const REALTIME_HANGUP_CLOSE_DELAY_MS = 2000;
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
 const REALTIME_REQUIRED_QUIET_CHUNKS = 12;
@@ -882,6 +887,74 @@ function realtimePostCallActionTool(): RealtimeVoiceTool {
   };
 }
 
+function realtimeEditPostCallActionTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME,
+    description:
+      "Edit work previously registered for after this phone call ends. Use the one-based actionIndex returned by inkbox_register_post_call_action when the caller changes the recipient, channel, wording, or scope.",
+    parameters: {
+      type: "object",
+      properties: {
+        actionIndex: {
+          type: "integer",
+          minimum: 1,
+          description: "One-based index of the queued post-call action to edit.",
+        },
+        action: {
+          type: "string",
+          description: "Replacement plain-English task. Omit to keep the current task.",
+        },
+        details: {
+          type: "string",
+          description:
+            "Replacement optional draft text, hints, or constraints. Pass an empty string to clear details.",
+        },
+      },
+      required: ["actionIndex"],
+    },
+  };
+}
+
+function realtimeDeletePostCallActionTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME,
+    description:
+      "Delete work previously registered for after this phone call ends. Use this when the caller cancels a queued follow-up.",
+    parameters: {
+      type: "object",
+      properties: {
+        actionIndex: {
+          type: "integer",
+          minimum: 1,
+          description: "One-based index of the queued post-call action to delete.",
+        },
+      },
+      required: ["actionIndex"],
+    },
+  };
+}
+
+function realtimeHangUpCallTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_HANG_UP_CALL_TOOL_NAME,
+    description:
+      "End the live phone call. This is a two-step tool: the first call does not hang up, it prompts you to say a short goodbye. After you have said goodbye, call inkbox_hang_up_call a second time to actually end the call.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "Optional short reason for ending the call.",
+        },
+      },
+      required: [],
+    },
+  };
+}
+
 function buildRealtimeInstructions(
   account: ResolvedInkboxAccount,
   meta: RealtimeCallMeta,
@@ -917,6 +990,8 @@ function buildRealtimeInstructions(
       ? "For outbound calls, do not open with a generic offer to help. Start by explaining why you are calling, then ask the next specific question or give the requested update."
       : undefined,
     `If the caller asks for work to happen after the call, call ${REALTIME_POST_CALL_ACTION_TOOL_NAME}. Tell the caller the action is queued for after the call; do not claim it has already been completed.`,
+    `If the caller changes or cancels previously queued after-call work, call ${REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME} or ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} using the actionIndex returned when the work was queued.`,
+    `If the caller asks to hang up, says goodbye, or the conversation is clearly complete, call ${REALTIME_HANG_UP_CALL_TOOL_NAME}. The first call arms hangup and asks you to say goodbye; after the goodbye, call it once more to end the phone call.`,
     "Call openclaw_agent_consult only after the caller asks for contact edits, notes, email/SMS/call-history reads, workspace/memory/current-info, or other tool work that must happen during the call.",
     "Do not call openclaw_agent_consult just to greet, identify yourself, identify the caller, or fill call-start context.",
     config.instructions,
@@ -1435,15 +1510,38 @@ async function runRealtimeAgentConsult(
 }
 
 function readPostCallStringArg(args: unknown, key: string): string | undefined {
-  if (!args || typeof args !== "object" || Array.isArray(args)) {
+  const record = readPostCallRecord(args);
+  if (!record) {
     return undefined;
   }
-  const value = (args as Record<string, unknown>)[key];
+  const value = record[key];
   if (typeof value !== "string") {
     return undefined;
   }
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function readPostCallRecord(args: unknown): Record<string, unknown> | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  return args as Record<string, unknown>;
+}
+
+function hasPostCallArg(args: unknown, key: string): boolean {
+  const record = readPostCallRecord(args);
+  return record ? Object.prototype.hasOwnProperty.call(record, key) : false;
+}
+
+function readPostCallActionIndex(args: unknown): number {
+  const record = readPostCallRecord(args);
+  if (!record) {
+    return 0;
+  }
+  const rawIndex = record.actionIndex ?? record.action_index;
+  const index = typeof rawIndex === "number" ? rawIndex : Number(rawIndex);
+  return Number.isInteger(index) ? index : 0;
 }
 
 function registerRealtimePostCallAction(
@@ -1468,8 +1566,76 @@ function registerRealtimePostCallAction(
   return {
     status: "registered",
     actionId: value.id,
+    actionIndex: actions.length,
+    actionCount: actions.length,
     message:
       "Post-call action registered. Tell the caller it is queued for after the call, not completed yet.",
+  };
+}
+
+function editRealtimePostCallAction(
+  actions: RealtimePostCallAction[],
+  toolEvent: RealtimeVoiceToolCallEvent,
+): Record<string, unknown> {
+  const actionIndex = readPostCallActionIndex(toolEvent.args);
+  if (actionIndex < 1 || actionIndex > actions.length) {
+    return {
+      error: "invalid actionIndex",
+      actionCount: actions.length,
+    };
+  }
+
+  const hasAction = hasPostCallArg(toolEvent.args, "action");
+  const hasDetails = hasPostCallArg(toolEvent.args, "details");
+  if (!hasAction && !hasDetails) {
+    return { error: "missing action or details argument" };
+  }
+
+  const record = readPostCallRecord(toolEvent.args) ?? {};
+  const queued = actions[actionIndex - 1];
+  if (hasAction) {
+    const action = typeof record.action === "string" ? record.action.trim() : "";
+    if (!action) {
+      return { error: "action cannot be empty" };
+    }
+    queued.action = action;
+  }
+  if (hasDetails) {
+    queued.details = typeof record.details === "string" ? record.details.trim() : undefined;
+  }
+
+  return {
+    status: "updated",
+    actionId: queued.id,
+    actionIndex,
+    actionCount: actions.length,
+    action: queued,
+    message:
+      "Queued after-call action updated. If the caller needs to know, confirm briefly that the queued work was changed.",
+  };
+}
+
+function deleteRealtimePostCallAction(
+  actions: RealtimePostCallAction[],
+  toolEvent: RealtimeVoiceToolCallEvent,
+): Record<string, unknown> {
+  const actionIndex = readPostCallActionIndex(toolEvent.args);
+  if (actionIndex < 1 || actionIndex > actions.length) {
+    return {
+      error: "invalid actionIndex",
+      actionCount: actions.length,
+    };
+  }
+
+  const deleted = actions.splice(actionIndex - 1, 1)[0];
+  return {
+    status: "deleted",
+    deletedAction: deleted,
+    actionIndex,
+    actionCount: actions.length,
+    remainingActions: [...actions],
+    message:
+      "Queued after-call action deleted. If the caller needs to know, confirm briefly that it was canceled.",
   };
 }
 
@@ -1573,6 +1739,8 @@ function handleRealtimeToolCall(
     toolEvent: RealtimeVoiceToolCallEvent;
     transcript: RealtimeTranscriptEntry[];
     postCallActions: RealtimePostCallAction[];
+    hangupArmedAt: { value?: number };
+    requestHangup: (reason?: string) => Promise<void>;
   },
 ): void {
   const callId = opts.toolEvent.callId || opts.toolEvent.itemId;
@@ -1581,6 +1749,50 @@ function handleRealtimeToolCall(
       callId,
       registerRealtimePostCallAction(opts.postCallActions, opts.toolEvent),
     );
+    return;
+  }
+  if (opts.toolEvent.name === REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME) {
+    opts.session.submitToolResult(
+      callId,
+      editRealtimePostCallAction(opts.postCallActions, opts.toolEvent),
+    );
+    return;
+  }
+  if (opts.toolEvent.name === REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME) {
+    opts.session.submitToolResult(
+      callId,
+      deleteRealtimePostCallAction(opts.postCallActions, opts.toolEvent),
+    );
+    return;
+  }
+  if (opts.toolEvent.name === REALTIME_HANG_UP_CALL_TOOL_NAME) {
+    const now = Date.now();
+    const armedAt = opts.hangupArmedAt.value;
+    if (armedAt === undefined || now - armedAt > REALTIME_HANGUP_CONFIRM_WINDOW_MS) {
+      opts.hangupArmedAt.value = now;
+      opts.session.submitToolResult(callId, {
+        status: "confirm_goodbye",
+        message:
+          "Don't hang up yet. Say a brief, natural goodbye to the caller now, then call inkbox_hang_up_call once more to actually end the call.",
+      });
+      return;
+    }
+
+    const reason = readPostCallStringArg(opts.toolEvent.args, "reason") ?? "";
+    opts.session.submitToolResult(
+      callId,
+      {
+        status: "hangup_requested",
+        reason,
+        message: "The call is ending now.",
+      },
+      { suppressResponse: true },
+    );
+    void opts.requestHangup(reason).catch((error) => {
+      opts.logger?.warn?.(
+        `Inkbox realtime hangup failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
     return;
   }
   if (opts.toolEvent.name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
@@ -1986,6 +2198,8 @@ async function runRealtimeCallWebSocket(
   const resolved = resolveRealtimeProvider(opts);
   let streamId: string | undefined;
   let closed = false;
+  const hangupArmedAt: { value?: number } = {};
+  let pendingHangupClose: Promise<void> | undefined;
   const transcript: RealtimeTranscriptEntry[] = [];
   const postCallActions: RealtimePostCallAction[] = [];
   const sendJson = async (payload: Record<string, unknown>) => {
@@ -1999,6 +2213,29 @@ async function runRealtimeCallWebSocket(
   let initialGreetingActive = false;
   let initialGreetingOutputStarted = false;
   let suppressInputUntil = 0;
+  const requestHangup = async (reason = ""): Promise<void> => {
+    if (!pendingHangupClose) {
+      pendingHangupClose = (async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, REALTIME_HANGUP_CLOSE_DELAY_MS));
+        if (closed) {
+          return;
+        }
+        const hangupFrame: Record<string, unknown> = { event: "hangup" };
+        if (reason) {
+          hangupFrame.reason = reason;
+        }
+        if (streamId) {
+          hangupFrame.stream_id = streamId;
+        }
+        await opts.ws.send(JSON.stringify(hangupFrame));
+        closed = true;
+        audioPacer.close();
+        session.close();
+        await opts.ws.close().catch(() => {});
+      })();
+    }
+    return pendingHangupClose;
+  };
   const session = createRealtimeVoiceBridgeSession({
     provider: resolved.provider,
     cfg: opts.cfg as any,
@@ -2012,6 +2249,9 @@ async function runRealtimeCallWebSocket(
     markStrategy: "ack-immediately",
     tools: resolveRealtimeVoiceAgentConsultTools(realtime.toolPolicy, [
       realtimePostCallActionTool(),
+      realtimeEditPostCallActionTool(),
+      realtimeDeletePostCallActionTool(),
+      realtimeHangUpCallTool(),
     ]),
     audioSink: {
       isOpen: () => !closed,
@@ -2061,6 +2301,8 @@ async function runRealtimeCallWebSocket(
         toolEvent,
         transcript,
         postCallActions,
+        hangupArmedAt,
+        requestHangup,
       });
     },
     onReady: () => {
@@ -2154,6 +2396,13 @@ async function runRealtimeCallWebSocket(
       }
     }
   } finally {
+    if (pendingHangupClose) {
+      await pendingHangupClose.catch((error) => {
+        opts.logger?.warn?.(
+          `Inkbox realtime hangup close failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     closed = true;
     audioPacer.close();
     session.close();

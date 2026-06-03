@@ -181,7 +181,7 @@ openclaw inkbox setup
 openclaw gateway run
 ```
 
-Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. If realtime auth/provider config is unavailable, calls fall back to Inkbox STT/TTS unless `voiceRealtime.fallbackToInkboxSttTts` is set to `false`.
+Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. The realtime voice model can call `openclaw_agent_consult`, `inkbox_register_post_call_action`, `inkbox_edit_post_call_action`, `inkbox_delete_post_call_action`, and `inkbox_hang_up_call`. If realtime auth/provider config is unavailable, calls fall back to Inkbox STT/TTS unless `voiceRealtime.fallbackToInkboxSttTts` is set to `false`.
 
 Optional realtime overrides:
 
@@ -316,7 +316,8 @@ npm_config_cache=/tmp/npm-cache npm pack --dry-run
 - Agent-scoped: runtime should use an Inkbox agent-scoped API key.
 - Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions, and wires the incoming-call URL.
 - Voice: Inkbox STT/TTS fallback path and realtime raw-media path both route through the same call WebSocket.
-- Post-call actions: realtime calls can register work for the main OpenClaw agent after hangup.
+- Post-call actions: realtime calls can register, edit, delete, and dispatch work for the main OpenClaw agent after hangup.
+- Hangup: realtime calls expose a two-step hangup tool so the agent can say goodbye before dropping the phone leg.
 - Identity-aware calls: call prompts include agent handle/mailbox/phone/tunnel and known caller contact metadata.
 
 See [PLAN.md](./PLAN.md) for the longer architecture history and roadmap.

@@ -12,6 +12,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Interactive `openclaw inkbox setup` flow using Inkbox signup, identity discovery/creation, phone provisioning, SMS START opt-in polling, and signing-key handling.
 - Structured `openclaw doctor` health checks under `inkbox/*`.
 - Mail/phone contact-rule tools plus contact/note identity-access grant tools.
+- Realtime phone-call tools for editing/deleting queued post-call actions and two-step hangup.
 
 ### Changed
 
