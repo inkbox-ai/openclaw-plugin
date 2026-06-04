@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const realtimeMock = vi.hoisted(() => ({
   available: true,
   sessions: [] as any[],
-  toolCallOnAudio: false as false | true | "consult" | "post_call",
+  toolCallOnAudio: false as any,
   resolveCalls: [] as any[],
 }));
 
@@ -63,6 +63,39 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
   }),
   createRealtimeVoiceBridgeSession: vi.fn((params: any) => {
     let toolCalled = false;
+    const normalizeToolCalls = (value: any) => {
+      const values = Array.isArray(value) ? value : [value === true ? "consult" : value];
+      return values.map((entry: any, index: number) => {
+        if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+          return {
+            itemId: entry.itemId ?? `item-${index + 1}`,
+            callId: entry.callId ?? `tool-${index + 1}`,
+            name: entry.name,
+            args: entry.args ?? {},
+          };
+        }
+        if (entry === "post_call") {
+          return {
+            itemId: `item-${index + 1}`,
+            callId: `tool-${index + 1}`,
+            name: "inkbox_register_post_call_action",
+            args: {
+              action: "Send a follow-up email to Dima about the launch checklist.",
+              details: "Include that staging is still pending.",
+            },
+          };
+        }
+        return {
+          itemId: `item-${index + 1}`,
+          callId: `tool-${index + 1}`,
+          name: entry === "consult" ? "openclaw_agent_consult" : String(entry),
+          args:
+            entry === "consult"
+              ? { question: "Save this as a note." }
+              : {},
+        };
+      });
+    };
     const session: any = {
       bridge: { supportsToolResultContinuation: true },
       connect: vi.fn(async () => {
@@ -72,25 +105,9 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
         if (realtimeMock.toolCallOnAudio && !toolCalled) {
           toolCalled = true;
           params.onTranscript?.("user", "Please handle this request.", true);
-          const toolName =
-            realtimeMock.toolCallOnAudio === "post_call"
-              ? "inkbox_register_post_call_action"
-              : "openclaw_agent_consult";
-          params.onToolCall?.(
-            {
-              itemId: "item-1",
-              callId: "tool-1",
-              name: toolName,
-              args:
-                toolName === "inkbox_register_post_call_action"
-                  ? {
-                      action: "Send a follow-up email to Dima about the launch checklist.",
-                      details: "Include that staging is still pending.",
-                    }
-                  : { question: "Save this as a note." },
-            },
-            session,
-          );
+          for (const toolCall of normalizeToolCalls(realtimeMock.toolCallOnAudio)) {
+            params.onToolCall?.(toolCall, session);
+          }
         }
       }),
       setMediaTimestamp: vi.fn(),
@@ -187,8 +204,9 @@ function createRuntime(options: { conversations?: any[] } = {}) {
 }
 
 function createChannelRuntime(replyText = "I can hear you on the call.") {
+  const deliveryResults: any[] = [];
   const dispatchReply = vi.fn(async (params: any) => {
-    await params.delivery.deliver({ text: replyText });
+    deliveryResults.push(await params.delivery.deliver({ text: replyText }));
   });
   return {
     inbound: {
@@ -201,6 +219,7 @@ function createChannelRuntime(replyText = "I can hear you on the call.") {
     reply: {
       dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
     },
+    deliveryResults,
   };
 }
 
@@ -593,6 +612,22 @@ describe("createInkboxSessionBridge", () => {
     expect(params.instructions).toContain(
       "Do not deny that you have an agent email or phone number.",
     );
+    expect(params.instructions).toContain("inkbox_edit_post_call_action");
+    expect(params.instructions).toContain("inkbox_delete_post_call_action");
+    expect(params.instructions).toContain("inkbox_hang_up_call");
+    expect(params.instructions).toContain(
+      "If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call openclaw_agent_consult.",
+    );
+    expect(params.instructions).toContain(
+      "If openclaw_agent_consult completes or queues work that matches a previously registered after-call action, call inkbox_delete_post_call_action",
+    );
+    expect(params.tools.map((tool: any) => tool.name)).toEqual([
+      "openclaw_agent_consult",
+      "inkbox_register_post_call_action",
+      "inkbox_edit_post_call_action",
+      "inkbox_delete_post_call_action",
+      "inkbox_hang_up_call",
+    ]);
     expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
       "Greet there in one short sentence and ask how you can help.",
     );
@@ -932,6 +967,7 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain("[inkbox:voice_realtime_consult");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Save this as a note.");
     expect(run.ctxPayload.extra.InkboxVoiceReplyOnly).toBe(true);
+    expect(channelRuntime.deliveryResults[0]).toEqual({ visibleReplySent: true });
 
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
@@ -955,6 +991,74 @@ describe("createInkboxSessionBridge", () => {
         is_final: true,
       }),
     );
+  });
+
+  it("deduplicates repeated in-call SMS consults while the first is running", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      {
+        callId: "consult-1",
+        name: "openclaw_agent_consult",
+        args: {
+          question:
+            'Send SMS to +15551234567 now: "Hi, this is smoke-agent. I am here to help during your call."',
+        },
+      },
+      {
+        callId: "consult-2",
+        name: "openclaw_agent_consult",
+        args: {
+          question:
+            'Proceed to send a quick generic SMS to +15551234567: "Hi, this is smoke-agent. I am here to help during your call."',
+        },
+      },
+    ];
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("SMS queued during the call.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
+      "consult-2",
+      expect.objectContaining({
+        status: "already_running",
+        existingToolCallId: "consult-1",
+      }),
+    );
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("consult-1", {
+      status: "ok",
+      result: "SMS queued during the call.",
+    });
   });
 
   it("runs registered realtime post-call actions after the call closes", async () => {
@@ -997,6 +1101,8 @@ describe("createInkboxSessionBridge", () => {
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
       status: "registered",
       actionId: "tool-1",
+      actionIndex: 1,
+      actionCount: 1,
       message:
         "Post-call action registered. Tell the caller it is queued for after the call, not completed yet.",
     });
@@ -1014,7 +1120,244 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
     );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "execute only the actions that are still needed",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "If an action was already completed or queued during the call",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Full live-call transcript:");
     expect(run.ctxPayload.extra.InkboxMode).toBe("sms");
+  });
+
+  it("includes in-call consult results in realtime post-call handoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      {
+        callId: "register-1",
+        name: "inkbox_register_post_call_action",
+        args: {
+          action: "Send an SMS to Dima.",
+          details: "Caller initially accepted an after-call SMS.",
+        },
+      },
+      {
+        callId: "consult-1",
+        name: "openclaw_agent_consult",
+        args: { question: "Send the SMS now during the live call." },
+      },
+    ];
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime(
+      "Yes. The main agent queued the SMS during the live call.",
+    );
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(channelRuntime.deliveryResults[0]).toEqual({ visibleReplySent: true });
+    expect(channelRuntime.deliveryResults[1]).toEqual({ visibleReplySent: true });
+    const postCallRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
+    const body = postCallRun.ctxPayload.message.bodyForAgent;
+    expect(body).toContain("In-call OpenClaw consult results:");
+    expect(body).toContain("Request: Send the SMS now during the live call.");
+    expect(body).toContain("Result: Yes. The main agent queued the SMS during the live call.");
+    expect(body).toContain(
+      "A same-channel in-call consult result that says an SMS/email was sent or queued counts as already handled.",
+    );
+  });
+
+  it("edits and deletes queued realtime post-call actions by index", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      {
+        callId: "register-1",
+        name: "inkbox_register_post_call_action",
+        args: { action: "Email Dima.", details: "Old draft." },
+      },
+      {
+        callId: "register-2",
+        name: "inkbox_register_post_call_action",
+        args: { action: "Create a note.", details: "Old note." },
+      },
+      {
+        callId: "edit-2",
+        name: "inkbox_edit_post_call_action",
+        args: {
+          actionIndex: 2,
+          action: "Create an Inkbox note about the launch checklist.",
+          details: "Include that staging is still pending.",
+        },
+      },
+      {
+        callId: "delete-1",
+        name: "inkbox_delete_post_call_action",
+        args: { actionIndex: 1 },
+      },
+    ];
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Note created.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("edit-2", {
+      status: "updated",
+      actionId: "register-2",
+      actionIndex: 2,
+      actionCount: 2,
+      action: expect.objectContaining({
+        action: "Create an Inkbox note about the launch checklist.",
+        details: "Include that staging is still pending.",
+      }),
+      message: expect.stringContaining("updated"),
+    });
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("delete-1", {
+      status: "deleted",
+      deletedAction: expect.objectContaining({ action: "Email Dima." }),
+      actionIndex: 1,
+      actionCount: 1,
+      remainingActions: [
+        expect.objectContaining({
+          action: "Create an Inkbox note about the launch checklist.",
+        }),
+      ],
+      message: expect.stringContaining("deleted"),
+    });
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Create an Inkbox note about the launch checklist.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain("Email Dima.");
+  });
+
+  it("requires two realtime hangup calls before closing the Inkbox call", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      {
+        callId: "hangup-1",
+        name: "inkbox_hang_up_call",
+        args: { reason: "caller said goodbye" },
+      },
+      {
+        callId: "hangup-2",
+        name: "inkbox_hang_up_call",
+        args: { reason: "caller said goodbye" },
+      },
+    ];
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Should not dispatch.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+    ]);
+
+    const run = bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(2000);
+    await run;
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("hangup-1", {
+      status: "confirm_goodbye",
+      message: expect.stringContaining("Don't hang up yet"),
+    });
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
+      "hangup-2",
+      {
+        status: "hangup_requested",
+        reason: "caller said goodbye",
+        message: "The call is ending now.",
+      },
+      { suppressResponse: true },
+    );
+    expect(parseSentTextFrames(ws)).toContainEqual({
+      event: "hangup",
+      reason: "caller said goodbye",
+      stream_id: "stream-1",
+    });
+    expect(realtimeSession.close).toHaveBeenCalled();
+    expect(ws.close).toHaveBeenCalled();
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
   });
 
   it("routes unaddressed group SMS to the agent and honors silent replies", async () => {

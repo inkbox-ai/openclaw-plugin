@@ -14,6 +14,7 @@ export interface InkboxChannelSendParams {
   accountId?: string | null;
   to: string;
   text: string;
+  subject?: string | null;
   threadId?: string | number | null;
   replyToId?: string | number | null;
 }
@@ -65,7 +66,8 @@ export function parseInkboxTarget(raw: string): ParsedInkboxTarget | null {
       withoutProvider,
     ) ||
     (/^(sms:|text:|phone:)/i.test(withoutProvider) &&
-      looksLikeConversationId(normalized))
+      looksLikeConversationId(normalized)) ||
+    looksLikeConversationId(normalized)
   ) {
     return { mode: "sms-conversation", value: normalized };
   }
@@ -78,11 +80,117 @@ export function parseInkboxTarget(raw: string): ParsedInkboxTarget | null {
   return null;
 }
 
-function outboundSubject(threadId?: string | number | null): string {
-  if (threadId !== undefined && threadId !== null && String(threadId).trim()) {
+function replySubject(subject?: string | null): string | undefined {
+  const trimmed = subject?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.toLowerCase().startsWith("re:") ? trimmed : `Re: ${trimmed}`;
+}
+
+function fallbackOutboundSubject(
+  threadId?: string | number | null,
+  replyToId?: string | number | null,
+): string {
+  if (
+    (threadId !== undefined && threadId !== null && String(threadId).trim()) ||
+    (replyToId !== undefined && replyToId !== null && String(replyToId).trim())
+  ) {
     return "Re: Inkbox message";
   }
   return "Inkbox message";
+}
+
+function normalizeEmailThreadId(threadId?: string | number | null): string | undefined {
+  if (threadId === undefined || threadId === null) {
+    return undefined;
+  }
+  const raw = String(threadId).trim();
+  if (!raw) {
+    return undefined;
+  }
+  const withoutPrefix = raw.replace(/^email:/i, "").trim();
+  return looksLikeConversationId(withoutPrefix) ? withoutPrefix : undefined;
+}
+
+function normalizeMessageId(messageId?: string | number | null): string | undefined {
+  if (messageId === undefined || messageId === null) {
+    return undefined;
+  }
+  const trimmed = String(messageId).trim();
+  return trimmed || undefined;
+}
+
+function readThreadSubject(thread: any): string | undefined {
+  const direct = typeof thread?.subject === "string" ? thread.subject.trim() : "";
+  if (direct) {
+    return direct;
+  }
+  if (Array.isArray(thread?.messages)) {
+    for (const message of thread.messages) {
+      const subject = typeof message?.subject === "string" ? message.subject.trim() : "";
+      if (subject) {
+        return subject;
+      }
+    }
+  }
+  return undefined;
+}
+
+async function resolveEmailReplySubject(
+  identity: any,
+  params: InkboxChannelSendParams,
+): Promise<string> {
+  const explicit = replySubject(params.subject);
+  if (explicit) {
+    return explicit;
+  }
+
+  const threadId = normalizeEmailThreadId(params.threadId);
+  if (threadId && typeof identity.getThread === "function") {
+    try {
+      const subject = readThreadSubject(await identity.getThread(threadId));
+      const resolved = replySubject(subject);
+      if (resolved) {
+        return resolved;
+      }
+    } catch {
+      // Keep generic message sends best-effort; a failed thread lookup should
+      // not prevent the visible reply from being sent.
+    }
+  }
+
+  const replyToId = normalizeMessageId(params.replyToId);
+  if (replyToId && typeof identity.iterEmails === "function") {
+    try {
+      let checked = 0;
+      for await (const message of identity.iterEmails({ pageSize: 25 })) {
+        checked += 1;
+        if (normalizeMessageId(message?.messageId) === replyToId) {
+          const subject = replySubject(message?.subject);
+          if (subject) {
+            return subject;
+          }
+          const messageThreadId = normalizeEmailThreadId(message?.threadId);
+          if (messageThreadId && typeof identity.getThread === "function") {
+            const threadSubject = readThreadSubject(await identity.getThread(messageThreadId));
+            const resolved = replySubject(threadSubject);
+            if (resolved) {
+              return resolved;
+            }
+          }
+          break;
+        }
+        if (checked >= 100) {
+          break;
+        }
+      }
+    } catch {
+      // Fall through to the safe generic subject.
+    }
+  }
+
+  return fallbackOutboundSubject(params.threadId, params.replyToId);
 }
 
 export async function sendInkboxChannelText(
@@ -99,7 +207,7 @@ export async function sendInkboxChannelText(
   const target = parseInkboxTarget(params.to);
   if (!target) {
     throw new Error(
-      `Inkbox target must be an email address or E.164 phone number (got ${JSON.stringify(params.to)}).`,
+      `Inkbox target must be an email address, E.164 phone number, or SMS conversation id (got ${JSON.stringify(params.to)}).`,
     );
   }
   if (target.mode === "sms-conversation") {
@@ -130,7 +238,7 @@ export async function sendInkboxChannelText(
 
   const msg = await identity.sendEmail({
     to: [target.value],
-    subject: outboundSubject(params.threadId),
+    subject: await resolveEmailReplySubject(identity, params),
     bodyText: params.text,
     inReplyToMessageId:
       params.replyToId !== undefined && params.replyToId !== null

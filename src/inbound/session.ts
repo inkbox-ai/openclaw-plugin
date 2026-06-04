@@ -96,6 +96,14 @@ type RealtimePostCallAction = {
   createdAt: number;
 };
 
+type RealtimeConsultResult = {
+  id: string;
+  request: string;
+  result: string;
+  createdAt: number;
+  dedupeKey?: string;
+};
+
 type RealtimeAgentIdentityInfo = {
   handle?: string;
   id?: string;
@@ -152,6 +160,11 @@ const REALTIME_AUDIO_MAX_START_BUFFER_MS = 160;
 const REALTIME_AUDIO_STALE_CLOCK_MS = TELEPHONY_CHUNK_MS * 2;
 const REALTIME_GREETING_INPUT_SUPPRESSION_MS = 700;
 const REALTIME_POST_CALL_ACTION_TOOL_NAME = "inkbox_register_post_call_action";
+const REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME = "inkbox_edit_post_call_action";
+const REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME = "inkbox_delete_post_call_action";
+const REALTIME_HANG_UP_CALL_TOOL_NAME = "inkbox_hang_up_call";
+const REALTIME_HANGUP_CONFIRM_WINDOW_MS = 60 * 1000;
+const REALTIME_HANGUP_CLOSE_DELAY_MS = 2000;
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
 const REALTIME_REQUIRED_QUIET_CHUNKS = 12;
@@ -822,6 +835,8 @@ function shouldFallbackToInkboxSttTts(account: ResolvedInkboxAccount): boolean {
 
 const DEFAULT_REALTIME_PROVIDER = "openai";
 const DEFAULT_REALTIME_VOICE = "cedar";
+const REALTIME_TRANSCRIPT_MAX_ENTRIES = 200;
+const REALTIME_POST_CALL_CONSULT_DRAIN_MS = 5000;
 
 function resolveRealtimeConfig(account: ResolvedInkboxAccount) {
   const config = account.config.voiceRealtime ?? {};
@@ -858,7 +873,7 @@ function realtimePostCallActionTool(): RealtimeVoiceTool {
     type: "function",
     name: REALTIME_POST_CALL_ACTION_TOOL_NAME,
     description:
-      "Register work the main OpenClaw Inkbox agent must do after this phone call ends, such as sending an email/SMS follow-up, creating a note, or updating a contact. Use this instead of claiming you sent something yourself.",
+      "Register deferred work the main OpenClaw Inkbox agent must do after this phone call ends, such as sending an email/SMS follow-up, creating a note, or updating a contact. Do not use this for work the caller wants done now during the live call if openclaw_agent_consult can perform it.",
     parameters: {
       type: "object",
       properties: {
@@ -878,6 +893,74 @@ function realtimePostCallActionTool(): RealtimeVoiceTool {
         },
       },
       required: ["action"],
+    },
+  };
+}
+
+function realtimeEditPostCallActionTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME,
+    description:
+      "Edit work previously registered for after this phone call ends. Use the one-based actionIndex returned by inkbox_register_post_call_action when the caller changes the recipient, channel, wording, or scope.",
+    parameters: {
+      type: "object",
+      properties: {
+        actionIndex: {
+          type: "integer",
+          minimum: 1,
+          description: "One-based index of the queued post-call action to edit.",
+        },
+        action: {
+          type: "string",
+          description: "Replacement plain-English task. Omit to keep the current task.",
+        },
+        details: {
+          type: "string",
+          description:
+            "Replacement optional draft text, hints, or constraints. Pass an empty string to clear details.",
+        },
+      },
+      required: ["actionIndex"],
+    },
+  };
+}
+
+function realtimeDeletePostCallActionTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME,
+    description:
+      "Delete work previously registered for after this phone call ends. Use this when the caller cancels a queued follow-up, or when in-call work/consult results already completed or superseded it.",
+    parameters: {
+      type: "object",
+      properties: {
+        actionIndex: {
+          type: "integer",
+          minimum: 1,
+          description: "One-based index of the queued post-call action to delete.",
+        },
+      },
+      required: ["actionIndex"],
+    },
+  };
+}
+
+function realtimeHangUpCallTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_HANG_UP_CALL_TOOL_NAME,
+    description:
+      "End the live phone call. This is a two-step tool: the first call does not hang up, it prompts you to say a short goodbye. After you have said goodbye, call inkbox_hang_up_call a second time to actually end the call.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "Optional short reason for ending the call.",
+        },
+      },
+      required: [],
     },
   };
 }
@@ -916,7 +999,11 @@ function buildRealtimeInstructions(
     meta.outboundContext
       ? "For outbound calls, do not open with a generic offer to help. Start by explaining why you are calling, then ask the next specific question or give the requested update."
       : undefined,
-    `If the caller asks for work to happen after the call, call ${REALTIME_POST_CALL_ACTION_TOOL_NAME}. Tell the caller the action is queued for after the call; do not claim it has already been completed.`,
+    "If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call openclaw_agent_consult. This includes sending SMS/email, reading SMS/email/call history, creating notes, or updating contacts. Do not say it cannot be done unless the consult result says it cannot be done.",
+    `If the caller explicitly asks for work to happen after the call or accepts an after-call deferral, call ${REALTIME_POST_CALL_ACTION_TOOL_NAME}. Tell the caller the action is queued for after the call; do not claim it has already been completed.`,
+    `If the caller changes, cancels, or no longer needs previously queued after-call work, call ${REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME} or ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} using the actionIndex returned when the work was queued.`,
+    `If openclaw_agent_consult completes or queues work that matches a previously registered after-call action, call ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} for that action so it is not executed twice after hangup.`,
+    `If the caller asks to hang up, says goodbye, or the conversation is clearly complete, call ${REALTIME_HANG_UP_CALL_TOOL_NAME}. The first call arms hangup and asks you to say goodbye; after the goodbye, call it once more to end the phone call.`,
     "Call openclaw_agent_consult only after the caller asks for contact edits, notes, email/SMS/call-history reads, workspace/memory/current-info, or other tool work that must happen during the call.",
     "Do not call openclaw_agent_consult just to greet, identify yourself, identify the caller, or fill call-start context.",
     config.instructions,
@@ -1010,16 +1097,72 @@ function appendRealtimeTranscript(
     return;
   }
   entries.push({ ...entry, text });
-  while (entries.length > 20) {
+  while (entries.length > REALTIME_TRANSCRIPT_MAX_ENTRIES) {
     entries.shift();
   }
 }
 
-function renderRealtimeTranscript(entries: RealtimeTranscriptEntry[]): string {
-  return entries
-    .slice(-12)
+function renderRealtimeTranscript(
+  entries: RealtimeTranscriptEntry[],
+  opts: { limit?: number | "all" } = {},
+): string {
+  const selected = opts.limit === "all" ? entries : entries.slice(-(opts.limit ?? 12));
+  return selected
     .map((entry) => `${entry.role === "assistant" ? "Agent" : "Caller"}: ${entry.text}`)
     .join("\n");
+}
+
+function clipPromptText(value: string, maxChars = 2000): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}...` : value;
+}
+
+function readConsultResultText(result: Record<string, unknown>): string {
+  const explicit = typeof result.result === "string" ? result.result.trim() : "";
+  if (explicit) {
+    return explicit;
+  }
+  const error = typeof result.error === "string" ? result.error.trim() : "";
+  if (error) {
+    return `ERROR: ${error}`;
+  }
+  return JSON.stringify(result);
+}
+
+function renderRealtimeConsultResults(results: RealtimeConsultResult[]): string | undefined {
+  if (results.length === 0) {
+    return undefined;
+  }
+  return results
+    .map((entry, index) =>
+      [
+        `${index + 1}. Request: ${clipPromptText(entry.request, 1000)}`,
+        `Result: ${clipPromptText(entry.result, 2000)}`,
+      ].join("\n"),
+    )
+    .join("\n\n");
+}
+
+function normalizeConsultText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9+]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function quotedConsultText(value: string): string | undefined {
+  const match = value.match(/["“]([^"”]{8,280})["”]/);
+  return match ? normalizeConsultText(match[1]) : undefined;
+}
+
+function realtimeConsultDedupeKey(request: string): string | undefined {
+  const normalized = normalizeConsultText(request);
+  const phone = normalized.match(/\+\d{8,15}/)?.[0] ?? "";
+  const isSms = /\b(sms|text|message)\b/.test(normalized);
+  if (!isSms || !phone) {
+    return undefined;
+  }
+  return ["sms", phone, quotedConsultText(request) ?? "generic"].join(":");
+}
+
+function realtimeConsultAllowsRepeat(request: string): boolean {
+  return /\b(again|another|different|new|repeat|second)\b/i.test(request);
 }
 
 function resolveRealtimeProvider(opts: InkboxSessionBridgeOptions) {
@@ -1365,6 +1508,8 @@ async function runRealtimeAgentConsult(
     meta: RealtimeCallMeta;
     toolEvent: RealtimeVoiceToolCallEvent;
     transcript: RealtimeTranscriptEntry[];
+    postCallActions: RealtimePostCallAction[];
+    consultResults: RealtimeConsultResult[];
   },
 ): Promise<Record<string, unknown>> {
   let requestText: string;
@@ -1377,6 +1522,7 @@ async function runRealtimeAgentConsult(
   }
 
   const recentTranscript = renderRealtimeTranscript(opts.transcript);
+  const priorConsultResults = renderRealtimeConsultResults(opts.consultResults);
   const visibleText: string[] = [];
   await dispatchInboundTurn({
     ...opts,
@@ -1394,7 +1540,8 @@ async function runRealtimeAgentConsult(
         if (text) {
           visibleText.push(text);
         }
-        return { visibleReplySent: false };
+        // The realtime bridge consumes this final reply as the tool result.
+        return { visibleReplySent: Boolean(text) };
       },
       onError: (error: unknown) => {
         opts.logger?.warn?.(
@@ -1411,6 +1558,20 @@ async function runRealtimeAgentConsult(
       body: [
         `[inkbox:voice_realtime_consult call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
         requestText,
+        opts.postCallActions.length
+          ? [
+              "Pending after-call actions already queued by the realtime call agent:",
+              renderPostCallActions(opts.postCallActions),
+              "If this consult completes, queues, cancels, or supersedes one of those pending actions, say so explicitly in your result so the call agent can delete that after-call action before hangup.",
+            ].join("\n")
+          : undefined,
+        priorConsultResults
+          ? [
+              "Previous OpenClaw consult results during this same live call:",
+              priorConsultResults,
+              "Do not repeat work that was already completed or queued unless the caller explicitly asked for another/repeat/different action.",
+            ].join("\n")
+          : undefined,
         recentTranscript ? `Recent live-call transcript:\n${recentTranscript}` : undefined,
       ]
         .filter(Boolean)
@@ -1428,22 +1589,50 @@ async function runRealtimeAgentConsult(
   });
 
   const result = visibleText.join("\n\n").trim();
-  return {
+  const response: Record<string, unknown> = {
     status: "ok",
     result: result || "OpenClaw completed the consult but returned no speakable text.",
   };
+  if (opts.postCallActions.length > 0) {
+    response.postCallActionGuidance =
+      "If this result completed, queued, canceled, or superseded a pending after-call action, call inkbox_delete_post_call_action for that actionIndex before the call ends.";
+  }
+  return response;
 }
 
 function readPostCallStringArg(args: unknown, key: string): string | undefined {
-  if (!args || typeof args !== "object" || Array.isArray(args)) {
+  const record = readPostCallRecord(args);
+  if (!record) {
     return undefined;
   }
-  const value = (args as Record<string, unknown>)[key];
+  const value = record[key];
   if (typeof value !== "string") {
     return undefined;
   }
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function readPostCallRecord(args: unknown): Record<string, unknown> | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  return args as Record<string, unknown>;
+}
+
+function hasPostCallArg(args: unknown, key: string): boolean {
+  const record = readPostCallRecord(args);
+  return record ? Object.prototype.hasOwnProperty.call(record, key) : false;
+}
+
+function readPostCallActionIndex(args: unknown): number {
+  const record = readPostCallRecord(args);
+  if (!record) {
+    return 0;
+  }
+  const rawIndex = record.actionIndex ?? record.action_index;
+  const index = typeof rawIndex === "number" ? rawIndex : Number(rawIndex);
+  return Number.isInteger(index) ? index : 0;
 }
 
 function registerRealtimePostCallAction(
@@ -1468,8 +1657,76 @@ function registerRealtimePostCallAction(
   return {
     status: "registered",
     actionId: value.id,
+    actionIndex: actions.length,
+    actionCount: actions.length,
     message:
       "Post-call action registered. Tell the caller it is queued for after the call, not completed yet.",
+  };
+}
+
+function editRealtimePostCallAction(
+  actions: RealtimePostCallAction[],
+  toolEvent: RealtimeVoiceToolCallEvent,
+): Record<string, unknown> {
+  const actionIndex = readPostCallActionIndex(toolEvent.args);
+  if (actionIndex < 1 || actionIndex > actions.length) {
+    return {
+      error: "invalid actionIndex",
+      actionCount: actions.length,
+    };
+  }
+
+  const hasAction = hasPostCallArg(toolEvent.args, "action");
+  const hasDetails = hasPostCallArg(toolEvent.args, "details");
+  if (!hasAction && !hasDetails) {
+    return { error: "missing action or details argument" };
+  }
+
+  const record = readPostCallRecord(toolEvent.args) ?? {};
+  const queued = actions[actionIndex - 1];
+  if (hasAction) {
+    const action = typeof record.action === "string" ? record.action.trim() : "";
+    if (!action) {
+      return { error: "action cannot be empty" };
+    }
+    queued.action = action;
+  }
+  if (hasDetails) {
+    queued.details = typeof record.details === "string" ? record.details.trim() : undefined;
+  }
+
+  return {
+    status: "updated",
+    actionId: queued.id,
+    actionIndex,
+    actionCount: actions.length,
+    action: queued,
+    message:
+      "Queued after-call action updated. If the caller needs to know, confirm briefly that the queued work was changed.",
+  };
+}
+
+function deleteRealtimePostCallAction(
+  actions: RealtimePostCallAction[],
+  toolEvent: RealtimeVoiceToolCallEvent,
+): Record<string, unknown> {
+  const actionIndex = readPostCallActionIndex(toolEvent.args);
+  if (actionIndex < 1 || actionIndex > actions.length) {
+    return {
+      error: "invalid actionIndex",
+      actionCount: actions.length,
+    };
+  }
+
+  const deleted = actions.splice(actionIndex - 1, 1)[0];
+  return {
+    status: "deleted",
+    deletedAction: deleted,
+    actionIndex,
+    actionCount: actions.length,
+    remainingActions: [...actions],
+    message:
+      "Queued after-call action deleted. If the caller needs to know, confirm briefly that it was canceled.",
   };
 }
 
@@ -1501,13 +1758,15 @@ async function runRealtimePostCallActions(
     activeCalls: Map<string, ActiveCall>;
     meta: RealtimeCallMeta;
     transcript: RealtimeTranscriptEntry[];
+    consultResults: RealtimeConsultResult[];
     actions: RealtimePostCallAction[];
   },
 ): Promise<void> {
   if (opts.actions.length === 0) {
     return;
   }
-  const recentTranscript = renderRealtimeTranscript(opts.transcript);
+  const fullTranscript = renderRealtimeTranscript(opts.transcript, { limit: "all" });
+  const consultResults = renderRealtimeConsultResults(opts.consultResults);
   const visibleText: string[] = [];
   await dispatchInboundTurn({
     ...opts,
@@ -1525,7 +1784,8 @@ async function runRealtimePostCallActions(
         if (text) {
           visibleText.push(text);
         }
-        return { visibleReplySent: false };
+        // The post-call bridge captures this reply for logs; no source-channel send is pending.
+        return { visibleReplySent: Boolean(text) };
       },
       onError: (error: unknown) => {
         opts.logger?.warn?.(
@@ -1541,12 +1801,15 @@ async function runRealtimePostCallActions(
       remoteAddress: opts.meta.remotePhoneNumber,
       body: [
         `[inkbox:voice_post_call_actions call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
-        "The realtime voice call ended. Execute these post-call actions now using Inkbox tools where appropriate.",
-        "Do not merely say they are impossible. If an email/SMS/note/contact update was requested and enough recipient/content info is present, perform it.",
+        "The realtime voice call ended. Review these queued post-call actions and execute only the actions that are still needed.",
+        "These actions were registered during the live call and may be stale. Before doing anything, reconcile them against the full live-call transcript, in-call OpenClaw consult results, and prior messages in this session.",
+        "If an action was already completed or queued during the call, canceled, superseded, or the caller said it already happened, do not perform it again. A same-channel in-call consult result that says an SMS/email was sent or queued counts as already handled.",
+        "Do not merely say still-needed actions are impossible. If an email/SMS/note/contact update is still needed and enough recipient/content info is present, perform it.",
         "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
         "Only if required information is missing, ask the caller for the missing information. Try SMS first; if SMS is unavailable or not opted in, try email; if email is unavailable, place a follow-up call with the question.",
         renderPostCallActions(opts.actions),
-        recentTranscript ? `Recent live-call transcript:\n${recentTranscript}` : undefined,
+        consultResults ? `In-call OpenClaw consult results:\n${consultResults}` : undefined,
+        fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -1573,6 +1836,11 @@ function handleRealtimeToolCall(
     toolEvent: RealtimeVoiceToolCallEvent;
     transcript: RealtimeTranscriptEntry[];
     postCallActions: RealtimePostCallAction[];
+    consultResults: RealtimeConsultResult[];
+    pendingConsults: Set<Promise<void>>;
+    pendingConsultKeys: Map<string, string>;
+    hangupArmedAt: { value?: number };
+    requestHangup: (reason?: string) => Promise<void>;
   },
 ): void {
   const callId = opts.toolEvent.callId || opts.toolEvent.itemId;
@@ -1581,6 +1849,50 @@ function handleRealtimeToolCall(
       callId,
       registerRealtimePostCallAction(opts.postCallActions, opts.toolEvent),
     );
+    return;
+  }
+  if (opts.toolEvent.name === REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME) {
+    opts.session.submitToolResult(
+      callId,
+      editRealtimePostCallAction(opts.postCallActions, opts.toolEvent),
+    );
+    return;
+  }
+  if (opts.toolEvent.name === REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME) {
+    opts.session.submitToolResult(
+      callId,
+      deleteRealtimePostCallAction(opts.postCallActions, opts.toolEvent),
+    );
+    return;
+  }
+  if (opts.toolEvent.name === REALTIME_HANG_UP_CALL_TOOL_NAME) {
+    const now = Date.now();
+    const armedAt = opts.hangupArmedAt.value;
+    if (armedAt === undefined || now - armedAt > REALTIME_HANGUP_CONFIRM_WINDOW_MS) {
+      opts.hangupArmedAt.value = now;
+      opts.session.submitToolResult(callId, {
+        status: "confirm_goodbye",
+        message:
+          "Don't hang up yet. Say a brief, natural goodbye to the caller now, then call inkbox_hang_up_call once more to actually end the call.",
+      });
+      return;
+    }
+
+    const reason = readPostCallStringArg(opts.toolEvent.args, "reason") ?? "";
+    opts.session.submitToolResult(
+      callId,
+      {
+        status: "hangup_requested",
+        reason,
+        message: "The call is ending now.",
+      },
+      { suppressResponse: true },
+    );
+    void opts.requestHangup(reason).catch((error) => {
+      opts.logger?.warn?.(
+        `Inkbox realtime hangup failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
     return;
   }
   if (opts.toolEvent.name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
@@ -1612,15 +1924,84 @@ function handleRealtimeToolCall(
     // Continuation is an optimization; the final tool result is authoritative.
   }
 
-  void runRealtimeAgentConsult(opts)
+  let consultRequest = "";
+  try {
+    consultRequest = buildRealtimeVoiceAgentConsultChatMessage(opts.toolEvent.args);
+  } catch {
+    consultRequest = JSON.stringify(opts.toolEvent.args ?? {});
+  }
+  const consultKey = realtimeConsultDedupeKey(consultRequest);
+  if (consultKey && !realtimeConsultAllowsRepeat(consultRequest)) {
+    const pendingCallId = opts.pendingConsultKeys.get(consultKey);
+    if (pendingCallId) {
+      opts.session.submitToolResult(callId, {
+        status: "already_running",
+        existingToolCallId: pendingCallId,
+        result:
+          "OpenClaw is already handling this same in-call request. Do not call the consult tool again or queue a duplicate post-call action; wait briefly for the existing result.",
+      });
+      return;
+    }
+    const completed = [...opts.consultResults]
+      .reverse()
+      .find((entry) => entry.dedupeKey === consultKey);
+    if (completed) {
+      opts.session.submitToolResult(callId, {
+        status: "already_handled",
+        existingToolCallId: completed.id,
+        result: `OpenClaw already handled this same in-call request: ${completed.result}. Do not send it again unless the caller explicitly asks for another/repeat/different message.`,
+      });
+      return;
+    }
+  }
+
+  const pendingConsult = runRealtimeAgentConsult(opts)
     .then((result) => {
+      opts.consultResults.push({
+        id: callId,
+        request: consultRequest,
+        result: readConsultResultText(result),
+        createdAt: Date.now(),
+        dedupeKey: consultKey,
+      });
       opts.session.submitToolResult(callId, result);
     })
     .catch((error) => {
+      opts.consultResults.push({
+        id: callId,
+        request: consultRequest,
+        result: `ERROR: ${error instanceof Error ? error.message : String(error)}`,
+        createdAt: Date.now(),
+        dedupeKey: consultKey,
+      });
       opts.session.submitToolResult(callId, {
         error: error instanceof Error ? error.message : String(error),
       });
     });
+  opts.pendingConsults.add(pendingConsult);
+  if (consultKey) {
+    opts.pendingConsultKeys.set(consultKey, callId);
+  }
+  void pendingConsult.finally(() => {
+    opts.pendingConsults.delete(pendingConsult);
+    if (consultKey && opts.pendingConsultKeys.get(consultKey) === callId) {
+      opts.pendingConsultKeys.delete(consultKey);
+    }
+  });
+}
+
+async function waitForPendingRealtimeConsults(
+  pendingConsults: Set<Promise<void>>,
+): Promise<void> {
+  if (pendingConsults.size === 0) {
+    return;
+  }
+  await Promise.race([
+    Promise.allSettled([...pendingConsults]),
+    new Promise<void>((resolve) =>
+      setTimeout(resolve, REALTIME_POST_CALL_CONSULT_DRAIN_MS),
+    ),
+  ]);
 }
 
 function prewarmStateKey(account: ResolvedInkboxAccount): string {
@@ -1986,8 +2367,13 @@ async function runRealtimeCallWebSocket(
   const resolved = resolveRealtimeProvider(opts);
   let streamId: string | undefined;
   let closed = false;
+  const hangupArmedAt: { value?: number } = {};
+  let pendingHangupClose: Promise<void> | undefined;
   const transcript: RealtimeTranscriptEntry[] = [];
   const postCallActions: RealtimePostCallAction[] = [];
+  const consultResults: RealtimeConsultResult[] = [];
+  const pendingConsults = new Set<Promise<void>>();
+  const pendingConsultKeys = new Map<string, string>();
   const sendJson = async (payload: Record<string, unknown>) => {
     if (closed) {
       return;
@@ -1999,6 +2385,29 @@ async function runRealtimeCallWebSocket(
   let initialGreetingActive = false;
   let initialGreetingOutputStarted = false;
   let suppressInputUntil = 0;
+  const requestHangup = async (reason = ""): Promise<void> => {
+    if (!pendingHangupClose) {
+      pendingHangupClose = (async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, REALTIME_HANGUP_CLOSE_DELAY_MS));
+        if (closed) {
+          return;
+        }
+        const hangupFrame: Record<string, unknown> = { event: "hangup" };
+        if (reason) {
+          hangupFrame.reason = reason;
+        }
+        if (streamId) {
+          hangupFrame.stream_id = streamId;
+        }
+        await opts.ws.send(JSON.stringify(hangupFrame));
+        closed = true;
+        audioPacer.close();
+        session.close();
+        await opts.ws.close().catch(() => {});
+      })();
+    }
+    return pendingHangupClose;
+  };
   const session = createRealtimeVoiceBridgeSession({
     provider: resolved.provider,
     cfg: opts.cfg as any,
@@ -2012,6 +2421,9 @@ async function runRealtimeCallWebSocket(
     markStrategy: "ack-immediately",
     tools: resolveRealtimeVoiceAgentConsultTools(realtime.toolPolicy, [
       realtimePostCallActionTool(),
+      realtimeEditPostCallActionTool(),
+      realtimeDeletePostCallActionTool(),
+      realtimeHangUpCallTool(),
     ]),
     audioSink: {
       isOpen: () => !closed,
@@ -2061,6 +2473,11 @@ async function runRealtimeCallWebSocket(
         toolEvent,
         transcript,
         postCallActions,
+        consultResults,
+        pendingConsults,
+        pendingConsultKeys,
+        hangupArmedAt,
+        requestHangup,
       });
     },
     onReady: () => {
@@ -2154,16 +2571,25 @@ async function runRealtimeCallWebSocket(
       }
     }
   } finally {
+    if (pendingHangupClose) {
+      await pendingHangupClose.catch((error) => {
+        opts.logger?.warn?.(
+          `Inkbox realtime hangup close failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     closed = true;
     audioPacer.close();
     session.close();
     unregisterActiveCall(opts.activeCalls, opts.active);
     await opts.ws.close().catch(() => {});
     opts.logger?.info?.(`Inkbox call WebSocket closed: call_id=${opts.meta.callId}`);
+    await waitForPendingRealtimeConsults(pendingConsults);
     void runRealtimePostCallActions({
       ...opts,
       activeCalls: opts.activeCalls,
       transcript,
+      consultResults,
       actions: [...postCallActions],
     }).catch((error) => {
       opts.logger?.warn?.(
