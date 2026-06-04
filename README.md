@@ -60,6 +60,18 @@ openclaw gateway run
 
 Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, and calls into OpenClaw sessions.
 
+Restart the gateway after changing Inkbox config, updating the plugin, or re-running setup:
+
+```bash
+openclaw gateway restart
+```
+
+If you started the gateway in the foreground with `openclaw gateway run`, press `Ctrl+C` in that terminal and start it again:
+
+```bash
+openclaw gateway run
+```
+
 ## Setup Wizard
 
 `openclaw inkbox setup` walks the current OpenClaw profile through Inkbox configuration:
