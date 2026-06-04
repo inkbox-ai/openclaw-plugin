@@ -35,6 +35,10 @@ describe("inkbox outbound target parsing", () => {
       mode: "sms-conversation",
       value: conversationId,
     });
+    expect(parseInkboxTarget(conversationId)).toEqual({
+      mode: "sms-conversation",
+      value: conversationId,
+    });
   });
 
   it("normalizes provider prefixes", () => {

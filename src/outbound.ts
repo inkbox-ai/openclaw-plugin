@@ -65,7 +65,8 @@ export function parseInkboxTarget(raw: string): ParsedInkboxTarget | null {
       withoutProvider,
     ) ||
     (/^(sms:|text:|phone:)/i.test(withoutProvider) &&
-      looksLikeConversationId(normalized))
+      looksLikeConversationId(normalized)) ||
+    looksLikeConversationId(normalized)
   ) {
     return { mode: "sms-conversation", value: normalized };
   }
@@ -99,7 +100,7 @@ export async function sendInkboxChannelText(
   const target = parseInkboxTarget(params.to);
   if (!target) {
     throw new Error(
-      `Inkbox target must be an email address or E.164 phone number (got ${JSON.stringify(params.to)}).`,
+      `Inkbox target must be an email address, E.164 phone number, or SMS conversation id (got ${JSON.stringify(params.to)}).`,
     );
   }
   if (target.mode === "sms-conversation") {

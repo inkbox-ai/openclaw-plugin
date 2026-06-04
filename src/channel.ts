@@ -271,7 +271,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
             : undefined,
       targetResolver: {
         looksLikeId: (raw: string) => parseInkboxTarget(raw) !== null,
-        hint: "<email:user@example.com|sms:+14155550123>",
+        hint: "<email:user@example.com|sms:+14155550123|conversation:uuid>",
       },
       resolveOutboundSessionRoute: ({
         cfg,
