@@ -265,6 +265,38 @@ function textWebhookEvent(params: {
   };
 }
 
+function mailWebhookEvent(params: {
+  from: string;
+  subject?: string;
+  snippet?: string;
+  agentIdentities?: any[];
+}): any {
+  return {
+    event_type: "message.received",
+    timestamp: "2026-05-21T00:00:00Z",
+    data: {
+      message: {
+        id: "mail-in-1",
+        mailbox_id: "mailbox-1",
+        thread_id: "thread-1",
+        message_id: "<mail-in-1@example.com>",
+        from_address: params.from,
+        to_addresses: ["smoke-agent@inkboxmail.com"],
+        cc_addresses: null,
+        bcc_addresses: null,
+        subject: params.subject ?? "Loop test",
+        snippet: params.snippet ?? "Please reply to yourself.",
+        direction: "inbound",
+        status: "received",
+        has_attachments: false,
+        created_at: "2026-05-21T00:00:00Z",
+      },
+      contacts: [],
+      agent_identities: params.agentIdentities ?? [],
+    },
+  };
+}
+
 function parseSentTextFrames(ws: FakeInkboxWebSocket) {
   return ws.sent.map((message) => JSON.parse(message));
 }
@@ -344,6 +376,72 @@ describe("createInkboxSessionBridge", () => {
       }),
     );
     expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("ignores self-originated inbound email by mailbox address", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger,
+    });
+
+    await bridge.handlers.onMail?.(
+      mailWebhookEvent({
+        from: "Smoke Agent <smoke-agent@inkboxmail.com>",
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(runtime.getClient).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-originated mail ignored"),
+    );
+  });
+
+  it("ignores self-originated inbound email by agent identity marker", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger,
+    });
+
+    await bridge.handlers.onMail?.(
+      mailWebhookEvent({
+        from: "alias@inkboxmail.com",
+        agentIdentities: [
+          {
+            bucket: "from",
+            address: "alias@inkboxmail.com",
+            id: "identity-1",
+            agent_handle: "smoke-agent",
+            display_name: "Smoke Agent",
+          },
+        ],
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(runtime.getIdentity).not.toHaveBeenCalled();
+    expect(runtime.getClient).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-originated mail ignored"),
+    );
   });
 
   it("speaks greeting and agent replies over TTS, not SMS", async () => {

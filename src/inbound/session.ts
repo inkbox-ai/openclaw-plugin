@@ -582,6 +582,91 @@ async function lookupContact(
   return undefined;
 }
 
+function normalizeEmailAddress(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  let text = value.trim();
+  const angleMatch = text.match(/<([^<>]+)>/);
+  if (angleMatch?.[1]) {
+    text = angleMatch[1].trim();
+  }
+  text = text.replace(/^mailto:/i, "").trim().toLowerCase();
+  return text.includes("@") ? text : undefined;
+}
+
+function normalizeIdentityHandle(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim().toLowerCase();
+  return trimmed || undefined;
+}
+
+function agentIdentityFromBucketMatches(
+  event: MailWebhookPayload,
+  fromAddress: string,
+  params: { identityId?: string | null; identityHandle?: string | null },
+): boolean {
+  const identityId = typeof params.identityId === "string" ? params.identityId.trim() : "";
+  const identityHandle = normalizeIdentityHandle(params.identityHandle);
+  if (!identityId && !identityHandle) {
+    return false;
+  }
+  const identities = Array.isArray(event.data.agent_identities)
+    ? event.data.agent_identities
+    : [];
+  return identities.some((entry) => {
+    if (entry.bucket !== "from" || normalizeEmailAddress(entry.address) !== fromAddress) {
+      return false;
+    }
+    return (
+      (identityId && entry.id === identityId) ||
+      (identityHandle && normalizeIdentityHandle(entry.agent_handle) === identityHandle)
+    );
+  });
+}
+
+async function isSelfMailEvent(
+  runtime: InkboxRuntime,
+  account: ResolvedInkboxAccount,
+  event: MailWebhookPayload,
+  fromAddress: string,
+): Promise<boolean> {
+  const configuredHandle =
+    normalizeIdentityHandle(account.config.identity) ?? normalizeIdentityHandle(account.identity);
+  if (
+    agentIdentityFromBucketMatches(event, fromAddress, {
+      identityHandle: configuredHandle,
+    })
+  ) {
+    return true;
+  }
+
+  let identity: AgentIdentity | undefined;
+  try {
+    identity = await runtime.getIdentity();
+  } catch {
+    return false;
+  }
+
+  if (
+    agentIdentityFromBucketMatches(event, fromAddress, {
+      identityId: identity.id,
+      identityHandle: identity.agentHandle ?? configuredHandle,
+    })
+  ) {
+    return true;
+  }
+
+  const selfAddresses = new Set(
+    [identity.mailbox?.emailAddress, identity.emailAddress]
+      .map((entry) => normalizeEmailAddress(entry))
+      .filter((entry): entry is string => Boolean(entry)),
+  );
+  return selfAddresses.has(fromAddress);
+}
+
 function textMediaMarkers(
   media: NonNullable<TextWebhookPayload["data"]["text_message"]["media"]> | null,
 ): string[] {
@@ -2163,14 +2248,20 @@ export async function prewarmInkboxAgent(
 
 async function buildMailTurn(
   runtime: InkboxRuntime,
+  account: ResolvedInkboxAccount,
   event: MailWebhookPayload,
+  logger?: PluginLogger,
 ): Promise<InkboxInboundTurn | null> {
   if (event.event_type !== "message.received") {
     return null;
   }
   const message = event.data.message;
-  const from = message.from_address?.trim().toLowerCase();
+  const from = normalizeEmailAddress(message.from_address);
   if (!from) {
+    return null;
+  }
+  if (await isSelfMailEvent(runtime, account, event, from)) {
+    logger?.info?.(`Inkbox self-originated mail ignored without waking agent: from=${from}`);
     return null;
   }
   const contactsList = Array.isArray(event.data.contacts) ? event.data.contacts : [];
@@ -2653,9 +2744,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
 
   const handlers: InboundHandlers = {
     async onMail(event) {
-      const turn = await buildMailTurn(opts.runtime, event);
+      const turn = await buildMailTurn(opts.runtime, opts.account, event, opts.logger);
       if (!turn) {
-        opts.logger?.info?.(`Inkbox mail lifecycle event: ${event.event_type}`);
+        if (event.event_type !== "message.received") {
+          opts.logger?.info?.(`Inkbox mail lifecycle event: ${event.event_type}`);
+        }
         return;
       }
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
