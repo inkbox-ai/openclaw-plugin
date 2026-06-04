@@ -613,6 +613,12 @@ describe("createInkboxSessionBridge", () => {
     expect(params.instructions).toContain("inkbox_edit_post_call_action");
     expect(params.instructions).toContain("inkbox_delete_post_call_action");
     expect(params.instructions).toContain("inkbox_hang_up_call");
+    expect(params.instructions).toContain(
+      "If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call openclaw_agent_consult.",
+    );
+    expect(params.instructions).toContain(
+      "If openclaw_agent_consult completes or queues work that matches a previously registered after-call action, call inkbox_delete_post_call_action",
+    );
     expect(params.tools.map((tool: any) => tool.name)).toEqual([
       "openclaw_agent_consult",
       "inkbox_register_post_call_action",
@@ -1043,7 +1049,77 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
     );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "execute only the actions that are still needed",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "If an action was already completed or queued during the call",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Full live-call transcript:");
     expect(run.ctxPayload.extra.InkboxMode).toBe("sms");
+  });
+
+  it("includes in-call consult results in realtime post-call handoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      {
+        callId: "register-1",
+        name: "inkbox_register_post_call_action",
+        args: {
+          action: "Send an SMS to Dima.",
+          details: "Caller initially accepted an after-call SMS.",
+        },
+      },
+      {
+        callId: "consult-1",
+        name: "openclaw_agent_consult",
+        args: { question: "Send the SMS now during the live call." },
+      },
+    ];
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime(
+      "Yes. The main agent queued the SMS during the live call.",
+    );
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    const postCallRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
+    const body = postCallRun.ctxPayload.message.bodyForAgent;
+    expect(body).toContain("In-call OpenClaw consult results:");
+    expect(body).toContain("Request: Send the SMS now during the live call.");
+    expect(body).toContain("Result: Yes. The main agent queued the SMS during the live call.");
+    expect(body).toContain(
+      "A same-channel in-call consult result that says an SMS/email was sent or queued counts as already handled.",
+    );
   });
 
   it("edits and deletes queued realtime post-call actions by index", async () => {
