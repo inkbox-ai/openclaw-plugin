@@ -58,6 +58,7 @@ const inkboxMessageAdapter = defineChannelMessageAdapter({
         accountId: ctx.accountId,
         to: ctx.to,
         text: ctx.text,
+        subject: ctx.subject,
         threadId: ctx.threadId,
         replyToId: ctx.replyToId,
       });
