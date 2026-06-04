@@ -837,6 +837,48 @@ const DEFAULT_REALTIME_PROVIDER = "openai";
 const DEFAULT_REALTIME_VOICE = "cedar";
 const REALTIME_TRANSCRIPT_MAX_ENTRIES = 200;
 const REALTIME_POST_CALL_CONSULT_DRAIN_MS = 5000;
+const REALTIME_CONNECT_TIMEOUT_MS = 8000;
+
+class RealtimeCallBridgeConnectError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(`OpenAI realtime connect failed: ${message}`);
+    this.name = "RealtimeCallBridgeConnectError";
+    this.cause = cause;
+  }
+}
+
+function isRealtimeCallBridgeConnectError(error: unknown): error is RealtimeCallBridgeConnectError {
+  return error instanceof RealtimeCallBridgeConnectError;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function connectRealtimeSessionBeforeAccept(
+  session: RealtimeVoiceBridgeSession,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      session.connect(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`connect timed out after ${REALTIME_CONNECT_TIMEOUT_MS}ms`));
+        }, REALTIME_CONNECT_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    throw new RealtimeCallBridgeConnectError(error);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
 
 function resolveRealtimeConfig(account: ResolvedInkboxAccount) {
   const config = account.config.voiceRealtime ?? {};
@@ -2495,6 +2537,13 @@ async function runRealtimeCallWebSocket(
     },
   });
 
+  try {
+    await connectRealtimeSessionBeforeAccept(session);
+  } catch (error) {
+    session.close();
+    throw error;
+  }
+
   await opts.ws.accept({
     headers: [
       ["x-use-inkbox-text-to-speech", "false"],
@@ -2504,7 +2553,6 @@ async function runRealtimeCallWebSocket(
 
   let greetingTriggered = false;
   try {
-    await session.connect();
     registerActiveCall(opts.activeCalls, opts.active);
     opts.logger?.info?.(
       `Inkbox call WebSocket open: call_id=${opts.meta.callId} contact=${opts.meta.contactKey} direction=${opts.meta.direction} mode=realtime provider=${resolved.provider.id}`,
@@ -2664,6 +2712,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
 
       if (!realtimeUnavailable) {
+        let fallbackAfterConnectFailure = false;
         try {
           await runRealtimeCallWebSocket({
             ...opts,
@@ -2673,31 +2722,38 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
             activeCalls,
           });
         } catch (error) {
+          if (isRealtimeCallBridgeConnectError(error) && shouldFallbackToInkboxSttTts(opts.account)) {
+            opts.logger?.warn?.(
+              `Inkbox realtime call bridge connect failed; falling back to Inkbox STT/TTS: ${errorMessage(error.cause)}`,
+            );
+            fallbackAfterConnectFailure = true;
+          } else {
+            opts.logger?.warn?.(`Inkbox realtime call bridge failed: ${errorMessage(error)}`);
+            await ws.close(1011, "realtime bridge unavailable");
+            return;
+          }
+        }
+        if (!fallbackAfterConnectFailure) {
+          return;
+        }
+      } else {
+        if (!shouldFallbackToInkboxSttTts(opts.account)) {
           opts.logger?.warn?.(
-            `Inkbox realtime call bridge failed: ${error instanceof Error ? error.message : String(error)}`,
+            `Inkbox realtime call bridge unavailable: ${errorMessage(realtimeUnavailable)}`,
           );
           await ws.close(1011, "realtime bridge unavailable");
+          return;
         }
-        return;
-      }
-
-      if (!shouldFallbackToInkboxSttTts(opts.account)) {
-        opts.logger?.warn?.(
-          `Inkbox realtime call bridge unavailable: ${realtimeUnavailable instanceof Error ? realtimeUnavailable.message : String(realtimeUnavailable)}`,
-        );
-        await ws.close(1011, "realtime bridge unavailable");
-        return;
-      }
-      const unavailableMessage =
-        realtimeUnavailable instanceof Error ? realtimeUnavailable.message : String(realtimeUnavailable);
-      if (isVoiceRealtimeExplicitlyEnabled(opts.account)) {
-        opts.logger?.warn?.(
-          `Inkbox realtime call bridge unavailable; falling back to Inkbox STT/TTS: ${unavailableMessage}`,
-        );
-      } else {
-        opts.logger?.info?.(
-          `Inkbox realtime call bridge auto-detect unavailable; using Inkbox STT/TTS: ${unavailableMessage}`,
-        );
+        const unavailableMessage = errorMessage(realtimeUnavailable);
+        if (isVoiceRealtimeExplicitlyEnabled(opts.account)) {
+          opts.logger?.warn?.(
+            `Inkbox realtime call bridge unavailable; falling back to Inkbox STT/TTS: ${unavailableMessage}`,
+          );
+        } else {
+          opts.logger?.info?.(
+            `Inkbox realtime call bridge auto-detect unavailable; using Inkbox STT/TTS: ${unavailableMessage}`,
+          );
+        }
       }
     } else {
       opts.logger?.info?.(

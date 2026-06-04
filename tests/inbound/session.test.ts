@@ -5,6 +5,7 @@ const realtimeMock = vi.hoisted(() => ({
   sessions: [] as any[],
   toolCallOnAudio: false as any,
   resolveCalls: [] as any[],
+  connectError: undefined as Error | undefined,
 }));
 
 vi.mock("@inkbox/sdk", () => ({
@@ -99,6 +100,9 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
     const session: any = {
       bridge: { supportsToolResultContinuation: true },
       connect: vi.fn(async () => {
+        if (realtimeMock.connectError) {
+          throw realtimeMock.connectError;
+        }
         params.onReady?.(session);
       }),
       sendAudio: vi.fn((audio: Buffer) => {
@@ -271,6 +275,7 @@ describe("createInkboxSessionBridge", () => {
     realtimeMock.sessions = [];
     realtimeMock.toolCallOnAudio = false;
     realtimeMock.resolveCalls = [];
+    realtimeMock.connectError = undefined;
   });
 
   afterEach(() => {
@@ -877,6 +882,60 @@ describe("createInkboxSessionBridge", () => {
         event: "text",
         delta: "Fallback voice reply.",
         turn_id: "turn-fallback",
+      }),
+    );
+  });
+
+  it("falls back to Inkbox STT/TTS when realtime connect fails before accepting media", async () => {
+    realtimeMock.connectError = new Error("invalid_api_key");
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Connect fallback reply.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          voiceRealtime: {
+            enabled: true,
+            provider: "openai",
+            fallbackToInkboxSttTts: true,
+          },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({
+        event: "transcript",
+        text: "Use connect fallback.",
+        is_final: true,
+        turn_id: "turn-connect-fallback",
+      }),
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+
+    expect(realtimeMock.sessions).toHaveLength(1);
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.connect).toHaveBeenCalledTimes(1);
+    expect(realtimeSession.close).toHaveBeenCalledTimes(1);
+    expect(ws.accept).toHaveBeenCalledTimes(1);
+    expect(ws.accept).toHaveBeenCalledWith({
+      headers: [
+        ["x-use-inkbox-text-to-speech", "true"],
+        ["x-use-inkbox-speech-to-text", "true"],
+      ],
+    });
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const frames = parseSentTextFrames(ws);
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        event: "text",
+        delta: "Connect fallback reply.",
+        turn_id: "turn-connect-fallback",
       }),
     );
   });
