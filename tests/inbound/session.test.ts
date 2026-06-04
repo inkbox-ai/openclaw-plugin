@@ -406,6 +406,35 @@ describe("createInkboxSessionBridge", () => {
     );
   });
 
+  it("logs and ignores inbound email with an unparseable sender", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger,
+    });
+
+    await bridge.handlers.onMail?.(
+      mailWebhookEvent({
+        from: "Unknown Sender",
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(runtime.getIdentity).not.toHaveBeenCalled();
+    expect(runtime.getClient).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("missing or unparseable from_address"),
+    );
+  });
+
   it("ignores self-originated inbound email by agent identity marker", async () => {
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime();

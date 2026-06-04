@@ -2258,6 +2258,7 @@ async function buildMailTurn(
   const message = event.data.message;
   const from = normalizeEmailAddress(message.from_address);
   if (!from) {
+    logger?.info?.("Inkbox inbound email ignored without waking agent: missing or unparseable from_address");
     return null;
   }
   if (await isSelfMailEvent(runtime, account, event, from)) {
