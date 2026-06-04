@@ -204,8 +204,9 @@ function createRuntime(options: { conversations?: any[] } = {}) {
 }
 
 function createChannelRuntime(replyText = "I can hear you on the call.") {
+  const deliveryResults: any[] = [];
   const dispatchReply = vi.fn(async (params: any) => {
-    await params.delivery.deliver({ text: replyText });
+    deliveryResults.push(await params.delivery.deliver({ text: replyText }));
   });
   return {
     inbound: {
@@ -218,6 +219,7 @@ function createChannelRuntime(replyText = "I can hear you on the call.") {
     reply: {
       dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
     },
+    deliveryResults,
   };
 }
 
@@ -965,6 +967,7 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain("[inkbox:voice_realtime_consult");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Save this as a note.");
     expect(run.ctxPayload.extra.InkboxVoiceReplyOnly).toBe(true);
+    expect(channelRuntime.deliveryResults[0]).toEqual({ visibleReplySent: true });
 
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
@@ -988,6 +991,74 @@ describe("createInkboxSessionBridge", () => {
         is_final: true,
       }),
     );
+  });
+
+  it("deduplicates repeated in-call SMS consults while the first is running", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      {
+        callId: "consult-1",
+        name: "openclaw_agent_consult",
+        args: {
+          question:
+            'Send SMS to +15551234567 now: "Hi, this is smoke-agent. I am here to help during your call."',
+        },
+      },
+      {
+        callId: "consult-2",
+        name: "openclaw_agent_consult",
+        args: {
+          question:
+            'Proceed to send a quick generic SMS to +15551234567: "Hi, this is smoke-agent. I am here to help during your call."',
+        },
+      },
+    ];
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("SMS queued during the call.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+      JSON.stringify({ event: "stop" }),
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const realtimeSession = realtimeMock.sessions[0].session;
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
+      "consult-2",
+      expect.objectContaining({
+        status: "already_running",
+        existingToolCallId: "consult-1",
+      }),
+    );
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("consult-1", {
+      status: "ok",
+      result: "SMS queued during the call.",
+    });
   });
 
   it("runs registered realtime post-call actions after the call closes", async () => {
@@ -1112,6 +1183,8 @@ describe("createInkboxSessionBridge", () => {
     await Promise.resolve();
 
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(channelRuntime.deliveryResults[0]).toEqual({ visibleReplySent: true });
+    expect(channelRuntime.deliveryResults[1]).toEqual({ visibleReplySent: true });
     const postCallRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
     const body = postCallRun.ctxPayload.message.bodyForAgent;
     expect(body).toContain("In-call OpenClaw consult results:");

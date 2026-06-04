@@ -101,6 +101,7 @@ type RealtimeConsultResult = {
   request: string;
   result: string;
   createdAt: number;
+  dedupeKey?: string;
 };
 
 type RealtimeAgentIdentityInfo = {
@@ -1141,6 +1142,29 @@ function renderRealtimeConsultResults(results: RealtimeConsultResult[]): string 
     .join("\n\n");
 }
 
+function normalizeConsultText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9+]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function quotedConsultText(value: string): string | undefined {
+  const match = value.match(/["“]([^"”]{8,280})["”]/);
+  return match ? normalizeConsultText(match[1]) : undefined;
+}
+
+function realtimeConsultDedupeKey(request: string): string | undefined {
+  const normalized = normalizeConsultText(request);
+  const phone = normalized.match(/\+\d{8,15}/)?.[0] ?? "";
+  const isSms = /\b(sms|text|message)\b/.test(normalized);
+  if (!isSms || !phone) {
+    return undefined;
+  }
+  return ["sms", phone, quotedConsultText(request) ?? "generic"].join(":");
+}
+
+function realtimeConsultAllowsRepeat(request: string): boolean {
+  return /\b(again|another|different|new|repeat|second)\b/i.test(request);
+}
+
 function resolveRealtimeProvider(opts: InkboxSessionBridgeOptions) {
   const realtime = resolveRealtimeConfig(opts.account);
   const providerConfigOverrides: Record<string, unknown> = {};
@@ -1485,6 +1509,7 @@ async function runRealtimeAgentConsult(
     toolEvent: RealtimeVoiceToolCallEvent;
     transcript: RealtimeTranscriptEntry[];
     postCallActions: RealtimePostCallAction[];
+    consultResults: RealtimeConsultResult[];
   },
 ): Promise<Record<string, unknown>> {
   let requestText: string;
@@ -1497,6 +1522,7 @@ async function runRealtimeAgentConsult(
   }
 
   const recentTranscript = renderRealtimeTranscript(opts.transcript);
+  const priorConsultResults = renderRealtimeConsultResults(opts.consultResults);
   const visibleText: string[] = [];
   await dispatchInboundTurn({
     ...opts,
@@ -1514,7 +1540,8 @@ async function runRealtimeAgentConsult(
         if (text) {
           visibleText.push(text);
         }
-        return { visibleReplySent: false };
+        // The realtime bridge consumes this final reply as the tool result.
+        return { visibleReplySent: Boolean(text) };
       },
       onError: (error: unknown) => {
         opts.logger?.warn?.(
@@ -1536,6 +1563,13 @@ async function runRealtimeAgentConsult(
               "Pending after-call actions already queued by the realtime call agent:",
               renderPostCallActions(opts.postCallActions),
               "If this consult completes, queues, cancels, or supersedes one of those pending actions, say so explicitly in your result so the call agent can delete that after-call action before hangup.",
+            ].join("\n")
+          : undefined,
+        priorConsultResults
+          ? [
+              "Previous OpenClaw consult results during this same live call:",
+              priorConsultResults,
+              "Do not repeat work that was already completed or queued unless the caller explicitly asked for another/repeat/different action.",
             ].join("\n")
           : undefined,
         recentTranscript ? `Recent live-call transcript:\n${recentTranscript}` : undefined,
@@ -1750,7 +1784,8 @@ async function runRealtimePostCallActions(
         if (text) {
           visibleText.push(text);
         }
-        return { visibleReplySent: false };
+        // The post-call bridge captures this reply for logs; no source-channel send is pending.
+        return { visibleReplySent: Boolean(text) };
       },
       onError: (error: unknown) => {
         opts.logger?.warn?.(
@@ -1803,6 +1838,7 @@ function handleRealtimeToolCall(
     postCallActions: RealtimePostCallAction[];
     consultResults: RealtimeConsultResult[];
     pendingConsults: Set<Promise<void>>;
+    pendingConsultKeys: Map<string, string>;
     hangupArmedAt: { value?: number };
     requestHangup: (reason?: string) => Promise<void>;
   },
@@ -1894,6 +1930,30 @@ function handleRealtimeToolCall(
   } catch {
     consultRequest = JSON.stringify(opts.toolEvent.args ?? {});
   }
+  const consultKey = realtimeConsultDedupeKey(consultRequest);
+  if (consultKey && !realtimeConsultAllowsRepeat(consultRequest)) {
+    const pendingCallId = opts.pendingConsultKeys.get(consultKey);
+    if (pendingCallId) {
+      opts.session.submitToolResult(callId, {
+        status: "already_running",
+        existingToolCallId: pendingCallId,
+        result:
+          "OpenClaw is already handling this same in-call request. Do not call the consult tool again or queue a duplicate post-call action; wait briefly for the existing result.",
+      });
+      return;
+    }
+    const completed = [...opts.consultResults]
+      .reverse()
+      .find((entry) => entry.dedupeKey === consultKey);
+    if (completed) {
+      opts.session.submitToolResult(callId, {
+        status: "already_handled",
+        existingToolCallId: completed.id,
+        result: `OpenClaw already handled this same in-call request: ${completed.result}. Do not send it again unless the caller explicitly asks for another/repeat/different message.`,
+      });
+      return;
+    }
+  }
 
   const pendingConsult = runRealtimeAgentConsult(opts)
     .then((result) => {
@@ -1902,6 +1962,7 @@ function handleRealtimeToolCall(
         request: consultRequest,
         result: readConsultResultText(result),
         createdAt: Date.now(),
+        dedupeKey: consultKey,
       });
       opts.session.submitToolResult(callId, result);
     })
@@ -1911,14 +1972,21 @@ function handleRealtimeToolCall(
         request: consultRequest,
         result: `ERROR: ${error instanceof Error ? error.message : String(error)}`,
         createdAt: Date.now(),
+        dedupeKey: consultKey,
       });
       opts.session.submitToolResult(callId, {
         error: error instanceof Error ? error.message : String(error),
       });
     });
   opts.pendingConsults.add(pendingConsult);
+  if (consultKey) {
+    opts.pendingConsultKeys.set(consultKey, callId);
+  }
   void pendingConsult.finally(() => {
     opts.pendingConsults.delete(pendingConsult);
+    if (consultKey && opts.pendingConsultKeys.get(consultKey) === callId) {
+      opts.pendingConsultKeys.delete(consultKey);
+    }
   });
 }
 
@@ -2305,6 +2373,7 @@ async function runRealtimeCallWebSocket(
   const postCallActions: RealtimePostCallAction[] = [];
   const consultResults: RealtimeConsultResult[] = [];
   const pendingConsults = new Set<Promise<void>>();
+  const pendingConsultKeys = new Map<string, string>();
   const sendJson = async (payload: Record<string, unknown>) => {
     if (closed) {
       return;
@@ -2406,6 +2475,7 @@ async function runRealtimeCallWebSocket(
         postCallActions,
         consultResults,
         pendingConsults,
+        pendingConsultKeys,
         hangupArmedAt,
         requestHangup,
       });
