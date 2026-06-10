@@ -23,14 +23,16 @@ export const TEXT_EVENT_TYPES: readonly string[] = [
 ];
 
 // iMessage: inbound plus the outbound delivery lifecycle — same split as
-// text. Tapback reactions (`imessage.reaction_received`) are deliberately
-// not subscribed: waking the agent for every thumbs-up isn't worth a turn,
-// and live reactions are visible on message reads anyway.
+// text. Tapback reactions (`imessage.reaction_received`) are subscribed and
+// dispatched as a turn carrying the reaction + a response policy: the agent
+// decides whether to reply or return [SILENT] (a "?" tapback usually
+// warrants a reply, a "love" usually does not).
 export const IMESSAGE_EVENT_TYPES: readonly string[] = [
   "imessage.received",
   "imessage.sent",
   "imessage.delivered",
   "imessage.delivery_failed",
+  "imessage.reaction_received",
 ];
 
 export interface DesiredSubscriptionSet {

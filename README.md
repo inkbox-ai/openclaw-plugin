@@ -225,6 +225,8 @@ iMessage works differently from SMS: the agent does not get its own iMessage num
 
 If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignmentStatus` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`, `imessage.delivery_failed`) arrive as webhooks and are logged by the gateway without waking the agent, matching the SMS lifecycle handling.
 
+While the agent composes a reply, the recipient sees a typing indicator — the gateway pulses it until the response sends (or the agent decides no reply is warranted). Inbound tapbacks (`imessage.reaction_received`) do wake the agent: the turn carries the reaction, the message it targets, and a response policy — a `question` tapback usually warrants a reply, while `love`/`like`/`laugh`/`dislike` usually resolve to `[SILENT]` and nothing is sent.
+
 ## CLI
 
 ```bash

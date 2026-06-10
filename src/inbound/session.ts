@@ -834,12 +834,84 @@ async function sendVoiceText(
   );
 }
 
+// iMessage typing indicators auto-expire client-side after a short window,
+// so a single sendIMessageTyping() would fade while the agent is still
+// thinking. We refresh every IMESSAGE_TYPING_REFRESH_MS until the reply goes
+// out (or the turn resolves without one), mirroring the "…" a human would
+// see. The cap bounds a turn that never resolves so the indicator can't
+// pulse indefinitely.
+const IMESSAGE_TYPING_REFRESH_MS = 2000;
+const IMESSAGE_TYPING_MAX_MS = 300_000;
+
+export interface IMessageTypingPulse {
+  start(conversationId: string | undefined): void;
+  stop(conversationId: string | undefined): void;
+}
+
+export function createIMessageTypingPulse(
+  runtime: InkboxRuntime,
+  logger?: PluginLogger,
+): IMessageTypingPulse {
+  const active = new Map<string, { timer: NodeJS.Timeout; elapsedMs: number }>();
+
+  function stop(conversationId: string | undefined): void {
+    if (!conversationId) {
+      return;
+    }
+    const entry = active.get(conversationId);
+    if (entry) {
+      clearInterval(entry.timer);
+      active.delete(conversationId);
+    }
+  }
+
+  async function pulse(conversationId: string): Promise<void> {
+    try {
+      const identity = await runtime.getIdentity();
+      const sendTyping = (identity as any).sendIMessageTyping;
+      if (typeof sendTyping !== "function") {
+        stop(conversationId); // SDK too old — nothing to pulse
+        return;
+      }
+      await sendTyping.call(identity, conversationId);
+    } catch (error) {
+      // A transient typing failure should never derail the turn; log and
+      // keep trying on the next tick.
+      logger?.debug?.(
+        `Inkbox iMessage typing pulse failed for ${conversationId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  function start(conversationId: string | undefined): void {
+    if (!conversationId || active.has(conversationId)) {
+      return;
+    }
+    const entry = {
+      elapsedMs: 0,
+      timer: setInterval(() => {
+        entry.elapsedMs += IMESSAGE_TYPING_REFRESH_MS;
+        if (entry.elapsedMs >= IMESSAGE_TYPING_MAX_MS) {
+          stop(conversationId);
+          return;
+        }
+        void pulse(conversationId);
+      }, IMESSAGE_TYPING_REFRESH_MS),
+    };
+    active.set(conversationId, entry);
+    void pulse(conversationId);
+  }
+
+  return { start, stop };
+}
+
 async function deliverReply(
   params: {
     turn: InkboxInboundTurn;
     text: string;
     runtime: InkboxRuntime;
     activeCalls: Map<string, ActiveCall>;
+    imessageTyping?: IMessageTypingPulse;
     logger?: PluginLogger;
   },
 ): Promise<string | undefined> {
@@ -870,6 +942,9 @@ async function deliverReply(
     if (!conversationId && !params.turn.remoteAddress) {
       throw new Error("Inkbox iMessage reply missing conversation id and remote number.");
     }
+    // The reply is going out now — stop the typing pulse for this
+    // conversation regardless of how the send below resolves.
+    params.imessageTyping?.stop(conversationId);
     // Recipient-first channel: server-side gates (recipient hasn't messaged
     // yet, released assignment, quota) surface as thrown API errors rather
     // than being pre-checked here.
@@ -1458,6 +1533,7 @@ async function dispatchInboundTurn(
   opts: InkboxSessionBridgeOptions & {
     turn: InkboxInboundTurn;
     activeCalls: Map<string, ActiveCall>;
+    imessageTyping?: IMessageTypingPulse;
     dispatchAbortSignal?: AbortSignal;
     shouldDeliverReply?: () => boolean;
     deliveryOverride?: {
@@ -1608,6 +1684,7 @@ async function dispatchInboundTurn(
         text,
         runtime: opts.runtime,
         activeCalls: opts.activeCalls,
+        imessageTyping: opts.imessageTyping,
         logger: opts.logger,
       });
       return {
@@ -2448,6 +2525,80 @@ async function buildIMessageTurn(
   };
 }
 
+// Route an inbound tapback into the contact's session. Unlike SMS/email
+// there is no body — the signal is the reaction itself plus which message it
+// targets. The turn hands the agent the reaction and a response policy: a
+// "question" tapback usually wants a reply, the rest usually don't, so the
+// agent is told it may return [SILENT] when no visible reply is warranted
+// (the same sentinel deliverReply already drops).
+async function buildIMessageReactionTurn(
+  runtime: InkboxRuntime,
+  account: ResolvedInkboxAccount,
+  event: IMessageWebhookPayload,
+  logger?: PluginLogger,
+): Promise<InkboxInboundTurn | null> {
+  const reaction = event.data.reaction;
+  if (!reaction) {
+    return null;
+  }
+  if (reaction.direction && reaction.direction !== "inbound") {
+    // The agent's own outbound tapbacks echo back as a webhook too.
+    return null;
+  }
+  const remote =
+    typeof reaction.remote_number === "string" ? reaction.remote_number.trim() : "";
+  if (!remote) {
+    return null;
+  }
+  const conversationIdRaw = reaction.conversation_id;
+  const conversationId =
+    typeof conversationIdRaw === "string" && conversationIdRaw.trim()
+      ? conversationIdRaw.trim()
+      : undefined;
+  const targetMessageId =
+    typeof reaction.target_message_id === "string" ? reaction.target_message_id.trim() : "";
+  const reactionType = (reaction.reaction ?? "").trim().toLowerCase();
+  const customEmoji = (reaction.custom_emoji ?? "").trim();
+  const reactionLabel =
+    (reactionType === "custom" && customEmoji
+      ? `${reactionType}:${customEmoji}`
+      : reactionType) || "unknown";
+  const contact =
+    (await hydrateContact(runtime, firstWebhookContact(webhookContacts(event.data)))) ??
+    (await lookupContact(runtime, "phone", remote));
+  const contactKey = contact?.id ?? remote;
+  const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
+  const targetPart = targetMessageId ? ` target_message_id=${targetMessageId}` : "";
+  const marker =
+    `[inkbox:imessage_reaction from=${remote} reaction=${reactionLabel}` +
+    `${conversationPart}${targetPart} | ${renderContactMarker(contact)}]`;
+  const policy = [
+    `${contact?.name ?? remote} reacted with a '${reactionLabel}' tapback to your message.`,
+    "A reaction is a lightweight signal, not always a request for a reply.",
+    "Reply only when the reaction plausibly warrants one — e.g. a 'question' " +
+      "tapback usually asks for clarification or a follow-up, 'emphasize' may " +
+      "invite one, while 'love'/'like'/'laugh'/'dislike' are usually just " +
+      "acknowledgements that need no response.",
+    "If no visible reply is warranted, return exactly [SILENT].",
+  ].join("\n");
+  return {
+    mode: "imessage",
+    contactKey,
+    contact,
+    fromLabel: contact?.name ?? remote,
+    remoteAddress: remote,
+    conversationId,
+    conversationKind: "direct",
+    conversationLabel: contact?.name ?? remote,
+    body: `${marker}\n${policy}`,
+    messageId: reaction.id || targetMessageId,
+    replyToId: targetMessageId || reaction.id,
+    threadId: conversationId ? `imessage:${conversationId}` : undefined,
+    timestamp: parseTimestamp(reaction.created_at ?? event.timestamp),
+    raw: event,
+  };
+}
+
 function parseCallContext(raw: string | undefined): Record<string, unknown> {
   if (!raw) {
     return {};
@@ -2816,6 +2967,7 @@ async function runRealtimeCallWebSocket(
 export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): InkboxSessionBridge {
   const activeCalls = new Map<string, ActiveCall>();
   const callMetaById = new Map<string, Partial<InkboxInboundTurn> & { callId: string }>();
+  const imessageTyping = createIMessageTypingPulse(opts.runtime, opts.logger);
 
   const handlers: InboundHandlers = {
     async onMail(event) {
@@ -2837,6 +2989,29 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
     },
     async onIMessage(event) {
+      if (event.event_type === "imessage.reaction_received") {
+        const turn = await buildIMessageReactionTurn(
+          opts.runtime, opts.account, event, opts.logger,
+        );
+        if (!turn) {
+          opts.logger?.info?.("Inkbox iMessage reaction ignored (outbound echo or unroutable).");
+          return;
+        }
+        // A "question" tapback usually expects a reply, so show the typing
+        // indicator while the agent works on it. Other reaction types most
+        // often resolve to [SILENT], so we don't promise a reply that isn't
+        // coming.
+        const reactionType = (event.data.reaction?.reaction ?? "").toLowerCase();
+        if (reactionType === "question") {
+          imessageTyping.start(turn.conversationId);
+        }
+        try {
+          await dispatchInboundTurn({ ...opts, turn, activeCalls, imessageTyping });
+        } finally {
+          imessageTyping.stop(turn.conversationId);
+        }
+        return;
+      }
       const turn = await buildIMessageTurn(opts.runtime, opts.account, event, opts.logger);
       if (!turn) {
         // Delivery/status callbacks (and any other imessage.* fan-out a
@@ -2845,7 +3020,15 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         opts.logger?.info?.(`Inkbox iMessage lifecycle event: ${event.event_type}`);
         return;
       }
-      await dispatchInboundTurn({ ...opts, turn, activeCalls });
+      // Show the recipient a typing indicator while the agent works on the
+      // reply. deliverReply stops it the moment the response goes out; the
+      // finally covers [SILENT] turns and failures.
+      imessageTyping.start(turn.conversationId);
+      try {
+        await dispatchInboundTurn({ ...opts, turn, activeCalls, imessageTyping });
+      } finally {
+        imessageTyping.stop(turn.conversationId);
+      }
     },
     async onCall(event: PhoneIncomingCallWebhookPayload): Promise<InboundCallDecision> {
       const wsUrl = opts.getCallWebsocketUrl?.();

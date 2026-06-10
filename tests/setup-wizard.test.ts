@@ -859,6 +859,7 @@ describe("runSetupWizard", () => {
           "imessage.sent",
           "imessage.delivered",
           "imessage.delivery_failed",
+          "imessage.reaction_received",
         ],
       }),
     );
