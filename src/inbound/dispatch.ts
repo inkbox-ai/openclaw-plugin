@@ -1,4 +1,5 @@
 import type {
+  IMessageWebhookPayload,
   MailWebhookPayload,
   TextWebhookPayload,
   PhoneIncomingCallWebhookPayload,
@@ -16,14 +17,14 @@ export interface InboundCallDecision {
 // allowlist decision. Text and call payloads have moved from singular
 // `contact` to plural `contacts`, so tolerate both during rollout. Text/call
 // keep the previous first-contact allowlist behavior.
-function resolveRemoteContactIds(parsed: any, kind: "mail" | "text" | "call"): string[] {
+function resolveRemoteContactIds(parsed: any, kind: "mail" | "text" | "imessage" | "call"): string[] {
   if (kind === "mail") {
     const contacts = parsed?.data?.contacts;
     if (!Array.isArray(contacts)) return [];
     const fromContact = contacts.find((c: any) => c?.bucket === "from");
     return typeof fromContact?.id === "string" ? [fromContact.id] : [];
   }
-  if (kind === "text") {
+  if (kind === "text" || kind === "imessage") {
     const contacts = parsed?.data?.contacts;
     if (Array.isArray(contacts)) {
       const first = contacts.find((c: any) => typeof c?.id === "string");
@@ -58,6 +59,11 @@ export interface InboundHandlers {
   // delivered/delivery_failed/delivery_unconfirmed.
   onText?(event: TextWebhookPayload): Promise<void> | void;
 
+  // iMessage events fire-and-forget. imessage.received plus the outbound
+  // delivery lifecycle (imessage.sent/delivered/delivery_failed); the
+  // subscription is owned by the agent identity, not a phone number.
+  onIMessage?(event: IMessageWebhookPayload): Promise<void> | void;
+
   // Inbound calls are synchronous — the HTTP response IS the routing decision.
   // Default if unspecified: reject. To answer, return clientWebsocketUrl
   // pointing at a WS endpoint that will bridge audio.
@@ -67,7 +73,7 @@ export interface InboundHandlers {
 }
 
 export interface DispatchResult {
-  kind: "mail" | "text" | "call";
+  kind: "mail" | "text" | "imessage" | "call";
   // Only populated for kind="call". The handler builds the response body
   // from this.
   callDecision?: InboundCallDecision;
@@ -108,6 +114,14 @@ export async function dispatchInbound(
       }
       await handlers.onText?.(parsed as TextWebhookPayload);
       return { kind: "text" };
+    }
+    if (eventType.startsWith("imessage.")) {
+      const contactIds = resolveRemoteContactIds(parsed, "imessage");
+      if (!anyInboundContactAllowed(contactIds, allowedContactIds)) {
+        return { kind: "imessage" };
+      }
+      await handlers.onIMessage?.(parsed as IMessageWebhookPayload);
+      return { kind: "imessage" };
     }
   }
   // Flat call payload. Check allowlist before consulting the handler so

@@ -174,6 +174,11 @@ class FakeInkboxWebSocket {
 
 function createRuntime(options: { conversations?: any[] } = {}) {
   const sendText = vi.fn(async () => ({ id: "txt-reply", deliveryStatus: "queued" }));
+  const sendIMessage = vi.fn(async () => ({
+    id: "im-reply",
+    conversationId: "imconv-123",
+    status: "queued",
+  }));
   const listTextConversations = vi.fn(async () => options.conversations ?? []);
   const runtime = {
     getIdentity: vi.fn(async () => ({
@@ -190,6 +195,7 @@ function createRuntime(options: { conversations?: any[] } = {}) {
       },
       tunnel: { publicHost: "smoke-agent.inkboxwire.com" },
       sendText,
+      sendIMessage,
       listTextConversations,
     })),
     getClient: vi.fn(async () => ({
@@ -204,7 +210,7 @@ function createRuntime(options: { conversations?: any[] } = {}) {
       },
     })),
   };
-  return { runtime, sendText, listTextConversations };
+  return { runtime, sendText, sendIMessage, listTextConversations };
 }
 
 function createChannelRuntime(replyText = "I can hear you on the call.") {
@@ -261,6 +267,47 @@ function textWebhookEvent(params: {
         created_at: "2026-05-21T00:00:00Z",
         updated_at: "2026-05-21T00:00:00Z",
       },
+    },
+  };
+}
+
+function imessageWebhookEvent(params: {
+  content: string;
+  conversationId?: string;
+  remote?: string;
+  direction?: string;
+  eventType?: string;
+}): any {
+  return {
+    event_type: params.eventType ?? "imessage.received",
+    timestamp: "2026-06-10T00:00:00Z",
+    data: {
+      contacts: [],
+      agent_identities: [],
+      message: {
+        id: "im-in-1",
+        conversation_id: params.conversationId ?? "imconv-123",
+        assignment_id: "assign-1",
+        direction: params.direction ?? "inbound",
+        remote_number: params.remote ?? "+15551234567",
+        content: params.content,
+        message_type: "message",
+        service: "imessage",
+        send_style: null,
+        media: null,
+        was_downgraded: null,
+        status: null,
+        error_code: null,
+        error_message: null,
+        error_reason: null,
+        error_detail: null,
+        is_read: false,
+        recipients: null,
+        reactions: null,
+        created_at: "2026-06-10T00:00:00Z",
+        updated_at: "2026-06-10T00:00:00Z",
+      },
+      reaction: null,
     },
   };
 }
@@ -1628,5 +1675,92 @@ describe("createInkboxSessionBridge", () => {
       conversationId: "conv-group",
       text: "Sure, I can help.",
     });
+  });
+
+  it("routes inbound iMessage into a contact session and replies by conversationId", async () => {
+    const { runtime, sendIMessage, sendText } = createRuntime();
+    const channelRuntime = createChannelRuntime("On my way!");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({ content: "Dinner moved to 7." }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:imessage from=+15551234567 conversation_id=imconv-123",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Dinner moved to 7.");
+    expect(run.ctxPayload.extra.InkboxMode).toBe("imessage");
+    expect(run.ctxPayload.extra.InkboxConversationId).toBe("imconv-123");
+    expect(run.ctxPayload.reply.to).toBe("imessage:imconv-123");
+    expect(run.ctxPayload.reply.messageThreadId).toBe("imessage:imconv-123");
+    expect(sendIMessage).toHaveBeenCalledWith({
+      conversationId: "imconv-123",
+      text: "On my way!",
+    });
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("ignores outbound iMessage echoes without waking the agent", async () => {
+    const { runtime, sendIMessage } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({ content: "agent reply", direction: "outbound" }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(sendIMessage).not.toHaveBeenCalled();
+  });
+
+  it("logs iMessage delivery lifecycle events without dispatching an agent turn", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({
+        content: "agent reply",
+        direction: "outbound",
+        eventType: "imessage.delivered",
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      "Inkbox iMessage lifecycle event: imessage.delivered",
+    );
   });
 });

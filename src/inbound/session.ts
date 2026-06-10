@@ -2,6 +2,7 @@ import { verifyWebhook } from "@inkbox/sdk";
 import type {
   AgentIdentity,
   Contact,
+  IMessageWebhookPayload,
   MailWebhookPayload,
   PhoneIncomingCallWebhookPayload,
   TextWebhookPayload,
@@ -29,6 +30,7 @@ import {
 } from "../outbound-call-context.js";
 import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
 import {
+  IMESSAGE_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
   reconcileWebhookSubscription,
@@ -36,7 +38,7 @@ import {
 
 type ChannelRuntime = any;
 
-type InboundMode = "email" | "sms" | "voice" | "warmup";
+type InboundMode = "email" | "sms" | "imessage" | "voice" | "warmup";
 
 type ContactSummary = {
   id?: string;
@@ -669,6 +671,7 @@ async function isSelfMailEvent(
 
 function textMediaMarkers(
   media: NonNullable<TextWebhookPayload["data"]["text_message"]["media"]> | null,
+  markerLabel = "mms_attachment",
 ): string[] {
   if (!media?.length) {
     return [];
@@ -676,7 +679,7 @@ function textMediaMarkers(
   return media.map((item, index) => {
     const contentType = item.content_type || "application/octet-stream";
     const size = typeof item.size === "number" ? ` size=${item.size}` : "";
-    return `[inkbox:mms_attachment index=${index + 1} content_type=${contentType}${size} url=${item.url}]`;
+    return `[inkbox:${markerLabel} index=${index + 1} content_type=${contentType}${size} url=${item.url}]`;
   });
 }
 
@@ -862,6 +865,20 @@ async function deliverReply(
   }
 
   const identity = await params.runtime.getIdentity();
+  if (params.turn.mode === "imessage") {
+    const conversationId = params.turn.conversationId?.trim();
+    if (!conversationId && !params.turn.remoteAddress) {
+      throw new Error("Inkbox iMessage reply missing conversation id and remote number.");
+    }
+    // Recipient-first channel: server-side gates (recipient hasn't messaged
+    // yet, released assignment, quota) surface as thrown API errors rather
+    // than being pre-checked here.
+    const msg = await identity.sendIMessage({
+      ...(conversationId ? { conversationId } : { to: params.turn.remoteAddress }),
+      text,
+    });
+    return msg.id;
+  }
   if (params.turn.mode === "sms") {
     const conversationId = params.turn.conversationId?.trim();
     if (!conversationId && !params.turn.remoteAddress) {
@@ -1484,8 +1501,9 @@ async function dispatchInboundTurn(
     timestamp,
     body: opts.turn.body,
   });
+  const conversationPrefix = opts.turn.mode === "imessage" ? "imessage" : "sms";
   const smsReplyTarget = opts.turn.conversationId
-    ? `sms:${opts.turn.conversationId}`
+    ? `${conversationPrefix}:${opts.turn.conversationId}`
     : opts.turn.remoteAddress ?? opts.turn.contactKey;
   const ctxPayload = core.inbound.buildContext({
     channel: "inkbox",
@@ -2374,6 +2392,62 @@ async function buildTextTurn(
   };
 }
 
+// Mirrors buildTextTurn minus the SMS-only concerns: no group support, no
+// opt-in control words, and no local number — iMessage rides a shared
+// Inkbox-managed line, so the conversation id is the only stable reply
+// target.
+async function buildIMessageTurn(
+  runtime: InkboxRuntime,
+  account: ResolvedInkboxAccount,
+  event: IMessageWebhookPayload,
+  logger?: PluginLogger,
+): Promise<InkboxInboundTurn | null> {
+  if (event.event_type !== "imessage.received") {
+    return null;
+  }
+  const message = event.data.message;
+  if (!message) {
+    return null;
+  }
+  if (message.direction && message.direction !== "inbound") {
+    return null;
+  }
+  const remote =
+    typeof message.remote_number === "string" ? message.remote_number.trim() : "";
+  if (!remote) {
+    return null;
+  }
+  const conversationIdRaw = message.conversation_id;
+  const conversationId =
+    typeof conversationIdRaw === "string" && conversationIdRaw.trim()
+      ? conversationIdRaw.trim()
+      : undefined;
+  const contact =
+    (await hydrateContact(runtime, firstWebhookContact(webhookContacts(event.data)))) ??
+    (await lookupContact(runtime, "phone", remote));
+  const contactKey = contact?.id ?? remote;
+  const mediaMarkers = textMediaMarkers(message.media as any, "imessage_attachment");
+  const text = [message.content ?? "", ...mediaMarkers].filter(Boolean).join("\n");
+  const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
+  const marker = `[inkbox:imessage from=${remote}${conversationPart} | ${renderContactMarker(contact)}]`;
+  return {
+    mode: "imessage",
+    contactKey,
+    contact,
+    fromLabel: contact?.name ?? remote,
+    remoteAddress: remote,
+    conversationId,
+    conversationKind: "direct",
+    conversationLabel: contact?.name ?? remote,
+    body: [marker, text].filter(Boolean).join("\n"),
+    messageId: message.id,
+    replyToId: message.id,
+    threadId: conversationId ? `imessage:${conversationId}` : undefined,
+    timestamp: parseTimestamp(message.created_at ?? event.timestamp),
+    raw: event,
+  };
+}
+
 function parseCallContext(raw: string | undefined): Record<string, unknown> {
   if (!raw) {
     return {};
@@ -2762,6 +2836,17 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
     },
+    async onIMessage(event) {
+      const turn = await buildIMessageTurn(opts.runtime, opts.account, event, opts.logger);
+      if (!turn) {
+        // Delivery/status callbacks (and any other imessage.* fan-out a
+        // drifted subscription delivers) are logged without waking the agent,
+        // matching the text-channel split.
+        opts.logger?.info?.(`Inkbox iMessage lifecycle event: ${event.event_type}`);
+        return;
+      }
+      await dispatchInboundTurn({ ...opts, turn, activeCalls });
+    },
     async onCall(event: PhoneIncomingCallWebhookPayload): Promise<InboundCallDecision> {
       const wsUrl = opts.getCallWebsocketUrl?.();
       if (!wsUrl) {
@@ -3035,6 +3120,32 @@ export async function configureInkboxIdentityDelivery(
     } catch (error) {
       opts.logger?.warn?.(
         `Inkbox phone delivery update failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  // iMessage: identity-owned subscription, only while the identity is
+  // enabled (the server rejects imessage.* subscriptions otherwise).
+  if (identity.imessageEnabled && identity.id) {
+    try {
+      const imessageSub = await reconcileWebhookSubscription(
+        inkbox,
+        {
+          agentIdentityId: identity.id,
+          url: opts.webhookUrl,
+          eventTypes: IMESSAGE_EVENT_TYPES,
+        },
+        opts.logger,
+      );
+      if (imessageSub) {
+        opts.logger?.info?.(`Inkbox iMessage events subscribed at ${opts.webhookUrl}`);
+      } else {
+        opts.logger?.warn?.(
+          `Inkbox iMessage subscription was not created at ${opts.webhookUrl}; inbound iMessage will not be delivered until that is resolved.`,
+        );
+      }
+    } catch (error) {
+      opts.logger?.warn?.(
+        `Inkbox iMessage subscription reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

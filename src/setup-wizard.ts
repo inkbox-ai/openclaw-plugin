@@ -21,6 +21,7 @@ import {
   websocketUrl,
 } from "./call-websocket.js";
 import {
+  IMESSAGE_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
   reconcileWebhookSubscription,
@@ -75,6 +76,8 @@ export interface WizardResult {
 
 const SMS_OPT_IN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const SMS_OPT_IN_POLL_MS = 3000;
+const IMESSAGE_CONNECT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+const IMESSAGE_CONNECT_POLL_MS = 3000;
 const SELF_SIGNUP_VERIFICATION_NOTE = "OpenClaw Inkbox plugin setup";
 const OPENAI_REALTIME_MODEL = "gpt-realtime-2";
 const OPENAI_REALTIME_VOICE = "cedar";
@@ -708,6 +711,24 @@ async function configureIdentityGatewayDelivery(params: {
     }
   }
 
+  // iMessage events are owned by the agent identity, not a phone number —
+  // the channel rides shared Inkbox-managed lines. Only valid while the
+  // identity is iMessage-enabled.
+  if (params.identity.imessageEnabled && params.identity.id) {
+    const imessageSub = await reconcileWebhookSubscription(params.client, {
+      agentIdentityId: params.identity.id,
+      url: webhookUrl,
+      eventTypes: IMESSAGE_EVENT_TYPES,
+    });
+    if (imessageSub) {
+      console.log(`iMessage events subscribed at ${webhookUrl}.`);
+    } else {
+      console.log(
+        `iMessage subscription was not created — see the warning above. Inbound iMessage will not arrive at ${webhookUrl} until that is resolved.`,
+      );
+    }
+  }
+
   const tunnelName = deriveTunnelName(params.identity, params.identityHandle);
   return {
     webhookUrl,
@@ -738,6 +759,9 @@ function printAgentSummary(identity: AgentIdentity): void {
     }
   } else {
     console.log("  Phone:   (none - provision later in the Inkbox console)");
+  }
+  if (identity.imessageEnabled) {
+    console.log("  iMessage: enabled (people connect via the Inkbox iMessage router)");
   }
   console.log("\nReachability rules:");
   console.log("  Manage who can reach this agent at https://inkbox.ai/console/contact-rules");
@@ -833,6 +857,169 @@ async function waitForSmsStart(params: {
   }
   throw new Error(
     `Did not observe START before the wait timed out. Text START to ${params.identity.phoneNumber.number}, then re-run setup.`,
+  );
+}
+
+// Offer to enable iMessage for the agent and walk through connecting an
+// iPhone. Enablement lives on the Inkbox identity, not local config — there
+// is no number to provision; people connect through the Inkbox iMessage
+// router. Returns the (possibly refreshed) identity.
+async function configureIMessage(params: {
+  client: Inkbox;
+  identity: AgentIdentity;
+  identityHandle: string;
+  prompter: Prompter;
+}): Promise<AgentIdentity> {
+  let identity = params.identity;
+  // Detect the SDK's iMessage surface before prompting so setups running
+  // against an older @inkbox/sdk skip the step instead of crashing.
+  const imessages = (params.client as any).imessages;
+  if (
+    typeof imessages?.getTriageNumber !== "function" ||
+    typeof (identity as any).update !== "function"
+  ) {
+    console.log("iMessage requires @inkbox/sdk >= 0.4.7; skipping iMessage setup.");
+    return identity;
+  }
+
+  console.log("\niMessage:");
+  if (identity.imessageEnabled) {
+    console.log("  iMessage is already enabled for this agent.");
+  } else {
+    const enable = await params.prompter.confirm(
+      "Enable iMessage for this agent? People connect by texting the Inkbox iMessage router — no number to provision.",
+      true,
+    );
+    if (!enable) {
+      console.log("  Skipped. Re-run `openclaw inkbox setup` anytime to enable iMessage.");
+      return identity;
+    }
+    try {
+      await identity.update({ imessageEnabled: true });
+      // Re-fetch so the local object reflects the new flag (the SDK gates
+      // its iMessage helpers on it).
+      identity = await params.client.getIdentity(params.identityHandle);
+    } catch (error) {
+      console.log(`  Could not enable iMessage: ${messageFromError(error)}`);
+      console.log("  You can enable it later from the Inkbox Console and re-run setup.");
+      return identity;
+    }
+    console.log("  iMessage enabled for this agent.");
+  }
+
+  // Surface phones already connected through the router so re-runs don't
+  // read like a first-time setup, and default the walkthrough off when a
+  // connection already exists (connecting another phone is the rare case).
+  let connected: Awaited<ReturnType<AgentIdentity["listIMessageAssignments"]>> = [];
+  try {
+    connected = await identity.listIMessageAssignments({ limit: 5 });
+  } catch {
+    connected = [];
+  }
+  if (connected.length) {
+    console.log(
+      `  Already connected: ${connected.map((entry) => entry.remoteNumber).join(", ")}`,
+    );
+  }
+  const wantConnect = await params.prompter.confirm(
+    connected.length
+      ? "Connect another iPhone to this agent now?"
+      : "Connect your iPhone to this agent now?",
+    connected.length === 0,
+  );
+  if (!wantConnect) {
+    console.log("  You can connect anytime — re-run `openclaw inkbox setup` for the walkthrough.");
+    return identity;
+  }
+  await waitForIMessageFirstMessage({
+    client: params.client,
+    identity,
+    identityHandle: params.identityHandle,
+  });
+  return identity;
+}
+
+// Walk the user through the iMessage connect flow, wait for their first
+// inbound iMessage, then greet them back in that conversation. Timing out is
+// non-fatal — the connection can be finished later by re-running setup.
+async function waitForIMessageFirstMessage(params: {
+  client: Inkbox;
+  identity: AgentIdentity;
+  identityHandle: string;
+}): Promise<void> {
+  let triage: { number: string; connectCommand: string };
+  try {
+    triage = await (params.client as any).imessages.getTriageNumber();
+  } catch (error) {
+    console.log(`Could not fetch the iMessage router number: ${messageFromError(error)}`);
+    console.log("Re-run `openclaw inkbox setup` later to finish connecting.");
+    return;
+  }
+  const connectCommand =
+    triage.connectCommand && !triage.connectCommand.includes("your-handle")
+      ? triage.connectCommand
+      : `connect @${params.identityHandle}`;
+
+  console.log("\nFrom your iPhone, in the Messages app:");
+  console.log(`  1. Text "${connectCommand}" to ${triage.number}`);
+  console.log("  2. Inkbox texts you back from the number now assigned to this agent.");
+  console.log('  3. Send any first message (e.g. "hi") in that NEW thread.');
+  console.log("The agent can only message you after you message it first.");
+  console.log("\nWaiting up to 5 minutes for your first iMessage...");
+
+  const startedAt = Date.now();
+  let match: Awaited<ReturnType<AgentIdentity["listIMessages"]>>[number] | undefined;
+  while (Date.now() - startedAt < IMESSAGE_CONNECT_WAIT_TIMEOUT_MS) {
+    let messages: Awaited<ReturnType<AgentIdentity["listIMessages"]>> = [];
+    try {
+      messages = await params.identity.listIMessages({ limit: 10 });
+    } catch {
+      messages = [];
+    }
+    match = messages.find((message) => {
+      if (message.direction !== "inbound") {
+        return false;
+      }
+      // Ignore traffic from a connection that predates this run; accept
+      // rows without a parseable timestamp rather than stalling the poll.
+      const createdAt =
+        message.createdAt instanceof Date ? message.createdAt.getTime() : undefined;
+      return createdAt === undefined || createdAt >= startedAt;
+    });
+    if (match) {
+      break;
+    }
+    await sleep(IMESSAGE_CONNECT_POLL_MS);
+  }
+  if (!match) {
+    console.log(
+      "Did not see a first iMessage before the wait timed out. Connect and message the agent, then re-run setup if you want the welcome walkthrough.",
+    );
+    return;
+  }
+
+  console.log(`Got it. First iMessage received from ${match.remoteNumber || "your phone"}.`);
+  const welcome =
+    `You're connected! This is your iMessage channel to your OpenClaw agent ` +
+    `@${params.identityHandle}. Anything you send here goes straight to the agent, ` +
+    `and its replies will show up right in this thread.`;
+  try {
+    await params.identity.sendIMessage({
+      conversationId: match.conversationId,
+      text: welcome,
+    });
+    console.log("Sent a welcome message back on that thread.");
+  } catch (error) {
+    console.log(`Could not send the welcome message: ${messageFromError(error)}`);
+  }
+  try {
+    // Clear the unread flag the walkthrough message left behind.
+    await params.identity.markIMessageConversationRead(match.conversationId);
+  } catch {
+    // Best-effort; unread state is cosmetic here.
+  }
+  console.log(
+    "If the gateway is already running, restart it so it picks up this new iMessage connection.",
   );
 }
 
@@ -1097,6 +1284,15 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       })
     : undefined;
 
+  // Step 4b — offer iMessage. Runs before delivery setup (step 6) so the
+  // identity-owned imessage.* subscription is created when enabled.
+  identity = await configureIMessage({
+    client: agentClient,
+    identity,
+    identityHandle,
+    prompter,
+  });
+
   printInkboxAuthorizationInfo();
 
   // Step 5 — signing key for inbound webhooks.
@@ -1161,6 +1357,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     identityHandle,
     emailAddress: identity.mailbox?.emailAddress ?? null,
     phoneNumber: identity.phoneNumber?.number ?? null,
+    imessageEnabled: Boolean(identity.imessageEnabled),
     tunnelPublicHost: identity.tunnel?.publicHost ?? null,
     savedAt: new Date().toISOString(),
   });

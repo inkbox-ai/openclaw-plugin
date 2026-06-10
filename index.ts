@@ -10,9 +10,11 @@ import { registerInkboxPublicUrlInboundRoutes } from "./src/gateway.js";
 import { resolveInkboxAccount, resolveInkboxToolsConfig } from "./src/accounts.js";
 import { registerSendEmail } from "./src/tools/send-email.js";
 import { registerSendSms } from "./src/tools/send-sms.js";
+import { registerSendIMessage } from "./src/tools/send-imessage.js";
 import { registerForwardEmail } from "./src/tools/forward-email.js";
 import { registerEmailReads } from "./src/tools/email-reads.js";
 import { registerSmsReads } from "./src/tools/sms-reads.js";
+import { registerIMessageReads } from "./src/tools/imessage-reads.js";
 import { registerCallReads } from "./src/tools/call-reads.js";
 import { registerContactTools } from "./src/tools/contacts.js";
 import { registerNoteTools } from "./src/tools/notes.js";
@@ -81,6 +83,7 @@ function registerInkboxTools(api: any): void {
   // threaded through; when undefined, no filtering applies.
   registerSendEmail(api, runtime, cfg.allowedRecipients);
   registerSendSms(api, runtime, cfg.allowedRecipients);
+  registerSendIMessage(api, runtime, cfg.allowedRecipients);
 
   // Optional outbound tools — require explicit opt-in via tools.allow.
   registerForwardEmail(api, runtime, cfg.allowedRecipients);
@@ -107,6 +110,7 @@ function registerInkboxTools(api: any): void {
   // by default; optional ones (mark-read, raw text list/get) require opt-in.
   registerEmailReads(api, runtime);
   registerSmsReads(api, runtime);
+  registerIMessageReads(api, runtime);
   registerCallReads(api, runtime);
 
   // Access-scoped contact + note tools. With an agent-scoped key the SDK
@@ -131,7 +135,7 @@ function registerInkboxTools(api: any): void {
 const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   id: "inkbox",
   name: "Inkbox",
-  description: "Adds Inkbox messaging tools (email, SMS, voice) to OpenClaw",
+  description: "Adds Inkbox messaging tools (email, SMS, iMessage, voice) to OpenClaw",
   plugin: inkboxPlugin,
   registerCliMetadata: registerInkboxCli,
   registerFull(api: any) {

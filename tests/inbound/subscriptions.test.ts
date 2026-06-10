@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InkboxAPIError } from "@inkbox/sdk";
 import {
+  IMESSAGE_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
   reconcileWebhookSubscription,
@@ -57,6 +58,38 @@ describe("reconcileWebhookSubscription", () => {
     });
     expect(update).not.toHaveBeenCalled();
     expect(result?.mailboxId).toBe("mb-1");
+  });
+
+  it("creates an identity-owned iMessage subscription", async () => {
+    const { client, list, create } = makeClient({
+      create: vi.fn(async (opts: any) => makeSub({ ...opts })),
+    });
+
+    const result = await reconcileWebhookSubscription(client, {
+      agentIdentityId: "identity-1",
+      url: "https://example.com/inkbox/webhook",
+      eventTypes: IMESSAGE_EVENT_TYPES,
+    });
+
+    expect(list).toHaveBeenCalledWith({ agentIdentityId: "identity-1" });
+    expect(create).toHaveBeenCalledWith({
+      agentIdentityId: "identity-1",
+      url: "https://example.com/inkbox/webhook",
+      eventTypes: [...IMESSAGE_EVENT_TYPES],
+    });
+    expect(result?.url).toBe("https://example.com/inkbox/webhook");
+  });
+
+  it("rejects more than one subscription owner", async () => {
+    const { client } = makeClient();
+    await expect(
+      reconcileWebhookSubscription(client, {
+        mailboxId: "mb-1",
+        agentIdentityId: "identity-1",
+        url: "https://example.com/inkbox/webhook",
+        eventTypes: IMESSAGE_EVENT_TYPES,
+      }),
+    ).rejects.toThrow(/exactly one of/i);
   });
 
   it("no-ops when matching URL + matching event-types", async () => {

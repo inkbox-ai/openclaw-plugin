@@ -1,4 +1,4 @@
-import type { TextWebhookPayload } from "@inkbox/sdk";
+import type { IMessageWebhookPayload, TextWebhookPayload } from "@inkbox/sdk";
 
 export interface SmsBatchConfig {
   // Wait this many ms after the last text.received from a given remote
@@ -168,6 +168,142 @@ export class SmsBatcher {
   // Test helper — flush every pending batch synchronously without waiting
   // for timers. Useful in unit tests so the assertions don't have to await
   // wallclock.
+  async flushAll(): Promise<void> {
+    const keys = Array.from(this.pending.keys());
+    await Promise.all(keys.map((k) => this.flush(k)));
+  }
+}
+
+// A flushed iMessage batch — same shape as the SMS variant, with the
+// concatenated body in `data.message.content` and the raw fragments under
+// `__batch`.
+export interface BatchedIMessageEvent extends IMessageWebhookPayload {
+  __batch?: {
+    fragments: IMessageWebhookPayload[];
+    remoteNumber: string;
+    conversationId?: string;
+  };
+}
+
+export type IMessageFlushFn = (batched: BatchedIMessageEvent) => Promise<void> | void;
+
+interface PendingIMessageBatch {
+  key: string;
+  remoteNumber: string;
+  conversationId?: string;
+  fragments: IMessageWebhookPayload[];
+  totalChars: number;
+  timer: NodeJS.Timeout | null;
+}
+
+function imessageBatchKey(
+  event: IMessageWebhookPayload,
+): { key: string; remote: string; conversationId?: string } | undefined {
+  const message = (event as any)?.data?.message;
+  const remote = message?.remote_number ?? message?.remoteNumber;
+  if (typeof remote !== "string" || !remote.trim()) return undefined;
+  const conversationIdRaw = message?.conversation_id ?? message?.conversationId;
+  const conversationId =
+    typeof conversationIdRaw === "string" && conversationIdRaw.trim()
+      ? conversationIdRaw.trim()
+      : undefined;
+  return {
+    remote: remote.trim(),
+    conversationId,
+    key: conversationId ? `${conversationId}:${remote.trim()}` : remote.trim(),
+  };
+}
+
+// iMessage users send fragment bursts just like SMS users. Shares the SMS
+// batch config (delay + caps); conversations are 1:1 so keying by
+// conversation + sender mirrors the SMS batcher without group concerns.
+export class IMessageBatcher {
+  private pending = new Map<string, PendingIMessageBatch>();
+
+  constructor(
+    private readonly cfg: SmsBatchConfig,
+    private readonly flushFn: IMessageFlushFn,
+  ) {}
+
+  enabled(): boolean {
+    return this.cfg.batchDelayMs > 0;
+  }
+
+  // Accept an imessage.received event. Returns true when accumulated (caller
+  // must NOT also invoke the underlying handler); false when batching is
+  // disabled or the event is a delivery-lifecycle callback.
+  accept(event: IMessageWebhookPayload): boolean {
+    if (!this.enabled()) return false;
+    if (event.event_type !== "imessage.received") return false;
+    const keyInfo = imessageBatchKey(event);
+    if (!keyInfo) return false;
+
+    let batch = this.pending.get(keyInfo.key);
+    if (!batch) {
+      batch = {
+        key: keyInfo.key,
+        remoteNumber: keyInfo.remote,
+        conversationId: keyInfo.conversationId,
+        fragments: [],
+        totalChars: 0,
+        timer: null,
+      };
+      this.pending.set(keyInfo.key, batch);
+    }
+
+    const content: string = (event as any)?.data?.message?.content ?? "";
+    batch.fragments.push(event);
+    batch.totalChars += content.length;
+
+    if (
+      batch.fragments.length >= this.cfg.maxMessages ||
+      batch.totalChars >= this.cfg.maxChars
+    ) {
+      this.clearTimer(batch);
+      void this.flush(keyInfo.key);
+      return true;
+    }
+
+    this.clearTimer(batch);
+    batch.timer = setTimeout(() => void this.flush(keyInfo.key), this.cfg.batchDelayMs);
+    return true;
+  }
+
+  private clearTimer(batch: PendingIMessageBatch): void {
+    if (batch.timer) {
+      clearTimeout(batch.timer);
+      batch.timer = null;
+    }
+  }
+
+  private async flush(key: string): Promise<void> {
+    const batch = this.pending.get(key);
+    if (!batch || batch.fragments.length === 0) return;
+    this.pending.delete(key);
+    this.clearTimer(batch);
+    const head = batch.fragments[0];
+    const concatenated = batch.fragments
+      .map((f: any) => f?.data?.message?.content ?? "")
+      .join("\n");
+    const out: BatchedIMessageEvent = {
+      ...(head as any),
+      data: {
+        ...(head as any).data,
+        message: {
+          ...(head as any).data?.message,
+          content: concatenated,
+        },
+      },
+      __batch: {
+        fragments: batch.fragments,
+        remoteNumber: batch.remoteNumber,
+        ...(batch.conversationId ? { conversationId: batch.conversationId } : {}),
+      },
+    };
+    await this.flushFn(out);
+  }
+
+  // Test helper — flush every pending batch without waiting for timers.
   async flushAll(): Promise<void> {
     const keys = Array.from(this.pending.keys());
     await Promise.all(keys.map((k) => this.flush(k)));

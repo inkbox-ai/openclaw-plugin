@@ -6,6 +6,13 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Added
 
+- Full iMessage support (requires `@inkbox/sdk >= 0.4.7`):
+  - Setup-wizard step that enables iMessage on the identity and walks the user through connecting an iPhone via the Inkbox iMessage router (polls for the first inbound message, replies with a welcome, marks the thread read).
+  - Identity-owned `imessage.*` webhook subscription (inbound plus the outbound delivery lifecycle; lifecycle events are logged without waking the agent).
+  - Inbound iMessage routed into the same contact-keyed session as email/SMS/voice, tagged `[inkbox:imessage …]`, with replies targeting the conversation id and `imessage:<conversation-id>` outbound targets for agent-initiated sends.
+  - Inbound iMessage fragment batching sharing the SMS `sms.batchDelayMs` settings.
+  - Tools: `inkbox_send_imessage`, `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`, plus optional `inkbox_imessage_triage_number`, `inkbox_list_imessage_assignments`, `inkbox_send_imessage_reaction`, and `inkbox_mark_imessage_conversation_read`.
+  - Bundled `inkbox-imessage-responder` skill covering the connect model, recipient-first rule, released-connection handling, and tapback etiquette.
 - Inbound HTTP `publicUrl` override path (skip the Inkbox tunnel when OpenClaw is already publicly reachable).
 - `inkbox_place_call` outbound voice tool (caller provides `clientWebsocketUrl` until the in-plugin audio bridge lands).
 - `inkbox-outreach-sequence` skill covering multi-step outreach over email + SMS.

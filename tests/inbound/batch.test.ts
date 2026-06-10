@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SmsBatcher } from "../../src/inbound/batch.js";
+import { IMessageBatcher, SmsBatcher } from "../../src/inbound/batch.js";
 
 function textEvent(remote: string, text: string, conversationId?: string): any {
   return {
@@ -102,6 +102,83 @@ describe("SmsBatcher", () => {
     const flush = vi.fn();
     const b = new SmsBatcher({ batchDelayMs: 999_999, maxMessages: 10, maxChars: 10000 }, flush);
     b.accept(textEvent("+15551234567", "queued"));
+    expect(flush).not.toHaveBeenCalled();
+    await b.flushAll();
+    expect(flush).toHaveBeenCalledTimes(1);
+  });
+});
+
+function imessageEvent(remote: string, content: string, conversationId = "imconv-1"): any {
+  return {
+    event_type: "imessage.received",
+    timestamp: "2026-06-10T00:00:00Z",
+    data: {
+      message: {
+        id: `im-${Math.random()}`,
+        conversation_id: conversationId,
+        direction: "inbound",
+        remote_number: remote,
+        content,
+      },
+    },
+  };
+}
+
+describe("IMessageBatcher", () => {
+  it("falls through when batchDelayMs is 0", () => {
+    const flush = vi.fn();
+    const b = new IMessageBatcher({ batchDelayMs: 0, maxMessages: 8, maxChars: 4000 }, flush);
+    expect(b.accept(imessageEvent("+15551234567", "hi"))).toBe(false);
+    expect(flush).not.toHaveBeenCalled();
+  });
+
+  it("does not batch delivery-lifecycle events", () => {
+    const flush = vi.fn();
+    const b = new IMessageBatcher({ batchDelayMs: 100, maxMessages: 8, maxChars: 4000 }, flush);
+    const delivered = imessageEvent("+15551234567", "hi");
+    delivered.event_type = "imessage.delivered";
+    expect(b.accept(delivered)).toBe(false);
+  });
+
+  it("accumulates fragments from the same conversation and flushes after delay", async () => {
+    const flush = vi.fn();
+    const b = new IMessageBatcher({ batchDelayMs: 100, maxMessages: 8, maxChars: 4000 }, flush);
+    expect(b.accept(imessageEvent("+15551234567", "hi"))).toBe(true);
+    expect(b.accept(imessageEvent("+15551234567", "are"))).toBe(true);
+    expect(b.accept(imessageEvent("+15551234567", "you there?"))).toBe(true);
+    expect(flush).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(110);
+    expect(flush).toHaveBeenCalledTimes(1);
+    const batched = flush.mock.calls[0][0];
+    expect(batched.data.message.content).toBe("hi\nare\nyou there?");
+    expect(batched.__batch.fragments).toHaveLength(3);
+    expect(batched.__batch.remoteNumber).toBe("+15551234567");
+    expect(batched.__batch.conversationId).toBe("imconv-1");
+  });
+
+  it("does not merge bursts from different conversations", async () => {
+    const flush = vi.fn();
+    const b = new IMessageBatcher({ batchDelayMs: 100, maxMessages: 8, maxChars: 4000 }, flush);
+    b.accept(imessageEvent("+15551234567", "hi from A", "imconv-a"));
+    b.accept(imessageEvent("+15559999999", "hi from B", "imconv-b"));
+    await vi.advanceTimersByTimeAsync(110);
+    expect(flush).toHaveBeenCalledTimes(2);
+  });
+
+  it("respects maxMessages cap by flushing immediately", async () => {
+    const flush = vi.fn();
+    const b = new IMessageBatcher({ batchDelayMs: 100, maxMessages: 2, maxChars: 4000 }, flush);
+    b.accept(imessageEvent("+15551234567", "one"));
+    b.accept(imessageEvent("+15551234567", "two"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(flush).toHaveBeenCalledTimes(1);
+  });
+
+  it("flushAll synchronously drains pending batches", async () => {
+    const flush = vi.fn();
+    const b = new IMessageBatcher({ batchDelayMs: 999_999, maxMessages: 10, maxChars: 10000 }, flush);
+    b.accept(imessageEvent("+15551234567", "queued"));
     expect(flush).not.toHaveBeenCalled();
     await b.flushAll();
     expect(flush).toHaveBeenCalledTimes(1);

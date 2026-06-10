@@ -1,8 +1,8 @@
 # Inkbox OpenClaw Plugin
 
-[Inkbox](https://inkbox.ai) channel plugin for [OpenClaw](https://openclaw.ai). It gives an OpenClaw agent its own Inkbox identity: mailbox, phone number, SMS, voice calls, contacts, notes, contact rules, identity access, and optional credential vault access without forking OpenClaw.
+[Inkbox](https://inkbox.ai) channel plugin for [OpenClaw](https://openclaw.ai). It gives an OpenClaw agent its own Inkbox identity: mailbox, phone number, SMS, iMessage, voice calls, contacts, notes, contact rules, identity access, and optional credential vault access without forking OpenClaw.
 
-Status: outbound tools, read tools, bundled skills, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group text conversations, inbound email/SMS/voice, realtime phone calls, post-call actions, and package-included skills are implemented. ClawHub publishing is still pending.
+Status: outbound tools, read tools, bundled skills, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group text conversations, inbound email/SMS/iMessage/voice, realtime phone calls, post-call actions, and package-included skills are implemented. ClawHub publishing is still pending.
 
 ## Prerequisites
 
@@ -58,7 +58,7 @@ Start the gateway:
 openclaw gateway run
 ```
 
-Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, and calls into OpenClaw sessions.
+Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text/iMessage webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, iMessage, and calls into OpenClaw sessions.
 
 Restart the gateway after changing Inkbox config, updating the plugin, or re-running setup:
 
@@ -80,9 +80,10 @@ openclaw gateway run
 2. Resolves or creates the Inkbox agent identity for this OpenClaw agent.
 3. Stores an agent-scoped API key, the identity handle, and webhook signing key in `channels.inkbox`.
 4. Optionally provisions a local SMS + voice phone number without asking for a state.
-5. Points the identity's mailbox and phone number at the agent-owned Inkbox tunnel.
+5. Offers to enable iMessage for the agent (existing or freshly created), then walks you through connecting your iPhone: text the connect command to the Inkbox iMessage router, message the agent once, and receive a welcome reply confirming the channel.
+6. Points the identity's mailbox, phone number, and iMessage events at the agent-owned Inkbox tunnel.
    Existing phone numbers are configured the same way as freshly provisioned numbers: inbound SMS goes to the gateway webhook, and calls use `auto_accept` with the gateway media WebSocket.
-6. Prints the final mailbox/phone summary.
+7. Prints the final mailbox/phone summary.
 
 If setup provisions a new local phone number, it waits for any inbound SMS `START` to that number before finishing. It also seeds `~/.openclaw/inkbox/identity-state.json` so `openclaw inkbox doctor` can show useful channel state.
 
@@ -145,6 +146,10 @@ openclaw config set tools.allow '[
   "inkbox_get_text",
   "inkbox_mark_text_read",
   "inkbox_mark_text_conversation_read",
+  "inkbox_imessage_triage_number",
+  "inkbox_list_imessage_assignments",
+  "inkbox_send_imessage_reaction",
+  "inkbox_mark_imessage_conversation_read",
   "inkbox_update_contact",
   "inkbox_delete_contact",
   "inkbox_export_contact_vcard",
@@ -209,6 +214,17 @@ Disable realtime:
 openclaw config set channels.inkbox.voiceRealtime.enabled false --strict-json
 ```
 
+## iMessage
+
+iMessage works differently from SMS: the agent does not get its own iMessage number. People connect to the agent through the Inkbox iMessage router, and each connected person gets a dedicated thread with the agent.
+
+1. Enable iMessage for the agent during `openclaw inkbox setup` (or later by re-running it). Enablement is stored on the Inkbox identity, not in local config.
+2. From an iPhone, text the connect command (for example `connect @my-agent-handle`) to the Inkbox iMessage router number. The wizard prints both, and the agent can also share them via the `inkbox_imessage_triage_number` tool.
+3. Inkbox texts back from the number assigned to that conversation. Send any first message there — the agent can only reply after you message it first (recipient-first; there is no cold outreach over iMessage).
+4. The setup wizard waits for that first message and replies with a welcome confirming the channel. From then on, the gateway routes the thread into the same contact-keyed OpenClaw session as email/SMS/voice, and the agent replies over iMessage in that thread.
+
+If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignmentStatus` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`, `imessage.delivery_failed`) arrive as webhooks and are logged by the gateway without waking the agent, matching the SMS lifecycle handling.
+
 ## CLI
 
 ```bash
@@ -244,10 +260,11 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 1. Run `openclaw inkbox doctor`.
 2. Text `START` to the agent's Inkbox phone number from every phone the agent should text.
 3. Send the agent an SMS and verify it replies in the same SMS thread.
-4. Send the agent an email and verify it replies from its Inkbox mailbox.
-5. Call the agent phone number and ask for its handle, email, and phone.
-6. Ask during a call for a post-call SMS or email follow-up, then verify it sends after hangup.
-7. Ask the agent to save a contact and an Inkbox note, then ask it to read them back.
+4. If iMessage is enabled, connect via the Inkbox iMessage router, message the agent, and verify it replies in the same iMessage thread.
+5. Send the agent an email and verify it replies from its Inkbox mailbox.
+6. Call the agent phone number and ask for its handle, email, and phone.
+7. Ask during a call for a post-call SMS or email follow-up, then verify it sends after hangup.
+8. Ask the agent to save a contact and an Inkbox note, then ask it to read them back.
 
 ## Config Reference
 
@@ -255,13 +272,13 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 |---|---|---|---|
 | `apiKey` | yes | - | Agent-scoped Inkbox API key. Admin keys are accepted by setup only so it can mint an agent-scoped key. |
 | `identity` | yes | - | Inkbox agent identity handle. |
-| `signingKey` | inbound | - | Webhook HMAC secret. Required for inbound email/SMS/calls. |
+| `signingKey` | inbound | - | Webhook HMAC secret. Required for inbound email/SMS/iMessage/calls. |
 | `baseUrl` | no | `https://inkbox.ai` | Override Inkbox API base URL. |
 | `tunnelName` | no | identity handle | Override Inkbox tunnel name. |
 | `publicUrl` | no | - | Public OpenClaw URL. If omitted, the plugin opens an Inkbox tunnel. |
 | `allowedRecipients` | no | - | Outbound recipient allowlist. Empty means no local outbound filtering. |
 | `allowedInboundContactIds` | no | - | Optional local inbound allowlist by Inkbox contact UUID. Empty means Inkbox contact rules decide reachability. |
-| `sms.batchDelayMs` | no | `0` | Inbound SMS fragment batching window. |
+| `sms.batchDelayMs` | no | `0` | Inbound SMS and iMessage fragment batching window. |
 | `voiceTranscriptCoalesceMs` | no | plugin default | Non-realtime voice transcript coalescing window. |
 | `voiceAgentPrewarm` | no | plugin default | Prewarm the voice path when the gateway starts. |
 | `voiceRealtime.enabled` | no | auto | Use raw phone media with an OpenClaw realtime voice provider. Set `false` to force Inkbox STT/TTS. |
@@ -278,9 +295,10 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 
 Required by default:
 
-- Outbound: `inkbox_send_email`, `inkbox_send_sms`
+- Outbound: `inkbox_send_email`, `inkbox_send_sms`, `inkbox_send_imessage`
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
+- iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
 - Voice reads: `inkbox_list_calls`, `inkbox_list_call_transcripts`
 - Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`
 - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`
@@ -288,7 +306,8 @@ Required by default:
 Optional:
 
 - Outbound: `inkbox_forward_email`, `inkbox_place_call`
-- Lifecycle: `inkbox_mark_emails_read`, `inkbox_list_texts`, `inkbox_get_text`, `inkbox_mark_text_read`, `inkbox_mark_text_conversation_read`
+- Lifecycle: `inkbox_mark_emails_read`, `inkbox_list_texts`, `inkbox_get_text`, `inkbox_mark_text_read`, `inkbox_mark_text_conversation_read`, `inkbox_mark_imessage_conversation_read`
+- iMessage: `inkbox_imessage_triage_number`, `inkbox_list_imessage_assignments`, `inkbox_send_imessage_reaction`
 - Contacts: `inkbox_update_contact`, `inkbox_delete_contact`, `inkbox_export_contact_vcard`
 - Notes: `inkbox_update_note`, `inkbox_delete_note`
 - Contact rules: `inkbox_list_mail_contact_rules`, `inkbox_create_mail_contact_rule`, `inkbox_update_mail_contact_rule`, `inkbox_delete_mail_contact_rule`, `inkbox_list_phone_contact_rules`, `inkbox_create_phone_contact_rule`, `inkbox_update_phone_contact_rule`, `inkbox_delete_phone_contact_rule`
@@ -305,6 +324,7 @@ The package includes all `skills/*/SKILL.md` files in npm tarballs.
 | `inkbox-troubleshooting` | Runtime/config errors, failed tools, readiness issues |
 | `inkbox-email-triage` | Checking or replying to Inkbox email |
 | `inkbox-sms-responder` | Sending, replying to, or triaging SMS |
+| `inkbox-imessage-responder` | Sending, replying to, or triaging iMessage |
 | `inkbox-outbound-calling` | Placing calls to numbers or contacts |
 | `inkbox-call-review` | Reviewing calls and transcripts |
 | `inkbox-contact-lookup` | Resolving, creating, or updating contacts |
@@ -327,7 +347,7 @@ npm_config_cache=/tmp/npm-cache npm pack --dry-run
 
 - Plugin, not fork: uses OpenClaw plugin SDK, channel gateway, tools, HTTP routes, CLI, and bundled skills.
 - Agent-scoped: runtime should use an Inkbox agent-scoped API key.
-- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions, and wires the incoming-call URL.
+- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions (plus an identity-owned iMessage subscription when enabled), and wires the incoming-call URL.
 - Voice: Inkbox STT/TTS fallback path and realtime raw-media path both route through the same call WebSocket.
 - Post-call actions: realtime calls can register, edit, delete, and dispatch work for the main OpenClaw agent after hangup.
 - Hangup: realtime calls expose a two-step hangup tool so the agent can say goodbye before dropping the phone leg.

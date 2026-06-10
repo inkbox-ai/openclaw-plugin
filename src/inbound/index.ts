@@ -2,9 +2,9 @@ import type { InkboxRuntime, InkboxPluginConfig, PluginLogger } from "../client.
 import type { InboundHandlers } from "./dispatch.js";
 import { openInkboxTunnel } from "./tunnel.js";
 import { registerInboundHttpRoute } from "./http-route.js";
-import { SmsBatcher, DEFAULT_SMS_BATCH } from "./batch.js";
-export { SmsBatcher, DEFAULT_SMS_BATCH } from "./batch.js";
-export type { SmsBatchConfig, BatchedTextEvent } from "./batch.js";
+import { SmsBatcher, IMessageBatcher, DEFAULT_SMS_BATCH } from "./batch.js";
+export { SmsBatcher, IMessageBatcher, DEFAULT_SMS_BATCH } from "./batch.js";
+export type { SmsBatchConfig, BatchedTextEvent, BatchedIMessageEvent } from "./batch.js";
 
 export { RequestIdDedup } from "./dedup.js";
 export { handleInkboxWebhook } from "./handler.js";
@@ -50,21 +50,19 @@ export function startInbound(opts: StartInboundOptions): void {
   // into one synthetic batched event before they reach the handler.
   const batchDelayMs = cfg.sms?.batchDelayMs ?? DEFAULT_SMS_BATCH.batchDelayMs;
   let wrappedHandlers = handlers;
-  if (batchDelayMs > 0 && handlers.onText) {
-    const userOnText = handlers.onText;
-    const batcher = new SmsBatcher(
-      {
-        batchDelayMs,
-        maxMessages: cfg.sms?.maxMessages ?? DEFAULT_SMS_BATCH.maxMessages,
-        maxChars: cfg.sms?.maxChars ?? DEFAULT_SMS_BATCH.maxChars,
-      },
-      async (batched) => {
+  if (batchDelayMs > 0 && (handlers.onText || handlers.onIMessage)) {
+    const batchConfig = {
+      batchDelayMs,
+      maxMessages: cfg.sms?.maxMessages ?? DEFAULT_SMS_BATCH.maxMessages,
+      maxChars: cfg.sms?.maxChars ?? DEFAULT_SMS_BATCH.maxChars,
+    };
+    wrappedHandlers = { ...handlers };
+    if (handlers.onText) {
+      const userOnText = handlers.onText;
+      const batcher = new SmsBatcher(batchConfig, async (batched) => {
         await userOnText(batched);
-      },
-    );
-    wrappedHandlers = {
-      ...handlers,
-      onText: async (event) => {
+      });
+      wrappedHandlers.onText = async (event) => {
         // Try to accumulate. If accepted, the batcher will fire userOnText
         // on flush — we MUST NOT also call it here. If not accepted (e.g.
         // delivery-status event), pass through immediately.
@@ -72,10 +70,24 @@ export function startInbound(opts: StartInboundOptions): void {
         if (!accepted) {
           await userOnText(event);
         }
-      },
-    };
+      };
+    }
+    if (handlers.onIMessage) {
+      // iMessage rides the same fragment-burst pattern; reuse the SMS batch
+      // settings rather than growing a parallel config section.
+      const userOnIMessage = handlers.onIMessage;
+      const imessageBatcher = new IMessageBatcher(batchConfig, async (batched) => {
+        await userOnIMessage(batched);
+      });
+      wrappedHandlers.onIMessage = async (event) => {
+        const accepted = imessageBatcher.accept(event as any);
+        if (!accepted) {
+          await userOnIMessage(event);
+        }
+      };
+    }
     logger?.info?.(
-      `Inkbox SMS batching on (delay=${batchDelayMs}ms, maxMessages=${cfg.sms?.maxMessages ?? DEFAULT_SMS_BATCH.maxMessages}, maxChars=${cfg.sms?.maxChars ?? DEFAULT_SMS_BATCH.maxChars}).`,
+      `Inkbox SMS batching on (delay=${batchDelayMs}ms, maxMessages=${batchConfig.maxMessages}, maxChars=${batchConfig.maxChars}).`,
     );
   }
 

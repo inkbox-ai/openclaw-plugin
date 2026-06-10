@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockIdentity = vi.hoisted(() => ({
   sendEmail: vi.fn(),
   sendText: vi.fn(),
+  sendIMessage: vi.fn(),
   getThread: vi.fn(),
   iterEmails: vi.fn(),
 }));
@@ -34,8 +35,37 @@ describe("sendInkboxChannelText", () => {
   beforeEach(() => {
     mockIdentity.sendEmail.mockReset().mockResolvedValue({ id: "email-1" });
     mockIdentity.sendText.mockReset().mockResolvedValue({ id: "sms-1" });
+    mockIdentity.sendIMessage.mockReset().mockResolvedValue({ id: "im-1" });
     mockIdentity.getThread.mockReset();
     mockIdentity.iterEmails.mockReset().mockImplementation(() => emailMessages([]));
+  });
+
+  it("sends iMessage conversation targets through sendIMessage", async () => {
+    const result = await sendInkboxChannelText({
+      cfg,
+      to: "imessage:550e8400-e29b-41d4-a716-446655440000",
+      text: "reply body",
+    });
+
+    expect(mockIdentity.sendIMessage).toHaveBeenCalledWith({
+      conversationId: "550e8400-e29b-41d4-a716-446655440000",
+      text: "reply body",
+    });
+    expect(mockIdentity.sendText).not.toHaveBeenCalled();
+    expect(result.messageId).toBe("im-1");
+  });
+
+  it("sends explicit iMessage number targets through sendIMessage", async () => {
+    await sendInkboxChannelText({
+      cfg,
+      to: "imessage:+14155550123",
+      text: "hi there",
+    });
+
+    expect(mockIdentity.sendIMessage).toHaveBeenCalledWith({
+      to: "+14155550123",
+      text: "hi there",
+    });
   });
 
   it("preserves the Inkbox email thread subject for generic message replies", async () => {
