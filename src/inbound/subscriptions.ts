@@ -22,9 +22,25 @@ export const TEXT_EVENT_TYPES: readonly string[] = [
   "text.delivery_unconfirmed",
 ];
 
+// iMessage: inbound plus the outbound delivery lifecycle — same split as
+// text. Tapback reactions (`imessage.reaction_received`) are subscribed and
+// dispatched as a turn carrying the reaction + a response policy: the agent
+// decides whether to reply or return [SILENT] (a "?" tapback usually
+// warrants a reply, a "love" usually does not).
+export const IMESSAGE_EVENT_TYPES: readonly string[] = [
+  "imessage.received",
+  "imessage.sent",
+  "imessage.delivered",
+  "imessage.delivery_failed",
+  "imessage.reaction_received",
+];
+
 export interface DesiredSubscriptionSet {
   mailboxId?: string;
   phoneNumberId?: string;
+  // iMessage rides shared Inkbox-managed numbers, so imessage.* subscriptions
+  // are owned by the agent identity rather than a phone number.
+  agentIdentityId?: string;
   url: string;
   eventTypes: readonly string[];
 }
@@ -69,15 +85,18 @@ export async function reconcileWebhookSubscription(
 ): Promise<WebhookSubscription | null> {
   const hasMailbox = desired.mailboxId !== undefined;
   const hasPhone = desired.phoneNumberId !== undefined;
-  if (hasMailbox === hasPhone) {
+  const hasIdentity = desired.agentIdentityId !== undefined;
+  if (Number(hasMailbox) + Number(hasPhone) + Number(hasIdentity) !== 1) {
     throw new Error(
-      "reconcileWebhookSubscription requires exactly one of mailboxId or phoneNumberId",
+      "reconcileWebhookSubscription requires exactly one of mailboxId, phoneNumberId, or agentIdentityId",
     );
   }
 
   const ownerFilter = hasMailbox
     ? { mailboxId: desired.mailboxId! }
-    : { phoneNumberId: desired.phoneNumberId! };
+    : hasPhone
+      ? { phoneNumberId: desired.phoneNumberId! }
+      : { agentIdentityId: desired.agentIdentityId! };
 
   const existing = await inkbox.webhooks.subscriptions.list(ownerFilter);
   const match = existing.find((sub) => sub.url === desired.url);

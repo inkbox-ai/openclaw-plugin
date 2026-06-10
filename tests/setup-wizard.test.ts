@@ -33,6 +33,7 @@ const sdk = vi.hoisted(() => {
   const subscriptionsList = vi.fn();
   const subscriptionsCreate = vi.fn();
   const subscriptionsUpdate = vi.fn();
+  const getTriageNumber = vi.fn();
   const Inkbox = Object.assign(
     vi.fn(() => ({
       whoami,
@@ -41,6 +42,7 @@ const sdk = vi.hoisted(() => {
       createSigningKey,
       mailboxes: { update: mailboxesUpdate },
       phoneNumbers: { update: phoneNumbersUpdate },
+      imessages: { getTriageNumber },
       webhooks: {
         subscriptions: {
           list: subscriptionsList,
@@ -68,6 +70,7 @@ const sdk = vi.hoisted(() => {
     subscriptionsList,
     subscriptionsCreate,
     subscriptionsUpdate,
+    getTriageNumber,
   };
 });
 
@@ -160,6 +163,11 @@ beforeEach(async () => {
   sdk.subscriptionsList.mockReset();
   sdk.subscriptionsCreate.mockReset();
   sdk.subscriptionsUpdate.mockReset();
+  sdk.getTriageNumber.mockReset();
+  sdk.getTriageNumber.mockResolvedValue({
+    number: "+15550009999",
+    connectCommand: "connect @your-handle",
+  });
   sdk.subscriptionsList.mockResolvedValue([]);
   sdk.subscriptionsCreate.mockImplementation(async (opts: any) => ({
     id: "sub-stub",
@@ -801,5 +809,156 @@ describe("runSetupWizard", () => {
     expect(result.ok).toBe(true);
     expect(sdk.subscriptionsCreate).not.toHaveBeenCalled();
     expect(sdk.subscriptionsUpdate).not.toHaveBeenCalled();
+  });
+
+  function createIMessageIdentity(overrides: Record<string, unknown> = {}) {
+    const identity: any = createIdentity({
+      imessageEnabled: false,
+      listIMessageAssignments: vi.fn(async () => []),
+      listIMessages: vi.fn(async () => []),
+      sendIMessage: vi.fn(async () => ({ id: "im-1" })),
+      markIMessageConversationRead: vi.fn(async () => ({
+        conversationId: "imconv-123",
+        updatedCount: 1,
+      })),
+      ...overrides,
+    });
+    identity.update = vi.fn(async (opts: any) => {
+      if ("imessageEnabled" in opts) {
+        identity.imessageEnabled = opts.imessageEnabled;
+      }
+    });
+    return identity;
+  }
+
+  it("enables iMessage and creates the identity-owned subscription", async () => {
+    const identity = createIMessageIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    // realtime: no, enable iMessage: yes, connect walkthrough: no,
+    // keep existing signing key: yes
+    const prompter = createPrompter({ confirms: [false, true, false, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(identity.update).toHaveBeenCalledWith({ imessageEnabled: true });
+    expect(sdk.subscriptionsCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentIdentityId: "identity-1",
+        eventTypes: [
+          "imessage.received",
+          "imessage.sent",
+          "imessage.delivered",
+          "imessage.delivery_failed",
+          "imessage.reaction_received",
+        ],
+      }),
+    );
+  });
+
+  it("walks through the iPhone connect flow and greets back on the new thread", async () => {
+    const identity = createIMessageIdentity();
+    identity.listIMessages = vi.fn(async () => [
+      {
+        id: "im-old",
+        direction: "inbound",
+        conversationId: "imconv-old",
+        remoteNumber: "+15555550101",
+        createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      },
+      {
+        id: "im-new",
+        direction: "inbound",
+        conversationId: "imconv-123",
+        remoteNumber: "+15555550101",
+        createdAt: new Date(Date.now() + 5000),
+      },
+    ]);
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ confirms: [false, true, true, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sdk.getTriageNumber).toHaveBeenCalled();
+    // The stale message from a prior connection is skipped; the welcome
+    // lands in the fresh conversation and is marked read.
+    expect(identity.sendIMessage).toHaveBeenCalledTimes(1);
+    const sent = identity.sendIMessage.mock.calls[0][0];
+    expect(sent.conversationId).toBe("imconv-123");
+    expect(sent.text).toContain("@smoke-agent");
+    expect(identity.markIMessageConversationRead).toHaveBeenCalledWith("imconv-123");
+  });
+
+  it("leaves the identity untouched when iMessage is declined", async () => {
+    const identity = createIMessageIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ confirms: [false, false, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(identity.update).not.toHaveBeenCalled();
+    expect(sdk.subscriptionsCreate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ agentIdentityId: "identity-1" }),
+    );
+  });
+
+  it("defaults the connect walkthrough off when a phone is already connected", async () => {
+    const identity = createIMessageIdentity({
+      imessageEnabled: true,
+      listIMessageAssignments: vi.fn(async () => [
+        { id: "assign-1", remoteNumber: "+15555550101", status: "active" },
+      ]),
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    // Only the realtime decline is scripted; the connect prompt falls back
+    // to its default, which must be "no" when a connection already exists.
+    const prompter = createPrompter({ confirms: [false] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(prompter.confirm.mock.calls).toContainEqual([
+      "Connect another iPhone to this agent now?",
+      false,
+    ]);
+    expect(identity.listIMessages).not.toHaveBeenCalled();
   });
 });

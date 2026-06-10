@@ -26,13 +26,13 @@ import {
 const meta = {
   id: INKBOX_CHANNEL_ID,
   label: "Inkbox",
-  selectionLabel: "Inkbox (Email, SMS, Voice)",
+  selectionLabel: "Inkbox (Email, SMS, iMessage, Voice)",
   docsPath: "/plugins/inkbox",
   docsLabel: "inkbox",
-  blurb: "Inkbox email, SMS, and voice identities.",
+  blurb: "Inkbox email, SMS, iMessage, and voice identities.",
   order: 90,
   detailLabel: "Inkbox",
-  aliases: ["email", "sms", "phone"],
+  aliases: ["email", "sms", "phone", "imessage"],
   markdownCapable: false,
   exposure: {
     configured: true,
@@ -189,7 +189,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
     },
     agentPrompt: {
       messageToolCapabilities: () => [
-        "Inkbox sends direct email, SMS, and voice calls from the configured agent identity.",
+        "Inkbox sends direct email, SMS, iMessage, and voice calls from the configured agent identity.",
       ],
       messageToolHints: ({ cfg, accountId }: any) => {
         const account = resolveInkboxAccount({ cfg, accountId });
@@ -198,7 +198,8 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
           identity
             ? `- Inkbox account ${account.accountId} sends as identity handle \`${identity}\`. Use \`inkbox_whoami\` when you need the mailbox address, phone number, org id, or auth subtype.`
             : "- Inkbox is enabled but the identity handle is not configured; use `inkbox_whoami`/doctor output to debug before sending.",
-          "- For Inkbox conversations, prefer Inkbox tools for Inkbox state: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_emails`, `inkbox_list_calls`, `inkbox_list_call_transcripts`, `inkbox_lookup_contact`, `inkbox_create_contact`, and `inkbox_create_note`.",
+          "- For Inkbox conversations, prefer Inkbox tools for Inkbox state: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`, `inkbox_list_emails`, `inkbox_list_calls`, `inkbox_list_call_transcripts`, `inkbox_lookup_contact`, `inkbox_create_contact`, and `inkbox_create_note`.",
+          "- iMessage is recipient-first: a person must connect through the Inkbox iMessage router and message this agent before outbound iMessage sends work. Reply with `inkbox_send_imessage` using `conversationId`; if someone asks how to reach the agent over iMessage, share the output of `inkbox_imessage_triage_number`.",
           "- When a user asks to save a contact, use `inkbox_lookup_contact` first; then use `inkbox_create_contact` or `inkbox_update_contact`. Use `inkbox_create_note` only for free-form memory that is not an address-book contact field.",
           "- When a user asks you to call them, use `inkbox_place_call`. Always include the call `purpose` when the user gave a reason/topic, and include `openingMessage` when you know what should be said first; the call bridge loads that context before greeting the callee. During an active voice-call turn, answer conversationally; the Inkbox bridge speaks your reply over TTS, so do not send SMS or email unless the user explicitly asks for a separate follow-up.",
         ];
@@ -206,7 +207,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
       inboundFormattingHints: () => ({
         text_markup: "plain",
         rules: [
-          "This is an Inkbox email/SMS/voice session. Inkbox is the source of truth for mailbox, SMS conversations, call transcripts, contacts, and notes.",
+          "This is an Inkbox email/SMS/iMessage/voice session. Inkbox is the source of truth for mailbox, SMS and iMessage conversations, call transcripts, contacts, and notes.",
           "You are the configured Inkbox agent identity for this OpenClaw account. If asked who or what you are, identify as the OpenClaw agent connected through Inkbox; do not say you have no name or identity set.",
           "Use Inkbox tools for contact and note operations. Do not fall back to workspace notes when the user asks to save Inkbox contact details.",
           "If the inbound message is an Inkbox voice-call transcript, reply normally; the plugin will speak the response on the active call with Inkbox TTS.",
@@ -252,17 +253,22 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         resolveInkboxAccount({ cfg, accountId }).defaultTo,
     },
     messaging: {
-      targetPrefixes: ["inkbox", "email", "mailto", "sms", "text", "phone", "conversation"],
+      targetPrefixes: ["inkbox", "email", "mailto", "sms", "text", "phone", "imessage", "conversation"],
       normalizeTarget: normalizeInkboxTarget,
       parseExplicitTarget: ({ raw }: { raw: string }) => {
         const parsed = parseInkboxTarget(raw);
-        return parsed
-          ? {
-              to: parsed.value,
-              chatType:
-                parsed.mode === "sms-conversation" ? ("group" as const) : ("direct" as const),
-            }
-          : null;
+        if (!parsed) {
+          return null;
+        }
+        // Keep iMessage targets channel-prefixed — a stripped conversation
+        // UUID would re-parse as an SMS conversation on the send path.
+        const isIMessage =
+          parsed.mode === "imessage" || parsed.mode === "imessage-conversation";
+        return {
+          to: isIMessage ? `imessage:${parsed.value}` : parsed.value,
+          chatType:
+            parsed.mode === "sms-conversation" ? ("group" as const) : ("direct" as const),
+        };
       },
       inferTargetChatType: ({ to }: { to: string }) =>
         parseInkboxTarget(to)?.mode === "sms-conversation"
@@ -288,6 +294,9 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
           return null;
         }
         const chatType = parsed.mode === "sms-conversation" ? "group" : "direct";
+        const isIMessage =
+          parsed.mode === "imessage" || parsed.mode === "imessage-conversation";
+        const targetValue = isIMessage ? `imessage:${parsed.value}` : parsed.value;
         const route = buildChannelOutboundSessionRoute({
           cfg,
           agentId,
@@ -295,14 +304,14 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
           accountId,
           peer: {
             kind: chatType,
-            id: parsed.value,
+            id: targetValue,
           },
           chatType,
           from:
             chatType === "group"
               ? `inkbox:conversation:${parsed.value}`
               : `inkbox:${accountId ?? resolveDefaultInkboxAccountId(cfg)}`,
-          to: parsed.value,
+          to: targetValue,
         });
         return buildThreadAwareOutboundSessionRoute({
           route,

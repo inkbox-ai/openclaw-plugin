@@ -131,6 +131,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
 
 import {
   InkboxRealtimeAudioPacer,
+  createIMessageTypingPulse,
   createInkboxSessionBridge,
   prewarmInkboxAgent,
 } from "../../src/inbound/session.js";
@@ -174,6 +175,12 @@ class FakeInkboxWebSocket {
 
 function createRuntime(options: { conversations?: any[] } = {}) {
   const sendText = vi.fn(async () => ({ id: "txt-reply", deliveryStatus: "queued" }));
+  const sendIMessage = vi.fn(async () => ({
+    id: "im-reply",
+    conversationId: "imconv-123",
+    status: "queued",
+  }));
+  const sendIMessageTyping = vi.fn(async () => undefined);
   const listTextConversations = vi.fn(async () => options.conversations ?? []);
   const runtime = {
     getIdentity: vi.fn(async () => ({
@@ -190,6 +197,8 @@ function createRuntime(options: { conversations?: any[] } = {}) {
       },
       tunnel: { publicHost: "smoke-agent.inkboxwire.com" },
       sendText,
+      sendIMessage,
+      sendIMessageTyping,
       listTextConversations,
     })),
     getClient: vi.fn(async () => ({
@@ -204,7 +213,7 @@ function createRuntime(options: { conversations?: any[] } = {}) {
       },
     })),
   };
-  return { runtime, sendText, listTextConversations };
+  return { runtime, sendText, sendIMessage, sendIMessageTyping, listTextConversations };
 }
 
 function createChannelRuntime(replyText = "I can hear you on the call.") {
@@ -260,6 +269,78 @@ function textWebhookEvent(params: {
         failed_at: null,
         created_at: "2026-05-21T00:00:00Z",
         updated_at: "2026-05-21T00:00:00Z",
+      },
+    },
+  };
+}
+
+function imessageWebhookEvent(params: {
+  content: string;
+  conversationId?: string;
+  remote?: string;
+  direction?: string;
+  eventType?: string;
+}): any {
+  return {
+    event_type: params.eventType ?? "imessage.received",
+    timestamp: "2026-06-10T00:00:00Z",
+    data: {
+      contacts: [],
+      agent_identities: [],
+      message: {
+        id: "im-in-1",
+        conversation_id: params.conversationId ?? "imconv-123",
+        assignment_id: "assign-1",
+        direction: params.direction ?? "inbound",
+        remote_number: params.remote ?? "+15551234567",
+        content: params.content,
+        message_type: "message",
+        service: "imessage",
+        send_style: null,
+        media: null,
+        was_downgraded: null,
+        status: null,
+        error_code: null,
+        error_message: null,
+        error_reason: null,
+        error_detail: null,
+        is_read: false,
+        recipients: null,
+        reactions: null,
+        created_at: "2026-06-10T00:00:00Z",
+        updated_at: "2026-06-10T00:00:00Z",
+      },
+      reaction: null,
+    },
+  };
+}
+
+function imessageReactionWebhookEvent(params: {
+  reaction: string;
+  direction?: string;
+  conversationId?: string;
+  remote?: string;
+  customEmoji?: string;
+}): any {
+  return {
+    event_type: "imessage.reaction_received",
+    timestamp: "2026-06-10T00:00:00Z",
+    data: {
+      contacts: [],
+      agent_identities: [],
+      message: null,
+      reaction: {
+        id: "react-in-1",
+        conversation_id: params.conversationId ?? "imconv-123",
+        assignment_id: "assign-1",
+        target_message_id: "im-target-9",
+        direction: params.direction ?? "inbound",
+        reaction: params.reaction,
+        custom_emoji: params.customEmoji ?? null,
+        remote_number: params.remote ?? "+15551234567",
+        part_index: 0,
+        created_at: "2026-06-10T00:00:00Z",
+        updated_at: "2026-06-10T00:00:00Z",
       },
     },
   };
@@ -1628,5 +1709,250 @@ describe("createInkboxSessionBridge", () => {
       conversationId: "conv-group",
       text: "Sure, I can help.",
     });
+  });
+
+  it("routes inbound iMessage into a contact session and replies by conversationId", async () => {
+    const { runtime, sendIMessage, sendText } = createRuntime();
+    const channelRuntime = createChannelRuntime("On my way!");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({ content: "Dinner moved to 7." }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:imessage from=+15551234567 conversation_id=imconv-123",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Dinner moved to 7.");
+    expect(run.ctxPayload.extra.InkboxMode).toBe("imessage");
+    expect(run.ctxPayload.extra.InkboxConversationId).toBe("imconv-123");
+    // The route/conversation id must stay channel-prefixed so a generic
+    // `message`-tool send to this peer resolves to sendIMessage, not SMS.
+    expect(run.ctxPayload.conversation.id).toBe("imessage:imconv-123");
+    expect(run.ctxPayload.conversation.routePeer.id).toBe("imessage:imconv-123");
+    expect(run.ctxPayload.reply.to).toBe("imessage:imconv-123");
+    expect(run.ctxPayload.reply.messageThreadId).toBe("imessage:imconv-123");
+    expect(sendIMessage).toHaveBeenCalledWith({
+      conversationId: "imconv-123",
+      text: "On my way!",
+    });
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("ignores outbound iMessage echoes without waking the agent", async () => {
+    const { runtime, sendIMessage } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({ content: "agent reply", direction: "outbound" }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(sendIMessage).not.toHaveBeenCalled();
+  });
+
+  it("logs iMessage delivery lifecycle events without dispatching an agent turn", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({
+        content: "agent reply",
+        direction: "outbound",
+        eventType: "imessage.delivered",
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      "Inkbox iMessage lifecycle event: imessage.delivered",
+    );
+  });
+
+  it("pulses the typing indicator while composing an iMessage reply", async () => {
+    const { runtime, sendIMessageTyping } = createRuntime();
+    const channelRuntime = createChannelRuntime("On my way!");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({ content: "Dinner moved to 7." }),
+    );
+    // The first pulse fires immediately on turn start; let it settle.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sendIMessageTyping).toHaveBeenCalledWith("imconv-123");
+  });
+
+  it("dispatches inbound tapbacks with a reply-or-silent policy and replies into the thread", async () => {
+    const { runtime, sendIMessage, sendIMessageTyping } = createRuntime();
+    const channelRuntime = createChannelRuntime("Yes — 7pm at the usual place.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageReactionWebhookEvent({ reaction: "question" }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:imessage_reaction from=+15551234567 reaction=question conversation_id=imconv-123 target_message_id=im-target-9",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain("return exactly [SILENT]");
+    expect(run.ctxPayload.reply.to).toBe("imessage:imconv-123");
+    expect(sendIMessage).toHaveBeenCalledWith({
+      conversationId: "imconv-123",
+      text: "Yes — 7pm at the usual place.",
+    });
+    // A "question" tapback usually expects a reply, so typing is shown.
+    expect(sendIMessageTyping).toHaveBeenCalledWith("imconv-123");
+  });
+
+  it("does not promise a reply for non-question tapbacks and honors [SILENT]", async () => {
+    const { runtime, sendIMessage, sendIMessageTyping } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageReactionWebhookEvent({ reaction: "love" }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(sendIMessage).not.toHaveBeenCalled();
+    expect(sendIMessageTyping).not.toHaveBeenCalled();
+  });
+
+  it("ignores outbound tapback echoes without waking the agent", async () => {
+    const { runtime, sendIMessage } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageReactionWebhookEvent({ reaction: "like", direction: "outbound" }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(sendIMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("createIMessageTypingPulse", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refreshes the indicator on an interval until stopped", async () => {
+    vi.useFakeTimers();
+    const sendIMessageTyping = vi.fn(async () => undefined);
+    const runtime = {
+      getIdentity: async () => ({ sendIMessageTyping }),
+      getClient: async () => ({}),
+    };
+    const pulse = createIMessageTypingPulse(runtime as any);
+
+    pulse.start("imconv-1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendIMessageTyping).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(sendIMessageTyping).toHaveBeenCalledTimes(2);
+
+    // Starting again for the same conversation does not double-pulse.
+    pulse.start("imconv-1");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(sendIMessageTyping).toHaveBeenCalledTimes(3);
+
+    pulse.stop("imconv-1");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sendIMessageTyping).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops on its own at the safety cap", async () => {
+    vi.useFakeTimers();
+    const sendIMessageTyping = vi.fn(async () => undefined);
+    const runtime = {
+      getIdentity: async () => ({ sendIMessageTyping }),
+      getClient: async () => ({}),
+    };
+    const pulse = createIMessageTypingPulse(runtime as any);
+
+    pulse.start("imconv-1");
+    await vi.advanceTimersByTimeAsync(400_000);
+    const countAtCap = sendIMessageTyping.mock.calls.length;
+    // 1 immediate + one per 2s tick until the 300s cap.
+    expect(countAtCap).toBe(150);
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(sendIMessageTyping).toHaveBeenCalledTimes(countAtCap);
   });
 });

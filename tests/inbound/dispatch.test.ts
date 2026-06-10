@@ -42,6 +42,25 @@ function legacyTextEvent(eventType: string, contactId: string | null = "contact-
   };
 }
 
+function imessageEvent(eventType: string, contactId: string | null = "contact-im-1") {
+  return {
+    event_type: eventType,
+    timestamp: "2026-06-10T00:00:00Z",
+    data: {
+      contacts: contactId ? [{ id: contactId, name: "Ada" }] : [],
+      agent_identities: [],
+      message: {
+        id: "im-1",
+        conversation_id: "imconv-1",
+        direction: "inbound",
+        remote_number: "+15551234567",
+        content: "hi",
+      },
+      reaction: null,
+    },
+  };
+}
+
 function callEvent(contactId: string | null = "contact-call-1") {
   return {
     call_id: "call-1",
@@ -70,6 +89,19 @@ describe("dispatchInbound", () => {
     const result = await dispatchInbound(textEvent("text.received"), { onText });
     expect(result.kind).toBe("text");
     expect(onText).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes imessage.received to onIMessage", async () => {
+    const onIMessage = vi.fn();
+    const result = await dispatchInbound(imessageEvent("imessage.received"), { onIMessage });
+    expect(result.kind).toBe("imessage");
+    expect(onIMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes imessage delivery lifecycle to onIMessage as well (any imessage.* event)", async () => {
+    const onIMessage = vi.fn();
+    await dispatchInbound(imessageEvent("imessage.delivered"), { onIMessage });
+    expect(onIMessage).toHaveBeenCalledTimes(1);
   });
 
   it("routes flat call payload to onCall", async () => {
@@ -120,6 +152,18 @@ describe("dispatchInbound", () => {
       const onText = vi.fn();
       await dispatchInbound(legacyTextEvent("text.received", "contact-allowed"), { onText }, ["contact-allowed"]);
       expect(onText).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops iMessage when contact is not on the list", async () => {
+      const onIMessage = vi.fn();
+      await dispatchInbound(imessageEvent("imessage.received", "contact-blocked"), { onIMessage }, ["contact-allowed"]);
+      expect(onIMessage).not.toHaveBeenCalled();
+    });
+
+    it("delivers iMessage when contact is on the list", async () => {
+      const onIMessage = vi.fn();
+      await dispatchInbound(imessageEvent("imessage.received", "contact-allowed"), { onIMessage }, ["contact-allowed"]);
+      expect(onIMessage).toHaveBeenCalledTimes(1);
     });
 
     it("rejects call when contact is not on the list, ignoring handler", async () => {

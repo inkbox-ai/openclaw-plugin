@@ -12,6 +12,8 @@ export interface InkboxIdentityState {
   identityHandle: string;
   emailAddress: string | null;
   phoneNumber: string | null;
+  // Optional so state files written before iMessage support still parse.
+  imessageEnabled?: boolean;
   tunnelPublicHost: string | null;
   savedAt: string;
 }

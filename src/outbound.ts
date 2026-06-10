@@ -2,7 +2,12 @@ import { createInkboxRuntime } from "./client.js";
 import { checkOutboundRecipient } from "./allowlist.js";
 import { resolveInkboxAccount } from "./accounts.js";
 
-export type InkboxTargetMode = "email" | "sms" | "sms-conversation";
+export type InkboxTargetMode =
+  | "email"
+  | "sms"
+  | "sms-conversation"
+  | "imessage"
+  | "imessage-conversation";
 
 export interface ParsedInkboxTarget {
   mode: InkboxTargetMode;
@@ -27,10 +32,10 @@ function stripKnownPrefix(raw: string): string {
   return raw
     .trim()
     .replace(/^(inkbox:)/i, "")
-    .replace(/^(sms:conversation:|text:conversation:|phone:conversation:)/i, "")
+    .replace(/^(sms:conversation:|text:conversation:|phone:conversation:|imessage:conversation:)/i, "")
     .replace(/^(conversation:|thread:)/i, "")
     .replace(/^(email:|mailto:)/i, "")
-    .replace(/^(sms:|text:|phone:)/i, "");
+    .replace(/^(sms:|text:|phone:|imessage:)/i, "");
 }
 
 function stripProviderPrefix(raw: string): string {
@@ -48,6 +53,13 @@ export function normalizeInkboxTarget(raw: string): string | undefined {
   if (!trimmed) {
     return undefined;
   }
+  // iMessage targets keep their channel prefix: a stripped conversation UUID
+  // is indistinguishable from an SMS conversation id, so normalizing it away
+  // would re-route the send to the wrong channel.
+  if (/^imessage:/i.test(stripProviderPrefix(trimmed))) {
+    const value = stripKnownPrefix(trimmed);
+    return value ? `imessage:${value}` : undefined;
+  }
   return stripKnownPrefix(trimmed);
 }
 
@@ -60,6 +72,16 @@ export function parseInkboxTarget(raw: string): ParsedInkboxTarget | null {
   const normalized = stripKnownPrefix(trimmed);
   if (!normalized) {
     return null;
+  }
+  // iMessage targets are always explicit (`imessage:` prefix). A `+`-shaped
+  // value addresses a connected recipient by number; anything else is a
+  // conversation id — iMessage rides shared Inkbox-managed numbers, so the
+  // conversation is the canonical reply target.
+  if (/^imessage:/i.test(withoutProvider)) {
+    if (normalized.startsWith("+")) {
+      return { mode: "imessage", value: normalized };
+    }
+    return { mode: "imessage-conversation", value: normalized };
   }
   if (
     /^(conversation:|thread:|sms:conversation:|text:conversation:|phone:conversation:)/i.test(
@@ -210,10 +232,10 @@ export async function sendInkboxChannelText(
       `Inkbox target must be an email address, E.164 phone number, or SMS conversation id (got ${JSON.stringify(params.to)}).`,
     );
   }
-  if (target.mode === "sms-conversation") {
+  if (target.mode === "sms-conversation" || target.mode === "imessage-conversation") {
     if (account.config.allowedRecipients?.length) {
       throw new Error(
-        "Cannot send to an SMS conversation id while allowedRecipients is configured; recipients cannot be locally verified.",
+        "Cannot send to a conversation id while allowedRecipients is configured; recipients cannot be locally verified.",
       );
     }
   } else {
@@ -233,6 +255,20 @@ export async function sendInkboxChannelText(
   }
   if (target.mode === "sms") {
     const msg = await identity.sendText({ to: target.value, text: params.text });
+    return { messageId: msg.id };
+  }
+  // Recipient-first channel: sends only work toward people already connected
+  // to this identity through the Inkbox iMessage router. Server-side gates
+  // surface as thrown API errors.
+  if (target.mode === "imessage-conversation") {
+    const msg = await identity.sendIMessage({
+      conversationId: target.value,
+      text: params.text,
+    });
+    return { messageId: msg.id };
+  }
+  if (target.mode === "imessage") {
+    const msg = await identity.sendIMessage({ to: target.value, text: params.text });
     return { messageId: msg.id };
   }
 

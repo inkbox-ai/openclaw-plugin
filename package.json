@@ -1,7 +1,7 @@
 {
   "name": "@inkbox/inkbox",
-  "version": "0.1.0",
-  "description": "Inkbox plugin for OpenClaw — adds email, SMS, and voice messaging tools and inbound webhook handling",
+  "version": "0.2.0",
+  "description": "Inkbox plugin for OpenClaw — adds email, SMS, iMessage, and voice messaging tools and inbound webhook handling",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,7 +19,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@inkbox/sdk": "^0.4.6",
+    "@inkbox/sdk": "^0.4.7",
     "json5": "^2.2.3",
     "typebox": "^1.1.38"
   },
@@ -44,16 +44,17 @@
     "channel": {
       "id": "inkbox",
       "label": "Inkbox",
-      "selectionLabel": "Inkbox (Email, SMS, Voice)",
+      "selectionLabel": "Inkbox (Email, SMS, iMessage, Voice)",
       "detailLabel": "Inkbox",
       "docsPath": "/plugins/inkbox",
       "docsLabel": "inkbox",
-      "blurb": "Inkbox email, SMS, and voice identities.",
+      "blurb": "Inkbox email, SMS, iMessage, and voice identities.",
       "order": 90,
       "aliases": [
         "email",
         "sms",
-        "phone"
+        "phone",
+        "imessage"
       ],
       "markdownCapable": false,
       "exposure": {
