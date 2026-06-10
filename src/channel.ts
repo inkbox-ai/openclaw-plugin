@@ -257,13 +257,18 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
       normalizeTarget: normalizeInkboxTarget,
       parseExplicitTarget: ({ raw }: { raw: string }) => {
         const parsed = parseInkboxTarget(raw);
-        return parsed
-          ? {
-              to: parsed.value,
-              chatType:
-                parsed.mode === "sms-conversation" ? ("group" as const) : ("direct" as const),
-            }
-          : null;
+        if (!parsed) {
+          return null;
+        }
+        // Keep iMessage targets channel-prefixed — a stripped conversation
+        // UUID would re-parse as an SMS conversation on the send path.
+        const isIMessage =
+          parsed.mode === "imessage" || parsed.mode === "imessage-conversation";
+        return {
+          to: isIMessage ? `imessage:${parsed.value}` : parsed.value,
+          chatType:
+            parsed.mode === "sms-conversation" ? ("group" as const) : ("direct" as const),
+        };
       },
       inferTargetChatType: ({ to }: { to: string }) =>
         parseInkboxTarget(to)?.mode === "sms-conversation"
@@ -289,6 +294,9 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
           return null;
         }
         const chatType = parsed.mode === "sms-conversation" ? "group" : "direct";
+        const isIMessage =
+          parsed.mode === "imessage" || parsed.mode === "imessage-conversation";
+        const targetValue = isIMessage ? `imessage:${parsed.value}` : parsed.value;
         const route = buildChannelOutboundSessionRoute({
           cfg,
           agentId,
@@ -296,14 +304,14 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
           accountId,
           peer: {
             kind: chatType,
-            id: parsed.value,
+            id: targetValue,
           },
           chatType,
           from:
             chatType === "group"
               ? `inkbox:conversation:${parsed.value}`
               : `inkbox:${accountId ?? resolveDefaultInkboxAccountId(cfg)}`,
-          to: parsed.value,
+          to: targetValue,
         });
         return buildThreadAwareOutboundSessionRoute({
           route,

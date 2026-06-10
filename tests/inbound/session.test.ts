@@ -1737,6 +1737,10 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain("Dinner moved to 7.");
     expect(run.ctxPayload.extra.InkboxMode).toBe("imessage");
     expect(run.ctxPayload.extra.InkboxConversationId).toBe("imconv-123");
+    // The route/conversation id must stay channel-prefixed so a generic
+    // `message`-tool send to this peer resolves to sendIMessage, not SMS.
+    expect(run.ctxPayload.conversation.id).toBe("imessage:imconv-123");
+    expect(run.ctxPayload.conversation.routePeer.id).toBe("imessage:imconv-123");
     expect(run.ctxPayload.reply.to).toBe("imessage:imconv-123");
     expect(run.ctxPayload.reply.messageThreadId).toBe("imessage:imconv-123");
     expect(sendIMessage).toHaveBeenCalledWith({

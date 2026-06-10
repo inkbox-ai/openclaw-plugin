@@ -53,6 +53,13 @@ export function normalizeInkboxTarget(raw: string): string | undefined {
   if (!trimmed) {
     return undefined;
   }
+  // iMessage targets keep their channel prefix: a stripped conversation UUID
+  // is indistinguishable from an SMS conversation id, so normalizing it away
+  // would re-route the send to the wrong channel.
+  if (/^imessage:/i.test(stripProviderPrefix(trimmed))) {
+    const value = stripKnownPrefix(trimmed);
+    return value ? `imessage:${value}` : undefined;
+  }
   return stripKnownPrefix(trimmed);
 }
 

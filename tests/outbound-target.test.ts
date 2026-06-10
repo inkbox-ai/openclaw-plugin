@@ -72,6 +72,19 @@ describe("inkbox outbound target parsing", () => {
     expect(parseInkboxTarget("unknown")).toBeNull();
   });
 
+  it("keeps the imessage prefix through normalization", () => {
+    const conversationId = "550e8400-e29b-41d4-a716-446655440000";
+    // A stripped conversation UUID re-parses as an SMS conversation, so
+    // normalization must not drop the channel prefix.
+    expect(normalizeInkboxTarget(`imessage:conversation:${conversationId}`)).toBe(
+      `imessage:${conversationId}`,
+    );
+    expect(normalizeInkboxTarget(`inkbox:imessage:${conversationId}`)).toBe(
+      `imessage:${conversationId}`,
+    );
+    expect(normalizeInkboxTarget("imessage:+14155550123")).toBe("imessage:+14155550123");
+  });
+
   it("advertises group chat support", () => {
     expect(inkboxPlugin.capabilities.chatTypes).toContain("group");
   });

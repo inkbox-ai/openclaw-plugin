@@ -1552,8 +1552,13 @@ async function dispatchInboundTurn(
   }
 
   const conversationKind = opts.turn.conversationKind ?? "direct";
+  // iMessage route ids carry their channel prefix: a bare conversation UUID
+  // parses as an SMS conversation on the outbound path, so a `message`-tool
+  // send targeting this peer would reply over the wrong channel.
   const conversationRouteId =
-    opts.turn.conversationId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
+    opts.turn.mode === "imessage" && opts.turn.conversationId
+      ? `imessage:${opts.turn.conversationId}`
+      : opts.turn.conversationId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
   const { route, buildEnvelope } = resolveInboundRouteEnvelopeBuilderWithRuntime({
     cfg: opts.cfg as any,
     channel: "inkbox",
