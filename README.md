@@ -1,6 +1,21 @@
-# Inkbox OpenClaw Plugin
+<h1>Inkbox OpenClaw Plugin</h1>
 
-[Inkbox](https://inkbox.ai) channel plugin for [OpenClaw](https://openclaw.ai). It gives an OpenClaw agent its own Inkbox identity: mailbox, phone number, SMS, iMessage, voice calls, contacts, notes, contact rules, identity access, and optional credential vault access without forking OpenClaw.
+<img src="assets/openclaw_with_phone.png" alt="OpenClaw, now with a phone" width="200" align="left">
+
+<p>
+  <br><br>
+  <b>Give your OpenClaw agent its own Inkbox identity:</b><br>
+  a mailbox, iMessage, a phone number for calls and SMS, voice, contacts, notes, and an internet address.<br>
+  Keep OpenClaw reachable from anywhere without forking OpenClaw.
+</p>
+
+<p>
+  <code>Email</code> · <code>Calls</code> · <code>SMS / MMS</code> · <code>iMessage</code> · <code>Contacts</code> · <code>Notes</code>
+</p>
+
+<br clear="left">
+
+---
 
 Status: outbound tools, read tools, bundled skills, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group text conversations, inbound email/SMS/iMessage/voice, realtime phone calls, post-call actions, and package-included skills are implemented. ClawHub publishing is still pending.
 
