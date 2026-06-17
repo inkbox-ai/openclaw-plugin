@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildOpenClawConfigBatch,
+  configureAgentAvatar,
   persistOpenClawConfigFile,
   runSetupWizard,
   smsToQrPayload,
@@ -169,6 +170,10 @@ beforeEach(async () => {
     number: "+15550009999",
     connectCommand: "connect @your-handle",
   });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response("ok", { status: 200 })),
+  );
   sdk.subscriptionsList.mockResolvedValue([]);
   sdk.subscriptionsCreate.mockImplementation(async (opts: any) => ({
     id: "sub-stub",
@@ -186,6 +191,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   await rm(tempHome, { recursive: true, force: true });
 });
 
@@ -195,6 +201,92 @@ describe("runSetupWizard", () => {
     expect(smsToQrPayload("+15550009999", "connect @smoke-agent")).toBe(
       "SMSTO:+15550009999:connect @smoke-agent",
     );
+  });
+
+  it("attaches the bundled avatar automatically for a newly created agent", async () => {
+    const fetchMock = vi.fn(async () => new Response("ok", { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const prompter = createPrompter();
+
+    await configureAgentAvatar({
+      baseUrl: "https://inkbox.ai",
+      apiKey: "ApiKey_test",
+      identityHandle: "smoke-agent",
+      isSignup: true,
+      prompter,
+    });
+
+    expect(prompter.confirm).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://inkbox.ai/api/v1/identities/smoke-agent/avatar",
+      expect.objectContaining({
+        method: "PUT",
+        headers: { "X-API-Key": "ApiKey_test" },
+      }),
+    );
+  });
+
+  it("leaves an existing agent avatar alone", async () => {
+    const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const prompter = createPrompter();
+
+    await configureAgentAvatar({
+      baseUrl: "https://inkbox.ai",
+      apiKey: "ApiKey_test",
+      identityHandle: "smoke-agent",
+      isSignup: false,
+      prompter,
+    });
+
+    expect(prompter.confirm).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://inkbox.ai/api/v1/identities/smoke-agent/avatar",
+      expect.objectContaining({ headers: { "X-API-Key": "ApiKey_test" } }),
+    );
+  });
+
+  it("offers and uploads the bundled avatar for an existing agent without one", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }))
+      .mockResolvedValueOnce(new Response("ok", { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const prompter = createPrompter({ confirms: [true] });
+
+    await configureAgentAvatar({
+      baseUrl: "https://inkbox.ai",
+      apiKey: "ApiKey_test",
+      identityHandle: "smoke-agent",
+      isSignup: false,
+      prompter,
+    });
+
+    expect(prompter.confirm).toHaveBeenCalledWith("Add the OpenClaw avatar?", true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "https://inkbox.ai/api/v1/identities/smoke-agent/avatar",
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
+
+  it("does not upload the bundled avatar when an existing agent declines", async () => {
+    const fetchMock = vi.fn(async () => new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const prompter = createPrompter({ confirms: [false] });
+
+    await configureAgentAvatar({
+      baseUrl: "https://inkbox.ai",
+      apiKey: "ApiKey_test",
+      identityHandle: "smoke-agent",
+      isSignup: false,
+      prompter,
+    });
+
+    expect(prompter.confirm).toHaveBeenCalledWith("Add the OpenClaw avatar?", true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("builds an OpenClaw config batch for channel config and tool access", () => {

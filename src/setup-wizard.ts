@@ -11,6 +11,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import type { Prompter } from "./prompt.js";
 import { writeIdentityState, readIdentityState } from "./state.js";
@@ -85,6 +86,12 @@ const OPENAI_REALTIME_VOICE = "cedar";
 const OPENAI_REALTIME_CLIENT_SECRETS_URL =
   "https://api.openai.com/v1/realtime/client_secrets";
 const requireOptional = createRequire(import.meta.url);
+const SETUP_WIZARD_DIR = dirname(fileURLToPath(import.meta.url));
+const AVATAR_FILENAME = "openclaw_with_phone.png";
+const AVATAR_PATH_CANDIDATES = [
+  join(SETUP_WIZARD_DIR, "..", "assets", AVATAR_FILENAME),
+  join(SETUP_WIZARD_DIR, "..", "..", "assets", AVATAR_FILENAME),
+];
 
 export type OpenAiRealtimeValidationResult =
   | { ok: true; message?: string }
@@ -311,6 +318,114 @@ function maskSecret(secret: string): string {
     return "*".repeat(trimmed.length);
   }
   return `${trimmed.slice(0, 6)}${"*".repeat(Math.max(8, trimmed.length - 10))}${trimmed.slice(-4)}`;
+}
+
+function avatarPath(): string | undefined {
+  return AVATAR_PATH_CANDIDATES.find((candidate) => existsSync(candidate));
+}
+
+function avatarEndpoint(baseUrl: string | undefined, handle: string): string {
+  const root = (baseUrl?.trim() || "https://inkbox.ai").replace(/\/+$/, "");
+  return `${root}/api/v1/identities/${handle}/avatar`;
+}
+
+async function identityHasAvatar(
+  baseUrl: string | undefined,
+  apiKey: string,
+  handle: string,
+): Promise<boolean | undefined> {
+  try {
+    const response = await fetch(avatarEndpoint(baseUrl, handle), {
+      headers: { "X-API-Key": apiKey },
+    });
+    if (response.status === 200) {
+      return true;
+    }
+    if (response.status === 404) {
+      return false;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function uploadAvatar(params: {
+  baseUrl: string | undefined;
+  apiKey: string;
+  handle: string;
+  image: Buffer;
+}): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob([new Uint8Array(params.image)], { type: "image/png" }),
+      AVATAR_FILENAME,
+    );
+    const response = await fetch(avatarEndpoint(params.baseUrl, params.handle), {
+      method: "PUT",
+      headers: { "X-API-Key": params.apiKey },
+      body: form,
+    });
+    if (response.status === 200 || response.status === 201) {
+      return { ok: true, detail: "ok" };
+    }
+    const detail = await response.text().catch(() => "");
+    return { ok: false, detail: `HTTP ${response.status} ${detail.slice(0, 200)}` };
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function configureAgentAvatar(params: {
+  baseUrl?: string;
+  apiKey: string;
+  identityHandle: string;
+  isSignup: boolean;
+  prompter: Pick<Prompter, "confirm">;
+}): Promise<void> {
+  const handle = params.identityHandle.trim();
+  const path = avatarPath();
+  if (!handle || !path) {
+    return;
+  }
+
+  if (!params.isSignup) {
+    if ((await identityHasAvatar(params.baseUrl, params.apiKey, handle)) === true) {
+      return;
+    }
+    console.log("\nAgent avatar:");
+    console.log("  This agent has no avatar on its Inkbox contact card.");
+    const addAvatar = await params.prompter.confirm("Add the OpenClaw avatar?", true);
+    if (!addAvatar) {
+      console.log("  Skipped. You can set an avatar later in the Inkbox console.");
+      return;
+    }
+  }
+
+  let image: Buffer;
+  try {
+    image = await readFile(path);
+  } catch (error) {
+    console.log(
+      `  Could not read the bundled avatar: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
+
+  const uploaded = await uploadAvatar({
+    baseUrl: params.baseUrl,
+    apiKey: params.apiKey,
+    handle,
+    image,
+  });
+  if (uploaded.ok) {
+    console.log("  Attached the OpenClaw avatar to this agent.");
+  } else {
+    console.log(`  Could not attach the avatar: ${uploaded.detail}`);
+    console.log("  You can set one later in the Inkbox console.");
+  }
 }
 
 function defaultVoiceRealtimeConfig(
@@ -1215,6 +1330,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   let agentApiKey: string = apiKey;
   let identity: AgentIdentity | undefined;
   let didProvisionPhone = false;
+  let createdIdentity = Boolean(signupIdentityHandle);
 
   if (subtype === AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED) {
     // Branch B — admin scoped.
@@ -1252,6 +1368,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
           ...(displayName ? { displayName } : {}),
           ...(createPhone ? { phoneNumber: { type: "local", incomingCallAction: "auto_reject" } } : {}),
         });
+        createdIdentity = true;
         didProvisionPhone = createPhone && Boolean(identity.phoneNumber);
         console.log(`Created identity ${identityHandle}.`);
       }
@@ -1266,6 +1383,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
         ...(displayName ? { displayName } : {}),
         ...(createPhone ? { phoneNumber: { type: "local", incomingCallAction: "auto_reject" } } : {}),
       });
+      createdIdentity = true;
       didProvisionPhone = createPhone && Boolean(identity.phoneNumber);
       console.log(`Created identity ${identityHandle}.`);
     }
@@ -1298,6 +1416,13 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     ? new Inkbox({ apiKey: agentApiKey, baseUrl })
     : client;
   identity = await agentClient.getIdentity(identityHandle);
+  await configureAgentAvatar({
+    baseUrl,
+    apiKey: agentApiKey,
+    identityHandle,
+    isSignup: createdIdentity,
+    prompter,
+  });
 
   // Step 4 — optional phone provision.
   if (!identity.phoneNumber) {
