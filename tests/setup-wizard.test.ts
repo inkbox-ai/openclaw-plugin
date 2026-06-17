@@ -6,6 +6,7 @@ import {
   buildOpenClawConfigBatch,
   persistOpenClawConfigFile,
   runSetupWizard,
+  smsToQrPayload,
   validateOpenAiRealtimeApiKey,
 } from "../src/setup-wizard.js";
 import type { Prompter } from "../src/prompt.js";
@@ -189,6 +190,13 @@ afterEach(async () => {
 });
 
 describe("runSetupWizard", () => {
+  it("uses SMSTO payloads for setup QR codes", () => {
+    expect(smsToQrPayload("+16614031457", "START")).toBe("SMSTO:+16614031457:START");
+    expect(smsToQrPayload("+15550009999", "connect @smoke-agent")).toBe(
+      "SMSTO:+15550009999:connect @smoke-agent",
+    );
+  });
+
   it("builds an OpenClaw config batch for channel config and tool access", () => {
     expect(
       buildOpenClawConfigBatch(

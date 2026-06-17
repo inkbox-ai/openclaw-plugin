@@ -8,6 +8,7 @@ import {
 } from "@inkbox/sdk";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import JSON5 from "json5";
@@ -83,6 +84,7 @@ const OPENAI_REALTIME_MODEL = "gpt-realtime-2";
 const OPENAI_REALTIME_VOICE = "cedar";
 const OPENAI_REALTIME_CLIENT_SECRETS_URL =
   "https://api.openai.com/v1/realtime/client_secrets";
+const requireOptional = createRequire(import.meta.url);
 
 export type OpenAiRealtimeValidationResult =
   | { ok: true; message?: string }
@@ -99,6 +101,33 @@ function sleep(ms: number): Promise<void> {
 
 function isStartText(text: string | null | undefined): boolean {
   return text?.trim().toUpperCase() === "START";
+}
+
+export function smsToQrPayload(number: string, body: string): string {
+  return `SMSTO:${number}:${body}`;
+}
+
+function smsDraftLink(number: string, body: string): string {
+  return `sms:${number}?&body=${encodeURIComponent(body)}`;
+}
+
+export function showQr(data: string): boolean {
+  if (!process.stdout.isTTY) {
+    return false;
+  }
+  try {
+    const qr = requireOptional("qrcode-terminal") as {
+      generate: (
+        input: string,
+        options: { small: boolean },
+        callback: (output: string) => void,
+      ) => void;
+    };
+    qr.generate(data, { small: true }, (output) => console.log(output));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeOptional(value: string): string | undefined {
@@ -756,6 +785,12 @@ function printAgentSummary(identity: AgentIdentity): void {
     if (identity.phoneNumber.type === "local") {
       console.log("\nSMS opt-in:");
       console.log(`  Text START to ${identity.phoneNumber.number} from each phone this agent should text.`);
+      console.log("\n  Or just scan this with your phone camera to draft that text in one tap:");
+      const qrPayload = smsToQrPayload(identity.phoneNumber.number, "START");
+      const fallbackLink = smsDraftLink(identity.phoneNumber.number, "START");
+      if (!showQr(qrPayload)) {
+        console.log(`    (install qrcode-terminal to show a scannable QR here: ${fallbackLink})`);
+      }
     }
   } else {
     console.log("  Phone:   (none - provision later in the Inkbox console)");
@@ -947,7 +982,7 @@ async function waitForIMessageFirstMessage(params: {
   identity: AgentIdentity;
   identityHandle: string;
 }): Promise<void> {
-  let triage: { number: string; connectCommand: string };
+  let triage: { number: string; connectCommand: string; smsLink?: string };
   try {
     triage = await (params.client as any).imessages.getTriageNumber();
   } catch (error) {
@@ -965,6 +1000,15 @@ async function waitForIMessageFirstMessage(params: {
   console.log("  2. Inkbox texts you back from the number now assigned to this agent.");
   console.log('  3. Send any first message (e.g. "hi") in that NEW thread.');
   console.log("The agent can only message you after you message it first.");
+  console.log("\nOr just scan this with your iPhone camera to do step 1 in one tap:");
+  const fallbackLink =
+    triage.smsLink && !triage.smsLink.includes("your-handle")
+      ? triage.smsLink
+      : smsDraftLink(triage.number, connectCommand);
+  const qrPayload = smsToQrPayload(triage.number, connectCommand);
+  if (!showQr(qrPayload)) {
+    console.log(`  (install qrcode-terminal to show a scannable QR here: ${fallbackLink})`);
+  }
   console.log("\nWaiting up to 5 minutes for your first iMessage...");
 
   const startedAt = Date.now();
