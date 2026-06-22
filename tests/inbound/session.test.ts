@@ -1618,7 +1618,7 @@ describe("createInkboxSessionBridge", () => {
       { suppressResponse: true },
     );
     expect(parseSentTextFrames(ws)).toContainEqual({
-      event: "hangup",
+      event: "stop",
       reason: "caller said goodbye",
       stream_id: "stream-1",
     });

@@ -2756,14 +2756,15 @@ async function runRealtimeCallWebSocket(
         if (closed) {
           return;
         }
-        const hangupFrame: Record<string, unknown> = { event: "hangup" };
+        // Inkbox ends the call on a `stop` event; `hangup` is ignored server-side.
+        const stopFrame: Record<string, unknown> = { event: "stop" };
         if (reason) {
-          hangupFrame.reason = reason;
+          stopFrame.reason = reason;
         }
         if (streamId) {
-          hangupFrame.stream_id = streamId;
+          stopFrame.stream_id = streamId;
         }
-        await opts.ws.send(JSON.stringify(hangupFrame));
+        await opts.ws.send(JSON.stringify(stopFrame));
         closed = true;
         audioPacer.close();
         session.close();
