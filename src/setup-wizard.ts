@@ -836,9 +836,9 @@ async function discoverAgentIdentityHandle(
 
 async function waitForSmsStart(params: {
   identity: AgentIdentity;
-}): Promise<void> {
+}): Promise<boolean> {
   if (params.identity.phoneNumber?.type !== "local") {
-    return;
+    return true;
   }
   const startedAt = Date.now();
   while (Date.now() - startedAt < SMS_OPT_IN_WAIT_TIMEOUT_MS) {
@@ -851,13 +851,17 @@ async function waitForSmsStart(params: {
     });
     if (found) {
       console.log("Received START opt-in text.");
-      return;
+      return true;
     }
     await sleep(SMS_OPT_IN_POLL_MS);
   }
-  throw new Error(
-    `Did not observe START before the wait timed out. Text START to ${params.identity.phoneNumber.number}, then re-run setup.`,
+  // Non-fatal, mirroring the iMessage connect wait below: the phone is already
+  // provisioned, so don't abort setup just because the opt-in hasn't landed
+  // yet. The agent can text any recipient the moment they reply START.
+  console.log(
+    `Did not see a START opt-in before the wait timed out. Text START to ${params.identity.phoneNumber.number} whenever you're ready — the agent can send once a recipient opts in. Continuing setup.`,
   );
+  return false;
 }
 
 // Offer to enable iMessage for the agent and walk through connecting an
@@ -1264,14 +1268,8 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
 
   if (didProvisionPhone && identity.phoneNumber) {
     console.log(`Text START to ${identity.phoneNumber.number}. Waiting up to 5 minutes...`);
-    try {
-      await waitForSmsStart({ identity });
-    } catch (error) {
-      return {
-        ok: false,
-        message: error instanceof Error ? error.message : String(error),
-      };
-    }
+    // Non-fatal: setup continues whether or not the START opt-in arrives in time.
+    await waitForSmsStart({ identity });
   }
 
   const voiceRealtime = identity.phoneNumber
