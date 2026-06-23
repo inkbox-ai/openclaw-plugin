@@ -74,7 +74,6 @@ export interface WizardResult {
   persisted?: boolean;
 }
 
-const SMS_OPT_IN_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const SMS_OPT_IN_POLL_MS = 3000;
 const IMESSAGE_CONNECT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const IMESSAGE_CONNECT_POLL_MS = 3000;
@@ -840,26 +839,32 @@ async function waitForSmsStart(params: {
   if (params.identity.phoneNumber?.type !== "local") {
     return true;
   }
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < SMS_OPT_IN_WAIT_TIMEOUT_MS) {
-    const texts = await params.identity.listTexts({ limit: 25 });
-    const found = texts.some((text) => {
-      if (text.direction !== "inbound" || !isStartText(text.text)) {
-        return false;
+  // Poll indefinitely for the START opt-in (no timeout). Ctrl+C skips the wait
+  // without aborting setup — the phone is already provisioned, so the agent can
+  // send the moment a recipient replies START.
+  let skipped = false;
+  const onSigint = (): void => {
+    skipped = true;
+  };
+  process.on("SIGINT", onSigint);
+  try {
+    while (!skipped) {
+      const texts = await params.identity.listTexts({ limit: 25 });
+      const found = texts.some(
+        (text) => text.direction === "inbound" && isStartText(text.text),
+      );
+      if (found) {
+        console.log("Received START opt-in text.");
+        return true;
       }
-      return true;
-    });
-    if (found) {
-      console.log("Received START opt-in text.");
-      return true;
+      await sleep(SMS_OPT_IN_POLL_MS);
     }
-    await sleep(SMS_OPT_IN_POLL_MS);
+  } finally {
+    process.off("SIGINT", onSigint);
   }
-  // Non-fatal, mirroring the iMessage connect wait below: the phone is already
-  // provisioned, so don't abort setup just because the opt-in hasn't landed
-  // yet. The agent can text any recipient the moment they reply START.
+  // Skipped via Ctrl+C — non-fatal, so continue the rest of setup.
   console.log(
-    `Did not see a START opt-in before the wait timed out. Text START to ${params.identity.phoneNumber.number} whenever you're ready — the agent can send once a recipient opts in. Continuing setup.`,
+    `Skipped the START wait. Text START to ${params.identity.phoneNumber.number} whenever you're ready — the agent can send once a recipient opts in. Continuing setup.`,
   );
   return false;
 }
@@ -1267,8 +1272,10 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   }
 
   if (didProvisionPhone && identity.phoneNumber) {
-    console.log(`Text START to ${identity.phoneNumber.number}. Waiting up to 5 minutes...`);
-    // Non-fatal: setup continues whether or not the START opt-in arrives in time.
+    console.log(
+      `Text START to ${identity.phoneNumber.number}. Waiting for the opt-in (Ctrl+C to skip)...`,
+    );
+    // Non-fatal: setup continues whether the START opt-in arrives or is skipped.
     await waitForSmsStart({ identity });
   }
 
