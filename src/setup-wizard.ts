@@ -1148,8 +1148,11 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     } else {
       apiKey = await prompter.ask("Paste your Inkbox API key (starts with ApiKey_)");
     }
-    if (!apiKey || !apiKey.startsWith("ApiKey_")) {
-      return { ok: false, message: "Invalid API key format. Expected an ApiKey_... string." };
+    // No client-side prefix check: whoami() below rejects anything that isn't an
+    // API key (info.authType !== "api_key"), so a JWT or other credential is
+    // caught server-side — matching the CC/Codex/Hermes wizards.
+    if (!apiKey) {
+      return { ok: false, message: "No API key provided." };
     }
   }
 
