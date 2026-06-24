@@ -834,18 +834,16 @@ async function sendVoiceText(
   );
 }
 
-// iMessage typing indicators auto-expire client-side after a short window,
-// so a single sendIMessageTyping() would fade while the agent is still
-// thinking. We refresh every IMESSAGE_TYPING_REFRESH_MS until the reply goes
-// out (or the turn resolves without one), mirroring the "…" a human would
-// see. The cap bounds a turn that never resolves so the indicator can't
-// pulse indefinitely.
-const IMESSAGE_TYPING_REFRESH_MS = 2000;
+const IMESSAGE_TYPING_REFRESH_MS = 40_000;
 const IMESSAGE_TYPING_MAX_MS = 300_000;
 
 export interface IMessageTypingPulse {
   start(conversationId: string | undefined): void;
   stop(conversationId: string | undefined): void;
+  // Resolve once any typing POST still on the wire for this conversation has
+  // finished. The reply send awaits this so the message can't overtake a
+  // typing request and leave a "…" bubble showing after it.
+  settle(conversationId: string | undefined): Promise<void>;
 }
 
 export function createIMessageTypingPulse(
@@ -853,6 +851,11 @@ export function createIMessageTypingPulse(
   logger?: PluginLogger,
 ): IMessageTypingPulse {
   const active = new Map<string, { timer: NodeJS.Timeout; elapsedMs: number }>();
+  // Most recent in-flight typing POST per conversation. The SDK has no
+  // "stop typing" call — Apple clears the indicator when the message arrives —
+  // so an unfinished typing POST that lands after the reply re-shows the
+  // bubble. settle() drains this before we send.
+  const inflight = new Map<string, Promise<void>>();
 
   function stop(conversationId: string | undefined): void {
     if (!conversationId) {
@@ -865,21 +868,54 @@ export function createIMessageTypingPulse(
     }
   }
 
+  async function settle(conversationId: string | undefined): Promise<void> {
+    if (!conversationId) {
+      return;
+    }
+    const pending = inflight.get(conversationId);
+    if (pending) {
+      await pending;
+    }
+  }
+
   async function pulse(conversationId: string): Promise<void> {
-    try {
-      const identity = await runtime.getIdentity();
-      const sendTyping = (identity as any).sendIMessageTyping;
-      if (typeof sendTyping !== "function") {
-        stop(conversationId); // SDK too old — nothing to pulse
-        return;
+    // stop() clears the interval but can't cancel a pulse already mid-await,
+    // so re-check membership after each await; a stopped conversation must
+    // never issue a typing POST behind the message that just went out.
+    if (!active.has(conversationId)) {
+      return;
+    }
+    const run = (async () => {
+      try {
+        const identity = await runtime.getIdentity();
+        if (!active.has(conversationId)) {
+          return; // stopped while resolving the identity
+        }
+        const sendTyping = (identity as any).sendIMessageTyping;
+        if (typeof sendTyping !== "function") {
+          stop(conversationId); // SDK too old — nothing to pulse
+          return;
+        }
+        if (!active.has(conversationId)) {
+          return; // stopped right before the send
+        }
+        await sendTyping.call(identity, conversationId);
+      } catch (error) {
+        // A transient typing failure should never derail the turn; log and
+        // keep trying on the next tick.
+        logger?.debug?.(
+          `Inkbox iMessage typing pulse failed for ${conversationId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-      await sendTyping.call(identity, conversationId);
-    } catch (error) {
-      // A transient typing failure should never derail the turn; log and
-      // keep trying on the next tick.
-      logger?.debug?.(
-        `Inkbox iMessage typing pulse failed for ${conversationId}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    })();
+    // Track this POST so settle() can wait it out before the reply ships.
+    inflight.set(conversationId, run);
+    try {
+      await run;
+    } finally {
+      if (inflight.get(conversationId) === run) {
+        inflight.delete(conversationId);
+      }
     }
   }
 
@@ -902,7 +938,7 @@ export function createIMessageTypingPulse(
     void pulse(conversationId);
   }
 
-  return { start, stop };
+  return { start, stop, settle };
 }
 
 async function deliverReply(
@@ -943,8 +979,10 @@ async function deliverReply(
       throw new Error("Inkbox iMessage reply missing conversation id and remote number.");
     }
     // The reply is going out now — stop the typing pulse for this
-    // conversation regardless of how the send below resolves.
+    // conversation, then wait out any typing POST still on the wire so the
+    // message can't overtake it and leave a "…" bubble showing after the reply.
     params.imessageTyping?.stop(conversationId);
+    await params.imessageTyping?.settle(conversationId);
     // Recipient-first channel: server-side gates (recipient hasn't messaged
     // yet, released assignment, quota) surface as thrown API errors rather
     // than being pre-checked here.
@@ -3020,6 +3058,16 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       const turn = await buildIMessageTurn(opts.runtime, opts.account, event, opts.logger);
       if (!turn) {
+        // The agent usually sends its reply mid-turn via a tool, which surfaces
+        // as imessage.sent well before the turn (and onIMessage's finally) ends.
+        // Stop the pulse on that signal so the "…" indicator can't keep
+        // re-pinging /typing after the reply already went out.
+        if (event.event_type === "imessage.sent") {
+          const sentId = event.data.message?.conversation_id;
+          imessageTyping.stop(
+            typeof sentId === "string" ? sentId.trim() || undefined : undefined,
+          );
+        }
         // Delivery/status callbacks (and any other imessage.* fan-out a
         // drifted subscription delivers) are logged without waking the agent,
         // matching the text-channel split.
