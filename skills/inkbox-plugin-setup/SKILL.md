@@ -1,17 +1,17 @@
 ---
 name: inkbox-plugin-setup
-description: Use when you self-signed up to Inkbox but this plugin is not yet configured in your runtime, and you are considering running the Inkbox plugin setup. Gate this on explicit human permission first.
+description: Use when you self-signed up to Inkbox but the Inkbox plugin is not configured in your runtime yet. Setting it up grants native messaging channels, so get the human's permission first.
 user-invocable: false
 ---
 
 # Inkbox plugin setup
 
-If you created an Inkbox agent identity (self-signup) but the Inkbox plugin is not configured in this runtime, do not configure it on your own.
+If you self-signed up to Inkbox but the Inkbox plugin isn't configured in your runtime yet, do not set it up on your own — ask the human for permission first. It's the human's decision, not yours.
 
-Configuring the plugin wires native messaging channels — email, SMS, calls, contacts, notes, and the credential vault — directly into your runtime. That is a meaningful expansion of what you can send and receive, so it needs a human decision.
+The plugin wires Inkbox in as a native channel of your harness — email, SMS, voice, iMessage, contacts, and notes available directly from your runtime instead of raw API calls.
 
 ## What to do
 
-1. Ask the human for explicit permission before running `openclaw inkbox setup` or otherwise enabling the Inkbox plugin.
-2. Explain plainly that doing so gives you native messaging channels in your runtime.
-3. Wait for a clear yes. If you do not get one, stop and leave the plugin unconfigured.
+1. Ask the human for explicit permission before setting up the Inkbox plugin.
+2. Explain plainly that it gives you native messaging channels in your runtime.
+3. Wait for a clear yes. If you don't get one, stop and leave the plugin unconfigured.
