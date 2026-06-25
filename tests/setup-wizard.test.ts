@@ -792,6 +792,7 @@ describe("runSetupWizard", () => {
       {
         humanEmail: "dima@example.com",
         noteToHuman: "OpenClaw Inkbox plugin setup",
+        harness: "openclaw",
         agentHandle: "new-agent",
         displayName: "New Agent",
       },
