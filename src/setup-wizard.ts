@@ -1217,6 +1217,8 @@ async function runSelfSignup(params: {
       {
         humanEmail,
         noteToHuman: SELF_SIGNUP_VERIFICATION_NOTE,
+        // Tag which harness drove the self-signup (forward-compatible optional SDK field).
+        harness: "openclaw",
         ...(agentHandle ? { agentHandle } : {}),
         ...(displayName ? { displayName } : {}),
       },
