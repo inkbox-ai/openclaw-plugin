@@ -1217,6 +1217,7 @@ async function runSelfSignup(params: {
       {
         humanEmail,
         noteToHuman: SELF_SIGNUP_VERIFICATION_NOTE,
+        harness: "openclaw",
         ...(agentHandle ? { agentHandle } : {}),
         ...(displayName ? { displayName } : {}),
       },

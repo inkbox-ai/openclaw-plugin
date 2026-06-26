@@ -834,8 +834,8 @@ async function sendVoiceText(
   );
 }
 
-const IMESSAGE_TYPING_REFRESH_MS = 40_000;
-const IMESSAGE_TYPING_MAX_MS = 300_000;
+export const IMESSAGE_TYPING_REFRESH_MS = 40_000;
+export const IMESSAGE_TYPING_MAX_MS = 300_000;
 
 export interface IMessageTypingPulse {
   start(conversationId: string | undefined): void;
