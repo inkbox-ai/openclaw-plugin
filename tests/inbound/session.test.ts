@@ -130,6 +130,8 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
 }));
 
 import {
+  IMESSAGE_TYPING_MAX_MS,
+  IMESSAGE_TYPING_REFRESH_MS,
   InkboxRealtimeAudioPacer,
   createIMessageTypingPulse,
   createInkboxSessionBridge,
@@ -1924,16 +1926,16 @@ describe("createIMessageTypingPulse", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(sendIMessageTyping).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(IMESSAGE_TYPING_REFRESH_MS);
     expect(sendIMessageTyping).toHaveBeenCalledTimes(2);
 
     // Starting again for the same conversation does not double-pulse.
     pulse.start("imconv-1");
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(IMESSAGE_TYPING_REFRESH_MS);
     expect(sendIMessageTyping).toHaveBeenCalledTimes(3);
 
     pulse.stop("imconv-1");
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(IMESSAGE_TYPING_REFRESH_MS * 3);
     expect(sendIMessageTyping).toHaveBeenCalledTimes(3);
   });
 
@@ -1947,12 +1949,15 @@ describe("createIMessageTypingPulse", () => {
     const pulse = createIMessageTypingPulse(runtime as any);
 
     pulse.start("imconv-1");
-    await vi.advanceTimersByTimeAsync(400_000);
+    await vi.advanceTimersByTimeAsync(IMESSAGE_TYPING_MAX_MS + IMESSAGE_TYPING_REFRESH_MS * 2);
     const countAtCap = sendIMessageTyping.mock.calls.length;
-    // 1 immediate + one per 2s tick until the 300s cap.
-    expect(countAtCap).toBe(150);
+    // 1 immediate pulse + one per refresh tick, until elapsed hits the cap (the
+    // capping tick stops without pulsing).
+    const expectedAtCap =
+      1 + Math.floor((IMESSAGE_TYPING_MAX_MS - 1) / IMESSAGE_TYPING_REFRESH_MS);
+    expect(countAtCap).toBe(expectedAtCap);
 
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(IMESSAGE_TYPING_REFRESH_MS * 2);
     expect(sendIMessageTyping).toHaveBeenCalledTimes(countAtCap);
   });
 });
