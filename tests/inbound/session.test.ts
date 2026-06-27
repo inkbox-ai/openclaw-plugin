@@ -1913,6 +1913,10 @@ describe("createIMessageTypingPulse", () => {
     vi.useRealTimers();
   });
 
+  it("keeps the safety cap at ten minutes", () => {
+    expect(IMESSAGE_TYPING_MAX_MS).toBe(600_000);
+  });
+
   it("refreshes the indicator on an interval until stopped", async () => {
     vi.useFakeTimers();
     const sendIMessageTyping = vi.fn(async () => undefined);
