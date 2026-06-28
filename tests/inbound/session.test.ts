@@ -577,6 +577,10 @@ describe("createInkboxSessionBridge", () => {
     ]);
 
     await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(ws.accept).toHaveBeenCalledWith({
       headers: [
@@ -584,7 +588,7 @@ describe("createInkboxSessionBridge", () => {
         ["x-use-inkbox-speech-to-text", "true"],
       ],
     });
-    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledWith(
       expect.objectContaining({
         routeSessionKey: "agent:main:inkbox:call:call-1",
@@ -596,6 +600,13 @@ describe("createInkboxSessionBridge", () => {
         }),
       }),
     );
+    const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain("[inkbox:voice_call");
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain("[call_ended]");
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain("Can you hear me?");
     expect(sendText).not.toHaveBeenCalled();
     expect(bridge.activeCalls.size).toBe(0);
 
@@ -689,8 +700,10 @@ describe("createInkboxSessionBridge", () => {
     ]);
 
     await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
 
-    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.message.bodyForAgent).toContain("segments=2");
     expect(run.ctxPayload.message.bodyForAgent).toContain("inkbox_identity=smoke-agent");
@@ -705,6 +718,17 @@ describe("createInkboxSessionBridge", () => {
       "take you so long to respond to my first message?",
     );
     expect(run.ctxPayload.reply.replyToId).toBe("turn-4b");
+    const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:voice_call",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain("[call_ended]");
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "That first message was split in two.",
+    );
 
     const frames = parseSentTextFrames(ws);
     expect(frames.filter((frame) => frame.event === "text" && frame.delta)).toEqual([
@@ -719,6 +743,13 @@ describe("createInkboxSessionBridge", () => {
   it("puts voice reply mode instructions in the agent-visible turn body", async () => {
     const { runtime } = createRuntime();
     const dispatchReply = vi.fn(async (params: any) => {
+      if (params.ctxPayload.message.bodyForAgent.includes("[call_ended]")) {
+        expect(params.ctxPayload.message.bodyForAgent).toContain(
+          "Do not redo work that was already completed on the call.",
+        );
+        await params.delivery.deliver({ text: "[SILENT]" });
+        return;
+      }
       expect(params.ctxPayload.message.bodyForAgent).toContain("reply_mode=voice_tts");
       expect(params.ctxPayload.message.bodyForAgent).toContain(
         "allow_separate_followup_tools_when_caller_explicitly_asks=true",
@@ -758,8 +789,10 @@ describe("createInkboxSessionBridge", () => {
     ]);
 
     await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
 
-    expect(dispatchReply).toHaveBeenCalledTimes(1);
+    expect(dispatchReply).toHaveBeenCalledTimes(2);
   });
 
   it("bridges raw Inkbox media through the OpenClaw realtime voice provider", async () => {
@@ -854,7 +887,7 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
-      "[inkbox:voice_call_ended",
+      "[inkbox:voice_call",
     );
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
       "Do not redo work that was already completed on the call.",
@@ -1096,7 +1129,13 @@ describe("createInkboxSessionBridge", () => {
         ["x-use-inkbox-speech-to-text", "true"],
       ],
     });
-    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent).toContain(
+      "[call_ended]",
+    );
+    expect(channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
     expect(realtimeMock.sessions).toHaveLength(0);
     const frames = parseSentTextFrames(ws);
     expect(frames).toContainEqual(
@@ -1139,6 +1178,8 @@ describe("createInkboxSessionBridge", () => {
     ]);
 
     await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(realtimeMock.sessions).toHaveLength(1);
     const realtimeSession = realtimeMock.sessions[0].session;
@@ -1151,7 +1192,13 @@ describe("createInkboxSessionBridge", () => {
         ["x-use-inkbox-speech-to-text", "true"],
       ],
     });
-    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent).toContain(
+      "[call_ended]",
+    );
+    expect(channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
     const frames = parseSentTextFrames(ws);
     expect(frames).toContainEqual(
       expect.objectContaining({
@@ -1188,6 +1235,8 @@ describe("createInkboxSessionBridge", () => {
     ]);
 
     await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(ws.accept).toHaveBeenCalledWith({
       headers: [
@@ -1195,7 +1244,13 @@ describe("createInkboxSessionBridge", () => {
         ["x-use-inkbox-speech-to-text", "true"],
       ],
     });
-    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent).toContain(
+      "[call_ended]",
+    );
+    expect(channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
     expect(realtimeMock.sessions).toHaveLength(0);
     const frames = parseSentTextFrames(ws);
     expect(frames).toContainEqual(
@@ -1251,7 +1306,7 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.deliveryResults[0]).toEqual({ visibleReplySent: true });
     const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
-      "[inkbox:voice_call_ended",
+      "[inkbox:voice_call",
     );
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
       "Do not redo work that was already completed on the call.",
@@ -1352,7 +1407,7 @@ describe("createInkboxSessionBridge", () => {
     });
     const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
-      "[inkbox:voice_call_ended",
+      "[inkbox:voice_call",
     );
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
       "Do not redo work that was already completed on the call.",
@@ -1663,7 +1718,7 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
-      "[inkbox:voice_call_ended",
+      "[inkbox:voice_call",
     );
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
       "Do not redo work that was already completed on the call.",

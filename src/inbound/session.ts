@@ -2098,8 +2098,9 @@ async function runRealtimePostCallActions(
               fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
             ]
           : [
-              `[inkbox:voice_call_ended call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
-              "The realtime voice call ended with no queued post-call actions. Review the transcript and in-call consult results only to catch commitments that still need follow-up.",
+              `[inkbox:voice_call call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} status=ended mode=realtime | ${renderContactMarker(opts.meta.contact)}]`,
+              "[call_ended] The realtime voice call has ended. Reflect on what just happened and decide if any follow-up actions are needed.",
+              "If you committed to anything during the call, perform that now via tool calls.",
               "Do not redo work that was already completed on the call. Do not repeat SMS, email, note, contact, or call-history work that an in-call consult result says it sent, queued, canceled, completed, or superseded.",
               "Only perform follow-up if the caller explicitly asked for it, you clearly committed to it, and it was not already handled during the call.",
               "If there is nothing still needed, return [SILENT]. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
@@ -2123,6 +2124,76 @@ async function runRealtimePostCallActions(
   });
   opts.logger?.info?.(
     `Inkbox realtime post-call ${hasQueuedActions ? "actions" : "reflection"} dispatched: call_id=${opts.meta.callId} actions=${opts.actions.length} captured_reply_chars=${visibleText.join("\n").length}`,
+  );
+}
+
+async function runSttTtsCallEndedReflection(
+  opts: InkboxSessionBridgeOptions & {
+    activeCalls: Map<string, ActiveCall>;
+    meta: RealtimeCallMeta;
+    transcript: RealtimeTranscriptEntry[];
+  },
+): Promise<void> {
+  if (opts.transcript.length === 0) {
+    return;
+  }
+  const fullTranscript = renderRealtimeTranscript(opts.transcript, { limit: "all" });
+  const visibleText: string[] = [];
+  await dispatchInboundTurn({
+    ...opts,
+    activeCalls: opts.activeCalls,
+    replyOptionsOverride: {
+      sourceReplyDeliveryMode: "automatic",
+      bootstrapContextMode: "lightweight",
+      fastModeOverride: true,
+      thinkingLevelOverride: "minimal",
+      suppressDefaultToolProgressMessages: true,
+    },
+    deliveryOverride: {
+      deliver: async (payload: unknown) => {
+        const text = payloadText(payload).trim();
+        if (text) {
+          visibleText.push(text);
+        }
+        // Call-ended reflection is for follow-up side effects only; never speak
+        // or message a summary back to the caller by default.
+        return { visibleReplySent: Boolean(text) };
+      },
+      onError: (error: unknown) => {
+        opts.logger?.warn?.(
+          `Inkbox STT/TTS call-ended reflection delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    },
+    turn: {
+      mode: "sms",
+      contactKey: opts.meta.contactKey,
+      contact: opts.meta.contact,
+      fromLabel: opts.meta.fromLabel,
+      remoteAddress: opts.meta.remotePhoneNumber,
+      body: [
+        `[inkbox:voice_call call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} status=ended mode=stt_tts | ${renderContactMarker(opts.meta.contact)}]`,
+        "[call_ended] The Inkbox STT/TTS voice call has ended. Reflect on what just happened and decide if any follow-up actions are needed.",
+        "If you committed to anything during the call, perform that now via tool calls.",
+        "Do not redo work that was already completed on the call. Do not repeat SMS, email, note, contact, or call-history work that the transcript shows was already handled, canceled, completed, or superseded.",
+        "Only perform follow-up if the caller explicitly asked for it, you clearly committed to it, and it was not already handled during the call.",
+        "If there is nothing still needed, return [SILENT]. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
+        fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      messageId: `call:${opts.meta.callId}:stt-tts-call-ended`,
+      replyToId: opts.meta.callId,
+      threadId: opts.meta.direction === "outbound" ? undefined : `call:${opts.meta.callId}`,
+      timestamp: Date.now(),
+      raw: {
+        event: "stt_tts_call_ended",
+        transcript: opts.transcript,
+      },
+    },
+  });
+  opts.logger?.info?.(
+    `Inkbox STT/TTS call-ended reflection dispatched: call_id=${opts.meta.callId} captured_reply_chars=${visibleText.join("\n").length}`,
   );
 }
 
@@ -3225,6 +3296,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     opts.logger?.info?.(
       `Inkbox call WebSocket open: call_id=${meta.callId} contact=${meta.contactKey} direction=${meta.direction} mode=inkbox-stt-tts`,
     );
+    const sttTtsTranscript: RealtimeTranscriptEntry[] = [];
     const voiceTranscripts = createVoiceTranscriptBuffer({
       callId: meta.callId,
       coalesceMs: resolveVoiceTranscriptCoalesceMs(opts.account),
@@ -3238,24 +3310,58 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           "You are on a live Inkbox phone call. Reply normally in text so the plugin speaks it over the active call. Do not substitute SMS or email for the spoken call response unless the caller explicitly asks you to send a separate follow-up/message.",
           text,
         ].join("\n");
+        sttTtsTranscript.push({ role: "user", text });
+        const turn: InkboxInboundTurn = {
+          mode: "voice",
+          contactKey: meta.contactKey,
+          contact: meta.contact,
+          fromLabel: meta.fromLabel,
+          remoteAddress: meta.remotePhoneNumber,
+          body,
+          messageId: `call:${meta.callId}:${turnId}`,
+          replyToId: turnId,
+          threadId: meta.direction === "outbound" ? undefined : `call:${meta.callId}`,
+          timestamp: segments[0]?.receivedAt ?? Date.now(),
+          raw: { event: "transcript", segments },
+        };
         await dispatchInboundTurn({
           ...opts,
           activeCalls,
           dispatchAbortSignal: abortSignal,
-          shouldDeliverReply,
-          turn: {
-            mode: "voice",
-            contactKey: meta.contactKey,
-            contact: meta.contact,
-            fromLabel: meta.fromLabel,
-            remoteAddress: meta.remotePhoneNumber,
-            body,
-            messageId: `call:${meta.callId}:${turnId}`,
-            replyToId: turnId,
-            threadId: meta.direction === "outbound" ? undefined : `call:${meta.callId}`,
-            timestamp: segments[0]?.receivedAt ?? Date.now(),
-            raw: { event: "transcript", segments },
+          deliveryOverride: {
+            deliver: async (payload: unknown) => {
+              const replyText = payloadText(payload).trim();
+              if (!replyText || replyText.toUpperCase() === "[SILENT]") {
+                return { visibleReplySent: false };
+              }
+              if (shouldDeliverReply() === false) {
+                opts.logger?.info?.(
+                  `Inkbox voice reply suppressed; newer caller transcript superseded call_id=${meta.callId}`,
+                );
+                return { visibleReplySent: false };
+              }
+              const messageId = await deliverReply({
+                turn,
+                text: replyText,
+                runtime: opts.runtime,
+                activeCalls,
+                logger: opts.logger,
+              });
+              sttTtsTranscript.push({ role: "assistant", text: replyText });
+              return {
+                visibleReplySent: Boolean(messageId || turn.mode === "voice"),
+                ...(messageId ? { messageIds: [messageId] } : {}),
+                ...(turn.threadId ? { threadId: turn.threadId } : {}),
+                ...(turn.replyToId ? { replyToId: turn.replyToId } : {}),
+              };
+            },
+            onError: (error: unknown) => {
+              opts.logger?.warn?.(
+                `Inkbox voice reply delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            },
           },
+          turn,
         });
       },
     });
@@ -3323,6 +3429,16 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       unregisterActiveCall(activeCalls, active);
       await ws.close().catch(() => {});
       opts.logger?.info?.(`Inkbox call WebSocket closed: call_id=${meta.callId}`);
+      void runSttTtsCallEndedReflection({
+        ...opts,
+        activeCalls,
+        meta,
+        transcript: [...sttTtsTranscript],
+      }).catch((error) => {
+        opts.logger?.warn?.(
+          `Inkbox STT/TTS call-ended reflection failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     }
   };
 
