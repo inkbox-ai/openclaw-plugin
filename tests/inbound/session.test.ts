@@ -27,7 +27,7 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
 }));
 
 vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
-  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME: "openclaw_agent_consult",
+  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME: "consult_agent",
   REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ: {
     encoding: "g711_ulaw",
     sampleRateHz: 8000,
@@ -45,7 +45,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
       : [
           {
             type: "function",
-            name: "openclaw_agent_consult",
+            name: "consult_agent",
             description: "Consult OpenClaw",
             parameters: { type: "object", properties: {}, required: [] },
           },
@@ -79,7 +79,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
           return {
             itemId: `item-${index + 1}`,
             callId: `tool-${index + 1}`,
-            name: "inkbox_register_post_call_action",
+            name: "register_post_call_action",
             args: {
               action: "Send a follow-up email to Dima about the launch checklist.",
               details: "Include that staging is still pending.",
@@ -89,7 +89,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
         return {
           itemId: `item-${index + 1}`,
           callId: `tool-${index + 1}`,
-          name: entry === "consult" ? "openclaw_agent_consult" : String(entry),
+          name: entry === "consult" ? "consult_agent" : String(entry),
           args:
             entry === "consult"
               ? { question: "Save this as a note." }
@@ -827,21 +827,21 @@ describe("createInkboxSessionBridge", () => {
     expect(params.instructions).toContain(
       "Do not deny that you have an agent email or phone number.",
     );
-    expect(params.instructions).toContain("inkbox_edit_post_call_action");
-    expect(params.instructions).toContain("inkbox_delete_post_call_action");
-    expect(params.instructions).toContain("inkbox_hang_up_call");
+    expect(params.instructions).toContain("edit_post_call_action");
+    expect(params.instructions).toContain("delete_post_call_action");
+    expect(params.instructions).toContain("hang_up_call");
     expect(params.instructions).toContain(
-      "If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call openclaw_agent_consult.",
+      "If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call consult_agent.",
     );
     expect(params.instructions).toContain(
-      "If openclaw_agent_consult completes or queues work that matches a previously registered after-call action, call inkbox_delete_post_call_action",
+      "If consult_agent completes or queues work that matches a previously registered after-call action, call delete_post_call_action",
     );
     expect(params.tools.map((tool: any) => tool.name)).toEqual([
-      "openclaw_agent_consult",
-      "inkbox_register_post_call_action",
-      "inkbox_edit_post_call_action",
-      "inkbox_delete_post_call_action",
-      "inkbox_hang_up_call",
+      "consult_agent",
+      "register_post_call_action",
+      "edit_post_call_action",
+      "delete_post_call_action",
+      "hang_up_call",
     ]);
     expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
       "Greet there in one short sentence and ask how you can help.",
@@ -1269,7 +1269,7 @@ describe("createInkboxSessionBridge", () => {
     realtimeMock.toolCallOnAudio = [
       {
         callId: "consult-1",
-        name: "openclaw_agent_consult",
+        name: "consult_agent",
         args: {
           question:
             'Send SMS to +15551234567 now: "Hi, this is smoke-agent. I am here to help during your call."',
@@ -1277,7 +1277,7 @@ describe("createInkboxSessionBridge", () => {
       },
       {
         callId: "consult-2",
-        name: "openclaw_agent_consult",
+        name: "consult_agent",
         args: {
           question:
             'Proceed to send a quick generic SMS to +15551234567: "Hi, this is smoke-agent. I am here to help during your call."',
@@ -1369,9 +1369,9 @@ describe("createInkboxSessionBridge", () => {
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
       status: "registered",
-      actionId: "tool-1",
-      actionIndex: 1,
-      actionCount: 1,
+      action_id: "tool-1",
+      action_index: 1,
+      action_count: 1,
       message:
         "Post-call action registered. Tell the caller it is queued for after the call, not completed yet.",
     });
@@ -1406,7 +1406,7 @@ describe("createInkboxSessionBridge", () => {
     realtimeMock.toolCallOnAudio = [
       {
         callId: "register-1",
-        name: "inkbox_register_post_call_action",
+        name: "register_post_call_action",
         args: {
           action: "Send an SMS to Dima.",
           details: "Caller initially accepted an after-call SMS.",
@@ -1414,7 +1414,7 @@ describe("createInkboxSessionBridge", () => {
       },
       {
         callId: "consult-1",
-        name: "openclaw_agent_consult",
+        name: "consult_agent",
         args: { question: "Send the SMS now during the live call." },
       },
     ];
@@ -1471,27 +1471,27 @@ describe("createInkboxSessionBridge", () => {
     realtimeMock.toolCallOnAudio = [
       {
         callId: "register-1",
-        name: "inkbox_register_post_call_action",
+        name: "register_post_call_action",
         args: { action: "Email Dima.", details: "Old draft." },
       },
       {
         callId: "register-2",
-        name: "inkbox_register_post_call_action",
+        name: "register_post_call_action",
         args: { action: "Create a note.", details: "Old note." },
       },
       {
         callId: "edit-2",
-        name: "inkbox_edit_post_call_action",
+        name: "edit_post_call_action",
         args: {
-          actionIndex: 2,
+          action_index: 2,
           action: "Create an Inkbox note about the launch checklist.",
           details: "Include that staging is still pending.",
         },
       },
       {
         callId: "delete-1",
-        name: "inkbox_delete_post_call_action",
-        args: { actionIndex: 1 },
+        name: "delete_post_call_action",
+        args: { action_index: 1 },
       },
     ];
     const { runtime } = createRuntime();
@@ -1528,9 +1528,9 @@ describe("createInkboxSessionBridge", () => {
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("edit-2", {
       status: "updated",
-      actionId: "register-2",
-      actionIndex: 2,
-      actionCount: 2,
+      action_id: "register-2",
+      action_index: 2,
+      action_count: 2,
       action: expect.objectContaining({
         action: "Create an Inkbox note about the launch checklist.",
         details: "Include that staging is still pending.",
@@ -1539,10 +1539,10 @@ describe("createInkboxSessionBridge", () => {
     });
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("delete-1", {
       status: "deleted",
-      deletedAction: expect.objectContaining({ action: "Email Dima." }),
-      actionIndex: 1,
-      actionCount: 1,
-      remainingActions: [
+      deleted_action: expect.objectContaining({ action: "Email Dima." }),
+      action_index: 1,
+      action_count: 1,
+      remaining_actions: [
         expect.objectContaining({
           action: "Create an Inkbox note about the launch checklist.",
         }),
@@ -1564,12 +1564,12 @@ describe("createInkboxSessionBridge", () => {
     realtimeMock.toolCallOnAudio = [
       {
         callId: "hangup-1",
-        name: "inkbox_hang_up_call",
+        name: "hang_up_call",
         args: { reason: "caller said goodbye" },
       },
       {
         callId: "hangup-2",
-        name: "inkbox_hang_up_call",
+        name: "hang_up_call",
         args: { reason: "caller said goodbye" },
       },
     ];

@@ -66,7 +66,7 @@ const voiceRealtimeSchema = {
       type: "string",
       enum: ["auto", "substantive", "always"],
       description:
-        "Guidance for when the realtime model should call openclaw_agent_consult.",
+        "Guidance for when the realtime model should call consult_agent.",
     },
     providers: {
       type: "object",
