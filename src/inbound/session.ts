@@ -24,6 +24,7 @@ import {
 } from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
+import { assertIMessageTextWithinLimit } from "../message-limits.js";
 import {
   consumeOutboundCallContextFromUrl,
   type OutboundCallContext,
@@ -995,8 +996,9 @@ async function deliverReply(
     return undefined;
   }
 
-  const identity = await params.runtime.getIdentity();
   if (params.turn.mode === "imessage") {
+    assertIMessageTextWithinLimit(text);
+    const identity = await params.runtime.getIdentity();
     const conversationId = params.turn.conversationId?.trim();
     if (!conversationId && !params.turn.remoteAddress) {
       throw new Error("Inkbox iMessage reply missing conversation id and remote number.");
@@ -1016,6 +1018,7 @@ async function deliverReply(
     return msg.id;
   }
   if (params.turn.mode === "sms") {
+    const identity = await params.runtime.getIdentity();
     const conversationId = params.turn.conversationId?.trim();
     if (!conversationId && !params.turn.remoteAddress) {
       throw new Error("Inkbox SMS reply missing remote phone number.");
@@ -1030,6 +1033,7 @@ async function deliverReply(
   if (!params.turn.remoteAddress) {
     throw new Error("Inkbox email reply missing remote email address.");
   }
+  const identity = await params.runtime.getIdentity();
   const subject = params.turn.subject
     ? params.turn.subject.toLowerCase().startsWith("re:")
       ? params.turn.subject

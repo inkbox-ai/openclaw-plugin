@@ -141,6 +141,7 @@ import {
   decorateCallWebsocketUrlWithContext,
   registerOutboundCallContext,
 } from "../../src/outbound-call-context.js";
+import { IMESSAGE_MAX_TEXT_CHARS } from "../../src/message-limits.js";
 
 type FakeInkboxWebSocketMessage = string | { message: string; advanceMs?: number };
 
@@ -1845,6 +1846,53 @@ describe("createInkboxSessionBridge", () => {
       conversationId: "imconv-123",
       text: "On my way!",
     });
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("rejects over-limit inbound iMessage replies before sending", async () => {
+    const { runtime, sendIMessage, sendText } = createRuntime();
+    const deliveryErrors: unknown[] = [];
+    const longReply = "x".repeat(IMESSAGE_MAX_TEXT_CHARS + 1);
+    const dispatchReply = vi.fn(async (params: any) => {
+      try {
+        await params.delivery.deliver({ text: longReply });
+      } catch (error) {
+        deliveryErrors.push(error);
+        params.delivery.onError?.(error);
+      }
+    });
+    const channelRuntime = {
+      inbound: {
+        buildContext: vi.fn((input) => input),
+        dispatchReply,
+      },
+      session: {
+        recordInboundSession: vi.fn(),
+      },
+      reply: {
+        dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
+      },
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({ content: "Dinner moved to 7." }),
+    );
+
+    expect(deliveryErrors).toHaveLength(1);
+    expect(String((deliveryErrors[0] as Error).message)).toContain(
+      "iMessage text is 18996 characters",
+    );
+    expect(sendIMessage).not.toHaveBeenCalled();
     expect(sendText).not.toHaveBeenCalled();
   });
 

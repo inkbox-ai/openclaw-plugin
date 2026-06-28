@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { registerSendIMessage } from "../../src/tools/send-imessage.js";
 import { registerIMessageReads } from "../../src/tools/imessage-reads.js";
 import type { InkboxRuntime } from "../../src/client.js";
+import { IMESSAGE_MAX_TEXT_CHARS } from "../../src/message-limits.js";
 
 interface RegisteredTool {
   name: string;
@@ -75,6 +76,21 @@ describe("registerSendIMessage", () => {
       conversationId: "imconv-123",
     });
     expect(out.isError).toBe(true);
+    expect(sendIMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects over-limit text before sending", async () => {
+    const { api, tools } = createApi();
+    const sendIMessage = vi.fn();
+    registerSendIMessage(api, createRuntime({ sendIMessage }));
+
+    const out = await tools.get("inkbox_send_imessage")!.execute("turn-1", {
+      conversationId: "imconv-123",
+      text: "x".repeat(IMESSAGE_MAX_TEXT_CHARS + 1),
+    });
+
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("iMessage text is 18996 characters");
     expect(sendIMessage).not.toHaveBeenCalled();
   });
 
