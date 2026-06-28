@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
+import { SMS_MAX_TEXT_CHARS, smsTextTooLongMessage } from "../message-limits.js";
 
 function normalizeRecipients(value: unknown): string[] | undefined {
   if (typeof value === "string") {
@@ -68,7 +69,7 @@ export function registerSendSms(
       ),
       text: Type.String({
         minLength: 1,
-        maxLength: 1600,
+        maxLength: SMS_MAX_TEXT_CHARS,
         description: "Message body (1-1600 chars).",
       }),
       mediaUrls: Type.Optional(
@@ -94,6 +95,9 @@ export function registerSendSms(
         }
         if (toList && toList.length > 8) {
           return toolError("Inkbox group texts support at most 8 recipients.");
+        }
+        if (String(params.text ?? "").length > SMS_MAX_TEXT_CHARS) {
+          return toolError(smsTextTooLongMessage(String(params.text ?? "")));
         }
         if (toList) {
           for (const recipient of toList) {

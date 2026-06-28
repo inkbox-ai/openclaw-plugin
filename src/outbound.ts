@@ -1,7 +1,7 @@
 import { createInkboxRuntime } from "./client.js";
 import { checkOutboundRecipient } from "./allowlist.js";
 import { resolveInkboxAccount } from "./accounts.js";
-import { assertIMessageTextWithinLimit } from "./message-limits.js";
+import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "./message-limits.js";
 
 export type InkboxTargetMode =
   | "email"
@@ -235,6 +235,9 @@ export async function sendInkboxChannelText(
   }
   if (target.mode === "imessage" || target.mode === "imessage-conversation") {
     assertIMessageTextWithinLimit(params.text);
+  }
+  if (target.mode === "sms" || target.mode === "sms-conversation") {
+    assertSmsTextWithinLimit(params.text);
   }
   if (target.mode === "sms-conversation" || target.mode === "imessage-conversation") {
     if (account.config.allowedRecipients?.length) {

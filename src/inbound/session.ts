@@ -24,7 +24,7 @@ import {
 } from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
-import { assertIMessageTextWithinLimit } from "../message-limits.js";
+import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../message-limits.js";
 import {
   consumeOutboundCallContextFromUrl,
   type OutboundCallContext,
@@ -1018,6 +1018,7 @@ async function deliverReply(
     return msg.id;
   }
   if (params.turn.mode === "sms") {
+    assertSmsTextWithinLimit(text);
     const identity = await params.runtime.getIdentity();
     const conversationId = params.turn.conversationId?.trim();
     if (!conversationId && !params.turn.remoteAddress) {

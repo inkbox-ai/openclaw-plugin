@@ -141,7 +141,7 @@ import {
   decorateCallWebsocketUrlWithContext,
   registerOutboundCallContext,
 } from "../../src/outbound-call-context.js";
-import { IMESSAGE_MAX_TEXT_CHARS } from "../../src/message-limits.js";
+import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/message-limits.js";
 
 type FakeInkboxWebSocketMessage = string | { message: string; advanceMs?: number };
 
@@ -1808,6 +1808,64 @@ describe("createInkboxSessionBridge", () => {
       conversationId: "conv-group",
       text: "Sure, I can help.",
     });
+  });
+
+  it("rejects over-limit inbound SMS replies before sending", async () => {
+    const { runtime, sendText, sendIMessage } = createRuntime({
+      conversations: [
+        {
+          id: "conv-sms",
+          participants: ["+15551234567"],
+          isGroup: false,
+        },
+      ],
+    });
+    const deliveryErrors: unknown[] = [];
+    const longReply = "x".repeat(SMS_MAX_TEXT_CHARS + 1);
+    const dispatchReply = vi.fn(async (params: any) => {
+      try {
+        await params.delivery.deliver({ text: longReply });
+      } catch (error) {
+        deliveryErrors.push(error);
+        params.delivery.onError?.(error);
+      }
+    });
+    const channelRuntime = {
+      inbound: {
+        buildContext: vi.fn((input) => input),
+        dispatchReply,
+      },
+      session: {
+        recordInboundSession: vi.fn(),
+      },
+      reply: {
+        dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
+      },
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onText?.(
+      textWebhookEvent({
+        conversationId: "conv-sms",
+        text: "Can you send me all the details?",
+      }),
+    );
+
+    expect(deliveryErrors).toHaveLength(1);
+    expect(String((deliveryErrors[0] as Error).message)).toContain(
+      "SMS text is 1601 characters",
+    );
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendIMessage).not.toHaveBeenCalled();
   });
 
   it("routes inbound iMessage into a contact session and replies by conversationId", async () => {
