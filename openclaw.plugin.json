@@ -101,6 +101,29 @@
             "type": "string",
             "description": "Public OpenClaw URL. If omitted, the plugin uses an Inkbox tunnel."
           },
+          "callWebsocketUrl": {
+            "type": "string",
+            "description": "Explicit outbound-call media WebSocket URL. If omitted, tunnel mode derives it from tunnelName/identity."
+          },
+          "voiceTranscriptCoalesceMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Wait this many ms before dispatching final voice transcript segments so clipped caller phrases can be coalesced. Defaults to 1200."
+          },
+          "voiceAgentPrewarm": {
+            "type": "boolean",
+            "description": "Run a hidden no-delivery agent turn when the gateway starts so the first caller turn does not pay OpenClaw/Codex cold-start latency. Defaults to true."
+          },
+          "voiceAgentPrewarmTtlMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Minimum time between hidden voice agent warmups. Defaults to 600000."
+          },
+          "voiceAgentPrewarmTimeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum time to let the hidden voice agent warmup run before aborting. Defaults to 70000."
+          },
           "allowedRecipients": {
             "type": "array",
             "items": { "type": "string" }
@@ -167,6 +190,11 @@
                 "signingKey": { "type": "string" },
                 "tunnelName": { "type": "string" },
                 "publicUrl": { "type": "string" },
+                "callWebsocketUrl": { "type": "string" },
+                "voiceTranscriptCoalesceMs": { "type": "integer", "minimum": 0 },
+                "voiceAgentPrewarm": { "type": "boolean" },
+                "voiceAgentPrewarmTtlMs": { "type": "integer", "minimum": 0 },
+                "voiceAgentPrewarmTimeoutMs": { "type": "integer", "minimum": 1 },
                 "allowedRecipients": {
                   "type": "array",
                   "items": { "type": "string" }
@@ -270,6 +298,18 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Enable this Inkbox account."
+      },
+      "name": {
+        "type": "string",
+        "description": "Human label for this account."
+      },
+      "defaultTo": {
+        "type": "string",
+        "description": "Default outbound target for the shared message tool."
+      },
       "apiKey": {
         "type": "string",
         "description": "Inkbox API key (ApiKey_... format). Create one in the Inkbox Console."
@@ -280,7 +320,7 @@
       },
       "baseUrl": {
         "type": "string",
-        "description": "Override Inkbox API base URL. Defaults to https://inkbox.ai."
+        "description": "Override Inkbox API base URL. Defaults to the SDK default."
       },
       "signingKey": {
         "type": "string",
@@ -293,6 +333,29 @@
       "publicUrl": {
         "type": "string",
         "description": "If set, skip the Inkbox tunnel and assume webhooks land at this public URL. Used when OpenClaw is hosted on a publicly reachable host."
+      },
+      "callWebsocketUrl": {
+        "type": "string",
+        "description": "Explicit outbound-call media WebSocket URL. If omitted, tunnel mode derives it from tunnelName/identity."
+      },
+      "voiceTranscriptCoalesceMs": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Wait this many ms before dispatching final voice transcript segments so clipped caller phrases can be coalesced. Defaults to 1200."
+      },
+      "voiceAgentPrewarm": {
+        "type": "boolean",
+        "description": "Run a hidden no-delivery agent turn when the gateway starts so the first caller turn does not pay OpenClaw/Codex cold-start latency. Defaults to true."
+      },
+      "voiceAgentPrewarmTtlMs": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Minimum time between hidden voice agent warmups. Defaults to 600000."
+      },
+      "voiceAgentPrewarmTimeoutMs": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Maximum time to let the hidden voice agent warmup run before aborting. Defaults to 70000."
       },
       "vault": {
         "type": "object",
