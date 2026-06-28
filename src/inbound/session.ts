@@ -2048,12 +2048,10 @@ async function runRealtimePostCallActions(
     actions: RealtimePostCallAction[];
   },
 ): Promise<void> {
-  if (opts.actions.length === 0) {
-    return;
-  }
   const fullTranscript = renderRealtimeTranscript(opts.transcript, { limit: "all" });
   const consultResults = renderRealtimeConsultResults(opts.consultResults);
   const visibleText: string[] = [];
+  const hasQueuedActions = opts.actions.length > 0;
   await dispatchInboundTurn({
     ...opts,
     activeCalls: opts.activeCalls,
@@ -2085,32 +2083,46 @@ async function runRealtimePostCallActions(
       contact: opts.meta.contact,
       fromLabel: opts.meta.fromLabel,
       remoteAddress: opts.meta.remotePhoneNumber,
-      body: [
-        `[inkbox:voice_post_call_actions call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
-        "The realtime voice call ended. Review these queued post-call actions and execute only the actions that are still needed.",
-        "These actions were registered during the live call and may be stale. Before doing anything, reconcile them against the full live-call transcript, in-call OpenClaw consult results, and prior messages in this session.",
-        "If an action was already completed or queued during the call, canceled, superseded, or the caller said it already happened, do not perform it again. A same-channel in-call consult result that says an SMS/email was sent or queued counts as already handled.",
-        "Do not merely say still-needed actions are impossible. If an email/SMS/note/contact update is still needed and enough recipient/content info is present, perform it.",
-        "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
-        "Only if required information is missing, ask the caller for the missing information. Try SMS first; if SMS is unavailable or not opted in, try email; if email is unavailable, place a follow-up call with the question.",
-        renderPostCallActions(opts.actions),
-        consultResults ? `In-call OpenClaw consult results:\n${consultResults}` : undefined,
-        fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
-      ]
+      body: (
+        hasQueuedActions
+          ? [
+              `[inkbox:voice_post_call_actions call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
+              "The realtime voice call ended. Review these queued post-call actions and execute only the actions that are still needed.",
+              "These actions were registered during the live call and may be stale. Before doing anything, reconcile them against the full live-call transcript, in-call OpenClaw consult results, and prior messages in this session.",
+              "If an action was already completed or queued during the call, canceled, superseded, or the caller said it already happened, do not perform it again. A same-channel in-call consult result that says an SMS/email was sent or queued counts as already handled.",
+              "Do not merely say still-needed actions are impossible. If an email/SMS/note/contact update is still needed and enough recipient/content info is present, perform it.",
+              "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
+              "Only if required information is missing, ask the caller for the missing information. Try SMS first; if SMS is unavailable or not opted in, try email; if email is unavailable, place a follow-up call with the question.",
+              renderPostCallActions(opts.actions),
+              consultResults ? `In-call OpenClaw consult results:\n${consultResults}` : undefined,
+              fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
+            ]
+          : [
+              `[inkbox:voice_call_ended call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
+              "The realtime voice call ended with no queued post-call actions. Review the transcript and in-call consult results only to catch commitments that still need follow-up.",
+              "Do not redo work that was already completed on the call. Do not repeat SMS, email, note, contact, or call-history work that an in-call consult result says it sent, queued, canceled, completed, or superseded.",
+              "Only perform follow-up if the caller explicitly asked for it, you clearly committed to it, and it was not already handled during the call.",
+              "If there is nothing still needed, return [SILENT]. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
+              consultResults ? `In-call OpenClaw consult results:\n${consultResults}` : undefined,
+              fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
+            ]
+      )
         .filter(Boolean)
         .join("\n\n"),
-      messageId: `call:${opts.meta.callId}:post-call-actions`,
+      messageId: hasQueuedActions
+        ? `call:${opts.meta.callId}:post-call-actions`
+        : `call:${opts.meta.callId}:call-ended`,
       replyToId: opts.meta.callId,
       threadId: opts.meta.direction === "outbound" ? undefined : `call:${opts.meta.callId}`,
       timestamp: Date.now(),
       raw: {
-        event: "realtime_post_call_actions",
+        event: hasQueuedActions ? "realtime_post_call_actions" : "realtime_call_ended",
         actions: opts.actions,
       },
     },
   });
   opts.logger?.info?.(
-    `Inkbox realtime post-call actions dispatched: call_id=${opts.meta.callId} actions=${opts.actions.length} captured_reply_chars=${visibleText.join("\n").length}`,
+    `Inkbox realtime post-call ${hasQueuedActions ? "actions" : "reflection"} dispatched: call_id=${opts.meta.callId} actions=${opts.actions.length} captured_reply_chars=${visibleText.join("\n").length}`,
   );
 }
 

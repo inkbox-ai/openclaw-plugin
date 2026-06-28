@@ -849,7 +849,19 @@ describe("createInkboxSessionBridge", () => {
     expect(realtimeSession.sendAudio).not.toHaveBeenCalledWith(echoedOutboundAudio);
     expect(realtimeSession.sendAudio).toHaveBeenCalledWith(inboundAudio);
     expect(realtimeSession.setMediaTimestamp).toHaveBeenCalledWith(40);
-    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:voice_call_ended",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "If there is nothing still needed, return [SILENT].",
+    );
 
     const frames = parseSentTextFrames(ws);
     expect(frames.some((frame) => frame.event === "text")).toBe(false);
@@ -1231,12 +1243,22 @@ describe("createInkboxSessionBridge", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.message.bodyForAgent).toContain("[inkbox:voice_realtime_consult");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Save this as a note.");
     expect(run.ctxPayload.extra.InkboxVoiceReplyOnly).toBe(true);
     expect(channelRuntime.deliveryResults[0]).toEqual({ visibleReplySent: true });
+    const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:voice_call_ended",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "In-call OpenClaw consult results:",
+    );
 
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
@@ -1315,7 +1337,7 @@ describe("createInkboxSessionBridge", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
       "consult-2",
@@ -1328,6 +1350,16 @@ describe("createInkboxSessionBridge", () => {
       status: "ok",
       result: "SMS queued during the call.",
     });
+    const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:voice_call_ended",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "SMS queued during the call.",
+    );
   });
 
   it("runs registered realtime post-call actions after the call closes", async () => {
@@ -1626,7 +1658,16 @@ describe("createInkboxSessionBridge", () => {
     });
     expect(realtimeSession.close).toHaveBeenCalled();
     expect(ws.close).toHaveBeenCalled();
-    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "[inkbox:voice_call_ended",
+    );
+    expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
+      "Do not redo work that was already completed on the call.",
+    );
   });
 
   it("routes unaddressed group SMS to the agent and honors silent replies", async () => {
