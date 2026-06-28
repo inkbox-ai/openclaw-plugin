@@ -4,6 +4,7 @@ import {
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_CLAIMED,
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED,
 } from "@inkbox/sdk";
+import { inkboxClientOptions } from "./sdk-options.js";
 
 // Shape of `plugins.entries.inkbox.config` after configSchema validation.
 export interface InkboxPluginConfig {
@@ -113,7 +114,7 @@ export function createInkboxRuntime(
     }
     const key = runtimeCacheKey(cfg);
     if (!resolved || resolved.key !== key) {
-      const inkbox = new Inkbox({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+      const inkbox = new Inkbox(inkboxClientOptions(cfg.apiKey, cfg.baseUrl));
       const promise = (async () => {
         // Confirm the key shape before we go any further. Agent-scoped is the
         // expected mode; admin-scoped works for outbound but we surface a warning

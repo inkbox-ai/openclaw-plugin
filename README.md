@@ -140,7 +140,7 @@ Env vars are also supported by the plugin and CLI:
 export INKBOX_API_KEY="ApiKey_xxxxxxxxxxxx"
 export INKBOX_IDENTITY="my-agent-handle"
 export INKBOX_SIGNING_KEY="whsec_xxxxxxxxxxxx"
-export INKBOX_BASE_URL="https://inkbox.ai"
+export INKBOX_BASE_URL="https://your-inkbox-api.example"
 ```
 
 Legacy plugin-scoped config under `plugins.entries.inkbox.config` still works, but new installs should use `channels.inkbox`.
@@ -290,7 +290,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `apiKey` | yes | - | Agent-scoped Inkbox API key. Admin keys are accepted by setup only so it can mint an agent-scoped key. |
 | `identity` | yes | - | Inkbox agent identity handle. |
 | `signingKey` | inbound | - | Webhook HMAC secret. Required for inbound email/SMS/iMessage/calls. |
-| `baseUrl` | no | `https://inkbox.ai` | Override Inkbox API base URL. |
+| `baseUrl` | no | SDK default | Override Inkbox API base URL. |
 | `tunnelName` | no | identity handle | Override Inkbox tunnel name. |
 | `publicUrl` | no | - | Public OpenClaw URL. If omitted, the plugin opens an Inkbox tunnel. |
 | `allowedRecipients` | no | - | Outbound recipient allowlist. Empty means no local outbound filtering. |

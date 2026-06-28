@@ -495,14 +495,8 @@ describe("runSetupWizard", () => {
       scopedIdentityId: "identity-2",
       label: "openclaw-plugin-selected-agent",
     });
-    expect(sdk.Inkbox).toHaveBeenNthCalledWith(1, {
-      apiKey: "ApiKey_admin",
-      baseUrl: undefined,
-    });
-    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, {
-      apiKey: "ApiKey_agent_selected",
-      baseUrl: undefined,
-    });
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(1, { apiKey: "ApiKey_admin" });
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, { apiKey: "ApiKey_agent_selected" });
   });
 
   it("lets an admin-scoped API key create an identity and mints an agent key", async () => {
@@ -550,10 +544,7 @@ describe("runSetupWizard", () => {
       scopedIdentityId: "identity-new",
       label: "openclaw-plugin-new-agent",
     });
-    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, {
-      apiKey: "ApiKey_agent_new",
-      baseUrl: undefined,
-    });
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, { apiKey: "ApiKey_agent_new" });
   });
 
   it("uses and stores an OpenClaw OpenAI API-key auth profile for realtime calls", async () => {
@@ -755,7 +746,7 @@ describe("runSetupWizard", () => {
     expect(prompter.ask.mock.calls.map(([question]) => question)).toContain(
       "Paste your Inkbox API key (starts with ApiKey_)",
     );
-    expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_new", baseUrl: undefined });
+    expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_new" });
     expect(persistConfig).toHaveBeenCalledWith(
       {
         apiKey: "ApiKey_new",
@@ -918,7 +909,7 @@ describe("runSetupWizard", () => {
         agentHandle: "new-agent",
         displayName: "New Agent",
       },
-      { baseUrl: undefined },
+      {},
     );
     expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
       "Verification email note",
@@ -932,7 +923,7 @@ describe("runSetupWizard", () => {
     expect(sdk.verifySignup).toHaveBeenCalledWith(
       "ApiKey_signup",
       { verificationCode: "123456" },
-      { baseUrl: undefined },
+      {},
     );
   });
 

@@ -16,6 +16,7 @@ import JSON5 from "json5";
 import type { Prompter } from "./prompt.js";
 import { writeIdentityState, readIdentityState } from "./state.js";
 import { DEFAULT_ACCOUNT_ID, resolveInkboxAccount } from "./accounts.js";
+import { inkboxBaseUrlOptions, inkboxClientOptions } from "./sdk-options.js";
 import {
   inkboxCallWebsocketPath,
   inkboxWebhookPath,
@@ -1221,7 +1222,7 @@ async function runSelfSignup(params: {
         ...(agentHandle ? { agentHandle } : {}),
         ...(displayName ? { displayName } : {}),
       },
-      { baseUrl: params.env.INKBOX_BASE_URL },
+      inkboxBaseUrlOptions(params.env.INKBOX_BASE_URL),
     );
     console.log(`Created Inkbox agent ${signup.agentHandle} (${signup.emailAddress}).`);
     console.log(signup.message);
@@ -1229,7 +1230,7 @@ async function runSelfSignup(params: {
     await Inkbox.verifySignup(
       signup.apiKey,
       { verificationCode: code },
-      { baseUrl: params.env.INKBOX_BASE_URL },
+      inkboxBaseUrlOptions(params.env.INKBOX_BASE_URL),
     );
     console.log("Signup verified.");
     return { apiKey: signup.apiKey, identityHandle: signup.agentHandle };
@@ -1317,7 +1318,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   }
 
   const baseUrl = reconfigureExisting ? env.INKBOX_BASE_URL : (existingBaseUrl ?? env.INKBOX_BASE_URL);
-  const client = new Inkbox({ apiKey, baseUrl });
+  const client = new Inkbox(inkboxClientOptions(apiKey, baseUrl));
 
   // Step 2 — whoami to discover scope.
   let info;
@@ -1426,7 +1427,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   // Re-construct a client with the (possibly new) agent-scoped key so the
   // identity resolves under the right access.
   const agentClient = subtype === AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED
-    ? new Inkbox({ apiKey: agentApiKey, baseUrl })
+    ? new Inkbox(inkboxClientOptions(agentApiKey, baseUrl))
     : client;
   identity = await agentClient.getIdentity(identityHandle);
   await configureAgentAvatar({
