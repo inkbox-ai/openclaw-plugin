@@ -13,6 +13,7 @@ import {
 } from "./call-websocket.js";
 import { openInkboxTunnel } from "./inbound/tunnel.js";
 import { registerInboundHttpRoute } from "./inbound/http-route.js";
+import { wrapInboundHandlersWithBatching } from "./inbound/batch.js";
 import {
   configureInkboxIdentityDelivery,
   createInkboxSessionBridge,
@@ -97,11 +98,16 @@ export function registerInkboxPublicUrlInboundRoutes(api: any): void {
       channelRuntime: api.runtime?.channel,
       logger: api.logger,
     });
+    const handlers = wrapInboundHandlersWithBatching(
+      bridge.handlers,
+      account.config,
+      api.logger,
+    );
     registerInboundHttpRoute({
       api,
       path,
       signingKey: account.config.signingKey,
-      handlers: bridge.handlers,
+      handlers,
       allowedContactIds: account.config.allowedInboundContactIds,
       logger: api.logger,
     });
@@ -129,6 +135,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
     logger: ctx.log,
     getCallWebsocketUrl: () => callWebsocketUrl,
   });
+  const handlers = wrapInboundHandlersWithBatching(bridge.handlers, account.config, ctx.log);
 
   ctx.setStatus({
     accountId: account.accountId,
@@ -170,7 +177,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
     identityHandle: account.identity!,
     signingKey: account.config.signingKey,
     tunnelName: account.tunnelName,
-    handlers: bridge.handlers,
+    handlers,
     wsHandler: bridge.wsHandler,
     allowedContactIds: account.config.allowedInboundContactIds,
     logger: ctx.log,

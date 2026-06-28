@@ -1,4 +1,6 @@
 import type { IMessageWebhookPayload, TextWebhookPayload } from "@inkbox/sdk";
+import type { PluginLogger } from "../client.js";
+import type { InboundHandlers } from "./dispatch.js";
 
 export interface SmsBatchConfig {
   // Wait this many ms after the last text.received from a given remote
@@ -16,6 +18,10 @@ export const DEFAULT_SMS_BATCH: SmsBatchConfig = {
   maxMessages: 8,
   maxChars: 4000,
 };
+
+export interface InboundBatchingConfig {
+  sms?: Partial<SmsBatchConfig>;
+}
 
 // A flushed batch — what onText receives when batching is on. We emit a
 // synthesized payload that looks like a regular TextWebhookPayload with the
@@ -308,4 +314,53 @@ export class IMessageBatcher {
     const keys = Array.from(this.pending.keys());
     await Promise.all(keys.map((k) => this.flush(k)));
   }
+}
+
+export function wrapInboundHandlersWithBatching(
+  handlers: InboundHandlers,
+  cfg: InboundBatchingConfig | undefined,
+  logger?: PluginLogger,
+): InboundHandlers {
+  const batchDelayMs = cfg?.sms?.batchDelayMs ?? DEFAULT_SMS_BATCH.batchDelayMs;
+  if (batchDelayMs <= 0 || (!handlers.onText && !handlers.onIMessage)) {
+    return handlers;
+  }
+
+  const batchConfig: SmsBatchConfig = {
+    batchDelayMs,
+    maxMessages: cfg?.sms?.maxMessages ?? DEFAULT_SMS_BATCH.maxMessages,
+    maxChars: cfg?.sms?.maxChars ?? DEFAULT_SMS_BATCH.maxChars,
+  };
+  const wrappedHandlers = { ...handlers };
+
+  if (handlers.onText) {
+    const userOnText = handlers.onText;
+    const batcher = new SmsBatcher(batchConfig, async (batched) => {
+      await userOnText(batched);
+    });
+    wrappedHandlers.onText = async (event) => {
+      const accepted = batcher.accept(event as any);
+      if (!accepted) {
+        await userOnText(event);
+      }
+    };
+  }
+
+  if (handlers.onIMessage) {
+    const userOnIMessage = handlers.onIMessage;
+    const imessageBatcher = new IMessageBatcher(batchConfig, async (batched) => {
+      await userOnIMessage(batched);
+    });
+    wrappedHandlers.onIMessage = async (event) => {
+      const accepted = imessageBatcher.accept(event as any);
+      if (!accepted) {
+        await userOnIMessage(event);
+      }
+    };
+  }
+
+  logger?.info?.(
+    `Inkbox SMS/iMessage batching on (delay=${batchDelayMs}ms, maxMessages=${batchConfig.maxMessages}, maxChars=${batchConfig.maxChars}).`,
+  );
+  return wrappedHandlers;
 }
