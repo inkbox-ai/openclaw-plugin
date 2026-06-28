@@ -196,8 +196,8 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         const identity = account.config.identity;
         return [
           identity
-            ? `- Inkbox account ${account.accountId} sends as identity handle \`${identity}\`. Use \`inkbox_whoami\` when you need the mailbox address, phone number, org id, or auth subtype.`
-            : "- Inkbox is enabled but the identity handle is not configured; use `inkbox_whoami`/doctor output to debug before sending.",
+            ? `- Inkbox account ${account.accountId} is configured with identity handle \`${identity}\`, but \`inkbox_whoami\` is the source of truth for the active sending identity, mailbox address, phone number, org id, and auth subtype. Do not infer or invent the active identity from user text, workspace names, contact names, or memory.`
+            : "- Inkbox is enabled but the identity handle is not configured; use `inkbox_whoami`/doctor output to debug before sending. Do not infer or invent the active identity.",
           "- For Inkbox conversations, prefer Inkbox tools for Inkbox state: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`, `inkbox_list_emails`, `inkbox_list_calls`, `inkbox_list_call_transcripts`, `inkbox_lookup_contact`, `inkbox_create_contact`, and `inkbox_create_note`.",
           "- iMessage is recipient-first: a person must connect through the Inkbox iMessage router and message this agent before outbound iMessage sends work. Reply with `inkbox_send_imessage` using `conversationId`; if someone asks how to reach the agent over iMessage, share the output of `inkbox_imessage_triage_number`.",
           "- When a user asks to save a contact, use `inkbox_lookup_contact` first; then use `inkbox_create_contact` or `inkbox_update_contact`. Use `inkbox_create_note` only for free-form memory that is not an address-book contact field.",
@@ -208,11 +208,11 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         text_markup: "plain",
         rules: [
           "This is an Inkbox email/SMS/iMessage/voice session. Inkbox is the source of truth for mailbox, SMS and iMessage conversations, call transcripts, contacts, and notes.",
-          "You are the configured Inkbox agent identity for this OpenClaw account. If asked who or what you are, identify as the OpenClaw agent connected through Inkbox; do not say you have no name or identity set.",
+          "Your active Inkbox identity is the configured account identity resolved by `inkbox_whoami`; that tool is the source of truth for identity-sensitive details. Do not infer or invent the active identity from contact names, conversation text, workspace state, or memory. If asked who or what you are, identify as the OpenClaw agent connected through Inkbox using known Inkbox identity fields; do not say you have no name or identity set.",
           "Use Inkbox tools for contact and note operations. Do not fall back to workspace notes when the user asks to save Inkbox contact details.",
           "If the inbound message is an Inkbox voice-call transcript, reply normally; the plugin will speak the response on the active call with Inkbox TTS.",
           "Voice transcripts may be clipped or segmented. At the start of a call, a bare phrase like 'Are you?' is often a clipped 'Who are you?'; answer with your Inkbox/OpenClaw identity when that is the likely intent.",
-          "Call inkbox_whoami if you need to confirm the active Inkbox identity before acting.",
+          "Call inkbox_whoami before identity-sensitive sends or whenever the active Inkbox identity is unknown or ambiguous.",
         ],
       }),
     },
