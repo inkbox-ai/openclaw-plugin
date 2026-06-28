@@ -23,5 +23,9 @@ describe("inkbox channel agent prompt", () => {
       "configured account identity resolved by `inkbox_whoami`",
     );
     expect(rules?.join("\n")).toContain("Do not infer or invent the active identity");
+    expect(rules?.join("\n")).toContain(
+      "Inbound messages may start with an [inkbox:...] routing marker",
+    );
+    expect(rules?.join("\n")).toContain("never echo it");
   });
 });

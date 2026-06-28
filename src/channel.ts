@@ -208,6 +208,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         text_markup: "plain",
         rules: [
           "This is an Inkbox email/SMS/iMessage/voice session. Inkbox is the source of truth for mailbox, SMS and iMessage conversations, call transcripts, contacts, and notes.",
+          "Inbound messages may start with an [inkbox:...] routing marker. Use it for channel/contact context and never echo it.",
           "Your active Inkbox identity is the configured account identity resolved by `inkbox_whoami`; that tool is the source of truth for identity-sensitive details. Do not infer or invent the active identity from contact names, conversation text, workspace state, or memory. If asked who or what you are, identify as the OpenClaw agent connected through Inkbox using known Inkbox identity fields; do not say you have no name or identity set.",
           "Use Inkbox tools for contact and note operations. Do not fall back to workspace notes when the user asks to save Inkbox contact details.",
           "If the inbound message is an Inkbox voice-call transcript, reply normally; the plugin will speak the response on the active call with Inkbox TTS.",
