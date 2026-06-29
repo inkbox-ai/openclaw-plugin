@@ -1758,7 +1758,7 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.conversation.kind).toBe("group");
-    expect(run.ctxPayload.conversation.id).toBe("conv-group");
+    expect(run.ctxPayload.conversation.id).toBe("sms:conv-group");
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "you receive every message in this group so you can track context",
     );
@@ -1800,7 +1800,7 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.conversation.kind).toBe("group");
-    expect(run.ctxPayload.conversation.id).toBe("conv-group");
+    expect(run.ctxPayload.conversation.id).toBe("sms:conv-group");
     expect(run.ctxPayload.reply.to).toBe("sms:conv-group");
     expect(run.ctxPayload.extra.InkboxConversationId).toBe("conv-group");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Group SMS response policy");
@@ -1905,6 +1905,57 @@ describe("createInkboxSessionBridge", () => {
       text: "On my way!",
     });
     expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("resolves inbound iMessage contact via SDK lookup and injects Hermes-style marker", async () => {
+    const { runtime } = createRuntime();
+    (runtime.getClient as any).mockResolvedValue({
+      calls: {
+        get: vi.fn(async () => ({
+          remotePhoneNumber: "+15167251294",
+          direction: "inbound",
+        })),
+      },
+      contacts: {
+        lookup: vi.fn(async () => [
+          {
+            id: "contact-dima",
+            preferredName: "Dima",
+            companyName: "Inkbox",
+            jobTitle: "must not render",
+            notes: "must not render",
+            emails: [{ value: "dima@inkbox.ai" }],
+            phones: [{ value: "+15167251294" }],
+          },
+        ]),
+      },
+    });
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({ remote: "+15167251294", content: "Who am I?" }),
+    );
+
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    const body = run.ctxPayload.message.bodyForAgent;
+    expect(run.ctxPayload.conversation.id).toBe("contact-dima");
+    expect(body).toContain("contact_id=contact-dima");
+    expect(body).toContain('contact_name="Dima"');
+    expect(body).toContain('contact_company="Inkbox"');
+    expect(body).toContain("contact_emails=dima@inkbox.ai");
+    expect(body).toContain("contact_phones=+15167251294");
+    expect(body).not.toContain("contact_job_title");
+    expect(body).not.toContain("contact_notes");
   });
 
   it("rejects over-limit inbound iMessage replies before sending", async () => {

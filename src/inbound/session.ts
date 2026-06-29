@@ -518,17 +518,11 @@ function renderContactMarker(contact: ContactSummary | undefined): string {
   if (contact.company) {
     parts.push(`contact_company=${JSON.stringify(contact.company)}`);
   }
-  if (contact.jobTitle) {
-    parts.push(`contact_job_title=${JSON.stringify(contact.jobTitle)}`);
-  }
   if (contact.emails?.length) {
     parts.push(`contact_emails=${contact.emails.join(",")}`);
   }
   if (contact.phones?.length) {
     parts.push(`contact_phones=${contact.phones.join(",")}`);
-  }
-  if (contact.notes) {
-    parts.push(`contact_notes=${JSON.stringify(contact.notes)}`);
   }
   return parts.join(" ");
 }
@@ -1616,13 +1610,12 @@ async function dispatchInboundTurn(
   }
 
   const conversationKind = opts.turn.conversationKind ?? "direct";
-  // iMessage route ids carry their channel prefix: a bare conversation UUID
-  // parses as an SMS conversation on the outbound path, so a `message`-tool
-  // send targeting this peer would reply over the wrong channel.
+  const channelThreadRouteId =
+    opts.turn.conversationId
+      ? `${opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
+      : undefined;
   const conversationRouteId =
-    opts.turn.mode === "imessage" && opts.turn.conversationId
-      ? `imessage:${opts.turn.conversationId}`
-      : opts.turn.conversationId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
+    opts.turn.contact?.id ?? channelThreadRouteId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
   const { route, buildEnvelope } = resolveInboundRouteEnvelopeBuilderWithRuntime({
     cfg: opts.cfg as any,
     channel: "inkbox",
@@ -2515,12 +2508,7 @@ async function buildMailTurn(
     logger?.info?.(`Inkbox self-originated mail ignored without waking agent: from=${from}`);
     return null;
   }
-  const contactsList = Array.isArray(event.data.contacts) ? event.data.contacts : [];
-  const webhookContact = contactsList.find((entry) => entry?.bucket === "from");
-  const contact =
-    (await hydrateContact(runtime, webhookContact
-      ? { id: webhookContact.id, name: webhookContact.name }
-      : undefined)) ?? (await lookupContact(runtime, "email", from));
+  const contact = await lookupContact(runtime, "email", from);
   const contactKey = contact?.id ?? from;
   const bodyText = message.snippet || message.subject || "";
   const subjectPart = message.subject ? ` subject=${JSON.stringify(message.subject)}` : "";
@@ -2576,10 +2564,7 @@ async function buildTextTurn(
     : [];
   const isGroup = Boolean(summary?.isGroup) || participants.length > 1 ||
     contacts.length > 1 || agentIdentities.length > 1;
-  const contact =
-    (isGroup ? await lookupContact(runtime, "phone", remote) : undefined) ??
-    (await hydrateContact(runtime, firstWebhookContact(contacts))) ??
-    (await lookupContact(runtime, "phone", remote));
+  const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
   const mediaMarkers = textMediaMarkers(message.media);
   const text = [rawText, ...mediaMarkers].filter(Boolean).join("\n");
@@ -2654,9 +2639,7 @@ async function buildIMessageTurn(
     typeof conversationIdRaw === "string" && conversationIdRaw.trim()
       ? conversationIdRaw.trim()
       : undefined;
-  const contact =
-    (await hydrateContact(runtime, firstWebhookContact(webhookContacts(event.data)))) ??
-    (await lookupContact(runtime, "phone", remote));
+  const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
   const mediaMarkers = textMediaMarkers(message.media as any, "imessage_attachment");
   const text = [message.content ?? "", ...mediaMarkers].filter(Boolean).join("\n");
@@ -2718,9 +2701,7 @@ async function buildIMessageReactionTurn(
     (reactionType === "custom" && customEmoji
       ? `${reactionType}:${customEmoji}`
       : reactionType) || "unknown";
-  const contact =
-    (await hydrateContact(runtime, firstWebhookContact(webhookContacts(event.data)))) ??
-    (await lookupContact(runtime, "phone", remote));
+  const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
   const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
   const targetPart = targetMessageId ? ` target_message_id=${targetMessageId}` : "";
