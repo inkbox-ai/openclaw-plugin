@@ -22,8 +22,8 @@ export interface WebhookResponse {
 // entry point (tunnel Fetch handler, registerHttpRoute Node handler, raw
 // http server, test fixture) and returns the response to send.
 //
-// Verification order: required-headers check → dedup → HMAC verify → JSON
-// parse → dispatch. We dedup before crypto so replays short-circuit cheaply.
+// Verification order: required-headers check → HMAC verify → dedup → JSON
+// parse → dispatch. Do not let unauthenticated traffic poison dedup state.
 export async function handleInkboxWebhook(
   bodyText: string,
   headers: Record<string, string>,
@@ -40,11 +40,6 @@ export async function handleInkboxWebhook(
     return { status: 400, body: "missing inkbox webhook headers" };
   }
 
-  // Dedup before HMAC so retries are O(1).
-  if (opts.dedup?.has(requestId)) {
-    return { status: 200, body: "dup" };
-  }
-
   // verifyWebhook does the timing-safe compare over
   // "{requestId}.{timestamp}.{body}" with HMAC-SHA256.
   const valid = verifyWebhook({
@@ -57,17 +52,26 @@ export async function handleInkboxWebhook(
     return { status: 403, body: "invalid signature" };
   }
 
+  if (opts.dedup && !opts.dedup.begin(requestId)) {
+    return { status: 200, body: "dup" };
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(bodyText);
   } catch {
+    opts.dedup?.rollback(requestId);
     return { status: 400, body: "invalid json" };
   }
 
-  const result = await dispatchInbound(parsed, opts.handlers, opts.allowedContactIds);
-  // Remember only after a successful dispatch; if dispatch throws, we'd
-  // rather Inkbox retry than silently swallow the event.
-  opts.dedup?.remember(requestId);
+  let result: Awaited<ReturnType<typeof dispatchInbound>>;
+  try {
+    result = await dispatchInbound(parsed, opts.handlers, opts.allowedContactIds);
+  } catch (error) {
+    opts.dedup?.rollback(requestId);
+    throw error;
+  }
+  opts.dedup?.commit(requestId);
 
   // For inbound calls, the response body IS the routing decision.
   if (result.kind === "call") {

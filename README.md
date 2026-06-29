@@ -204,7 +204,7 @@ openclaw config set tools.allow '[
 
 ## Realtime Calls
 
-Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
+Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. Environment keys are setup-time discovery inputs unless the wizard validates and persists them into `channels.inkbox.voiceRealtime.providers.openai.apiKey`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
 
 ```bash
 export INKBOX_REALTIME_API_KEY="sk-..."

@@ -722,7 +722,7 @@ async function promptForOpenAiRealtimeConfig(params: {
   for (;;) {
     const useRealtime = await params.prompter.confirm(
       "Use OpenAI Realtime API for phone calls?",
-      Boolean(detected),
+      defaultOptIn,
     );
     if (!useRealtime) {
       console.log("OpenAI Realtime calls disabled. Calls will use Inkbox STT/TTS.");

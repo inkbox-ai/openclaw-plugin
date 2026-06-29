@@ -58,7 +58,7 @@ describe("handleInkboxWebhook", () => {
     expect(onMail).toHaveBeenCalledTimes(1);
   });
 
-  it("short-circuits duplicate request-ids before verifying", async () => {
+  it("short-circuits duplicate request-ids after verifying", async () => {
     const dedup = new RequestIdDedup();
     const onMail = vi.fn();
     const opts = {
@@ -76,9 +76,53 @@ describe("handleInkboxWebhook", () => {
     expect(second.body).toBe("dup");
     // Handler must not fire again.
     expect(onMail).toHaveBeenCalledTimes(1);
-    // Verify was not called the second time either — dedup short-circuits
-    // before crypto.
-    expect(vi.mocked(verifyWebhook)).toHaveBeenCalledTimes(1);
+    // HMAC still runs on duplicates so unauthenticated traffic cannot probe
+    // or poison dedup state.
+    expect(vi.mocked(verifyWebhook)).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an invalid signature poison dedup state", async () => {
+    const dedup = new RequestIdDedup();
+    const onMail = vi.fn();
+    const opts = {
+      signingKey: "whsec_x",
+      handlers: { onMail },
+      dedup,
+    };
+    vi.mocked(verifyWebhook).mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+    const first = await handleInkboxWebhook(mailBody, baseHeaders, opts);
+    expect(first.status).toBe(403);
+
+    const second = await handleInkboxWebhook(mailBody, baseHeaders, opts);
+    expect(second.status).toBe(200);
+    expect(onMail).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses concurrent duplicate request-ids while dispatch is in-flight", async () => {
+    const dedup = new RequestIdDedup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onMail = vi.fn(async () => {
+      await gate;
+    });
+    const opts = {
+      signingKey: "whsec_x",
+      handlers: { onMail },
+      dedup,
+    };
+
+    const first = handleInkboxWebhook(mailBody, baseHeaders, opts);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const second = await handleInkboxWebhook(mailBody, baseHeaders, opts);
+
+    expect(second.status).toBe(200);
+    expect(second.body).toBe("dup");
+    expect(onMail).toHaveBeenCalledTimes(1);
+    release();
+    await first;
   });
 
   it("returns 400 on invalid JSON body", async () => {

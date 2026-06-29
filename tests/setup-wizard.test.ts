@@ -677,11 +677,11 @@ describe("runSetupWizard", () => {
       "sk-good",
       "gpt-realtime-2",
     );
-    expect(
-      prompter.confirm.mock.calls.filter(
-        ([question]) => question === "Use OpenAI Realtime API for phone calls?",
-      ),
-    ).toHaveLength(2);
+    const realtimeConfirms = prompter.confirm.mock.calls.filter(
+      ([question]) => question === "Use OpenAI Realtime API for phone calls?",
+    );
+    expect(realtimeConfirms).toHaveLength(2);
+    expect(realtimeConfirms.map(([, defaultYes]) => defaultYes)).toEqual([false, true]);
   });
 
   it("validates OpenAI realtime access with the GA client-secret payload shape", async () => {
