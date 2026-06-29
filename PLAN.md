@@ -121,8 +121,8 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 - [x] Add `@inkbox/sdk/tunnels/connect` — dynamic import in `src/inbound/tunnel.ts` keeps it out of the main require graph (POSIX-only subpath).
 - [x] On plugin activation, open tunnel via `startInbound()` in `src/inbound/index.ts`. Fire-and-forget so outbound stays available even if the tunnel doesn't come up.
 - [x] Fetch-API handler in `src/inbound/tunnel.ts` reads body + lowercase headers, defers to the pure `handleInkboxWebhook()` in `src/inbound/handler.ts`.
-- [x] Pure handler verifies required headers (`x-inkbox-request-id`, `x-inkbox-signature`, `x-inkbox-timestamp`), checks dedup, calls `verifyWebhook()` from `@inkbox/sdk`, parses JSON, dispatches.
-- [x] Dedup in `src/inbound/dedup.ts` — bounded set (10k entries default) with LRU eviction. Replays short-circuit before HMAC.
+- [x] Pure handler verifies required headers (`x-inkbox-request-id`, `x-inkbox-signature`, `x-inkbox-timestamp`), calls `verifyWebhook()` from `@inkbox/sdk`, checks dedup, parses JSON, dispatches.
+- [x] Dedup in `src/inbound/dedup.ts` — in-flight suppression plus committed-id cache (10k entries default, 5-minute TTL). HMAC verification happens before dedup so invalid traffic cannot poison request-id state.
 - [ ] `publicUrl` config override path (skip tunnel for hosted OpenClaw) — Phase 7.
 
 ### Sub-phase 2b — Event dispatch
@@ -359,7 +359,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 
 ### Idempotency & dedup
 
-- [ ] `x-inkbox-request-id` LRU sized to 10k entries
+- [x] `x-inkbox-request-id` dedup sized to 10k committed entries with a 5-minute TTL and in-flight duplicate suppression
 - [ ] Outbound retries use `Idempotency-Key` (TBD on SDK support)
 
 ### Batching
@@ -571,7 +571,7 @@ openclaw-plugin/
 │   │   ├── tunnel.ts              # Phase 2a
 │   │   ├── handler.ts             # Phase 2a — Fetch handler + HMAC verify
 │   │   ├── dispatch.ts            # Phase 2b — event routing
-│   │   └── dedup.ts               # Phase 2a — request-id LRU
+│   │   └── dedup.ts               # Phase 2a — request-id dedup
 │   ├── channel/                   # Phase 2c
 │   │   ├── channel-plugin-api.ts
 │   │   ├── runtime-setter-api.ts

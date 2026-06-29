@@ -45,7 +45,7 @@ Initial scaffold and feature-complete agent-scoped tool surface, minus channel-p
   - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`, `inkbox_update_note` (opt), `inkbox_delete_note` (opt).
   - Vault: `inkbox_credentials_list` (opt), `inkbox_credentials_get_login` (opt), `inkbox_credentials_get_api_key` (opt), `inkbox_credentials_get_ssh_key` (opt), `inkbox_totp_code` (opt).
   - Diagnostic: `inkbox_whoami` (opt).
-- Inbound webhook delivery via Inkbox tunnel (`@inkbox/sdk/tunnels/connect`) with HMAC-SHA256 verification, request-id LRU dedup (10k entries), and event discrimination across mail/text/call payload shapes.
+- Inbound webhook delivery via Inkbox tunnel (`@inkbox/sdk/tunnels/connect`) with HMAC-SHA256 verification, request-id dedup with in-flight suppression, 10k committed-id cap, 5-minute TTL, and event discrimination across mail/text/call payload shapes.
 - CLI subcommand group `openclaw inkbox {doctor,whoami,setup}` (interactive setup still a stub).
 - Outbound recipient allowlist and inbound contact-id allowlist.
 - Lazy Inkbox SDK client with first-call `whoami()` preflight that warns on non-agent-scoped keys.
