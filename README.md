@@ -165,9 +165,6 @@ openclaw config set tools.allow '[
   "inkbox_list_imessage_assignments",
   "inkbox_send_imessage_reaction",
   "inkbox_mark_imessage_conversation_read",
-  "inkbox_update_contact",
-  "inkbox_delete_contact",
-  "inkbox_export_contact_vcard",
   "inkbox_update_note",
   "inkbox_delete_note",
   "inkbox_list_mail_contact_rules",
@@ -317,7 +314,7 @@ Required by default:
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
 - Voice reads: `inkbox_list_calls`, `inkbox_list_call_transcripts`
-- Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`
+- Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact`, `inkbox_delete_contact`
 - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`
 
 Optional:
@@ -325,7 +322,6 @@ Optional:
 - Outbound: `inkbox_forward_email`, `inkbox_place_call`
 - Lifecycle: `inkbox_mark_emails_read`, `inkbox_list_texts`, `inkbox_get_text`, `inkbox_mark_text_read`, `inkbox_mark_text_conversation_read`, `inkbox_mark_imessage_conversation_read`
 - iMessage: `inkbox_imessage_triage_number`, `inkbox_list_imessage_assignments`, `inkbox_send_imessage_reaction`
-- Contacts: `inkbox_update_contact`, `inkbox_delete_contact`, `inkbox_export_contact_vcard`
 - Notes: `inkbox_update_note`, `inkbox_delete_note`
 - Contact rules: `inkbox_list_mail_contact_rules`, `inkbox_create_mail_contact_rule`, `inkbox_update_mail_contact_rule`, `inkbox_delete_mail_contact_rule`, `inkbox_list_phone_contact_rules`, `inkbox_create_phone_contact_rule`, `inkbox_update_phone_contact_rule`, `inkbox_delete_phone_contact_rule`
 - Identity access: `inkbox_list_contact_access`, `inkbox_grant_contact_access`, `inkbox_revoke_contact_access`, `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`

@@ -257,18 +257,20 @@ Branch B — Existing agent-scoped key
 | `inkbox_list_calls` | `identity.listCalls({limit?, offset?})` | required |
 | `inkbox_list_call_transcripts` | `identity.listTranscripts(callId)` | required |
 
-### Contacts (access-scoped reads)
+### Contacts (access-scoped CRUD)
 
-The agent reads contacts it has access to via grants set by an admin in the Inkbox Console. We do **not** expose grant management here — that stays admin-only.
+The agent reads and writes contacts it has access to via grants set by an admin in the Inkbox Console. Grant management is separate from ordinary contact CRUD.
 
 | Tool | SDK | Optional? |
 |---|---|---|
 | `inkbox_lookup_contact` | `inkbox.contacts.lookup({email?, phone?, emailDomain?, emailContains?, phoneContains?})` | required |
 | `inkbox_get_contact` | `inkbox.contacts.get(contactId)` | required |
 | `inkbox_list_contacts` | `inkbox.contacts.list({q?, order?, limit?, offset?})` | required |
-| `inkbox_export_contact_vcard` | `inkbox.contacts.vcards.export(contactId)` | optional |
+| `inkbox_create_contact` | `inkbox.contacts.create({...})` | required |
+| `inkbox_update_contact` | `inkbox.contacts.update(contactId, {...})` | required |
+| `inkbox_delete_contact` | `inkbox.contacts.delete(contactId)` | required |
 
-> Note: with an agent-scoped key, the SDK already filters list/lookup/get results to contacts the agent has access to. We don't need to re-implement the filter.
+> Note: with an agent-scoped key, the SDK already filters contact operations to contacts the agent has access to. We don't need to re-implement the filter.
 
 ### Notes (access-scoped)
 
@@ -437,9 +439,8 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 - `inkbox_get_contact`
 - `inkbox_list_contacts`
 - `inkbox_create_contact`
-- `inkbox_update_contact` ✱
-- `inkbox_delete_contact` ✱
-- `inkbox_export_contact_vcard` ✱
+- `inkbox_update_contact`
+- `inkbox_delete_contact`
 - `inkbox_list_notes`
 - `inkbox_get_note`
 - `inkbox_create_note`
