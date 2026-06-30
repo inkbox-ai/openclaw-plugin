@@ -36,16 +36,16 @@ Initial scaffold and feature-complete agent-scoped tool surface, minus channel-p
 
 ### Added
 
-- Tool plugin entry (`index.ts`) registering 31 agent tools:
+  - Tool plugin entry (`index.ts`) registering 30 agent tools:
   - Outbound: `inkbox_send_email`, `inkbox_send_sms`, `inkbox_forward_email` (opt).
   - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`, `inkbox_mark_emails_read` (opt).
   - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_texts` (opt), `inkbox_get_text` (opt), `inkbox_mark_text_read` (opt), `inkbox_mark_text_conversation_read` (opt).
   - Call reads: `inkbox_list_calls`, `inkbox_list_call_transcripts`.
-  - Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_export_contact_vcard` (opt).
+  - Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact`, `inkbox_delete_contact`.
   - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`, `inkbox_update_note` (opt), `inkbox_delete_note` (opt).
   - Vault: `inkbox_credentials_list` (opt), `inkbox_credentials_get_login` (opt), `inkbox_credentials_get_api_key` (opt), `inkbox_credentials_get_ssh_key` (opt), `inkbox_totp_code` (opt).
   - Diagnostic: `inkbox_whoami` (opt).
-- Inbound webhook delivery via Inkbox tunnel (`@inkbox/sdk/tunnels/connect`) with HMAC-SHA256 verification, request-id LRU dedup (10k entries), and event discrimination across mail/text/call payload shapes.
+- Inbound webhook delivery via Inkbox tunnel (`@inkbox/sdk/tunnels/connect`) with HMAC-SHA256 verification, request-id dedup with in-flight suppression, 10k committed-id cap, 5-minute TTL, and event discrimination across mail/text/call payload shapes.
 - CLI subcommand group `openclaw inkbox {doctor,whoami,setup}` (interactive setup still a stub).
 - Outbound recipient allowlist and inbound contact-id allowlist.
 - Lazy Inkbox SDK client with first-call `whoami()` preflight that warns on non-agent-scoped keys.

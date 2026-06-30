@@ -15,6 +15,7 @@ vi.mock("../src/client.js", () => ({
 }));
 
 import { sendInkboxChannelText } from "../src/outbound.js";
+import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../src/message-limits.js";
 
 const cfg = {
   channels: {
@@ -66,6 +67,32 @@ describe("sendInkboxChannelText", () => {
       to: "+14155550123",
       text: "hi there",
     });
+  });
+
+  it("rejects over-limit iMessage text before sending", async () => {
+    await expect(
+      sendInkboxChannelText({
+        cfg,
+        to: "imessage:550e8400-e29b-41d4-a716-446655440000",
+        text: "x".repeat(IMESSAGE_MAX_TEXT_CHARS + 1),
+      }),
+    ).rejects.toThrow("iMessage text is 18996 characters");
+
+    expect(mockIdentity.sendIMessage).not.toHaveBeenCalled();
+    expect(mockIdentity.sendText).not.toHaveBeenCalled();
+  });
+
+  it("rejects over-limit SMS text before sending", async () => {
+    await expect(
+      sendInkboxChannelText({
+        cfg,
+        to: "+14155550123",
+        text: "x".repeat(SMS_MAX_TEXT_CHARS + 1),
+      }),
+    ).rejects.toThrow("SMS text is 1601 characters");
+
+    expect(mockIdentity.sendText).not.toHaveBeenCalled();
+    expect(mockIdentity.sendIMessage).not.toHaveBeenCalled();
   });
 
   it("preserves the Inkbox email thread subject for generic message replies", async () => {

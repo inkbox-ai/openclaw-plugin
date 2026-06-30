@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
+import { IMESSAGE_MAX_TEXT_CHARS, imessageTextTooLongMessage } from "../message-limits.js";
 
 // Outbound iMessage — recipient-first channel: a person must have connected
 // to this identity through the Inkbox iMessage router and messaged it before
@@ -32,8 +33,8 @@ export function registerSendIMessage(
       ),
       text: Type.Optional(
         Type.String({
-          maxLength: 10000,
-          description: "Message body. Provide `text`, `mediaUrls`, or both.",
+          maxLength: IMESSAGE_MAX_TEXT_CHARS,
+          description: "Message body, max 18995 chars. Provide `text`, `mediaUrls`, or both.",
         }),
       ),
       mediaUrls: Type.Optional(
@@ -70,6 +71,9 @@ export function registerSendIMessage(
         const mediaUrls = Array.isArray(params.mediaUrls) ? params.mediaUrls : undefined;
         if (!text && !mediaUrls?.length) {
           return toolError("Provide `text`, `mediaUrls`, or both.");
+        }
+        if (text.length > IMESSAGE_MAX_TEXT_CHARS) {
+          return toolError(imessageTextTooLongMessage(text));
         }
         const conversationId =
           typeof params.conversationId === "string" ? params.conversationId.trim() : "";

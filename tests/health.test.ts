@@ -112,10 +112,7 @@ describe("detectInkboxHealthFindings", () => {
       "inkbox/cached-state-missing",
       "inkbox/sms-not-ready",
     ]);
-    expect(sdk.Inkbox).toHaveBeenCalledWith({
-      apiKey: "ApiKey_test",
-      baseUrl: undefined,
-    });
+    expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_test" });
     expect(sdk.getIdentity).toHaveBeenCalledWith("agent");
   });
 

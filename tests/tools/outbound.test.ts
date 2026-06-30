@@ -4,6 +4,7 @@ import { registerSendSms } from "../../src/tools/send-sms.js";
 import { registerForwardEmail } from "../../src/tools/forward-email.js";
 import { registerPlaceCall } from "../../src/tools/place-call.js";
 import type { InkboxRuntime } from "../../src/client.js";
+import { SMS_MAX_TEXT_CHARS } from "../../src/message-limits.js";
 
 // Tiny harness — `api.registerTool` collects tools into a map so the test
 // can fetch the execute() fn by name and call it directly. Skips the
@@ -160,6 +161,22 @@ describe("registerSendSms", () => {
       text: "replying in-thread",
     });
     expect(out.content[0].text).toContain("conversation=conv-1");
+  });
+
+  it("rejects over-limit text before sending", async () => {
+    const { api, tools } = createApi();
+    const sendText = vi.fn();
+    registerSendSms(api, createMockRuntime({ sendText }));
+    const tool = tools.get("inkbox_send_sms")!;
+
+    const out = await tool.execute("turn-1", {
+      to: "+15551234567",
+      text: "x".repeat(SMS_MAX_TEXT_CHARS + 1),
+    });
+
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("SMS text is 1601 characters");
+    expect(sendText).not.toHaveBeenCalled();
   });
 
   it("blocks non-allowlisted recipient", async () => {

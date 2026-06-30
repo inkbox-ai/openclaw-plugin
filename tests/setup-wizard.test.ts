@@ -27,6 +27,8 @@ const sdk = vi.hoisted(() => {
   const whoami = vi.fn();
   const listIdentities = vi.fn();
   const getIdentity = vi.fn();
+  const sdkCreateIdentity = vi.fn();
+  const apiKeysCreate = vi.fn();
   const createSigningKey = vi.fn();
   const signup = vi.fn();
   const verifySignup = vi.fn();
@@ -41,6 +43,8 @@ const sdk = vi.hoisted(() => {
       whoami,
       listIdentities,
       getIdentity,
+      createIdentity: sdkCreateIdentity,
+      apiKeys: { create: apiKeysCreate },
       createSigningKey,
       mailboxes: { update: mailboxesUpdate },
       phoneNumbers: { update: phoneNumbersUpdate },
@@ -64,6 +68,8 @@ const sdk = vi.hoisted(() => {
     whoami,
     listIdentities,
     getIdentity,
+    createIdentity: sdkCreateIdentity,
+    apiKeysCreate,
     createSigningKey,
     signup,
     verifySignup,
@@ -154,6 +160,8 @@ beforeEach(async () => {
   sdk.whoami.mockReset();
   sdk.listIdentities.mockReset();
   sdk.getIdentity.mockReset();
+  sdk.createIdentity.mockReset();
+  sdk.apiKeysCreate.mockReset();
   sdk.createSigningKey.mockReset();
   sdk.createSigningKey.mockResolvedValue({ signingKey: "whsec_test" });
   sdk.signup.mockReset();
@@ -434,6 +442,111 @@ describe("runSetupWizard", () => {
     );
   });
 
+  it("lets an admin-scoped API key select an existing identity and mints an agent key", async () => {
+    const firstIdentity = createIdentity({
+      id: "identity-1",
+      agentHandle: "first-agent",
+      mailbox: { id: "mailbox-1", emailAddress: "first-agent@inkboxmail.com" },
+      tunnel: { publicHost: "first-agent.inkboxwire.com" },
+    });
+    const selectedIdentity = createIdentity({
+      id: "identity-2",
+      agentHandle: "selected-agent",
+      mailbox: { id: "mailbox-2", emailAddress: "selected-agent@inkboxmail.com" },
+      phoneNumber: {
+        id: "phone-2",
+        number: "+15551230002",
+        type: "local",
+        smsStatus: "ready",
+      },
+      tunnel: { publicHost: "selected-agent.inkboxwire.com" },
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "admin",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([
+      { agentHandle: "first-agent" },
+      { agentHandle: "selected-agent" },
+    ]);
+    sdk.getIdentity.mockImplementation(async (handle: string) => {
+      if (handle === "first-agent") return firstIdentity;
+      if (handle === "selected-agent") return selectedIdentity;
+      throw new Error(`unexpected identity ${handle}`);
+    });
+    sdk.apiKeysCreate.mockResolvedValue({ apiKey: "ApiKey_agent_selected" });
+    const prompter = createPrompter({ asks: ["2"], confirms: [false, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_admin", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config).toEqual(
+      expect.objectContaining({
+        apiKey: "ApiKey_agent_selected",
+        identity: "selected-agent",
+        signingKey: "whsec_test",
+      }),
+    );
+    expect(sdk.apiKeysCreate).toHaveBeenCalledWith({
+      scopedIdentityId: "identity-2",
+      label: "openclaw-plugin-selected-agent",
+    });
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(1, { apiKey: "ApiKey_admin" });
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, { apiKey: "ApiKey_agent_selected" });
+  });
+
+  it("lets an admin-scoped API key create an identity and mints an agent key", async () => {
+    const createdIdentity = createIdentity({
+      id: "identity-new",
+      agentHandle: "new-agent",
+      mailbox: { id: "mailbox-new", emailAddress: "new-agent@inkboxmail.com" },
+      phoneNumber: null,
+      tunnel: { publicHost: "new-agent.inkboxwire.com" },
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "admin",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([]);
+    sdk.createIdentity.mockResolvedValue(createdIdentity);
+    sdk.getIdentity.mockImplementation(async (handle: string) => {
+      if (handle === "new-agent") return createdIdentity;
+      throw new Error(`unexpected identity ${handle}`);
+    });
+    sdk.apiKeysCreate.mockResolvedValue({ apiKey: "ApiKey_agent_new" });
+    const prompter = createPrompter({
+      asks: ["new-agent", "New Agent"],
+      confirms: [false, false, true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_admin", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config).toEqual(
+      expect.objectContaining({
+        apiKey: "ApiKey_agent_new",
+        identity: "new-agent",
+        signingKey: "whsec_test",
+      }),
+    );
+    expect(sdk.createIdentity).toHaveBeenCalledWith("new-agent", {
+      displayName: "New Agent",
+    });
+    expect(sdk.apiKeysCreate).toHaveBeenCalledWith({
+      scopedIdentityId: "identity-new",
+      label: "openclaw-plugin-new-agent",
+    });
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, { apiKey: "ApiKey_agent_new" });
+  });
+
   it("uses and stores an OpenClaw OpenAI API-key auth profile for realtime calls", async () => {
     const identity = createIdentity();
     sdk.whoami.mockResolvedValue({
@@ -564,11 +677,11 @@ describe("runSetupWizard", () => {
       "sk-good",
       "gpt-realtime-2",
     );
-    expect(
-      prompter.confirm.mock.calls.filter(
-        ([question]) => question === "Use OpenAI Realtime API for phone calls?",
-      ),
-    ).toHaveLength(2);
+    const realtimeConfirms = prompter.confirm.mock.calls.filter(
+      ([question]) => question === "Use OpenAI Realtime API for phone calls?",
+    );
+    expect(realtimeConfirms).toHaveLength(2);
+    expect(realtimeConfirms.map(([, defaultYes]) => defaultYes)).toEqual([false, true]);
   });
 
   it("validates OpenAI realtime access with the GA client-secret payload shape", async () => {
@@ -633,7 +746,7 @@ describe("runSetupWizard", () => {
     expect(prompter.ask.mock.calls.map(([question]) => question)).toContain(
       "Paste your Inkbox API key (starts with ApiKey_)",
     );
-    expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_new", baseUrl: undefined });
+    expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_new" });
     expect(persistConfig).toHaveBeenCalledWith(
       {
         apiKey: "ApiKey_new",
@@ -796,7 +909,7 @@ describe("runSetupWizard", () => {
         agentHandle: "new-agent",
         displayName: "New Agent",
       },
-      { baseUrl: undefined },
+      {},
     );
     expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
       "Verification email note",
@@ -810,7 +923,7 @@ describe("runSetupWizard", () => {
     expect(sdk.verifySignup).toHaveBeenCalledWith(
       "ApiKey_signup",
       { verificationCode: "123456" },
-      { baseUrl: undefined },
+      {},
     );
   });
 

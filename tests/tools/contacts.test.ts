@@ -78,7 +78,7 @@ describe("registerContactTools", () => {
       phones: [{ value: "+15551234567", isPrimary: true }],
     });
 
-    expect(options.get("inkbox_update_contact")).toEqual({ optional: true });
+    expect(options.get("inkbox_update_contact")).toBeUndefined();
     expect(update).toHaveBeenCalledWith("contact-1", {
       notes: null,
       emails: null,
@@ -88,7 +88,7 @@ describe("registerContactTools", () => {
     expect(out.content[0].text).toContain("Updated contact id=contact-1");
   });
 
-  it("registers destructive contact delete as optional", async () => {
+  it("deletes contacts by id", async () => {
     const { api, tools, options } = createApi();
     const deleteContact = vi.fn().mockResolvedValue(undefined);
     registerContactTools(api, createMockRuntime({ delete: deleteContact }));
@@ -97,7 +97,7 @@ describe("registerContactTools", () => {
       contactId: "contact-1",
     });
 
-    expect(options.get("inkbox_delete_contact")).toEqual({ optional: true });
+    expect(options.get("inkbox_delete_contact")).toBeUndefined();
     expect(deleteContact).toHaveBeenCalledWith("contact-1");
     expect(out.isError).toBeUndefined();
     expect(out.content[0].text).toContain("Deleted contact contact-1");

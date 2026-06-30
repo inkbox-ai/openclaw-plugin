@@ -121,8 +121,8 @@ Most OpenClaw users run on a laptop without a public URL. We default to opening 
 - [x] Add `@inkbox/sdk/tunnels/connect` — dynamic import in `src/inbound/tunnel.ts` keeps it out of the main require graph (POSIX-only subpath).
 - [x] On plugin activation, open tunnel via `startInbound()` in `src/inbound/index.ts`. Fire-and-forget so outbound stays available even if the tunnel doesn't come up.
 - [x] Fetch-API handler in `src/inbound/tunnel.ts` reads body + lowercase headers, defers to the pure `handleInkboxWebhook()` in `src/inbound/handler.ts`.
-- [x] Pure handler verifies required headers (`x-inkbox-request-id`, `x-inkbox-signature`, `x-inkbox-timestamp`), checks dedup, calls `verifyWebhook()` from `@inkbox/sdk`, parses JSON, dispatches.
-- [x] Dedup in `src/inbound/dedup.ts` — bounded set (10k entries default) with LRU eviction. Replays short-circuit before HMAC.
+- [x] Pure handler verifies required headers (`x-inkbox-request-id`, `x-inkbox-signature`, `x-inkbox-timestamp`), calls `verifyWebhook()` from `@inkbox/sdk`, checks dedup, parses JSON, dispatches.
+- [x] Dedup in `src/inbound/dedup.ts` — in-flight suppression plus committed-id cache (10k entries default, 5-minute TTL). HMAC verification happens before dedup so invalid traffic cannot poison request-id state.
 - [ ] `publicUrl` config override path (skip tunnel for hosted OpenClaw) — Phase 7.
 
 ### Sub-phase 2b — Event dispatch
@@ -257,18 +257,20 @@ Branch B — Existing agent-scoped key
 | `inkbox_list_calls` | `identity.listCalls({limit?, offset?})` | required |
 | `inkbox_list_call_transcripts` | `identity.listTranscripts(callId)` | required |
 
-### Contacts (access-scoped reads)
+### Contacts (access-scoped CRUD)
 
-The agent reads contacts it has access to via grants set by an admin in the Inkbox Console. We do **not** expose grant management here — that stays admin-only.
+The agent reads and writes contacts it has access to via grants set by an admin in the Inkbox Console. Grant management is separate from ordinary contact CRUD.
 
 | Tool | SDK | Optional? |
 |---|---|---|
 | `inkbox_lookup_contact` | `inkbox.contacts.lookup({email?, phone?, emailDomain?, emailContains?, phoneContains?})` | required |
 | `inkbox_get_contact` | `inkbox.contacts.get(contactId)` | required |
 | `inkbox_list_contacts` | `inkbox.contacts.list({q?, order?, limit?, offset?})` | required |
-| `inkbox_export_contact_vcard` | `inkbox.contacts.vcards.export(contactId)` | optional |
+| `inkbox_create_contact` | `inkbox.contacts.create({...})` | required |
+| `inkbox_update_contact` | `inkbox.contacts.update(contactId, {...})` | required |
+| `inkbox_delete_contact` | `inkbox.contacts.delete(contactId)` | required |
 
-> Note: with an agent-scoped key, the SDK already filters list/lookup/get results to contacts the agent has access to. We don't need to re-implement the filter.
+> Note: with an agent-scoped key, the SDK already filters contact operations to contacts the agent has access to. We don't need to re-implement the filter.
 
 ### Notes (access-scoped)
 
@@ -359,7 +361,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 
 ### Idempotency & dedup
 
-- [ ] `x-inkbox-request-id` LRU sized to 10k entries
+- [x] `x-inkbox-request-id` dedup sized to 10k committed entries with a 5-minute TTL and in-flight duplicate suppression
 - [ ] Outbound retries use `Idempotency-Key` (TBD on SDK support)
 
 ### Batching
@@ -437,9 +439,8 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 - `inkbox_get_contact`
 - `inkbox_list_contacts`
 - `inkbox_create_contact`
-- `inkbox_update_contact` ✱
-- `inkbox_delete_contact` ✱
-- `inkbox_export_contact_vcard` ✱
+- `inkbox_update_contact`
+- `inkbox_delete_contact`
 - `inkbox_list_notes`
 - `inkbox_get_note`
 - `inkbox_create_note`
@@ -571,7 +572,7 @@ openclaw-plugin/
 │   │   ├── tunnel.ts              # Phase 2a
 │   │   ├── handler.ts             # Phase 2a — Fetch handler + HMAC verify
 │   │   ├── dispatch.ts            # Phase 2b — event routing
-│   │   └── dedup.ts               # Phase 2a — request-id LRU
+│   │   └── dedup.ts               # Phase 2a — request-id dedup
 │   ├── channel/                   # Phase 2c
 │   │   ├── channel-plugin-api.ts
 │   │   ├── runtime-setter-api.ts

@@ -8,8 +8,9 @@ import {
   type HealthRepairResult,
 } from "openclaw/plugin-sdk/health";
 import { resolveInkboxAccount } from "./accounts.js";
-import { readIdentityState, writeIdentityState } from "./state.js";
 import { inkboxWebhookPath, publicUrl as composePublicUrl } from "./call-websocket.js";
+import { inkboxClientOptions } from "./sdk-options.js";
+import { readIdentityState, writeIdentityState } from "./state.js";
 
 const SOURCE = "@inkbox/inkbox";
 
@@ -156,7 +157,7 @@ export async function detectInkboxHealthFindings(
     return findings;
   }
 
-  const client = new Inkbox({ apiKey: account.apiKey, baseUrl: account.baseUrl });
+  const client = new Inkbox(inkboxClientOptions(account.apiKey, account.baseUrl));
 
   try {
     const info = await client.whoami();
@@ -425,7 +426,7 @@ async function repairCachedState(
       changes: [],
     };
   }
-  const client = new Inkbox({ apiKey: account.apiKey, baseUrl: account.baseUrl });
+  const client = new Inkbox(inkboxClientOptions(account.apiKey, account.baseUrl));
   const identity = await client.getIdentity(account.identity);
   await writeIdentityState({
     identityHandle: account.identity,

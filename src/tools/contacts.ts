@@ -90,7 +90,7 @@ export function registerContactTools(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_get_contact",
     description:
-      "Fetch a single contact by UUID. Returns the full contact record (names, emails, phones, addresses, vCard fields).",
+      "Fetch a single contact by UUID. Returns the full contact record, including names, emails, phones, company, and notes.",
     parameters: Type.Object({
       contactId: Type.String({ description: "UUID of the contact." }),
     }),
@@ -163,70 +163,45 @@ export function registerContactTools(api: any, runtime: InkboxRuntime): void {
     },
   });
 
-  api.registerTool(
-    {
-      name: "inkbox_update_contact",
-      description:
-        "Update an Inkbox address-book contact by UUID. Use after lookup/get when the user asks to add or correct contact details.",
-      parameters: Type.Object({
-        contactId: Type.String({ description: "UUID of the contact to update." }),
-        preferredName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-        givenName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-        familyName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-        companyName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-        jobTitle: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-        notes: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-        emails: Type.Optional(Type.Union([Type.Array(contactEmailSchema), Type.Null()])),
-        phones: Type.Optional(Type.Union([Type.Array(contactPhoneSchema), Type.Null()])),
-      }),
-      async execute(_id: string, params: any) {
-        return runTool(async () => {
-          const inkbox = await runtime.getClient();
-          const payload = buildContactWritePayload(params);
-          if (params.emails === null) payload.emails = null;
-          if (params.phones === null) payload.phones = null;
-          const contact = await inkbox.contacts.update(params.contactId, payload as any);
-          return toolText(formatWithHeader(`Updated contact id=${contact.id}.`, contact));
-        });
-      },
+  api.registerTool({
+    name: "inkbox_update_contact",
+    description:
+      "Update an Inkbox address-book contact by UUID. Use after lookup/get when the user asks to add or correct contact details.",
+    parameters: Type.Object({
+      contactId: Type.String({ description: "UUID of the contact to update." }),
+      preferredName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      givenName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      familyName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      companyName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      jobTitle: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      notes: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      emails: Type.Optional(Type.Union([Type.Array(contactEmailSchema), Type.Null()])),
+      phones: Type.Optional(Type.Union([Type.Array(contactPhoneSchema), Type.Null()])),
+    }),
+    async execute(_id: string, params: any) {
+      return runTool(async () => {
+        const inkbox = await runtime.getClient();
+        const payload = buildContactWritePayload(params);
+        if (params.emails === null) payload.emails = null;
+        if (params.phones === null) payload.phones = null;
+        const contact = await inkbox.contacts.update(params.contactId, payload as any);
+        return toolText(formatWithHeader(`Updated contact id=${contact.id}.`, contact));
+      });
     },
-    { optional: true },
-  );
+  });
 
-  api.registerTool(
-    {
-      name: "inkbox_delete_contact",
-      description: "Delete an Inkbox address-book contact by UUID. Irreversible.",
-      parameters: Type.Object({
-        contactId: Type.String({ description: "UUID of the contact to delete." }),
-      }),
-      async execute(_id: string, params: any) {
-        return runTool(async () => {
-          const inkbox = await runtime.getClient();
-          await inkbox.contacts.delete(params.contactId);
-          return toolText(`Deleted contact ${params.contactId}.`);
-        });
-      },
+  api.registerTool({
+    name: "inkbox_delete_contact",
+    description: "Delete an Inkbox address-book contact by UUID. Irreversible.",
+    parameters: Type.Object({
+      contactId: Type.String({ description: "UUID of the contact to delete." }),
+    }),
+    async execute(_id: string, params: any) {
+      return runTool(async () => {
+        const inkbox = await runtime.getClient();
+        await inkbox.contacts.delete(params.contactId);
+        return toolText(`Deleted contact ${params.contactId}.`);
+      });
     },
-    { optional: true },
-  );
-
-  api.registerTool(
-    {
-      name: "inkbox_export_contact_vcard",
-      description:
-        "Export a single contact as a vCard 4.0 string. Useful for handing a contact off to another system or saving to disk.",
-      parameters: Type.Object({
-        contactId: Type.String({ description: "UUID of the contact to export." }),
-      }),
-      async execute(_id: string, params: any) {
-        return runTool(async () => {
-          const inkbox = await runtime.getClient();
-          const vcf = await inkbox.contacts.vcards.export(params.contactId);
-          return toolText(`vCard for contact ${params.contactId}:\n\n${vcf}`);
-        });
-      },
-    },
-    { optional: true },
-  );
+  });
 }

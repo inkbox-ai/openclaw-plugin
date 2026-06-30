@@ -1,5 +1,6 @@
 import { Inkbox } from "@inkbox/sdk";
 import { resolveInkboxAccount } from "./accounts.js";
+import { inkboxClientOptions } from "./sdk-options.js";
 import { readIdentityState } from "./state.js";
 
 // CLI registrar — called by OpenClaw with a commander-style `program` so we
@@ -87,7 +88,7 @@ async function runDoctor(options: InkboxCliOptions = {}): Promise<void> {
   console.log(`Config (${cfg.source}):`);
   console.log(fmt("apiKey", cfg.apiKey, true));
   console.log(fmt("identity", cfg.identity));
-  console.log(fmt("baseUrl", cfg.baseUrl ?? "(default: https://inkbox.ai)"));
+  console.log(fmt("baseUrl", cfg.baseUrl ?? "(SDK default)"));
   console.log(fmt("signingKey", cfg.signingKey, true));
   console.log();
 
@@ -102,7 +103,7 @@ async function runDoctor(options: InkboxCliOptions = {}): Promise<void> {
   // Section 2: live API check.
   console.log("Live API check:");
   try {
-    const client = new Inkbox({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+    const client = new Inkbox(inkboxClientOptions(cfg.apiKey, cfg.baseUrl));
     const info = await client.whoami();
     console.log(`  authType: ${info.authType}`);
     if (info.authType === "api_key") {
@@ -155,7 +156,7 @@ async function runWhoami(options: InkboxCliOptions = {}): Promise<void> {
     return;
   }
   try {
-    const client = new Inkbox({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+    const client = new Inkbox(inkboxClientOptions(cfg.apiKey, cfg.baseUrl));
     const info = await client.whoami();
     // Single-line summary — handy for shell scripting.
     if (info.authType === "api_key") {

@@ -13,7 +13,7 @@ import {
   buildRealtimeVoiceAgentConsultChatMessage,
   buildRealtimeVoiceAgentConsultPolicyInstructions,
   createRealtimeVoiceBridgeSession,
-  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME as OPENCLAW_REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
   resolveConfiguredRealtimeVoiceProvider,
   resolveRealtimeVoiceAgentConsultToolPolicy,
@@ -24,6 +24,7 @@ import {
 } from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
+import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../message-limits.js";
 import {
   consumeOutboundCallContextFromUrl,
   type OutboundCallContext,
@@ -161,10 +162,11 @@ const REALTIME_AUDIO_START_BUFFER_CHUNKS = 8;
 const REALTIME_AUDIO_MAX_START_BUFFER_MS = 160;
 const REALTIME_AUDIO_STALE_CLOCK_MS = TELEPHONY_CHUNK_MS * 2;
 const REALTIME_GREETING_INPUT_SUPPRESSION_MS = 700;
-const REALTIME_POST_CALL_ACTION_TOOL_NAME = "inkbox_register_post_call_action";
-const REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME = "inkbox_edit_post_call_action";
-const REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME = "inkbox_delete_post_call_action";
-const REALTIME_HANG_UP_CALL_TOOL_NAME = "inkbox_hang_up_call";
+const REALTIME_CONSULT_TOOL_NAME = "consult_agent";
+const REALTIME_POST_CALL_ACTION_TOOL_NAME = "register_post_call_action";
+const REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME = "edit_post_call_action";
+const REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME = "delete_post_call_action";
+const REALTIME_HANG_UP_CALL_TOOL_NAME = "hang_up_call";
 const REALTIME_HANGUP_CONFIRM_WINDOW_MS = 60 * 1000;
 const REALTIME_HANGUP_CLOSE_DELAY_MS = 2000;
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
@@ -183,6 +185,28 @@ const voiceAgentPrewarmState = new Map<
     lastCompletedAt?: number;
   }
 >();
+
+function standardizeRealtimeToolText(text: string | undefined): string {
+  return (text ?? "")
+    .split(OPENCLAW_REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME).join(REALTIME_CONSULT_TOOL_NAME)
+    .split("inkbox_register_post_call_action").join(REALTIME_POST_CALL_ACTION_TOOL_NAME)
+    .split("inkbox_edit_post_call_action").join(REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME)
+    .split("inkbox_delete_post_call_action").join(REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME)
+    .split("inkbox_hang_up_call").join(REALTIME_HANG_UP_CALL_TOOL_NAME)
+    .split("actionIndex").join("action_index");
+}
+
+function standardizeRealtimeTools(tools: RealtimeVoiceTool[]): RealtimeVoiceTool[] {
+  return tools.map((tool) =>
+    tool.name === OPENCLAW_REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME
+      ? {
+          ...tool,
+          name: REALTIME_CONSULT_TOOL_NAME,
+          description: standardizeRealtimeToolText(String(tool.description ?? "")),
+        }
+      : tool,
+  );
+}
 
 function parseTimestamp(value: string | null | undefined): number | undefined {
   if (!value) {
@@ -494,17 +518,11 @@ function renderContactMarker(contact: ContactSummary | undefined): string {
   if (contact.company) {
     parts.push(`contact_company=${JSON.stringify(contact.company)}`);
   }
-  if (contact.jobTitle) {
-    parts.push(`contact_job_title=${JSON.stringify(contact.jobTitle)}`);
-  }
   if (contact.emails?.length) {
     parts.push(`contact_emails=${contact.emails.join(",")}`);
   }
   if (contact.phones?.length) {
     parts.push(`contact_phones=${contact.phones.join(",")}`);
-  }
-  if (contact.notes) {
-    parts.push(`contact_notes=${JSON.stringify(contact.notes)}`);
   }
   return parts.join(" ");
 }
@@ -835,7 +853,7 @@ async function sendVoiceText(
 }
 
 export const IMESSAGE_TYPING_REFRESH_MS = 40_000;
-export const IMESSAGE_TYPING_MAX_MS = 300_000;
+export const IMESSAGE_TYPING_MAX_MS = 600_000;
 
 export interface IMessageTypingPulse {
   start(conversationId: string | undefined): void;
@@ -972,8 +990,9 @@ async function deliverReply(
     return undefined;
   }
 
-  const identity = await params.runtime.getIdentity();
   if (params.turn.mode === "imessage") {
+    assertIMessageTextWithinLimit(text);
+    const identity = await params.runtime.getIdentity();
     const conversationId = params.turn.conversationId?.trim();
     if (!conversationId && !params.turn.remoteAddress) {
       throw new Error("Inkbox iMessage reply missing conversation id and remote number.");
@@ -993,6 +1012,8 @@ async function deliverReply(
     return msg.id;
   }
   if (params.turn.mode === "sms") {
+    assertSmsTextWithinLimit(text);
+    const identity = await params.runtime.getIdentity();
     const conversationId = params.turn.conversationId?.trim();
     if (!conversationId && !params.turn.remoteAddress) {
       throw new Error("Inkbox SMS reply missing remote phone number.");
@@ -1007,6 +1028,7 @@ async function deliverReply(
   if (!params.turn.remoteAddress) {
     throw new Error("Inkbox email reply missing remote email address.");
   }
+  const identity = await params.runtime.getIdentity();
   const subject = params.turn.subject
     ? params.turn.subject.toLowerCase().startsWith("re:")
       ? params.turn.subject
@@ -1130,7 +1152,7 @@ function realtimePostCallActionTool(): RealtimeVoiceTool {
     type: "function",
     name: REALTIME_POST_CALL_ACTION_TOOL_NAME,
     description:
-      "Register deferred work the main OpenClaw Inkbox agent must do after this phone call ends, such as sending an email/SMS follow-up, creating a note, or updating a contact. Do not use this for work the caller wants done now during the live call if openclaw_agent_consult can perform it.",
+      `Register deferred work the main OpenClaw Inkbox agent must do after this phone call ends, such as sending an email/SMS follow-up, creating a note, or updating a contact. Do not use this for work the caller wants done now during the live call if ${REALTIME_CONSULT_TOOL_NAME} can perform it.`,
     parameters: {
       type: "object",
       properties: {
@@ -1144,10 +1166,6 @@ function realtimePostCallActionTool(): RealtimeVoiceTool {
           description:
             "Optional extra details, draft text, recipient hints, or constraints from the call.",
         },
-        requestedBy: {
-          type: "string",
-          description: "Optional short label for who requested this action.",
-        },
       },
       required: ["action"],
     },
@@ -1159,11 +1177,11 @@ function realtimeEditPostCallActionTool(): RealtimeVoiceTool {
     type: "function",
     name: REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME,
     description:
-      "Edit work previously registered for after this phone call ends. Use the one-based actionIndex returned by inkbox_register_post_call_action when the caller changes the recipient, channel, wording, or scope.",
+      `Edit work previously registered for after this phone call ends. Use the one-based action_index returned by ${REALTIME_POST_CALL_ACTION_TOOL_NAME} when the caller changes the recipient, channel, wording, or scope.`,
     parameters: {
       type: "object",
       properties: {
-        actionIndex: {
+        action_index: {
           type: "integer",
           minimum: 1,
           description: "One-based index of the queued post-call action to edit.",
@@ -1178,7 +1196,7 @@ function realtimeEditPostCallActionTool(): RealtimeVoiceTool {
             "Replacement optional draft text, hints, or constraints. Pass an empty string to clear details.",
         },
       },
-      required: ["actionIndex"],
+      required: ["action_index"],
     },
   };
 }
@@ -1192,13 +1210,13 @@ function realtimeDeletePostCallActionTool(): RealtimeVoiceTool {
     parameters: {
       type: "object",
       properties: {
-        actionIndex: {
+        action_index: {
           type: "integer",
           minimum: 1,
           description: "One-based index of the queued post-call action to delete.",
         },
       },
-      required: ["actionIndex"],
+      required: ["action_index"],
     },
   };
 }
@@ -1208,7 +1226,7 @@ function realtimeHangUpCallTool(): RealtimeVoiceTool {
     type: "function",
     name: REALTIME_HANG_UP_CALL_TOOL_NAME,
     description:
-      "End the live phone call. This is a two-step tool: the first call does not hang up, it prompts you to say a short goodbye. After you have said goodbye, call inkbox_hang_up_call a second time to actually end the call.",
+      `End the live phone call. This is a two-step tool: the first call does not hang up, it prompts you to say a short goodbye. After you have said goodbye, call ${REALTIME_HANG_UP_CALL_TOOL_NAME} a second time to actually end the call.`,
     parameters: {
       type: "object",
       properties: {
@@ -1227,10 +1245,12 @@ function buildRealtimeInstructions(
   meta: RealtimeCallMeta,
 ): string {
   const config = resolveRealtimeConfig(account);
-  const policyInstructions = buildRealtimeVoiceAgentConsultPolicyInstructions({
-    toolPolicy: config.toolPolicy,
-    consultPolicy: config.consultPolicy,
-  });
+  const policyInstructions = standardizeRealtimeToolText(
+    buildRealtimeVoiceAgentConsultPolicyInstructions({
+      toolPolicy: config.toolPolicy,
+      consultPolicy: config.consultPolicy,
+    }),
+  );
   const contactInfo = renderRealtimeContactInfo(meta.contact);
   return [
     "You are the configured OpenClaw agent speaking on a live Inkbox phone call.",
@@ -1256,13 +1276,13 @@ function buildRealtimeInstructions(
     meta.outboundContext
       ? "For outbound calls, do not open with a generic offer to help. Start by explaining why you are calling, then ask the next specific question or give the requested update."
       : undefined,
-    "If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call openclaw_agent_consult. This includes sending SMS/email, reading SMS/email/call history, creating notes, or updating contacts. Do not say it cannot be done unless the consult result says it cannot be done.",
+    `If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call ${REALTIME_CONSULT_TOOL_NAME}. This includes sending SMS/email, reading SMS/email/call history, creating notes, or updating contacts. Do not say it cannot be done unless the consult result says it cannot be done.`,
     `If the caller explicitly asks for work to happen after the call or accepts an after-call deferral, call ${REALTIME_POST_CALL_ACTION_TOOL_NAME}. Tell the caller the action is queued for after the call; do not claim it has already been completed.`,
-    `If the caller changes, cancels, or no longer needs previously queued after-call work, call ${REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME} or ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} using the actionIndex returned when the work was queued.`,
-    `If openclaw_agent_consult completes or queues work that matches a previously registered after-call action, call ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} for that action so it is not executed twice after hangup.`,
+    `If the caller changes, cancels, or no longer needs previously queued after-call work, call ${REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME} or ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} using the action_index returned when the work was queued.`,
+    `If ${REALTIME_CONSULT_TOOL_NAME} completes or queues work that matches a previously registered after-call action, call ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} for that action so it is not executed twice after hangup.`,
     `If the caller asks to hang up, says goodbye, or the conversation is clearly complete, call ${REALTIME_HANG_UP_CALL_TOOL_NAME}. The first call arms hangup and asks you to say goodbye; after the goodbye, call it once more to end the phone call.`,
-    "Call openclaw_agent_consult only after the caller asks for contact edits, notes, email/SMS/call-history reads, workspace/memory/current-info, or other tool work that must happen during the call.",
-    "Do not call openclaw_agent_consult just to greet, identify yourself, identify the caller, or fill call-start context.",
+    `Call ${REALTIME_CONSULT_TOOL_NAME} only after the caller asks for contact edits, notes, email/SMS/call-history reads, workspace/memory/current-info, or other tool work that must happen during the call.`,
+    `Do not call ${REALTIME_CONSULT_TOOL_NAME} just to greet, identify yourself, identify the caller, or fill call-start context.`,
     config.instructions,
     policyInstructions,
   ]
@@ -1590,13 +1610,12 @@ async function dispatchInboundTurn(
   }
 
   const conversationKind = opts.turn.conversationKind ?? "direct";
-  // iMessage route ids carry their channel prefix: a bare conversation UUID
-  // parses as an SMS conversation on the outbound path, so a `message`-tool
-  // send targeting this peer would reply over the wrong channel.
+  const channelThreadRouteId =
+    opts.turn.conversationId
+      ? `${opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
+      : undefined;
   const conversationRouteId =
-    opts.turn.mode === "imessage" && opts.turn.conversationId
-      ? `imessage:${opts.turn.conversationId}`
-      : opts.turn.conversationId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
+    opts.turn.contact?.id ?? channelThreadRouteId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
   const { route, buildEnvelope } = resolveInboundRouteEnvelopeBuilderWithRuntime({
     cfg: opts.cfg as any,
     channel: "inkbox",
@@ -1815,7 +1834,7 @@ async function runRealtimeAgentConsult(
       },
     },
     turn: {
-      mode: "voice",
+      mode: "sms",
       contactKey: opts.meta.contactKey,
       contact: opts.meta.contact,
       fromLabel: opts.meta.fromLabel,
@@ -1843,7 +1862,6 @@ async function runRealtimeAgentConsult(
         .join("\n\n"),
       messageId: `call:${opts.meta.callId}:realtime-tool:${opts.toolEvent.callId}`,
       replyToId: opts.toolEvent.callId,
-      threadId: opts.meta.direction === "outbound" ? undefined : `call:${opts.meta.callId}`,
       timestamp: Date.now(),
       raw: {
         event: "realtime_tool_call",
@@ -1860,7 +1878,7 @@ async function runRealtimeAgentConsult(
   };
   if (opts.postCallActions.length > 0) {
     response.postCallActionGuidance =
-      "If this result completed, queued, canceled, or superseded a pending after-call action, call inkbox_delete_post_call_action for that actionIndex before the call ends.";
+      `If this result completed, queued, canceled, or superseded a pending after-call action, call ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} for that action_index before the call ends.`;
   }
   return response;
 }
@@ -1921,9 +1939,9 @@ function registerRealtimePostCallAction(
   actions.push(value);
   return {
     status: "registered",
-    actionId: value.id,
-    actionIndex: actions.length,
-    actionCount: actions.length,
+    action_id: value.id,
+    action_index: actions.length,
+    action_count: actions.length,
     message:
       "Post-call action registered. Tell the caller it is queued for after the call, not completed yet.",
   };
@@ -1936,8 +1954,8 @@ function editRealtimePostCallAction(
   const actionIndex = readPostCallActionIndex(toolEvent.args);
   if (actionIndex < 1 || actionIndex > actions.length) {
     return {
-      error: "invalid actionIndex",
-      actionCount: actions.length,
+      error: "invalid action_index",
+      action_count: actions.length,
     };
   }
 
@@ -1962,9 +1980,9 @@ function editRealtimePostCallAction(
 
   return {
     status: "updated",
-    actionId: queued.id,
-    actionIndex,
-    actionCount: actions.length,
+    action_id: queued.id,
+    action_index: actionIndex,
+    action_count: actions.length,
     action: queued,
     message:
       "Queued after-call action updated. If the caller needs to know, confirm briefly that the queued work was changed.",
@@ -1978,30 +1996,31 @@ function deleteRealtimePostCallAction(
   const actionIndex = readPostCallActionIndex(toolEvent.args);
   if (actionIndex < 1 || actionIndex > actions.length) {
     return {
-      error: "invalid actionIndex",
-      actionCount: actions.length,
+      error: "invalid action_index",
+      action_count: actions.length,
     };
   }
 
   const deleted = actions.splice(actionIndex - 1, 1)[0];
   return {
     status: "deleted",
-    deletedAction: deleted,
-    actionIndex,
-    actionCount: actions.length,
-    remainingActions: [...actions],
+    deleted_action: deleted,
+    action_index: actionIndex,
+    action_count: actions.length,
+    remaining_actions: [...actions],
     message:
       "Queued after-call action deleted. If the caller needs to know, confirm briefly that it was canceled.",
   };
 }
 
-function realtimeAgentConsultWorkingResponse(): Record<string, unknown> {
-  return {
-    status: "working",
-    tool: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
-    message:
-      "If you need to acknowledge the caller, say only 'One moment.' Do not mention context lookup, waiting for context, or checking context.",
-  };
+function speakRealtimeAgentConsultWorkingCue(session: RealtimeVoiceBridgeSession): void {
+  try {
+    session.sendUserMessage(
+      "Say only 'One moment.' Do not mention context lookup, waiting for context, or checking context.",
+    );
+  } catch {
+    // The final tool result remains authoritative; this cue is only to avoid dead air.
+  }
 }
 
 function renderPostCallActions(actions: RealtimePostCallAction[]): string {
@@ -2027,12 +2046,10 @@ async function runRealtimePostCallActions(
     actions: RealtimePostCallAction[];
   },
 ): Promise<void> {
-  if (opts.actions.length === 0) {
-    return;
-  }
   const fullTranscript = renderRealtimeTranscript(opts.transcript, { limit: "all" });
   const consultResults = renderRealtimeConsultResults(opts.consultResults);
   const visibleText: string[] = [];
+  const hasQueuedActions = opts.actions.length > 0;
   await dispatchInboundTurn({
     ...opts,
     activeCalls: opts.activeCalls,
@@ -2064,32 +2081,117 @@ async function runRealtimePostCallActions(
       contact: opts.meta.contact,
       fromLabel: opts.meta.fromLabel,
       remoteAddress: opts.meta.remotePhoneNumber,
-      body: [
-        `[inkbox:voice_post_call_actions call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
-        "The realtime voice call ended. Review these queued post-call actions and execute only the actions that are still needed.",
-        "These actions were registered during the live call and may be stale. Before doing anything, reconcile them against the full live-call transcript, in-call OpenClaw consult results, and prior messages in this session.",
-        "If an action was already completed or queued during the call, canceled, superseded, or the caller said it already happened, do not perform it again. A same-channel in-call consult result that says an SMS/email was sent or queued counts as already handled.",
-        "Do not merely say still-needed actions are impossible. If an email/SMS/note/contact update is still needed and enough recipient/content info is present, perform it.",
-        "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
-        "Only if required information is missing, ask the caller for the missing information. Try SMS first; if SMS is unavailable or not opted in, try email; if email is unavailable, place a follow-up call with the question.",
-        renderPostCallActions(opts.actions),
-        consultResults ? `In-call OpenClaw consult results:\n${consultResults}` : undefined,
-        fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
-      ]
+      body: (
+        hasQueuedActions
+          ? [
+              `[inkbox:voice_post_call_actions call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} | ${renderContactMarker(opts.meta.contact)}]`,
+              "The realtime voice call ended. Review these queued post-call actions and execute only the actions that are still needed.",
+              "These actions were registered during the live call and may be stale. Before doing anything, reconcile them against the full live-call transcript, in-call OpenClaw consult results, and prior messages in this session.",
+              "If an action was already completed or queued during the call, canceled, superseded, or the caller said it already happened, do not perform it again. A same-channel in-call consult result that says an SMS/email was sent or queued counts as already handled.",
+              "Do not merely say still-needed actions are impossible. If an email/SMS/note/contact update is still needed and enough recipient/content info is present, perform it.",
+              "Do not send a confirmation follow-up after successful work unless the caller explicitly requested one.",
+              "Only if required information is missing, ask the caller for the missing information. Try SMS first; if SMS is unavailable or not opted in, try email; if email is unavailable, place a follow-up call with the question.",
+              renderPostCallActions(opts.actions),
+              consultResults ? `In-call OpenClaw consult results:\n${consultResults}` : undefined,
+              fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
+            ]
+          : [
+              `[inkbox:voice_call call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} status=ended mode=realtime | ${renderContactMarker(opts.meta.contact)}]`,
+              "[call_ended] The realtime voice call has ended. Reflect on what just happened and decide if any follow-up actions are needed.",
+              "If you committed to anything during the call, perform that now via tool calls.",
+              "Do not redo work that was already completed on the call. Do not repeat SMS, email, note, contact, or call-history work that an in-call consult result says it sent, queued, canceled, completed, or superseded.",
+              "Only perform follow-up if the caller explicitly asked for it, you clearly committed to it, and it was not already handled during the call.",
+              "If there is nothing still needed, return [SILENT]. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
+              consultResults ? `In-call OpenClaw consult results:\n${consultResults}` : undefined,
+              fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
+            ]
+      )
         .filter(Boolean)
         .join("\n\n"),
-      messageId: `call:${opts.meta.callId}:post-call-actions`,
+      messageId: hasQueuedActions
+        ? `call:${opts.meta.callId}:post-call-actions`
+        : `call:${opts.meta.callId}:call-ended`,
       replyToId: opts.meta.callId,
       threadId: opts.meta.direction === "outbound" ? undefined : `call:${opts.meta.callId}`,
       timestamp: Date.now(),
       raw: {
-        event: "realtime_post_call_actions",
+        event: hasQueuedActions ? "realtime_post_call_actions" : "realtime_call_ended",
         actions: opts.actions,
       },
     },
   });
   opts.logger?.info?.(
-    `Inkbox realtime post-call actions dispatched: call_id=${opts.meta.callId} actions=${opts.actions.length} captured_reply_chars=${visibleText.join("\n").length}`,
+    `Inkbox realtime post-call ${hasQueuedActions ? "actions" : "reflection"} dispatched: call_id=${opts.meta.callId} actions=${opts.actions.length} captured_reply_chars=${visibleText.join("\n").length}`,
+  );
+}
+
+async function runSttTtsCallEndedReflection(
+  opts: InkboxSessionBridgeOptions & {
+    activeCalls: Map<string, ActiveCall>;
+    meta: RealtimeCallMeta;
+    transcript: RealtimeTranscriptEntry[];
+  },
+): Promise<void> {
+  if (opts.transcript.length === 0) {
+    return;
+  }
+  const fullTranscript = renderRealtimeTranscript(opts.transcript, { limit: "all" });
+  const visibleText: string[] = [];
+  await dispatchInboundTurn({
+    ...opts,
+    activeCalls: opts.activeCalls,
+    replyOptionsOverride: {
+      sourceReplyDeliveryMode: "automatic",
+      bootstrapContextMode: "lightweight",
+      fastModeOverride: true,
+      thinkingLevelOverride: "minimal",
+      suppressDefaultToolProgressMessages: true,
+    },
+    deliveryOverride: {
+      deliver: async (payload: unknown) => {
+        const text = payloadText(payload).trim();
+        if (text) {
+          visibleText.push(text);
+        }
+        // Call-ended reflection is for follow-up side effects only; never speak
+        // or message a summary back to the caller by default.
+        return { visibleReplySent: Boolean(text) };
+      },
+      onError: (error: unknown) => {
+        opts.logger?.warn?.(
+          `Inkbox STT/TTS call-ended reflection delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    },
+    turn: {
+      mode: "sms",
+      contactKey: opts.meta.contactKey,
+      contact: opts.meta.contact,
+      fromLabel: opts.meta.fromLabel,
+      remoteAddress: opts.meta.remotePhoneNumber,
+      body: [
+        `[inkbox:voice_call call_id=${opts.meta.callId}${renderIdentityMarker(opts.account)} status=ended mode=stt_tts | ${renderContactMarker(opts.meta.contact)}]`,
+        "[call_ended] The Inkbox STT/TTS voice call has ended. Reflect on what just happened and decide if any follow-up actions are needed.",
+        "If you committed to anything during the call, perform that now via tool calls.",
+        "Do not redo work that was already completed on the call. Do not repeat SMS, email, note, contact, or call-history work that the transcript shows was already handled, canceled, completed, or superseded.",
+        "Only perform follow-up if the caller explicitly asked for it, you clearly committed to it, and it was not already handled during the call.",
+        "If there is nothing still needed, return [SILENT]. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
+        fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      messageId: `call:${opts.meta.callId}:stt-tts-call-ended`,
+      replyToId: opts.meta.callId,
+      threadId: opts.meta.direction === "outbound" ? undefined : `call:${opts.meta.callId}`,
+      timestamp: Date.now(),
+      raw: {
+        event: "stt_tts_call_ended",
+        transcript: opts.transcript,
+      },
+    },
+  });
+  opts.logger?.info?.(
+    `Inkbox STT/TTS call-ended reflection dispatched: call_id=${opts.meta.callId} captured_reply_chars=${visibleText.join("\n").length}`,
   );
 }
 
@@ -2138,7 +2240,7 @@ function handleRealtimeToolCall(
       opts.session.submitToolResult(callId, {
         status: "confirm_goodbye",
         message:
-          "Don't hang up yet. Say a brief, natural goodbye to the caller now, then call inkbox_hang_up_call once more to actually end the call.",
+          `Don't hang up yet. Say a brief, natural goodbye to the caller now, then call ${REALTIME_HANG_UP_CALL_TOOL_NAME} once more to actually end the call.`,
       });
       return;
     }
@@ -2160,7 +2262,10 @@ function handleRealtimeToolCall(
     });
     return;
   }
-  if (opts.toolEvent.name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
+  if (
+    opts.toolEvent.name !== REALTIME_CONSULT_TOOL_NAME &&
+    opts.toolEvent.name !== OPENCLAW_REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME
+  ) {
     opts.session.submitToolResult(callId, {
       error: `Tool "${opts.toolEvent.name}" is not available in Inkbox realtime calls.`,
     });
@@ -2177,17 +2282,7 @@ function handleRealtimeToolCall(
     return;
   }
 
-  try {
-    if (opts.session.bridge.supportsToolResultContinuation) {
-      opts.session.submitToolResult(
-        callId,
-        realtimeAgentConsultWorkingResponse(),
-        { willContinue: true },
-      );
-    }
-  } catch {
-    // Continuation is an optimization; the final tool result is authoritative.
-  }
+  speakRealtimeAgentConsultWorkingCue(opts.session);
 
   let consultRequest = "";
   try {
@@ -2403,12 +2498,7 @@ async function buildMailTurn(
     logger?.info?.(`Inkbox self-originated mail ignored without waking agent: from=${from}`);
     return null;
   }
-  const contactsList = Array.isArray(event.data.contacts) ? event.data.contacts : [];
-  const webhookContact = contactsList.find((entry) => entry?.bucket === "from");
-  const contact =
-    (await hydrateContact(runtime, webhookContact
-      ? { id: webhookContact.id, name: webhookContact.name }
-      : undefined)) ?? (await lookupContact(runtime, "email", from));
+  const contact = await lookupContact(runtime, "email", from);
   const contactKey = contact?.id ?? from;
   const bodyText = message.snippet || message.subject || "";
   const subjectPart = message.subject ? ` subject=${JSON.stringify(message.subject)}` : "";
@@ -2464,10 +2554,7 @@ async function buildTextTurn(
     : [];
   const isGroup = Boolean(summary?.isGroup) || participants.length > 1 ||
     contacts.length > 1 || agentIdentities.length > 1;
-  const contact =
-    (isGroup ? await lookupContact(runtime, "phone", remote) : undefined) ??
-    (await hydrateContact(runtime, firstWebhookContact(contacts))) ??
-    (await lookupContact(runtime, "phone", remote));
+  const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
   const mediaMarkers = textMediaMarkers(message.media);
   const text = [rawText, ...mediaMarkers].filter(Boolean).join("\n");
@@ -2542,9 +2629,7 @@ async function buildIMessageTurn(
     typeof conversationIdRaw === "string" && conversationIdRaw.trim()
       ? conversationIdRaw.trim()
       : undefined;
-  const contact =
-    (await hydrateContact(runtime, firstWebhookContact(webhookContacts(event.data)))) ??
-    (await lookupContact(runtime, "phone", remote));
+  const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
   const mediaMarkers = textMediaMarkers(message.media as any, "imessage_attachment");
   const text = [message.content ?? "", ...mediaMarkers].filter(Boolean).join("\n");
@@ -2606,9 +2691,7 @@ async function buildIMessageReactionTurn(
     (reactionType === "custom" && customEmoji
       ? `${reactionType}:${customEmoji}`
       : reactionType) || "unknown";
-  const contact =
-    (await hydrateContact(runtime, firstWebhookContact(webhookContacts(event.data)))) ??
-    (await lookupContact(runtime, "phone", remote));
+  const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
   const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
   const targetPart = targetMessageId ? ` target_message_id=${targetMessageId}` : "";
@@ -2822,12 +2905,14 @@ async function runRealtimeCallWebSocket(
     autoRespondToAudio: true,
     interruptResponseOnInputAudio: true,
     markStrategy: "ack-immediately",
-    tools: resolveRealtimeVoiceAgentConsultTools(realtime.toolPolicy, [
-      realtimePostCallActionTool(),
-      realtimeEditPostCallActionTool(),
-      realtimeDeletePostCallActionTool(),
-      realtimeHangUpCallTool(),
-    ]),
+    tools: standardizeRealtimeTools(
+      resolveRealtimeVoiceAgentConsultTools(realtime.toolPolicy, [
+        realtimePostCallActionTool(),
+        realtimeEditPostCallActionTool(),
+        realtimeDeletePostCallActionTool(),
+        realtimeHangUpCallTool(),
+      ]),
+    ),
     audioSink: {
       isOpen: () => !closed,
       sendAudio: (audio) => {
@@ -3187,6 +3272,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     opts.logger?.info?.(
       `Inkbox call WebSocket open: call_id=${meta.callId} contact=${meta.contactKey} direction=${meta.direction} mode=inkbox-stt-tts`,
     );
+    const sttTtsTranscript: RealtimeTranscriptEntry[] = [];
     const voiceTranscripts = createVoiceTranscriptBuffer({
       callId: meta.callId,
       coalesceMs: resolveVoiceTranscriptCoalesceMs(opts.account),
@@ -3200,24 +3286,58 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           "You are on a live Inkbox phone call. Reply normally in text so the plugin speaks it over the active call. Do not substitute SMS or email for the spoken call response unless the caller explicitly asks you to send a separate follow-up/message.",
           text,
         ].join("\n");
+        sttTtsTranscript.push({ role: "user", text });
+        const turn: InkboxInboundTurn = {
+          mode: "voice",
+          contactKey: meta.contactKey,
+          contact: meta.contact,
+          fromLabel: meta.fromLabel,
+          remoteAddress: meta.remotePhoneNumber,
+          body,
+          messageId: `call:${meta.callId}:${turnId}`,
+          replyToId: turnId,
+          threadId: meta.direction === "outbound" ? undefined : `call:${meta.callId}`,
+          timestamp: segments[0]?.receivedAt ?? Date.now(),
+          raw: { event: "transcript", segments },
+        };
         await dispatchInboundTurn({
           ...opts,
           activeCalls,
           dispatchAbortSignal: abortSignal,
-          shouldDeliverReply,
-          turn: {
-            mode: "voice",
-            contactKey: meta.contactKey,
-            contact: meta.contact,
-            fromLabel: meta.fromLabel,
-            remoteAddress: meta.remotePhoneNumber,
-            body,
-            messageId: `call:${meta.callId}:${turnId}`,
-            replyToId: turnId,
-            threadId: meta.direction === "outbound" ? undefined : `call:${meta.callId}`,
-            timestamp: segments[0]?.receivedAt ?? Date.now(),
-            raw: { event: "transcript", segments },
+          deliveryOverride: {
+            deliver: async (payload: unknown) => {
+              const replyText = payloadText(payload).trim();
+              if (!replyText || replyText.toUpperCase() === "[SILENT]") {
+                return { visibleReplySent: false };
+              }
+              if (shouldDeliverReply() === false) {
+                opts.logger?.info?.(
+                  `Inkbox voice reply suppressed; newer caller transcript superseded call_id=${meta.callId}`,
+                );
+                return { visibleReplySent: false };
+              }
+              const messageId = await deliverReply({
+                turn,
+                text: replyText,
+                runtime: opts.runtime,
+                activeCalls,
+                logger: opts.logger,
+              });
+              sttTtsTranscript.push({ role: "assistant", text: replyText });
+              return {
+                visibleReplySent: Boolean(messageId || turn.mode === "voice"),
+                ...(messageId ? { messageIds: [messageId] } : {}),
+                ...(turn.threadId ? { threadId: turn.threadId } : {}),
+                ...(turn.replyToId ? { replyToId: turn.replyToId } : {}),
+              };
+            },
+            onError: (error: unknown) => {
+              opts.logger?.warn?.(
+                `Inkbox voice reply delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            },
           },
+          turn,
         });
       },
     });
@@ -3285,6 +3405,16 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       unregisterActiveCall(activeCalls, active);
       await ws.close().catch(() => {});
       opts.logger?.info?.(`Inkbox call WebSocket closed: call_id=${meta.callId}`);
+      void runSttTtsCallEndedReflection({
+        ...opts,
+        activeCalls,
+        meta,
+        transcript: [...sttTtsTranscript],
+      }).catch((error) => {
+        opts.logger?.warn?.(
+          `Inkbox STT/TTS call-ended reflection failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     }
   };
 

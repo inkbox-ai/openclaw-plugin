@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { IMessageBatcher, SmsBatcher } from "../../src/inbound/batch.js";
+import { IMessageBatcher, SmsBatcher, wrapInboundHandlersWithBatching } from "../../src/inbound/batch.js";
 
 function textEvent(remote: string, text: string, conversationId?: string): any {
   return {
@@ -182,5 +182,41 @@ describe("IMessageBatcher", () => {
     expect(flush).not.toHaveBeenCalled();
     await b.flushAll();
     expect(flush).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("wrapInboundHandlersWithBatching", () => {
+  it("wraps SMS handlers with the configured burst batcher", async () => {
+    const onText = vi.fn();
+    const wrapped = wrapInboundHandlersWithBatching(
+      { onText },
+      { sms: { batchDelayMs: 100, maxMessages: 8, maxChars: 4000 } },
+    );
+
+    await wrapped.onText!(textEvent("+15551234567", "first"));
+    await wrapped.onText!(textEvent("+15551234567", "second"));
+    expect(onText).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(110);
+
+    expect(onText).toHaveBeenCalledTimes(1);
+    expect(onText.mock.calls[0][0].data.text_message.text).toBe("first\nsecond");
+  });
+
+  it("wraps iMessage handlers with the configured burst batcher", async () => {
+    const onIMessage = vi.fn();
+    const wrapped = wrapInboundHandlersWithBatching(
+      { onIMessage },
+      { sms: { batchDelayMs: 100, maxMessages: 8, maxChars: 4000 } },
+    );
+
+    await wrapped.onIMessage!(imessageEvent("+15551234567", "first"));
+    await wrapped.onIMessage!(imessageEvent("+15551234567", "second"));
+    expect(onIMessage).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(110);
+
+    expect(onIMessage).toHaveBeenCalledTimes(1);
+    expect(onIMessage.mock.calls[0][0].data.message.content).toBe("first\nsecond");
   });
 });

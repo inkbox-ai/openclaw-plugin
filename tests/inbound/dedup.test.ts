@@ -13,6 +13,23 @@ describe("RequestIdDedup", () => {
     expect(d.has("req-1")).toBe(true);
   });
 
+  it("tracks in-flight ids before commit", () => {
+    const d = new RequestIdDedup();
+    expect(d.begin("req-1")).toBe(true);
+    expect(d.has("req-1")).toBe(true);
+    expect(d.begin("req-1")).toBe(false);
+    d.commit("req-1");
+    expect(d.has("req-1")).toBe(true);
+  });
+
+  it("rolls back in-flight ids without remembering them", () => {
+    const d = new RequestIdDedup();
+    expect(d.begin("req-1")).toBe(true);
+    d.rollback("req-1");
+    expect(d.has("req-1")).toBe(false);
+    expect(d.begin("req-1")).toBe(true);
+  });
+
   it("is idempotent on remember", () => {
     const d = new RequestIdDedup();
     d.remember("req-1");

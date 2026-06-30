@@ -140,7 +140,7 @@ Env vars are also supported by the plugin and CLI:
 export INKBOX_API_KEY="ApiKey_xxxxxxxxxxxx"
 export INKBOX_IDENTITY="my-agent-handle"
 export INKBOX_SIGNING_KEY="whsec_xxxxxxxxxxxx"
-export INKBOX_BASE_URL="https://inkbox.ai"
+export INKBOX_BASE_URL="https://your-inkbox-api.example"
 ```
 
 Legacy plugin-scoped config under `plugins.entries.inkbox.config` still works, but new installs should use `channels.inkbox`.
@@ -165,9 +165,6 @@ openclaw config set tools.allow '[
   "inkbox_list_imessage_assignments",
   "inkbox_send_imessage_reaction",
   "inkbox_mark_imessage_conversation_read",
-  "inkbox_update_contact",
-  "inkbox_delete_contact",
-  "inkbox_export_contact_vcard",
   "inkbox_update_note",
   "inkbox_delete_note",
   "inkbox_list_mail_contact_rules",
@@ -204,7 +201,7 @@ openclaw config set tools.allow '[
 
 ## Realtime Calls
 
-Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
+Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. Environment keys are setup-time discovery inputs unless the wizard validates and persists them into `channels.inkbox.voiceRealtime.providers.openai.apiKey`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
 
 ```bash
 export INKBOX_REALTIME_API_KEY="sk-..."
@@ -290,7 +287,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `apiKey` | yes | - | Agent-scoped Inkbox API key. Admin keys are accepted by setup only so it can mint an agent-scoped key. |
 | `identity` | yes | - | Inkbox agent identity handle. |
 | `signingKey` | inbound | - | Webhook HMAC secret. Required for inbound email/SMS/iMessage/calls. |
-| `baseUrl` | no | `https://inkbox.ai` | Override Inkbox API base URL. |
+| `baseUrl` | no | SDK default | Override Inkbox API base URL. |
 | `tunnelName` | no | identity handle | Override Inkbox tunnel name. |
 | `publicUrl` | no | - | Public OpenClaw URL. If omitted, the plugin opens an Inkbox tunnel. |
 | `allowedRecipients` | no | - | Outbound recipient allowlist. Empty means no local outbound filtering. |
@@ -317,7 +314,7 @@ Required by default:
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
 - Voice reads: `inkbox_list_calls`, `inkbox_list_call_transcripts`
-- Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`
+- Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact`, `inkbox_delete_contact`
 - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`
 
 Optional:
@@ -325,7 +322,6 @@ Optional:
 - Outbound: `inkbox_forward_email`, `inkbox_place_call`
 - Lifecycle: `inkbox_mark_emails_read`, `inkbox_list_texts`, `inkbox_get_text`, `inkbox_mark_text_read`, `inkbox_mark_text_conversation_read`, `inkbox_mark_imessage_conversation_read`
 - iMessage: `inkbox_imessage_triage_number`, `inkbox_list_imessage_assignments`, `inkbox_send_imessage_reaction`
-- Contacts: `inkbox_update_contact`, `inkbox_delete_contact`, `inkbox_export_contact_vcard`
 - Notes: `inkbox_update_note`, `inkbox_delete_note`
 - Contact rules: `inkbox_list_mail_contact_rules`, `inkbox_create_mail_contact_rule`, `inkbox_update_mail_contact_rule`, `inkbox_delete_mail_contact_rule`, `inkbox_list_phone_contact_rules`, `inkbox_create_phone_contact_rule`, `inkbox_update_phone_contact_rule`, `inkbox_delete_phone_contact_rule`
 - Identity access: `inkbox_list_contact_access`, `inkbox_grant_contact_access`, `inkbox_revoke_contact_access`, `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`
