@@ -115,6 +115,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
         }
       }),
       setMediaTimestamp: vi.fn(),
+      sendUserMessage: vi.fn(),
       triggerGreeting: vi.fn(() => {
         params.onTranscript?.("assistant", "Hi there.", true);
         params.audioSink.sendAudio(Buffer.from([0xff, 0xff]));
@@ -1303,7 +1304,8 @@ describe("createInkboxSessionBridge", () => {
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.message.bodyForAgent).toContain("[inkbox:voice_realtime_consult");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Save this as a note.");
-    expect(run.ctxPayload.extra.InkboxVoiceReplyOnly).toBe(true);
+    expect(run.ctxPayload.extra.InkboxMode).toBe("sms");
+    expect(run.ctxPayload.extra.InkboxVoiceReplyOnly).toBeUndefined();
     expect(channelRuntime.deliveryResults[0]).toEqual({ visibleReplySent: true });
     const reflectionRun = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
@@ -1317,18 +1319,14 @@ describe("createInkboxSessionBridge", () => {
     );
 
     const realtimeSession = realtimeMock.sessions[0].session;
-    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith(
-      "tool-1",
-      expect.objectContaining({
-        status: "working",
-        message: expect.stringContaining("One moment"),
-      }),
-      { willContinue: true },
+    expect(realtimeSession.sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("One moment"),
     );
     expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
       status: "ok",
       result: "Saved that note.",
     });
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledTimes(1);
     const frames = parseSentTextFrames(ws);
     expect(frames).toContainEqual(
       expect.objectContaining({

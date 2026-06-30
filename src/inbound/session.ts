@@ -1834,7 +1834,7 @@ async function runRealtimeAgentConsult(
       },
     },
     turn: {
-      mode: "voice",
+      mode: "sms",
       contactKey: opts.meta.contactKey,
       contact: opts.meta.contact,
       fromLabel: opts.meta.fromLabel,
@@ -1862,7 +1862,6 @@ async function runRealtimeAgentConsult(
         .join("\n\n"),
       messageId: `call:${opts.meta.callId}:realtime-tool:${opts.toolEvent.callId}`,
       replyToId: opts.toolEvent.callId,
-      threadId: opts.meta.direction === "outbound" ? undefined : `call:${opts.meta.callId}`,
       timestamp: Date.now(),
       raw: {
         event: "realtime_tool_call",
@@ -2014,13 +2013,14 @@ function deleteRealtimePostCallAction(
   };
 }
 
-function realtimeAgentConsultWorkingResponse(): Record<string, unknown> {
-  return {
-    status: "working",
-    tool: REALTIME_CONSULT_TOOL_NAME,
-    message:
-      "If you need to acknowledge the caller, say only 'One moment.' Do not mention context lookup, waiting for context, or checking context.",
-  };
+function speakRealtimeAgentConsultWorkingCue(session: RealtimeVoiceBridgeSession): void {
+  try {
+    session.sendUserMessage(
+      "Say only 'One moment.' Do not mention context lookup, waiting for context, or checking context.",
+    );
+  } catch {
+    // The final tool result remains authoritative; this cue is only to avoid dead air.
+  }
 }
 
 function renderPostCallActions(actions: RealtimePostCallAction[]): string {
@@ -2282,17 +2282,7 @@ function handleRealtimeToolCall(
     return;
   }
 
-  try {
-    if (opts.session.bridge.supportsToolResultContinuation) {
-      opts.session.submitToolResult(
-        callId,
-        realtimeAgentConsultWorkingResponse(),
-        { willContinue: true },
-      );
-    }
-  } catch {
-    // Continuation is an optimization; the final tool result is authoritative.
-  }
+  speakRealtimeAgentConsultWorkingCue(opts.session);
 
   let consultRequest = "";
   try {
