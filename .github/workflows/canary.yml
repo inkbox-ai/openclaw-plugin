@@ -1,0 +1,50 @@
+name: Canary — plugin vs OpenClaw latest
+
+# OpenClaw ships new releases constantly, so the host can break us even when we
+# don't push. Run the host-interface contract tests (plus a full typecheck)
+# against the latest published OpenClaw twice a day and post one Google Chat
+# message on failure. The live channel suite chains off this run, so the canary
+# leads and live follows on the same cadence.
+on:
+  schedule:
+    # 2x/day at 7 AM and 7 PM America/Los_Angeles (PDT/UTC-7 basis; cron is UTC).
+    - cron: "13 14 * * *"   # 07:00 PT
+    - cron: "13 2 * * *"    # 19:00 PT
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps + latest OpenClaw host
+        run: |
+          npm ci
+          npm install --no-save openclaw@latest
+          npm ls openclaw || true
+
+      - name: Typecheck vs latest OpenClaw
+        run: npm run typecheck
+
+      - name: Contract tests vs latest OpenClaw
+        run: npx vitest run tests/contract
+
+      # Alert only when an unattended (scheduled) run fails — no success pings,
+      # and manual dispatch stays silent (you're watching it). Non-blocking
+      # (--retry + || true) so a flaky webhook can't flip the result.
+      - name: Notify Google Chat on scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        run: |
+          curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"text": "⚠️ *FAILED* — Canary: contract suite vs OpenClaw `latest`\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true

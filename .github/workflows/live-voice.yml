@@ -1,0 +1,189 @@
+name: Live — voice calls (Inkbox TTS/STT + realtime)
+
+# Boots the agent-under-test (AUT) gateway plus a driver process that bridges the
+# other side of a real phone call over its own Inkbox tunnel. Two matrix legs:
+#   inbound_inkbox    — driver calls the agent; agent answers with Inkbox STT/TTS.
+#   outbound_realtime — driver texts "call me"; agent calls back via the realtime API.
+# Each leg verifies the stored call transcript shows the agent spoke to the caller.
+# Real model + real calls, so this runs only on ready (non-draft) PRs + dispatch, and
+# shares the AUT tunnel lock with the other live suites.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the call/transcript"
+        default: "220"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Same group as the other live suites: only one holder of the AUT tunnel at a time.
+  group: inkbox-live-aut-tunnel
+  cancel-in-progress: false
+
+jobs:
+  voice:
+    runs-on: ubuntu-latest
+    # Skip fork PRs (no secrets) and draft PRs (expensive). Pushes + dispatch always run.
+    if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false))
+    strategy:
+      fail-fast: false
+      max-parallel: 1          # legs share the AUT identity → one at a time
+      matrix:
+        scenario: [inbound_inkbox, outbound_realtime]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up env paths
+        run: |
+          echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
+          echo "DRIVER_LOG=$RUNNER_TEMP/driver.log" >> "$GITHUB_ENV"
+          echo "DRIVER_STATE=$RUNNER_TEMP/driver_state.json" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install live-test deps (Inkbox SDK + pytest + driver server)
+        # uvicorn[standard] (not bare uvicorn): the driver accepts a WebSocket
+        # upgrade, which needs the websockets extra.
+        run: pip install 'inkbox>=0.4.7' pytest fastapi 'uvicorn[standard]'
+
+      - name: Build the plugin
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install OpenClaw host
+        run: |
+          npm install -g openclaw@latest
+          openclaw --version
+
+      - name: Onboard model provider (real OpenAI)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # The agent's reasoning (deciding to place a call, composing replies)
+          # uses the chat model; send it straight to OpenAI as-is.
+          # --skip-health: onboard otherwise waits for a running gateway, and
+          # ours starts in a later step.
+          openclaw onboard --non-interactive \
+            --auth-choice custom-api-key \
+            --custom-base-url "https://api.openai.com/v1" \
+            --custom-model-id "gpt-5.5" \
+            --custom-api-key "$OPENAI_API_KEY" \
+            --custom-compatibility openai \
+            --secret-input-mode plaintext \
+            --skip-health \
+            --accept-risk
+
+      - name: Configure AUT identity + speech path (${{ matrix.scenario }})
+        env:
+          OPENCLAW_INKBOX_API_KEY: ${{ secrets.OPENCLAW_INKBOX_API_KEY }}
+          OPENCLAW_INKBOX_SIGNING_KEY: ${{ secrets.OPENCLAW_INKBOX_SIGNING_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          HANDLE="$(python3 - <<'PYEOF'
+          import os
+          from inkbox import Inkbox
+          c = Inkbox(api_key=os.environ["OPENCLAW_INKBOX_API_KEY"], base_url=os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai"))
+          print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
+          PYEOF
+          )"
+          echo "AUT handle: $HANDLE"
+          # Install the plugin BEFORE writing channels.inkbox.* — the channel id
+          # only validates once the plugin is registered.
+          openclaw plugins install -l "$GITHUB_WORKSPACE"
+          openclaw plugins enable inkbox || true
+          openclaw config set channels.inkbox.enabled true --strict-json
+          openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
+          openclaw config set channels.inkbox.identity "$HANDLE"
+          openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
+          openclaw config set tools.allow '["inkbox"]' --strict-json
+          # Onboarding defaults tools.profile to "coding", whose base allowlist
+          # strips the inkbox messaging/contact/call tools. "full" = no restriction.
+          openclaw config set tools.profile full
+          if [ "${{ matrix.scenario }}" = "outbound_realtime" ]; then
+            openclaw config set channels.inkbox.voiceRealtime.enabled true --strict-json
+            openclaw config set channels.inkbox.voiceRealtime.provider openai
+            openclaw config set channels.inkbox.voiceRealtime.model gpt-realtime-2
+            openclaw config set channels.inkbox.voiceRealtime.providers.openai.apiKey "$OPENAI_API_KEY"
+          else
+            # Force the Inkbox STT/TTS path so this leg proves it end to end.
+            openclaw config set channels.inkbox.voiceRealtime.enabled false --strict-json
+          fi
+
+      - name: Start gateway and wait for readiness
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
+          echo $! > "$RUNNER_TEMP/gateway.pid"
+          echo "Waiting for the gateway (tunnel + webhooks)…"
+          for i in $(seq 1 36); do
+            if openclaw health --json 2>/dev/null | jq -e '.channels.inkbox as $c | ($c.connected == true) or ([$c.accounts[]?.connected] | any)' >/dev/null; then
+              echo "Gateway ready."; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
+
+      - name: Start voice driver and wait for its tunnel
+        env:
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+        run: |
+          VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
+            python3 "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &
+          echo $! > "$RUNNER_TEMP/driver.pid"
+          for i in $(seq 1 30); do      # up to ~90s
+            if [ -s "$DRIVER_STATE" ]; then echo "driver ready:"; cat "$DRIVER_STATE"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::driver did not become ready"; cat "$DRIVER_LOG"; exit 1
+
+      - name: Run voice test (${{ matrix.scenario }})
+        env:
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          OPENCLAW_INKBOX_API_KEY: ${{ secrets.OPENCLAW_INKBOX_API_KEY }}
+          VOICE_SCENARIO: ${{ matrix.scenario }}
+          LIVE_VOICE_TIMEOUT: ${{ github.event.inputs.timeout_s || '220' }}
+        run: |
+          LIVE_REAL_MODEL=1 VOICE_DRIVER_STATE="$DRIVER_STATE" \
+            python3 -m pytest tests/live/test_voice.py -v
+
+      # Failure-only: these logs carry live call content and this repo is public.
+      - name: Dump logs (on failure only)
+        if: failure()
+        run: |
+          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
+          echo "=== driver.log ==="; cat "$DRIVER_LOG" || true
+          echo "=== openclaw logs ==="; tail -n 200 /tmp/openclaw/openclaw-*.log 2>/dev/null || true
+
+      - name: Tear down (always)
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/driver.pid" 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
+          sleep 3   # let the driver revert its number on exit
+
+  notify:
+    needs: [voice]
+    if: always() && needs.voice.result == 'failure' && github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Google Chat on scheduled failure
+        run: |
+          curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"text": "⚠️ *FAILED* — Live voice-call suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true

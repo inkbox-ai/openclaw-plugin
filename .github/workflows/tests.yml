@@ -1,0 +1,65 @@
+name: PR checks — typecheck · unit · contract
+
+on:
+  push:
+    branches: [main]
+  pull_request:                     # catches PRs from feature branches → main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  # Offline unit suite + typecheck against the pinned OpenClaw host from
+  # package-lock. Fast signal on our own code — cheap enough to run on every
+  # push, including draft PRs (the heavy live suite is what we gate).
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run unit tests
+        run: npm test
+
+  # Contract suite + full typecheck against the LATEST OpenClaw host. This is
+  # the lane that catches upstream interface drift (a moved plugin-sdk symbol,
+  # a changed entry shape, a type break in the channel APIs) before it reaches
+  # a user. Same suite the canary runs on a schedule; this is the per-PR gate.
+  contract-pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps + latest OpenClaw host
+        run: |
+          npm ci
+          npm install --no-save openclaw@latest
+          npm ls openclaw || true
+
+      - name: Typecheck vs latest OpenClaw
+        run: npm run typecheck
+
+      - name: Contract tests vs latest OpenClaw
+        run: npx vitest run tests/contract
