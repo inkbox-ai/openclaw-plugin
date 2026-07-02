@@ -2796,7 +2796,7 @@ async function resolveCallMeta(
     const phoneNumberId = identity.phoneNumber?.id;
     if (phoneNumberId && callId !== "unknown") {
       const inkbox = await opts.runtime.getClient();
-      const call = await inkbox.calls.get(phoneNumberId, callId);
+      const call = await inkbox.calls.get(callId);
       remotePhoneNumber = remotePhoneNumber || call.remotePhoneNumber;
       direction = direction || (outboundContext ? "outbound" : call.direction);
     }
