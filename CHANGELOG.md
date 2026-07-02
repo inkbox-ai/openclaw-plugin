@@ -24,6 +24,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Changed
 
+- Migrated to `@inkbox/sdk` 0.4.15's identity-centered phone API: call lookups no longer pass a phone-number id (`calls.get(callId)`), and the SDK pin moved from `>=0.4.10 <0.4.15` to `>=0.4.15`.
 - npm package name changed to `@inkbox/inkbox` so the unscoped package name matches the OpenClaw manifest id `inkbox`.
 - README and project docs now call out OpenClaw itself as a prerequisite, with links to the OpenClaw homepage/install docs and the installer/npm commands.
 - `inkbox_whoami` now includes the useful readiness fields that were previously split into `inkbox_rate_status`; the redundant `inkbox_rate_status` tool was removed.
