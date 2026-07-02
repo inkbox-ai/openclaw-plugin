@@ -133,6 +133,9 @@ jobs:
           openclaw config set channels.inkbox.identity "$HANDLE"
           openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
           openclaw config set tools.allow '["inkbox"]' --strict-json
+          # Onboarding defaults tools.profile to "coding", whose base allowlist
+          # strips the inkbox messaging/contact/call tools. "full" = no restriction.
+          openclaw config set tools.profile full
           openclaw plugins list --json | head -c 2000 || true
 
       - name: Start mock OpenAI model

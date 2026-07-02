@@ -56,7 +56,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install live-test deps (Inkbox SDK + pytest + driver server)
-        run: pip install 'inkbox>=0.4.7' pytest fastapi uvicorn
+        # uvicorn[standard] (not bare uvicorn): the driver accepts a WebSocket
+        # upgrade, which needs the websockets extra.
+        run: pip install 'inkbox>=0.4.7' pytest fastapi 'uvicorn[standard]'
 
       - name: Build the plugin
         run: |
@@ -109,6 +111,9 @@ jobs:
           openclaw config set channels.inkbox.identity "$HANDLE"
           openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
           openclaw config set tools.allow '["inkbox"]' --strict-json
+          # Onboarding defaults tools.profile to "coding", whose base allowlist
+          # strips the inkbox messaging/contact/call tools. "full" = no restriction.
+          openclaw config set tools.profile full
           if [ "${{ matrix.scenario }}" = "outbound_realtime" ]; then
             openclaw config set channels.inkbox.voiceRealtime.enabled true --strict-json
             openclaw config set channels.inkbox.voiceRealtime.provider openai
