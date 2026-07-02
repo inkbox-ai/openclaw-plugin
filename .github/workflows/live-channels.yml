@@ -84,6 +84,8 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          # --skip-health: onboard otherwise waits for a running gateway, and
+          # ours starts in a later step.
           if [ "${{ matrix.mode }}" = "real" ]; then
             # Custom OpenAI-compatible provider pointed straight at OpenAI: the
             # model id goes through as-is with the real key — no aggregator.
@@ -94,6 +96,7 @@ jobs:
               --custom-api-key "$OPENAI_API_KEY" \
               --custom-compatibility openai \
               --secret-input-mode plaintext \
+              --skip-health \
               --accept-risk
           else
             # Same provider shape, but aimed at the local deterministic mock.
@@ -104,6 +107,7 @@ jobs:
               --custom-api-key "sk-mock-not-used" \
               --custom-compatibility openai \
               --secret-input-mode plaintext \
+              --skip-health \
               --accept-risk
           fi
 

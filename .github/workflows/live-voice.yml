@@ -74,6 +74,8 @@ jobs:
         run: |
           # The agent's reasoning (deciding to place a call, composing replies)
           # uses the chat model; send it straight to OpenAI as-is.
+          # --skip-health: onboard otherwise waits for a running gateway, and
+          # ours starts in a later step.
           openclaw onboard --non-interactive \
             --auth-choice custom-api-key \
             --custom-base-url "https://api.openai.com/v1" \
@@ -81,6 +83,7 @@ jobs:
             --custom-api-key "$OPENAI_API_KEY" \
             --custom-compatibility openai \
             --secret-input-mode plaintext \
+            --skip-health \
             --accept-risk
 
       - name: Configure AUT identity + speech path (${{ matrix.scenario }})
