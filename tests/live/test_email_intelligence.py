@@ -32,7 +32,9 @@ AUT_KEY = os.environ.get("OPENCLAW_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 TIMEOUT_S = float(os.environ.get("LIVE_EMAIL_TIMEOUT", "150"))
 POLL_EVERY_S = 5.0
-ERROR_MARKERS = ("non-retryable error", "missing authentication", "http 401", "http 403", "traceback")
+# "something went wrong" is the host's canned agent-loop failure reply.
+ERROR_MARKERS = ("non-retryable error", "missing authentication", "http 401", "http 403", "traceback",
+                 "something went wrong")
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY and os.environ.get("LIVE_REAL_MODEL") == "1"),
