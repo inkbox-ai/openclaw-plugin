@@ -100,6 +100,10 @@ jobs:
           PYEOF
           )"
           echo "AUT handle: $HANDLE"
+          # Install the plugin BEFORE writing channels.inkbox.* — the channel id
+          # only validates once the plugin is registered.
+          openclaw plugins install -l "$GITHUB_WORKSPACE"
+          openclaw plugins enable inkbox || true
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"
@@ -114,8 +118,6 @@ jobs:
             # Force the Inkbox STT/TTS path so this leg proves it end to end.
             openclaw config set channels.inkbox.voiceRealtime.enabled false --strict-json
           fi
-          openclaw plugins install -l "$GITHUB_WORKSPACE"
-          openclaw plugins enable inkbox || true
 
       - name: Start gateway and wait for readiness
         env:

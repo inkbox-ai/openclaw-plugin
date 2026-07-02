@@ -124,13 +124,15 @@ jobs:
           PYEOF
           )"
           echo "AUT handle: $HANDLE"
+          # Install the plugin BEFORE writing channels.inkbox.* — the channel id
+          # only validates once the plugin is registered.
+          openclaw plugins install -l "$GITHUB_WORKSPACE"
+          openclaw plugins enable inkbox || true
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"
           openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
           openclaw config set tools.allow '["inkbox"]' --strict-json
-          openclaw plugins install -l "$GITHUB_WORKSPACE"
-          openclaw plugins enable inkbox || true
           openclaw plugins list --json | head -c 2000 || true
 
       - name: Start mock OpenAI model
