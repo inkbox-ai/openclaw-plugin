@@ -9,7 +9,8 @@ through the API keys (NO hardcoded expectations):
   * own identity — reports its own handle / email / phone (looked up via the AUT key).
   * sender       — reports who the sender is, from the contact card it can see
                    (looked up via the AUT key).
-  * tools        — names its real Inkbox tools (scraped from the tool sources).
+  * tools        — proves the tool surface is wired by making the agent look up
+                   a seeded probe contact only a live tool call can reveal.
   * contact CRUD — with LIVE_CONTACT_CRUD=1, creates/updates/deletes a
                    temporary contact through the real agent loop.
 
@@ -179,7 +180,8 @@ def test_reports_sender_details(ctx):
     body = _ask(ctx["remote"], ctx["aut_email"], remote_email,
                 "Who am I to you? Tell me everything you have on file about me. "
                 "Include my phone number in full — every digit, with no masking, "
-                "asterisks, or abbreviation.")
+                "asterisks, or abbreviation. Reply in this same email thread — "
+                "do not send the details as a separate email.")
     if name:
         assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:400]}"
     assert any(e.lower() in body for e in emails), f"reply missing sender email {emails}\n{body[:400]}"
@@ -190,7 +192,15 @@ def test_reports_sender_details(ctx):
 
 
 def test_aware_of_inkbox_tools(ctx):
-    """Non-LLM proof the agent is wired with real tools: it names them."""
+    """Behavioral proof the agent is wired with real tools: it uses one live.
+
+    The OpenClaw host's GPT-5 prompt overlay instructs the model not to expose
+    internal tool names, so asking it to enumerate its tools is a refusal coin
+    flip — and refusing a stranger's tool-inventory probe is arguably correct.
+    Don't test disclosure willingness; make the agent USE a contact tool: the
+    seeded probe contact's nonce surname can only come from a live lookup.
+    """
+    aut = ctx["aut"]
     tool_names = _plugin_tool_names()
     assert tool_names, "no inkbox_* tool names found in src/tools or the manifest"
     contact_tools = {
@@ -203,12 +213,27 @@ def test_aware_of_inkbox_tools(ctx):
     }
     assert contact_tools <= set(tool_names)
 
-    body = _ask(ctx["remote"], ctx["aut_email"], ctx["remote_email"],
-                "List the exact names of all the Inkbox tools you have access to, one per line.")
-    hits = [t for t in tool_names if t.lower() in body]
-    assert len(hits) >= 3, f"agent named only {hits} of its tools {tool_names}\n{body[:500]}"
-    missing_contacts = sorted(t for t in contact_tools if t.lower() not in body)
-    assert not missing_contacts, f"agent did not name contact tools {missing_contacts}\n{body[:500]}"
+    from inkbox.contacts.types import ContactEmail
+
+    probe_email = f"tool-probe-{uuid.uuid4().hex[:8]}@example.com"
+    # The surname nonce is deliberately NOT in the question (the email is), so
+    # echoing the question back can't pass — only a real lookup reveals it.
+    surname = f"fenwick-{uuid.uuid4().hex[:8]}"
+    _delete_contacts_by_email(aut, probe_email)
+    aut.contacts.create(
+        given_name="Probe",
+        family_name=surname,
+        emails=[ContactEmail(label="work", value=probe_email)],
+    )
+    try:
+        body = _ask(ctx["remote"], ctx["aut_email"], ctx["remote_email"],
+                    "Use your Inkbox contact tools to look up the contact whose "
+                    f"email address is {probe_email}, then reply in this same "
+                    "email thread with that contact's full name.")
+        assert surname in body, \
+            f"agent did not report the looked-up contact surname {surname!r}\n{body[:500]}"
+    finally:
+        _delete_contacts_by_email(aut, probe_email)
 
 
 def _contacts_by_email(client, email: str):
