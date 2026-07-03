@@ -33,6 +33,9 @@ AUT_KEY = os.environ.get("OPENCLAW_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 TIMEOUT_S = float(os.environ.get("LIVE_EMAIL_TIMEOUT", "150"))
 POLL_EVERY_S = 5.0
+# After the first reply, keep polling this long for follow-up messages in the
+# same thread (the agent may split its answer across two sends).
+REPLY_GRACE_S = float(os.environ.get("LIVE_EMAIL_REPLY_GRACE", "15"))
 # "something went wrong" is the host's canned agent-loop failure reply.
 ERROR_MARKERS = ("non-retryable error", "missing authentication", "http 401", "http 403", "traceback",
                  "something went wrong")
@@ -93,7 +96,14 @@ def _plugin_tool_names() -> list[str]:
 
 
 def _ask(remote, aut_email: str, remote_email: str, question: str) -> str:
-    """Email the agent a question; return the reply body (lowercased)."""
+    """Email the agent a question; return every reply body (lowercased, joined).
+
+    The agent may answer across more than one message (e.g. a tool-sent reply
+    followed by its closing turn text), so after the first reply we keep
+    polling for a short grace window and return the union of what the sender
+    actually received — assertions then hold regardless of which message
+    carries the substance.
+    """
     from inkbox.mail.types import MessageDirection
 
     nonce = f"smoke-{uuid.uuid4().hex[:8]}"
@@ -106,15 +116,23 @@ def _ask(remote, aut_email: str, remote_email: str, question: str) -> str:
         frm = (getattr(msg, "from_address", "") or "").lower()
         return aut_email.lower() in frm and nonce in (getattr(msg, "subject", "") or "")
 
+    replies: dict[str, str] = {}  # message id -> body, insertion-ordered
     deadline = time.monotonic() + TIMEOUT_S
-    while time.monotonic() < deadline:
+    grace_until = 0.0
+    while time.monotonic() < (grace_until or deadline):
         for msg in remote.messages.list(remote_email, direction=MessageDirection.INBOUND):
-            if _is_reply(msg):
-                body = getattr(remote.messages.get(remote_email, msg.id), "body_text", "") or ""
-                bad = [m for m in ERROR_MARKERS if m in body.lower()]
-                assert not bad, f"reply is an error, not a real answer: {bad}\n{body[:300]}"
-                return body.lower()
+            msg_id = str(msg.id)
+            if msg_id in replies or not _is_reply(msg):
+                continue
+            body = getattr(remote.messages.get(remote_email, msg.id), "body_text", "") or ""
+            bad = [m for m in ERROR_MARKERS if m in body.lower()]
+            assert not bad, f"reply is an error, not a real answer: {bad}\n{body[:300]}"
+            replies[msg_id] = body
+            # A reply landed — linger briefly for stragglers in the same thread.
+            grace_until = time.monotonic() + REPLY_GRACE_S
         time.sleep(POLL_EVERY_S)
+    if replies:
+        return "\n".join(replies.values()).lower()
     pytest.fail(f"no reply within {TIMEOUT_S:.0f}s to: {question!r}")
 
 

@@ -22,6 +22,10 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Mail/phone contact-rule tools plus contact/note identity-access grant tools.
 - Realtime phone-call tools for editing/deleting queued post-call actions and two-step hangup.
 
+### Fixed
+
+- The `inkbox-email-triage` skill no longer tells the agent to answer the inbound email it is currently handling via `inkbox_send_email` — that produced a double reply (the tool-sent answer plus the plugin's automatic delivery of the agent's final message into the same thread). The skill now explains the automatic threaded reply, reserves `inkbox_send_email` for new mail / other recipients / queue triage, and documents `[SILENT]` for email.
+
 ### Changed
 
 - Migrated to `@inkbox/sdk` 0.4.15's identity-centered phone API: call lookups no longer pass a phone-number id (`calls.get(callId)`), and the SDK pin moved from `>=0.4.10 <0.4.15` to `>=0.4.15`.
