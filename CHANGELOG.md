@@ -2,7 +2,23 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.2.1] - 2026-07-03
+
+### Added
+
+- Shared iMessage-line calling: `inkbox_place_call` accepts `origination` (`dedicated_number` / `shared_imessage_number`), auto-resolves it to the only available line or — when both lines exist — to the current conversation's channel, echoes it in the result, and turns the shared-line `no_shared_connection` rejection into a plain-language error with the dedicated-number fallback spelled out.
+- `inkbox_whoami` now reports a `lines` block labelling the dedicated phone line vs the shared iMessage line (the shared line's number is managed by Inkbox and never shown).
+- Realtime voice instructions name the two lines when iMessage is enabled, so the spoken agent describes its dedicated number vs the shared iMessage line correctly and never states a number for the shared line.
+- External webhook injection (default off, `channels.inkbox.externalEvents`): a webhook-provider registry classifies inbound requests by signature header before auth (Inkbox HMAC, GitHub `X-Hub-Signature-256`, secrets via `INKBOX_WEBHOOK_SECRET_<NAME>`), and unknown-but-opted-in events wake the agent on a fresh per-event thread with a verified/unverified directive instead of being dropped. Verified registered providers deliver regardless of the flag — configuring that source's secret is its opt-in; the flag gates only unverified/unknown senders and Inkbox-signed payloads with no known event shape.
+- Setup wizard: standalone dedicated-number step decoupled from identity creation — prints "Already provisioned" when a number exists and falls back to an Inkbox paid-tiers pricing pointer (plus the raw error) when provisioning is refused.
+
+### Changed
+
+- Inbound-call config is identity-scoped: the gateway and setup wizard call `identity.setIncomingCallAction(...)` (one row covers the dedicated number and the shared iMessage line, so shared-line-only identities can take calls too), keeping the number-scoped `phoneNumbers.update` only as a legacy-SDK fallback; health checks and `inkbox_whoami` read the config via `identity.getIncomingCallAction()`.
+- Setup wizard walks channels iMessage-first (its intro notes voice calls ride the same shared line), then the dedicated-number step, and offers realtime calling whenever the identity has a number or iMessage enabled.
+- `@inkbox/sdk` pin gained an upper bound: `>=0.4.15 <1.0.0` (manifest and CI installs).
+
+## [0.2.0] - 2026-06-10
 
 ### Added
 

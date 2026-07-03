@@ -16,6 +16,9 @@ export interface OpenTunnelOptions {
   wsHandler?: InkboxWsHandler;
   logger?: PluginLogger;
   allowedContactIds?: string[];
+  // Opt-in for unverified/unknown external-webhook delivery; see
+  // WebhookHandlerOptions.externalEvents.
+  externalEvents?: boolean;
   serve?: boolean;
 }
 
@@ -43,6 +46,7 @@ export async function openInkboxTunnel(opts: OpenTunnelOptions) {
       dedup,
       logger: opts.logger,
       allowedContactIds: opts.allowedContactIds,
+      externalEvents: opts.externalEvents,
     });
     return new Response(result.body ?? "", {
       status: result.status,

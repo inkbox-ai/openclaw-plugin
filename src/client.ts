@@ -52,6 +52,11 @@ export interface InkboxPluginConfig {
   // any event whose contact id is not on the list. Events with no contact
   // resolution are also dropped (conservative default).
   allowedInboundContactIds?: string[];
+  // Inbound: pass non-Inkbox ("external") webhooks through to the agent.
+  // These are signed by the source, not with our signing key, so unknown
+  // sources are delivered UNVERIFIED when enabled. Off by default for that
+  // reason.
+  externalEvents?: boolean;
   // Inbound SMS fragment batching. When `batchDelayMs > 0`, consecutive
   // text.received events from the same remote number within the window are
   // accumulated and delivered as a single event with concatenated body.

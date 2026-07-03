@@ -798,6 +798,9 @@ async function configureIdentityGatewayDelivery(params: {
   client: Inkbox;
   identity: AgentIdentity;
   identityHandle: string;
+  // iMessage enablement threaded separately — the local identity object may
+  // be stale right after the wizard flips the flag.
+  imessageEnabled?: boolean;
 }): Promise<{ webhookUrl?: string; callWebsocketUrl?: string; tunnelName?: string }> {
   const baseUrl = identityTunnelBaseUrl(params.identity, params.identityHandle);
   if (!baseUrl) {
@@ -839,26 +842,37 @@ async function configureIdentityGatewayDelivery(params: {
       url: webhookUrl,
       eventTypes: TEXT_EVENT_TYPES,
     });
-    await params.client.phoneNumbers.update(params.identity.phoneNumber.id, {
+    if (textSub) {
+      console.log(`Phone text events subscribed at ${webhookUrl}.`);
+    } else {
+      console.log("Phone text subscription was not created — see the warning above.");
+    }
+  }
+
+  // Inbound-call config is identity-scoped: one row covers the dedicated
+  // number AND the shared iMessage line. Register whenever calls can arrive
+  // on either.
+  const imessageEnabled = params.imessageEnabled || Boolean(params.identity.imessageEnabled);
+  if (params.identity.phoneNumber || imessageEnabled) {
+    const callConfig = {
       incomingCallAction: "auto_accept",
       clientWebsocketUrl: callWebsocketUrl,
       incomingCallWebhookUrl: null,
-    });
-    if (textSub) {
-      console.log(
-        `Phone text events subscribed at ${webhookUrl}; incoming calls bridge to ${callWebsocketUrl}.`,
-      );
-    } else {
-      console.log(
-        `Phone text subscription was not created — see the warning above. Incoming calls still bridge to ${callWebsocketUrl}.`,
-      );
+    };
+    if (typeof (params.identity as any).setIncomingCallAction === "function") {
+      await (params.identity as any).setIncomingCallAction(callConfig);
+    } else if (params.identity.phoneNumber?.id) {
+      // Legacy SDKs only expose the number-scoped shim, which cannot
+      // configure a shared-iMessage-only identity.
+      await params.client.phoneNumbers.update(params.identity.phoneNumber.id, callConfig);
     }
+    console.log(`Incoming calls bridge to ${callWebsocketUrl}.`);
   }
 
   // iMessage events are owned by the agent identity, not a phone number —
   // the channel rides shared Inkbox-managed lines. Only valid while the
   // identity is iMessage-enabled.
-  if (params.identity.imessageEnabled && params.identity.id) {
+  if (imessageEnabled && params.identity.id) {
     const imessageSub = await reconcileWebhookSubscription(params.client, {
       agentIdentityId: params.identity.id,
       url: webhookUrl,
@@ -930,28 +944,42 @@ function printProvisionedPhoneStatus(phone: { number?: string | null; smsStatus?
   );
 }
 
-async function maybeProvisionPhoneNumber(
+// Offer to provision a dedicated phone number (SMS + voice). Runs as a
+// standalone step AFTER iMessage setup so the wizard walks channels in a
+// natural order: connect over iMessage first, then add a dedicated number.
+// A no-op when the identity already has a number.
+async function offerDedicatedNumber(
   identity: AgentIdentity,
   prompter: Prompter,
 ): Promise<{ identity: AgentIdentity; didProvisionPhone: boolean }> {
+  console.log("\nDedicated phone number:");
   if (identity.phoneNumber) {
+    // Say so instead of silently skipping — otherwise the step looks lost.
+    console.log(`  Already provisioned: ${identity.phoneNumber.number}`);
     return { identity, didProvisionPhone: false };
   }
-  const wantPhone = await prompter.confirm(
-    "This identity has no phone number. Provision a local number for SMS + voice now?",
-    true,
-  );
+  console.log("  A local US number gives this agent its own line for SMS and voice.");
+  const wantPhone = await prompter.confirm("Provision a dedicated phone number now?", true);
   if (!wantPhone) {
+    console.log("  Skipped. Re-run `openclaw inkbox setup` anytime to add a number.");
     return { identity, didProvisionPhone: false };
   }
   try {
     const phone = await identity.provisionPhoneNumber({ type: "local" });
     printProvisionedPhoneStatus(phone);
-    return { identity: await identity.refresh(), didProvisionPhone: true };
   } catch (error) {
-    console.log(`Phone provisioning failed: ${messageFromError(error)}`);
-    console.log("You can provision a number later in the Inkbox console.");
+    // Graceful fallback — most rejections here are plan gating. Point at
+    // pricing and keep the wizard moving; nothing downstream needs a number.
+    console.log("  Dedicated phone numbers are available on Inkbox paid tiers —");
+    console.log("  see https://inkbox.ai/pricing for details.");
+    console.log(`  (provisioning response: ${messageFromError(error)})`);
     return { identity, didProvisionPhone: false };
+  }
+  try {
+    return { identity: await identity.refresh(), didProvisionPhone: true };
+  } catch {
+    // Refresh is cosmetic here; the number is provisioned either way.
+    return { identity, didProvisionPhone: true };
   }
 }
 
@@ -1023,13 +1051,15 @@ async function waitForSmsStart(params: {
 // Offer to enable iMessage for the agent and walk through connecting an
 // iPhone. Enablement lives on the Inkbox identity, not local config — there
 // is no number to provision; people connect through the Inkbox iMessage
-// router. Returns the (possibly refreshed) identity.
+// router. Returns the (possibly refreshed) identity plus whether iMessage
+// ended up enabled, so callers can gate iMessage-dependent steps even when
+// the local identity object is stale.
 async function configureIMessage(params: {
   client: Inkbox;
   identity: AgentIdentity;
   identityHandle: string;
   prompter: Prompter;
-}): Promise<AgentIdentity> {
+}): Promise<{ identity: AgentIdentity; enabled: boolean }> {
   let identity = params.identity;
   // Detect the SDK's iMessage surface before prompting so setups running
   // against an older @inkbox/sdk skip the step instead of crashing.
@@ -1039,32 +1069,38 @@ async function configureIMessage(params: {
     typeof (identity as any).update !== "function"
   ) {
     console.log("iMessage requires @inkbox/sdk >= 0.4.7; skipping iMessage setup.");
-    return identity;
+    return { identity, enabled: Boolean(identity.imessageEnabled) };
   }
 
   console.log("\niMessage:");
+  console.log("  Inkbox can make this agent reachable over iMessage from your iPhone.");
+  console.log("  No number to provision — you connect through the Inkbox iMessage router.");
+  console.log("  Once connected, the agent can also make and take voice calls with you");
+  console.log("  over that same shared iMessage line.");
   if (identity.imessageEnabled) {
     console.log("  iMessage is already enabled for this agent.");
   } else {
-    const enable = await params.prompter.confirm(
-      "Enable iMessage for this agent? People connect by texting the Inkbox iMessage router — no number to provision.",
-      true,
-    );
+    const enable = await params.prompter.confirm("Enable iMessage for this agent?", true);
     if (!enable) {
       console.log("  Skipped. Re-run `openclaw inkbox setup` anytime to enable iMessage.");
-      return identity;
+      return { identity, enabled: false };
     }
     try {
       await identity.update({ imessageEnabled: true });
+    } catch (error) {
+      console.log(`  Could not enable iMessage: ${messageFromError(error)}`);
+      console.log("  You can enable it later from the Inkbox Console and re-run setup.");
+      return { identity, enabled: false };
+    }
+    console.log("  iMessage enabled for this agent.");
+    try {
       // Re-fetch so the local object reflects the new flag (the SDK gates
       // its iMessage helpers on it).
       identity = await params.client.getIdentity(params.identityHandle);
     } catch (error) {
-      console.log(`  Could not enable iMessage: ${messageFromError(error)}`);
-      console.log("  You can enable it later from the Inkbox Console and re-run setup.");
-      return identity;
+      console.log(`  Could not refresh the identity after enabling: ${messageFromError(error)}`);
+      return { identity, enabled: true };
     }
-    console.log("  iMessage enabled for this agent.");
   }
 
   // Surface phones already connected through the router so re-runs don't
@@ -1089,14 +1125,14 @@ async function configureIMessage(params: {
   );
   if (!wantConnect) {
     console.log("  You can connect anytime — re-run `openclaw inkbox setup` for the walkthrough.");
-    return identity;
+    return { identity, enabled: true };
   }
   await waitForIMessageFirstMessage({
     client: params.client,
     identity,
     identityHandle: params.identityHandle,
   });
-  return identity;
+  return { identity, enabled: true };
 }
 
 // Walk the user through the iMessage connect flow, wait for their first
@@ -1374,31 +1410,23 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       } else {
         identityHandle = await prompter.ask("New identity handle (lowercase, 3-63 chars, alphanum+dash)");
         const displayName = normalizeOptional(await prompter.ask("Display name (optional)"));
-        const createPhone = await prompter.confirm(
-          "Provision a local phone number for SMS + voice for this identity?",
-          true,
-        );
+        // Phone provisioning is decoupled from creation: the wizard offers a
+        // dedicated number as a standalone step after iMessage setup.
         identity = await client.createIdentity(identityHandle, {
           ...(displayName ? { displayName } : {}),
-          ...(createPhone ? { phoneNumber: { type: "local", incomingCallAction: "auto_reject" } } : {}),
         });
         createdIdentity = true;
-        didProvisionPhone = createPhone && Boolean(identity.phoneNumber);
         console.log(`Created identity ${identityHandle}.`);
       }
     } else {
       identityHandle = await prompter.ask("New identity handle (lowercase, 3-63 chars, alphanum+dash)");
       const displayName = normalizeOptional(await prompter.ask("Display name (optional)"));
-      const createPhone = await prompter.confirm(
-        "Provision a local phone number for SMS + voice for this identity?",
-        true,
-      );
+      // Phone provisioning is decoupled from creation: the wizard offers a
+      // dedicated number as a standalone step after iMessage setup.
       identity = await client.createIdentity(identityHandle, {
         ...(displayName ? { displayName } : {}),
-        ...(createPhone ? { phoneNumber: { type: "local", incomingCallAction: "auto_reject" } } : {}),
       });
       createdIdentity = true;
-      didProvisionPhone = createPhone && Boolean(identity.phoneNumber);
       console.log(`Created identity ${identityHandle}.`);
     }
     // Mint an agent-scoped key bound to this identity. The plugin should use
@@ -1438,12 +1466,25 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     prompter,
   });
 
-  // Step 4 — optional phone provision.
-  if (!identity.phoneNumber) {
-    const provisioned = await maybeProvisionPhoneNumber(identity, prompter);
-    identity = provisioned.identity;
-    didProvisionPhone = didProvisionPhone || provisioned.didProvisionPhone;
-  }
+  // Step 4 — channels, in the order operators should think about them:
+  // connect over iMessage FIRST (no number to provision — you reach the agent
+  // through the shared Inkbox iMessage router), THEN offer a dedicated phone
+  // number for SMS + voice. Provisioning is decoupled from identity creation
+  // so this ordering holds across every entry path (signup, admin,
+  // agent-scoped). Runs before delivery setup (step 6) so the identity-owned
+  // imessage.* subscription is created when enabled.
+  const imessage = await configureIMessage({
+    client: agentClient,
+    identity,
+    identityHandle,
+    prompter,
+  });
+  identity = imessage.identity;
+  const imessageEnabled = imessage.enabled;
+
+  const provisioned = await offerDedicatedNumber(identity, prompter);
+  identity = provisioned.identity;
+  didProvisionPhone = didProvisionPhone || provisioned.didProvisionPhone;
 
   if (didProvisionPhone && identity.phoneNumber) {
     console.log(
@@ -1453,24 +1494,19 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     await waitForSmsStart({ identity });
   }
 
-  const voiceRealtime = identity.phoneNumber
-    ? await promptForOpenAiRealtimeConfig({
-        currentConfig: opts.currentConfig,
-        existingAccount,
-        env,
-        prompter,
-        validate: validateOpenAiRealtime,
-      })
-    : undefined;
-
-  // Step 4b — offer iMessage. Runs before delivery setup (step 6) so the
-  // identity-owned imessage.* subscription is created when enabled.
-  identity = await configureIMessage({
-    client: agentClient,
-    identity,
-    identityHandle,
-    prompter,
-  });
+  // Realtime calls work over both lines, so offer them whenever the identity
+  // can take a call — a dedicated number OR the shared iMessage line. The
+  // threaded bool covers a stale local identity object.
+  const voiceRealtime =
+    identity.phoneNumber || imessageEnabled
+      ? await promptForOpenAiRealtimeConfig({
+          currentConfig: opts.currentConfig,
+          existingAccount,
+          env,
+          prompter,
+          validate: validateOpenAiRealtime,
+        })
+      : undefined;
 
   printInkboxAuthorizationInfo();
 
@@ -1521,6 +1557,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       client: agentClient,
       identity,
       identityHandle,
+      imessageEnabled,
     });
     tunnelName = delivery.tunnelName;
   } catch (error) {

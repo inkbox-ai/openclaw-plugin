@@ -109,6 +109,7 @@ export function registerInkboxPublicUrlInboundRoutes(api: any): void {
       signingKey: account.config.signingKey,
       handlers,
       allowedContactIds: account.config.allowedInboundContactIds,
+      externalEvents: account.config.externalEvents,
       logger: api.logger,
     });
   }
@@ -180,6 +181,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
     handlers,
     wsHandler: bridge.wsHandler,
     allowedContactIds: account.config.allowedInboundContactIds,
+    externalEvents: account.config.externalEvents,
     logger: ctx.log,
     serve: false,
   });

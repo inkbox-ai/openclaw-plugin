@@ -62,6 +62,7 @@ export function startInbound(opts: StartInboundOptions): void {
         signingKey: cfg.signingKey,
         handlers: wrappedHandlers,
         allowedContactIds: cfg.allowedInboundContactIds,
+        externalEvents: cfg.externalEvents,
         logger,
       });
       logger?.info?.(
@@ -84,6 +85,7 @@ export function startInbound(opts: StartInboundOptions): void {
         handlers: wrappedHandlers,
         logger,
         allowedContactIds: cfg.allowedInboundContactIds,
+        externalEvents: cfg.externalEvents,
       }),
     )
     .catch((err) => {

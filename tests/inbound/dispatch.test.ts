@@ -179,4 +179,53 @@ describe("dispatchInbound", () => {
       expect(onMail).not.toHaveBeenCalled();
     });
   });
+
+  describe("external events", () => {
+    it("classifies an unknown enveloped event_type as external and delivers it verified", async () => {
+      const onExternal = vi.fn();
+      const onCall = vi.fn();
+      const payload = { event_type: "workflow_run.failed", title: "CI failed" };
+      const result = await dispatchInbound(payload, { onExternal, onCall }, undefined, {
+        requestId: "req-9",
+      });
+      expect(result.kind).toBe("external");
+      expect(onExternal).toHaveBeenCalledWith(payload, { verified: true, requestId: "req-9" });
+      // Unknown envelopes must never be guessed into the call path.
+      expect(onCall).not.toHaveBeenCalled();
+    });
+
+    it("classifies a flat payload without remote_phone_number as external", async () => {
+      const onExternal = vi.fn();
+      const onCall = vi.fn();
+      const payload = { alert: "disk full", severity: "high" };
+      const result = await dispatchInbound(payload, { onExternal, onCall });
+      expect(result.kind).toBe("external");
+      expect(onExternal).toHaveBeenCalledTimes(1);
+      expect(onCall).not.toHaveBeenCalled();
+    });
+
+    it("drops external events silently when no onExternal handler is wired", async () => {
+      const onCall = vi.fn();
+      const result = await dispatchInbound({ event_type: "deploy.finished" }, { onCall });
+      expect(result.kind).toBe("external");
+      expect(result.callDecision).toBeUndefined();
+      expect(onCall).not.toHaveBeenCalled();
+    });
+
+    it("does not apply the contact allowlist to external events", async () => {
+      // External senders have no Inkbox contact; their gate is the explicit
+      // onExternal opt-in, not the contact allowlist.
+      const onExternal = vi.fn();
+      await dispatchInbound({ event_type: "deploy.finished" }, { onExternal }, ["contact-allowed"]);
+      expect(onExternal).toHaveBeenCalledTimes(1);
+    });
+
+    it("still routes flat call payloads carrying remote_phone_number to onCall", async () => {
+      const onExternal = vi.fn();
+      const onCall = vi.fn().mockReturnValue({ action: "answer", clientWebsocketUrl: "wss://x" });
+      const result = await dispatchInbound(callEvent(), { onExternal, onCall });
+      expect(result.kind).toBe("call");
+      expect(onExternal).not.toHaveBeenCalled();
+    });
+  });
 });

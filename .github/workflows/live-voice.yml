@@ -58,7 +58,7 @@ jobs:
       - name: Install live-test deps (Inkbox SDK + pytest + driver server)
         # uvicorn[standard] (not bare uvicorn): the driver accepts a WebSocket
         # upgrade, which needs the websockets extra.
-        run: pip install 'inkbox>=0.4.15' pytest fastapi 'uvicorn[standard]'
+        run: pip install 'inkbox>=0.4.15,<1.0.0' pytest fastapi 'uvicorn[standard]'
 
       - name: Build the plugin
         run: |

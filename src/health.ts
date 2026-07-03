@@ -248,7 +248,7 @@ export async function detectInkboxHealthFindings(
       finding(
         "inkbox/no-phone-number",
         "info",
-        `Inkbox identity ${account.identity} has no phone number; SMS and call tools are unavailable.`,
+        `Inkbox identity ${account.identity} has no dedicated phone number; SMS and dedicated-line calls are unavailable.`,
         "channels.inkbox.identity",
         "Run `openclaw inkbox setup` and choose phone provisioning, or provision a number in Inkbox.",
       ),
@@ -373,21 +373,58 @@ export async function detectInkboxHealthFindings(
       }
     }
 
-    const callAction = (identity.phoneNumber as any).incomingCallAction;
-    const callWebhookUrl = (identity.phoneNumber as any).incomingCallWebhookUrl;
-    const callWsUrl = (identity.phoneNumber as any).clientWebsocketUrl;
+  }
+
+  // Inbound-call config is identity-scoped: one row covers the dedicated
+  // number AND the shared iMessage line, so check it whenever calls can
+  // arrive on either.
+  if (identity.phoneNumber || (identity as any).imessageEnabled) {
+    let callAction: string | undefined;
+    let callWebhookUrl: string | undefined;
+    let callWsUrl: string | undefined;
+    let readFailed = false;
+    if (typeof (identity as any).getIncomingCallAction === "function") {
+      try {
+        const callConfig = await (identity as any).getIncomingCallAction();
+        callAction = callConfig?.incomingCallAction ?? undefined;
+        callWebhookUrl = callConfig?.incomingCallWebhookUrl ?? undefined;
+        callWsUrl = callConfig?.clientWebsocketUrl ?? undefined;
+      } catch (error) {
+        // Absent config (404) is a legitimate "not wired yet" state; any
+        // other failure means we can't tell and shouldn't warn either way.
+        if (!(error instanceof InkboxAPIError && error.statusCode === 404)) {
+          readFailed = true;
+        }
+      }
+    } else {
+      // Legacy SDK without the identity-scoped surface — read the
+      // number-scoped fields.
+      callAction = (identity.phoneNumber as any)?.incomingCallAction;
+      callWebhookUrl = (identity.phoneNumber as any)?.incomingCallWebhookUrl;
+      callWsUrl = (identity.phoneNumber as any)?.clientWebsocketUrl;
+    }
     const callRouteOk =
       callAction === "auto_accept"
         ? Boolean(callWsUrl)
         : callAction === "webhook"
           ? Boolean(callWebhookUrl)
           : callAction === "auto_reject";
-    if (!callRouteOk) {
+    if (readFailed) {
+      findings.push(
+        finding(
+          "inkbox/incoming-call-route",
+          "info",
+          "Could not read the identity incoming-call config.",
+          "channels.inkbox",
+          "Re-check after the API is reachable.",
+        ),
+      );
+    } else if (!callRouteOk) {
       findings.push(
         finding(
           "inkbox/incoming-call-route",
           "warning",
-          `Phone number ${identity.phoneNumber.number} has incomingCallAction=${callAction ?? "(unset)"} without a matching URL.`,
+          `Identity ${account.identity} has incomingCallAction=${callAction ?? "(unset)"} without a matching URL.`,
           "channels.inkbox",
           "Run `openclaw inkbox setup` to wire the incoming-call route.",
         ),
@@ -432,6 +469,7 @@ async function repairCachedState(
     identityHandle: account.identity,
     emailAddress: identity.mailbox?.emailAddress ?? null,
     phoneNumber: identity.phoneNumber?.number ?? null,
+    imessageEnabled: Boolean((identity as any).imessageEnabled),
     tunnelPublicHost: identity.tunnel?.publicHost ?? null,
     savedAt: new Date().toISOString(),
   });

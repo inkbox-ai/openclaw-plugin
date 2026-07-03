@@ -9,6 +9,9 @@ export interface RegisterHttpRouteOptions {
   signingKey: string;
   handlers: InboundHandlers;
   allowedContactIds?: string[];
+  // Opt-in for unverified/unknown external-webhook delivery; see
+  // WebhookHandlerOptions.externalEvents.
+  externalEvents?: boolean;
   logger?: PluginLogger;
 }
 
@@ -51,6 +54,7 @@ export function registerInboundHttpRoute(opts: RegisterHttpRouteOptions): void {
           dedup,
           logger: opts.logger,
           allowedContactIds: opts.allowedContactIds,
+          externalEvents: opts.externalEvents,
         });
         res.statusCode = result.status;
         if (result.headers) {

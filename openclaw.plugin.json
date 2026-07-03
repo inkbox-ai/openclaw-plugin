@@ -131,6 +131,9 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "externalEvents": {
+            "type": "boolean"
+          },
           "sms": {
             "type": "object",
             "additionalProperties": false,
@@ -201,6 +204,9 @@
                 "allowedInboundContactIds": {
                   "type": "array",
                   "items": { "type": "string" }
+                },
+                "externalEvents": {
+                  "type": "boolean"
                 },
                 "sms": {
                   "type": "object",
@@ -373,6 +379,10 @@
         "type": "array",
         "items": { "type": "string" },
         "description": "Inbound contact-id allowlist. When set, webhook events whose remote contact id is not on this list are dropped (mail/text become no-ops, calls are rejected). Events with no contact resolution are also dropped."
+      },
+      "externalEvents": {
+        "type": "boolean",
+        "description": "Pass non-Inkbox (external) webhooks through to the agent. Unknown sources are delivered unverified. Defaults to false."
       },
       "sms": {
         "type": "object",
