@@ -166,6 +166,11 @@ export const inkboxAccountConfigJsonSchema = {
       items: { type: "string" },
       description: "Inbound Inkbox contact-id allowlist.",
     },
+    externalEvents: {
+      type: "boolean",
+      description:
+        "Pass unverified/unknown external webhooks through to the agent (delivered with an unverified directive). Verified registered providers (e.g. GitHub with its INKBOX_WEBHOOK_SECRET_GITHUB secret set) are delivered regardless of this flag. Defaults to false.",
+    },
     sms: smsSchema,
   },
 } as const;

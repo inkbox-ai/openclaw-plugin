@@ -134,6 +134,7 @@ import {
   IMESSAGE_TYPING_MAX_MS,
   IMESSAGE_TYPING_REFRESH_MS,
   InkboxRealtimeAudioPacer,
+  configureInkboxIdentityDelivery,
   createIMessageTypingPulse,
   createInkboxSessionBridge,
   prewarmInkboxAgent,
@@ -713,7 +714,7 @@ describe("createInkboxSessionBridge", () => {
       "Your Inkbox agent email address: smoke-agent@inkboxmail.com.",
     );
     expect(run.ctxPayload.message.bodyForAgent).toContain(
-      "Your Inkbox agent phone number: +16282028580.",
+      "Your dedicated phone line (your own number, for SMS and voice calls): +16282028580.",
     );
     expect(run.ctxPayload.message.bodyForAgent).toContain("What is it");
     expect(run.ctxPayload.message.bodyForAgent).toContain(
@@ -858,7 +859,7 @@ describe("createInkboxSessionBridge", () => {
     expect(params.instructions).toContain(
       "Your Inkbox agent email address: smoke-agent@inkboxmail.com.",
     );
-    expect(params.instructions).toContain("Your Inkbox agent phone number: +16282028580.");
+    expect(params.instructions).toContain("Your dedicated phone line (your own number, for SMS and voice calls): +16282028580.");
     expect(params.instructions).toContain(
       "Do not deny that you have an agent email or phone number.",
     );
@@ -2156,6 +2157,185 @@ describe("createInkboxSessionBridge", () => {
 
     expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
     expect(sendIMessage).not.toHaveBeenCalled();
+  });
+
+  it("wires onExternal unconditionally — the webhook handler gates delivery", () => {
+    // Verified registered providers must be deliverable even when the
+    // externalEvents opt-in is off, so the bridge always exposes the handler
+    // and the flag is enforced upstream in handleInkboxWebhook.
+    const { runtime } = createRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime(),
+    });
+    expect(typeof bridge.handlers.onExternal).toBe("function");
+  });
+
+  it("wakes the agent on an opted-in external event without delivering a reply", async () => {
+    const { runtime, sendText, sendIMessage } = createRuntime();
+    const channelRuntime = createChannelRuntime("Handled the alert.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent", externalEvents: true },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onExternal?.(
+      {
+        event_type: "workflow_run.failed",
+        source: "ci",
+        title: "Build broke",
+        severity: "high",
+        id: "run-77",
+      },
+      { verified: true, requestId: "req-77" },
+    );
+
+    // onExternal acks on dispatch; the agent turn completes asynchronously.
+    await vi.waitFor(() => expect(channelRuntime.deliveryResults).toHaveLength(1));
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
+    const body = ctxPayload.message.body as string;
+    expect(body).toContain("[inkbox:external source=ci event=workflow_run.failed");
+    expect(body).toContain("severity=high");
+    expect(body).toContain("EXTERNAL automated event");
+    expect(body).toContain("Build broke");
+    expect(body).toContain("Raw event payload:");
+    // Each event gets its own thread, keyed by the payload id.
+    expect(ctxPayload.route.routeSessionKey).toBeDefined();
+    expect(ctxPayload.extra.InkboxMode).toBe("external");
+    // The agent's text reply has nowhere to go — nothing may be sent.
+    expect(channelRuntime.deliveryResults[0]).toEqual({
+      visibleReplySent: false,
+      threadId: "external:ci:run-77",
+    });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendIMessage).not.toHaveBeenCalled();
+  });
+
+  it("prefixes the cautious directive on unverified external events", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent", externalEvents: true },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onExternal?.(
+      { alert: "disk full" },
+      { verified: false, requestId: "req-78" },
+    );
+
+    // onExternal acks on dispatch; the agent turn completes asynchronously.
+    await vi.waitFor(() => expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1));
+    const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
+    expect(ctxPayload.message.body).toContain("UNVERIFIED external event");
+  });
+});
+
+describe("configureInkboxIdentityDelivery", () => {
+  function deliveryRuntime(identity: any) {
+    const inkbox = {
+      webhooks: {
+        subscriptions: {
+          list: vi.fn(async () => []),
+          create: vi.fn(async (opts: any) => ({ id: "sub-1", ...opts })),
+          update: vi.fn(async () => ({})),
+        },
+      },
+      phoneNumbers: { update: vi.fn(async () => ({})) },
+    };
+    return {
+      getIdentity: vi.fn(async () => identity),
+      getClient: vi.fn(async () => inkbox),
+    };
+  }
+
+  it("writes the incoming-call config identity-scoped when the SDK supports it", async () => {
+    const setIncomingCallAction = vi.fn(async () => ({}));
+    const identity = {
+      id: "identity-1",
+      mailbox: null,
+      phoneNumber: { id: "phone-1", number: "+15550001111" },
+      imessageEnabled: false,
+      setIncomingCallAction,
+    };
+    const runtime = deliveryRuntime(identity);
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://example.com/inkbox/webhook",
+      callWebsocketUrl: "wss://example.com/inkbox/phone/media/ws",
+    });
+
+    expect(setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://example.com/inkbox/phone/media/ws",
+      incomingCallWebhookUrl: null,
+    });
+    const inkbox = await runtime.getClient();
+    expect(inkbox.phoneNumbers.update).not.toHaveBeenCalled();
+  });
+
+  it("configures inbound calls for a shared-iMessage-only identity", async () => {
+    const setIncomingCallAction = vi.fn(async () => ({}));
+    const identity = {
+      id: "identity-1",
+      mailbox: null,
+      phoneNumber: null,
+      imessageEnabled: true,
+      setIncomingCallAction,
+    };
+    const runtime = deliveryRuntime(identity);
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://example.com/inkbox/webhook",
+      callWebsocketUrl: "wss://example.com/inkbox/phone/media/ws",
+    });
+
+    // No dedicated number, but calls can arrive over the shared line.
+    expect(setIncomingCallAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the number-scoped update when the SDK lacks the method", async () => {
+    const identity = {
+      id: "identity-1",
+      mailbox: null,
+      phoneNumber: { id: "phone-1", number: "+15550001111" },
+      imessageEnabled: false,
+    };
+    const runtime = deliveryRuntime(identity);
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://example.com/inkbox/webhook",
+      callWebsocketUrl: "wss://example.com/inkbox/phone/media/ws",
+    });
+
+    const inkbox = await runtime.getClient();
+    expect(inkbox.phoneNumbers.update).toHaveBeenCalledWith("phone-1", {
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://example.com/inkbox/phone/media/ws",
+      incomingCallWebhookUrl: null,
+    });
   });
 });
 

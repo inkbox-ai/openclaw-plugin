@@ -111,9 +111,91 @@ describe("detectInkboxHealthFindings", () => {
       "inkbox/auth-key-admin-scoped",
       "inkbox/cached-state-missing",
       "inkbox/sms-not-ready",
+      // The fixture phone has no incoming-call config wired.
+      "inkbox/incoming-call-route",
     ]);
     expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_test" });
     expect(sdk.getIdentity).toHaveBeenCalledWith("agent");
+  });
+
+  it("reads the identity-scoped incoming-call config when the SDK exposes it", async () => {
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "api_key.agent_scoped.claimed",
+      organizationId: "org-1",
+    });
+    const getIncomingCallAction = vi.fn(async () => ({
+      agentIdentityId: "identity-1",
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://example.com/hooks/inkbox/phone/media/ws",
+      incomingCallWebhookUrl: null,
+    }));
+    sdk.getIdentity.mockResolvedValue({
+      mailbox: { id: "mb-1", emailAddress: "agent@inkboxmail.com" },
+      // Number-scoped fields intentionally absent — the identity-scoped read
+      // must be the source of truth.
+      phoneNumber: { id: "phone-1", number: "+15551234567", smsStatus: "ready" },
+      getIncomingCallAction,
+      tunnel: { publicHost: "agent.inkboxwire.com" },
+    });
+
+    const findings = await detectInkboxHealthFindings(
+      {
+        cfg: {
+          channels: {
+            inkbox: {
+              apiKey: "ApiKey_test",
+              identity: "agent",
+              signingKey: "whsec_test",
+              publicUrl: "https://example.com/hooks",
+            },
+          },
+        } as any,
+      },
+      {},
+    );
+
+    expect(getIncomingCallAction).toHaveBeenCalled();
+    expect(ids(findings)).not.toContain("inkbox/incoming-call-route");
+  });
+
+  it("checks the incoming-call route for an iMessage-only identity", async () => {
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "api_key.agent_scoped.claimed",
+      organizationId: "org-1",
+    });
+    const notFound = new sdk.InkboxAPIError(404, "no incoming-call config");
+    sdk.getIdentity.mockResolvedValue({
+      mailbox: { id: "mb-1", emailAddress: "agent@inkboxmail.com" },
+      phoneNumber: null,
+      imessageEnabled: true,
+      getIncomingCallAction: vi.fn(async () => {
+        throw notFound;
+      }),
+      tunnel: { publicHost: "agent.inkboxwire.com" },
+    });
+
+    const findings = await detectInkboxHealthFindings(
+      {
+        cfg: {
+          channels: {
+            inkbox: {
+              apiKey: "ApiKey_test",
+              identity: "agent",
+              signingKey: "whsec_test",
+              publicUrl: "https://example.com/hooks",
+            },
+          },
+        } as any,
+      },
+      {},
+    );
+
+    // No dedicated number, but the shared iMessage line can still take calls
+    // — the unwired identity-scoped config must surface as a warning.
+    const route = findings.find((f) => f.checkId === "inkbox/incoming-call-route");
+    expect(route?.severity).toBe("warning");
   });
 
   it("reports identity lookup failures as identity-not-found", async () => {

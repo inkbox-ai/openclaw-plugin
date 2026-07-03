@@ -198,6 +198,9 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
   if (typeof value.voiceAgentPrewarm === "boolean") {
     out.voiceAgentPrewarm = value.voiceAgentPrewarm;
   }
+  if (typeof value.externalEvents === "boolean") {
+    out.externalEvents = value.externalEvents;
+  }
   for (const field of ["voiceAgentPrewarmTtlMs", "voiceAgentPrewarmTimeoutMs"] as const) {
     const raw = value[field];
     if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {

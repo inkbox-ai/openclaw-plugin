@@ -33,12 +33,18 @@ function createMockRuntime(overrides: {
   sendText?: ReturnType<typeof vi.fn>;
   forwardEmail?: ReturnType<typeof vi.fn>;
   placeCall?: ReturnType<typeof vi.fn>;
+  // Line capabilities used by place-call origination resolution.
+  phoneNumber?: unknown;
+  imessageEnabled?: boolean;
 } = {}): InkboxRuntime {
   const identity = {
     sendEmail: overrides.sendEmail ?? vi.fn().mockResolvedValue({ id: "msg-1" }),
     sendText: overrides.sendText ?? vi.fn().mockResolvedValue({ id: "txt-1", deliveryStatus: "queued" }),
     forwardEmail: overrides.forwardEmail ?? vi.fn().mockResolvedValue({ id: "fwd-1" }),
     placeCall: overrides.placeCall ?? vi.fn().mockResolvedValue({ id: "call-1", status: "queued", rateLimit: { callsRemaining: 17 } }),
+    phoneNumber:
+      "phoneNumber" in overrides ? overrides.phoneNumber : { id: "phone-1", number: "+15550001111" },
+    imessageEnabled: overrides.imessageEnabled ?? false,
   };
   return {
     getIdentity: () => Promise.resolve(identity as any),
@@ -275,9 +281,11 @@ describe("registerPlaceCall", () => {
     });
     expect(placeCall).toHaveBeenCalledWith({
       toNumber: "+15551234567",
+      origination: "dedicated_number",
       clientWebsocketUrl: expect.stringContaining("wss://example.com/ws"),
     });
     expect(out.content[0].text).toContain("call-9");
+    expect(out.content[0].text).toContain("origination=dedicated_number");
     expect(out.content[0].text).toContain("callsRemaining=3");
   });
 
@@ -314,6 +322,7 @@ describe("registerPlaceCall", () => {
     });
     expect(placeCall).toHaveBeenCalledWith({
       toNumber: "+15551234567",
+      origination: "dedicated_number",
       clientWebsocketUrl: expect.stringContaining("wss://derived.example/ws"),
     });
     expect(out.content[0].text).toContain("call-10");
@@ -373,5 +382,68 @@ describe("registerPlaceCall", () => {
     expect(url.searchParams.get("inkbox_call_context_id")).toMatch(
       /^[0-9a-f-]{36}$/,
     );
+  });
+
+  it("passes an explicit shared-line origination through to placeCall", async () => {
+    const { api, tools } = createApi();
+    const placeCall = vi.fn().mockResolvedValue({ id: "call-12", status: "queued" });
+    registerPlaceCall(
+      api,
+      createMockRuntime({ placeCall, imessageEnabled: true }),
+      undefined,
+      () => "wss://derived.example/ws",
+    );
+    const tool = tools.get("inkbox_place_call")!;
+    const out = await tool.execute("turn-1", {
+      toNumber: "+15551234567",
+      purpose: "The user asked for a general call.",
+      origination: "shared_imessage_number",
+    });
+    expect(placeCall).toHaveBeenCalledWith(
+      expect.objectContaining({ origination: "shared_imessage_number" }),
+    );
+    expect(out.content[0].text).toContain("origination=shared_imessage_number");
+  });
+
+  it("explains a shared-line rejection when the recipient is not connected", async () => {
+    const { api, tools } = createApi();
+    const { InkboxAPIError } = await import("@inkbox/sdk");
+    const placeCall = vi
+      .fn()
+      .mockRejectedValue(new InkboxAPIError(409, "no_shared_connection: recipient has no active iMessage connection"));
+    registerPlaceCall(
+      api,
+      createMockRuntime({ placeCall, imessageEnabled: true }),
+      undefined,
+      () => "wss://derived.example/ws",
+    );
+    const tool = tools.get("inkbox_place_call")!;
+    const out = await tool.execute("turn-1", {
+      toNumber: "+15551234567",
+      purpose: "The user asked for a general call.",
+      origination: "shared_imessage_number",
+    });
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("isn't connected to you over iMessage");
+    expect(out.content[0].text).toContain('"dedicated_number"');
+  });
+
+  it("rejects with a clear error when the identity has no line to call from", async () => {
+    const { api, tools } = createApi();
+    const placeCall = vi.fn();
+    registerPlaceCall(
+      api,
+      createMockRuntime({ placeCall, phoneNumber: null, imessageEnabled: false }),
+      undefined,
+      () => "wss://derived.example/ws",
+    );
+    const tool = tools.get("inkbox_place_call")!;
+    const out = await tool.execute("turn-1", {
+      toNumber: "+15551234567",
+      purpose: "The user asked for a general call.",
+    });
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("Provision a number or enable iMessage first.");
+    expect(placeCall).not.toHaveBeenCalled();
   });
 });

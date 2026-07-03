@@ -74,8 +74,48 @@ function isCap409(err: unknown): boolean {
   return /max\s*\d+|maximum/i.test(detail) && /subscription/i.test(detail);
 }
 
-// Reconcile a desired subscription against the live set for one owner.
-// Returns the resulting row, or null if reconciliation aborted (e.g.
+function urlPathname(url: string): string | null {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return null;
+  }
+}
+
+// A same-owner row is one of OUR stale rows when it points somewhere else
+// but at this plugin's webhook route (`/inkbox[/account]/webhook`). The
+// pathname is the plugin's fingerprint: the base host changes across boots
+// (tunnel vs publicUrl, or a new tunnel host), the route does not. Rows on
+// other paths belong to other consumers and are never touched.
+function isStalePluginSubscription(sub: WebhookSubscription, desired: DesiredSubscriptionSet): boolean {
+  if (sub.url === desired.url) return false;
+  const desiredPath = urlPathname(desired.url);
+  if (!desiredPath) return false;
+  return urlPathname(sub.url) === desiredPath;
+}
+
+// Best-effort removal of a redundant stale row; a delete failure must never
+// fail the reconcile that already converged a live receiver.
+async function deleteStaleSubscription(
+  inkbox: Inkbox,
+  sub: WebhookSubscription,
+  logger?: PluginLogger,
+): Promise<void> {
+  try {
+    await inkbox.webhooks.subscriptions.delete(sub.id);
+    logger?.info?.(`Inkbox stale webhook subscription removed: ${sub.url}`);
+  } catch (err) {
+    if (err instanceof InkboxAPIError && err.statusCode === 404) return;
+    logger?.warn?.(
+      `Inkbox stale webhook subscription delete failed for ${sub.url}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+// Reconcile a desired subscription against the live set for one owner so a
+// boot always converges the owner onto ITS current webhook URL: adopt the
+// matching row, repoint a stale plugin row whose base URL changed, or create
+// one. Returns the resulting row, or null if reconciliation aborted (e.g.
 // cap exceeded). List-then-create races on duplicate URL are recovered
 // by re-listing and PATCHing.
 export async function reconcileWebhookSubscription(
@@ -100,14 +140,58 @@ export async function reconcileWebhookSubscription(
 
   const existing = await inkbox.webhooks.subscriptions.list(ownerFilter);
   const match = existing.find((sub) => sub.url === desired.url);
+  // Rows left by earlier boots of this plugin (same route, old base URL —
+  // e.g. a prior tunnel host, or a CI run in publicUrl mode). Repointed or
+  // removed below so Inkbox never keeps delivering to a dead URL.
+  const staleOurs = existing.filter((sub) => isStalePluginSubscription(sub, desired));
 
   if (match) {
-    if (sameEventTypes(match.eventTypes, desired.eventTypes)) {
-      return match;
+    const result = sameEventTypes(match.eventTypes, desired.eventTypes)
+      ? match
+      : await inkbox.webhooks.subscriptions.update(match.id, {
+          eventTypes: [...desired.eventTypes],
+        });
+    for (const stale of staleOurs) {
+      await deleteStaleSubscription(inkbox, stale, logger);
     }
-    return inkbox.webhooks.subscriptions.update(match.id, {
-      eventTypes: [...desired.eventTypes],
-    });
+    return result;
+  }
+
+  if (staleOurs.length > 0) {
+    // Repoint in place rather than delete+create: no zero-receiver window,
+    // and it cannot trip the per-owner subscription cap.
+    const [primary, ...extras] = staleOurs;
+    try {
+      const updated = await inkbox.webhooks.subscriptions.update(primary.id, {
+        url: desired.url,
+        ...(sameEventTypes(primary.eventTypes, desired.eventTypes)
+          ? {}
+          : { eventTypes: [...desired.eventTypes] }),
+      });
+      logger?.info?.(
+        `Inkbox webhook subscription repointed from ${primary.url} to ${desired.url}`,
+      );
+      for (const stale of extras) {
+        await deleteStaleSubscription(inkbox, stale, logger);
+      }
+      return updated;
+    } catch (err) {
+      if (!isDuplicateUrl409(err)) throw err;
+      // A concurrent activation already owns the desired URL — adopt that
+      // row and drop our stale ones.
+      const refreshed = await inkbox.webhooks.subscriptions.list(ownerFilter);
+      const raced = refreshed.find((sub) => sub.url === desired.url);
+      if (!raced) throw err;
+      const result = sameEventTypes(raced.eventTypes, desired.eventTypes)
+        ? raced
+        : await inkbox.webhooks.subscriptions.update(raced.id, {
+            eventTypes: [...desired.eventTypes],
+          });
+      for (const stale of staleOurs) {
+        await deleteStaleSubscription(inkbox, stale, logger);
+      }
+      return result;
+    }
   }
 
   try {

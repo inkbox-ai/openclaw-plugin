@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RequestIdDedup } from "../../src/inbound/dedup.js";
 
@@ -154,6 +155,144 @@ describe("handleInkboxWebhook", () => {
     expect(JSON.parse(out.body!)).toEqual({
       action: "answer",
       clientWebsocketUrl: "wss://example.com/ws",
+    });
+  });
+
+  it("delivers an Inkbox-signed unknown event type to onExternal as verified", async () => {
+    const onExternal = vi.fn();
+    const body = JSON.stringify({ event_type: "workflow_run.failed", title: "CI failed" });
+    const out = await handleInkboxWebhook(body, baseHeaders, {
+      signingKey: "whsec_x",
+      handlers: { onExternal },
+      externalEvents: true,
+    });
+    expect(out.status).toBe(200);
+    expect(out.body).toBe("ok");
+    expect(onExternal).toHaveBeenCalledWith(
+      expect.objectContaining({ event_type: "workflow_run.failed" }),
+      { verified: true, requestId: "req-1" },
+    );
+  });
+
+  it("ignores an Inkbox-signed unknown event type when external delivery is off", async () => {
+    const onCall = vi.fn();
+    const onExternal = vi.fn();
+    const body = JSON.stringify({ event_type: "workflow_run.failed" });
+    // onExternal is wired but the externalEvents opt-in is off — Inkbox-signed
+    // unknown shapes stay gated on the flag.
+    const out = await handleInkboxWebhook(body, baseHeaders, {
+      signingKey: "whsec_x",
+      handlers: { onCall, onExternal },
+    });
+    expect(out.status).toBe(200);
+    expect(out.body).toBe("ignored");
+    expect(onCall).not.toHaveBeenCalled();
+    expect(onExternal).not.toHaveBeenCalled();
+  });
+
+  it("delivers an unsigned unknown-source payload as unverified when opted in", async () => {
+    const onExternal = vi.fn();
+    const body = JSON.stringify({ alert: "disk full" });
+    const out = await handleInkboxWebhook(body, {}, {
+      signingKey: "whsec_x",
+      handlers: { onExternal },
+      externalEvents: true,
+    });
+    expect(out.status).toBe(200);
+    expect(onExternal).toHaveBeenCalledWith(
+      expect.objectContaining({ alert: "disk full" }),
+      { verified: false },
+    );
+    // The Inkbox scheme must not run for a request Inkbox never claimed.
+    expect(vi.mocked(verifyWebhook)).not.toHaveBeenCalled();
+  });
+
+  it("keeps the strict 400 for unknown sources when the opt-in is off", async () => {
+    const onExternal = vi.fn();
+    const body = JSON.stringify({ alert: "disk full" });
+    // onExternal wired but externalEvents off: unknown/unverified senders may
+    // not wake the agent.
+    const out = await handleInkboxWebhook(body, {}, {
+      signingKey: "whsec_x",
+      handlers: { onExternal },
+    });
+    expect(out.status).toBe(400);
+    expect(onExternal).not.toHaveBeenCalled();
+  });
+
+  describe("third-party provider requests", () => {
+    const githubBody = JSON.stringify({ action: "completed", workflow_run: { id: 42 } });
+
+    function githubHeaders(secret: string, body: string): Record<string, string> {
+      const digest = createHmac("sha256", secret).update(body).digest("hex");
+      return { "x-hub-signature-256": `sha256=${digest}` };
+    }
+
+    beforeEach(() => {
+      delete process.env.INKBOX_WEBHOOK_SECRET_GITHUB;
+    });
+
+    it("verifies a GitHub-signed request and delivers it verified", async () => {
+      process.env.INKBOX_WEBHOOK_SECRET_GITHUB = "gh-secret";
+      const onExternal = vi.fn();
+      const out = await handleInkboxWebhook(githubBody, githubHeaders("gh-secret", githubBody), {
+        signingKey: "whsec_x",
+        handlers: { onExternal },
+      });
+      expect(out.status).toBe(200);
+      expect(onExternal).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "completed" }),
+        { verified: true },
+      );
+    });
+
+    it("rejects a GitHub request whose signature does not verify", async () => {
+      process.env.INKBOX_WEBHOOK_SECRET_GITHUB = "gh-secret";
+      const onExternal = vi.fn();
+      const out = await handleInkboxWebhook(githubBody, githubHeaders("wrong-secret", githubBody), {
+        signingKey: "whsec_x",
+        handlers: { onExternal },
+      });
+      expect(out.status).toBe(401);
+      expect(onExternal).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when the provider secret is not configured", async () => {
+      const onExternal = vi.fn();
+      const out = await handleInkboxWebhook(githubBody, githubHeaders("gh-secret", githubBody), {
+        signingKey: "whsec_x",
+        handlers: { onExternal },
+      });
+      expect(out.status).toBe(401);
+      expect(onExternal).not.toHaveBeenCalled();
+    });
+
+    it("delivers a verified provider event even when the externalEvents flag is off", async () => {
+      // Configuring the provider's secret IS that source's opt-in; the
+      // externalEvents flag only gates unverified/unknown senders.
+      process.env.INKBOX_WEBHOOK_SECRET_GITHUB = "gh-secret";
+      const onExternal = vi.fn();
+      const out = await handleInkboxWebhook(githubBody, githubHeaders("gh-secret", githubBody), {
+        signingKey: "whsec_x",
+        handlers: { onExternal },
+        externalEvents: false,
+      });
+      expect(out.status).toBe(200);
+      expect(out.body).toBe("ok");
+      expect(onExternal).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "completed" }),
+        { verified: true },
+      );
+    });
+
+    it("acknowledges without dispatch when no external delivery path is wired", async () => {
+      process.env.INKBOX_WEBHOOK_SECRET_GITHUB = "gh-secret";
+      const out = await handleInkboxWebhook(githubBody, githubHeaders("gh-secret", githubBody), {
+        signingKey: "whsec_x",
+        handlers: {},
+      });
+      expect(out.status).toBe(200);
+      expect(out.body).toBe("ignored");
     });
   });
 

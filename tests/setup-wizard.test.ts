@@ -1054,9 +1054,9 @@ describe("runSetupWizard", () => {
     });
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
-    // realtime: no, enable iMessage: yes, connect walkthrough: no,
+    // enable iMessage: yes, connect walkthrough: no, realtime: no,
     // keep existing signing key: yes
-    const prompter = createPrompter({ confirms: [false, true, false, true] });
+    const prompter = createPrompter({ confirms: [true, false, false, true] });
 
     const result = await runSetupWizard({
       prompter,
@@ -1104,7 +1104,9 @@ describe("runSetupWizard", () => {
     });
     sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
     sdk.getIdentity.mockResolvedValue(identity);
-    const prompter = createPrompter({ confirms: [false, true, true, true] });
+    // enable iMessage: yes, connect walkthrough: yes, realtime: no,
+    // keep existing signing key: yes
+    const prompter = createPrompter({ confirms: [true, true, false, true] });
 
     const result = await runSetupWizard({
       prompter,
@@ -1174,5 +1176,155 @@ describe("runSetupWizard", () => {
       false,
     ]);
     expect(identity.listIMessages).not.toHaveBeenCalled();
+  });
+
+  it("prefers the identity-scoped incoming-call config during delivery setup", async () => {
+    const setIncomingCallAction = vi.fn(async () => ({}));
+    const identity = createIdentity({ setIncomingCallAction });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ confirms: [false, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://smoke-agent.inkboxwire.com/inkbox/phone/media/ws",
+      incomingCallWebhookUrl: null,
+    });
+    // The number-scoped legacy shim must not run when the identity-scoped
+    // surface exists.
+    expect(sdk.phoneNumbersUpdate).not.toHaveBeenCalled();
+  });
+
+  it("walks iMessage before the dedicated-number step", async () => {
+    const identity = createIMessageIdentity({ phoneNumber: null });
+    const provisionedPhone = {
+      id: "phone-2",
+      number: "+15559876543",
+      type: "local",
+      smsStatus: "ready",
+    };
+    identity.provisionPhoneNumber.mockImplementation(async () => {
+      identity.phoneNumber = provisionedPhone;
+      return provisionedPhone;
+    });
+    identity.listTexts.mockResolvedValue([
+      { direction: "inbound", text: "START", remotePhoneNumber: "+15550001111" },
+    ]);
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    // enable iMessage: yes, connect walkthrough: no, provision number: yes,
+    // realtime: no, keep existing signing key: yes
+    const prompter = createPrompter({ confirms: [true, false, true, false, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    const questions = prompter.confirm.mock.calls.map(([question]) => String(question));
+    const imessageIdx = questions.indexOf("Enable iMessage for this agent?");
+    const phoneIdx = questions.indexOf("Provision a dedicated phone number now?");
+    expect(imessageIdx).toBeGreaterThanOrEqual(0);
+    expect(phoneIdx).toBeGreaterThan(imessageIdx);
+    expect(identity.provisionPhoneNumber).toHaveBeenCalledWith({ type: "local" });
+  });
+
+  it("prints the existing number instead of prompting when one is provisioned", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const log = vi.spyOn(console, "log");
+    const prompter = createPrompter({ confirms: [false, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(log.mock.calls.flat().join("\n")).toContain("Already provisioned: +15551234567");
+    expect(prompter.confirm.mock.calls.map(([question]) => question)).not.toContain(
+      "Provision a dedicated phone number now?",
+    );
+    log.mockRestore();
+  });
+
+  it("points at paid tiers and keeps going when provisioning is refused", async () => {
+    const identity = createIdentity({ phoneNumber: null });
+    identity.provisionPhoneNumber.mockRejectedValue(
+      new sdk.InkboxAPIError(403, "phone provisioning requires a paid plan"),
+    );
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const log = vi.spyOn(console, "log");
+    const prompter = createPrompter({ confirms: [true, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    const output = log.mock.calls.flat().join("\n");
+    expect(output).toContain("Dedicated phone numbers are available on Inkbox paid tiers —");
+    expect(output).toContain("see https://inkbox.ai/pricing for details.");
+    expect(output).toContain("phone provisioning requires a paid plan");
+    log.mockRestore();
+  });
+
+  it("offers realtime calling for an iMessage-only identity", async () => {
+    const identity = createIMessageIdentity({ phoneNumber: null, imessageEnabled: true });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    // connect walkthrough: no, provision number: no, realtime: no,
+    // keep existing signing key: yes
+    const prompter = createPrompter({ confirms: [false, false, false, true] });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    // No dedicated number, but the shared iMessage line can take calls — the
+    // realtime opt-in must still be offered.
+    expect(prompter.confirm.mock.calls.map(([question]) => question)).toContain(
+      "Use OpenAI Realtime API for phone calls?",
+    );
+    expect(result.config?.voiceRealtime).toEqual(
+      expect.objectContaining({ enabled: false }),
+    );
   });
 });
