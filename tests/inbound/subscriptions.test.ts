@@ -27,15 +27,17 @@ function makeClient(
     list: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
+    delete: ReturnType<typeof vi.fn>;
   }> = {},
 ) {
   const list = overrides.list ?? vi.fn(async () => []);
   const create = overrides.create ?? vi.fn();
   const update = overrides.update ?? vi.fn();
+  const del = overrides.delete ?? vi.fn(async () => {});
   const client = {
-    webhooks: { subscriptions: { list, create, update } },
+    webhooks: { subscriptions: { list, create, update, delete: del } },
   };
-  return { client: client as any, list, create, update };
+  return { client: client as any, list, create, update, delete: del };
 }
 
 describe("reconcileWebhookSubscription", () => {
@@ -160,6 +162,224 @@ describe("reconcileWebhookSubscription", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(update).not.toHaveBeenCalled();
     expect(result?.id).toBe("sub-new");
+  });
+
+  it("repoints a stale plugin row when the base URL changed", async () => {
+    // Same /inkbox/webhook route, old base URL (e.g. a CI publicUrl boot):
+    // that row is ours — repoint it instead of leaving it pointed at a dead
+    // host.
+    const stale = makeSub({
+      id: "sub-stale",
+      mailboxId: "mb-1",
+      url: "http://127.0.0.1:18789/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const { client, create, update, delete: del } = makeClient({
+      list: vi.fn(async () => [stale]),
+      update: vi.fn(async (_id: string, opts: any) => makeSub({ ...stale, ...opts })),
+    });
+
+    const result = await reconcileWebhookSubscription(client, {
+      mailboxId: "mb-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: MAIL_EVENT_TYPES,
+    });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith("sub-stale", {
+      url: "https://tunnel.example.com/inkbox/webhook",
+    });
+    expect(result?.url).toBe("https://tunnel.example.com/inkbox/webhook");
+  });
+
+  it("repoints and patches event types together when both drifted", async () => {
+    const stale = makeSub({
+      id: "sub-stale",
+      phoneNumberId: "phone-1",
+      url: "http://127.0.0.1:18789/inkbox/webhook",
+      eventTypes: ["text.received"],
+    });
+    const { client, update } = makeClient({
+      list: vi.fn(async () => [stale]),
+      update: vi.fn(async (_id: string, opts: any) => makeSub({ ...stale, ...opts })),
+    });
+
+    await reconcileWebhookSubscription(client, {
+      phoneNumberId: "phone-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: TEXT_EVENT_TYPES,
+    });
+
+    expect(update).toHaveBeenCalledWith("sub-stale", {
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: [...TEXT_EVENT_TYPES],
+    });
+  });
+
+  it("deletes stale plugin rows when a row already matches the desired URL", async () => {
+    const match = makeSub({
+      id: "sub-match",
+      mailboxId: "mb-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const stale = makeSub({
+      id: "sub-stale",
+      mailboxId: "mb-1",
+      url: "http://127.0.0.1:18789/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const { client, create, update, delete: del } = makeClient({
+      list: vi.fn(async () => [match, stale]),
+    });
+
+    const result = await reconcileWebhookSubscription(client, {
+      mailboxId: "mb-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: MAIL_EVENT_TYPES,
+    });
+
+    expect(result).toBe(match);
+    expect(create).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(del).toHaveBeenCalledWith("sub-stale");
+  });
+
+  it("deletes extra stale rows after repointing the first", async () => {
+    const staleA = makeSub({
+      id: "sub-stale-a",
+      mailboxId: "mb-1",
+      url: "http://127.0.0.1:18789/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const staleB = makeSub({
+      id: "sub-stale-b",
+      mailboxId: "mb-1",
+      url: "https://old-tunnel.example.com/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const { client, update, delete: del } = makeClient({
+      list: vi.fn(async () => [staleA, staleB]),
+      update: vi.fn(async (_id: string, opts: any) => makeSub({ ...staleA, ...opts })),
+    });
+
+    await reconcileWebhookSubscription(client, {
+      mailboxId: "mb-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: MAIL_EVENT_TYPES,
+    });
+
+    expect(update).toHaveBeenCalledWith("sub-stale-a", {
+      url: "https://tunnel.example.com/inkbox/webhook",
+    });
+    expect(del).toHaveBeenCalledWith("sub-stale-b");
+  });
+
+  it("leaves other consumers' rows on different paths alone when repointing", async () => {
+    const stale = makeSub({
+      id: "sub-stale",
+      mailboxId: "mb-1",
+      url: "http://127.0.0.1:18789/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const foreign = makeSub({
+      id: "sub-foreign",
+      mailboxId: "mb-1",
+      url: "https://consumer.example.com/their/hook",
+      eventTypes: ["message.received"],
+    });
+    const accountScoped = makeSub({
+      id: "sub-account-scoped",
+      mailboxId: "mb-1",
+      url: "http://127.0.0.1:18789/inkbox/acct2/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const { client, update, delete: del } = makeClient({
+      list: vi.fn(async () => [foreign, stale, accountScoped]),
+      update: vi.fn(async (_id: string, opts: any) => makeSub({ ...stale, ...opts })),
+    });
+
+    await reconcileWebhookSubscription(client, {
+      mailboxId: "mb-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: MAIL_EVENT_TYPES,
+    });
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith("sub-stale", {
+      url: "https://tunnel.example.com/inkbox/webhook",
+    });
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("on repoint 409: adopts the raced desired-URL row and deletes the stale one", async () => {
+    const stale = makeSub({
+      id: "sub-stale",
+      mailboxId: "mb-1",
+      url: "http://127.0.0.1:18789/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const raced = makeSub({
+      id: "sub-raced",
+      mailboxId: "mb-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce([stale])
+      .mockResolvedValueOnce([stale, raced]);
+    const update = vi.fn().mockRejectedValue(
+      new InkboxAPIError(
+        409,
+        { detail: "An active subscription with this URL already exists on this owner" } as any,
+      ),
+    );
+    const { client, delete: del } = makeClient({ list, update });
+
+    const result = await reconcileWebhookSubscription(client, {
+      mailboxId: "mb-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: MAIL_EVENT_TYPES,
+    });
+
+    expect(result).toBe(raced);
+    expect(del).toHaveBeenCalledWith("sub-stale");
+  });
+
+  it("a stale-row delete failure does not fail the reconcile", async () => {
+    const match = makeSub({
+      id: "sub-match",
+      mailboxId: "mb-1",
+      url: "https://tunnel.example.com/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const stale = makeSub({
+      id: "sub-stale",
+      mailboxId: "mb-1",
+      url: "http://127.0.0.1:18789/inkbox/webhook",
+      eventTypes: [...MAIL_EVENT_TYPES],
+    });
+    const del = vi.fn().mockRejectedValue(new InkboxAPIError(500, "boom"));
+    const logger = { warn: vi.fn(), info: vi.fn() } as any;
+    const { client } = makeClient({
+      list: vi.fn(async () => [match, stale]),
+      delete: del,
+    });
+
+    const result = await reconcileWebhookSubscription(
+      client,
+      {
+        mailboxId: "mb-1",
+        url: "https://tunnel.example.com/inkbox/webhook",
+        eventTypes: MAIL_EVENT_TYPES,
+      },
+      logger,
+    );
+
+    expect(result).toBe(match);
+    expect(logger.warn).toHaveBeenCalled();
   });
 
   it("on 409 duplicate-URL: re-lists and returns the existing row", async () => {
