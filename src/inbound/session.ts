@@ -3344,7 +3344,13 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       opts.logger?.info?.(
         `Inkbox external event dispatched: thread=${turn.threadId} verified=${meta.verified}`,
       );
-      await dispatchInboundTurn({ ...opts, turn, activeCalls });
+      // Ack the webhook once the event is dispatched: the sender only needs
+      // delivery confirmation, and a full agent turn (tool calls included)
+      // easily outlives a forwarder's response timeout. The turn runs on
+      // detached; failures are logged rather than surfaced to the sender.
+      void dispatchInboundTurn({ ...opts, turn, activeCalls }).catch((error) => {
+        opts.logger?.warn?.(`Inkbox external event turn failed: ${errorMessage(error)}`);
+      });
     },
     async onCall(event: PhoneIncomingCallWebhookPayload): Promise<InboundCallDecision> {
       const wsUrl = opts.getCallWebsocketUrl?.();

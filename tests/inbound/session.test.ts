@@ -2202,6 +2202,8 @@ describe("createInkboxSessionBridge", () => {
       { verified: true, requestId: "req-77" },
     );
 
+    // onExternal acks on dispatch; the agent turn completes asynchronously.
+    await vi.waitFor(() => expect(channelRuntime.deliveryResults).toHaveLength(1));
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
     const body = ctxPayload.message.body as string;
@@ -2241,6 +2243,8 @@ describe("createInkboxSessionBridge", () => {
       { verified: false, requestId: "req-78" },
     );
 
+    // onExternal acks on dispatch; the agent turn completes asynchronously.
+    await vi.waitFor(() => expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1));
     const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
     expect(ctxPayload.message.body).toContain("UNVERIFIED external event");
   });
