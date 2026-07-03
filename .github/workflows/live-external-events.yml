@@ -1,0 +1,164 @@
+name: Live — external events (escalation → agent calls driver)
+
+# Boots the agent-under-test (AUT) gateway, then POSTs signed external escalation
+# webhooks at its local Inkbox webhook route asking it to phone the driver contact:
+# an Inkbox-signed unknown-shape event (the externalEvents catch-all) plus a
+# GitHub-signed workflow_run failure (valid and forged signatures). The tests
+# verify the agent actually places that call. The driver sits on auto_reject (set
+# by the test) — we monitor the escalation, not the call itself.
+# The gateway runs in publicUrl mode so the webhook route is a plain local HTTP
+# endpoint the tests can POST at directly, exactly like a forwarder would.
+# Real model + real call, so this runs only on ready (non-draft) PRs + dispatch,
+# and shares the AUT lock with the other live suites.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the agent to place the call"
+        default: "200"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Same group as the other live suites: only one holder of the AUT identity
+  # (and its tunnel, when a suite opens one) at a time.
+  group: inkbox-live-aut-tunnel
+  cancel-in-progress: false
+
+jobs:
+  external-events:
+    runs-on: ubuntu-latest
+    # Skip fork PRs (no secrets) and draft PRs (expensive). Dispatch always runs.
+    if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up env paths (gateway log)
+        run: echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install live-test deps (Inkbox SDK + pytest)
+        run: pip install 'inkbox>=0.4.15,<1.0.0' pytest
+
+      - name: Build the plugin
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install OpenClaw host
+        run: |
+          npm install -g openclaw@latest
+          openclaw --version
+
+      - name: Onboard model provider (real OpenAI)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # The agent's reasoning (deciding to place a call) uses the chat
+          # model; send it straight to OpenAI as-is.
+          # --skip-health: onboard otherwise waits for a running gateway, and
+          # ours starts in a later step.
+          openclaw onboard --non-interactive \
+            --auth-choice custom-api-key \
+            --custom-base-url "https://api.openai.com/v1" \
+            --custom-model-id "gpt-5.5" \
+            --custom-api-key "$OPENAI_API_KEY" \
+            --custom-compatibility openai \
+            --secret-input-mode plaintext \
+            --skip-health \
+            --accept-risk
+
+      - name: Configure AUT identity + external events
+        env:
+          OPENCLAW_INKBOX_API_KEY: ${{ secrets.OPENCLAW_INKBOX_API_KEY }}
+          OPENCLAW_INKBOX_SIGNING_KEY: ${{ secrets.OPENCLAW_INKBOX_SIGNING_KEY }}
+        run: |
+          HANDLE="$(python3 - <<'PYEOF'
+          import os
+          from inkbox import Inkbox
+          c = Inkbox(api_key=os.environ["OPENCLAW_INKBOX_API_KEY"], base_url=os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai"))
+          print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
+          PYEOF
+          )"
+          echo "AUT handle: $HANDLE"
+          # Install the plugin BEFORE writing channels.inkbox.* — the channel id
+          # only validates once the plugin is registered.
+          openclaw plugins install -l "$GITHUB_WORKSPACE"
+          openclaw plugins enable inkbox || true
+          openclaw config set channels.inkbox.enabled true --strict-json
+          openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
+          openclaw config set channels.inkbox.identity "$HANDLE"
+          openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
+          openclaw config set tools.allow '["inkbox"]' --strict-json
+          # Onboarding defaults tools.profile to "coding", whose base allowlist
+          # strips the inkbox messaging/contact/call tools. "full" = no restriction.
+          openclaw config set tools.profile full
+          # The whole point of this suite — let unknown-shape external webhooks
+          # reach the agent. Verified registered providers (github below) are
+          # opted in separately by configuring that provider's secret.
+          openclaw config set channels.inkbox.externalEvents true --strict-json
+          # publicUrl mode: the plugin serves its webhook route on the local
+          # gateway HTTP port instead of opening an Inkbox tunnel, so the tests
+          # can POST external events straight at it from the same host.
+          openclaw config set channels.inkbox.publicUrl "http://127.0.0.1:18789"
+          # No realtime needed — the driver auto-rejects, so no media leg runs.
+          openclaw config set channels.inkbox.voiceRealtime.enabled false --strict-json
+          # Per-run GitHub webhook secret: shared by the gateway (to verify) and
+          # the tests (to sign). Generated fresh so nothing is committed.
+          GH_SECRET="$(openssl rand -hex 24)"
+          echo "INKBOX_WEBHOOK_SECRET_GITHUB=$GH_SECRET" >> "$GITHUB_ENV"
+
+      - name: Start gateway and wait for readiness
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
+          echo $! > "$RUNNER_TEMP/gateway.pid"
+          echo "Waiting for the gateway (webhook route)…"
+          for i in $(seq 1 36); do      # up to ~180s
+            if openclaw health --json 2>/dev/null | jq -e '.channels.inkbox as $c | ($c.connected == true) or ([$c.accounts[]?.connected] | any)' >/dev/null; then
+              echo "Gateway ready."; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
+
+      - name: Run external-event tests
+        env:
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          OPENCLAW_INKBOX_API_KEY: ${{ secrets.OPENCLAW_INKBOX_API_KEY }}
+          OPENCLAW_INKBOX_SIGNING_KEY: ${{ secrets.OPENCLAW_INKBOX_SIGNING_KEY }}
+          LIVE_EXTERNAL_TIMEOUT: ${{ github.event.inputs.timeout_s || '200' }}
+        run: |
+          # Inkbox-signed escalation + GitHub-signed (valid & forged) escalation.
+          LIVE_REAL_MODEL=1 AUT_WEBHOOK_URL=http://127.0.0.1:18789/inkbox/webhook \
+            python3 -m pytest \
+              tests/live/test_external_event_intelligence.py \
+              tests/live/test_external_event_github.py -v
+
+      # Failure-only: these logs carry live agent content and this repo is public.
+      - name: Dump logs (on failure only)
+        if: failure()
+        run: |
+          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
+          echo "=== openclaw logs ==="; tail -n 200 /tmp/openclaw/openclaw-*.log 2>/dev/null || true
+
+      - name: Tear down (always)
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
+          sleep 3
