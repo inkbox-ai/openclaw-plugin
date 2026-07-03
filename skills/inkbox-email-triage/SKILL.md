@@ -8,19 +8,25 @@ user-invocable: false
 
 The Inkbox plugin gives you a working mailbox under an agent identity. Use this skill whenever you're processing inbound email or working through the unread queue.
 
+## Replying to the email that woke you
+
+When an inbound email arrives as your current turn (the turn body starts with `[inkbox:email from=…]`), the plugin automatically delivers your final message as the threaded reply. Just write the answer — do **not** call `inkbox_send_email` to answer it, or the sender receives two emails: your tool-sent reply plus your closing message. If no visible reply is warranted, return exactly `[SILENT]` and nothing is sent.
+
+`inkbox_send_email` is still the right tool for everything else: new outbound mail, looping in other recipients, or replying to a message other than the one in the current turn (as when working the unread queue below).
+
 ## Required tools
 
 - `inkbox_list_unread_emails` — start here
 - `inkbox_get_email` — for full body when the list summary isn't enough
 - `inkbox_get_email_thread` — pull the rest of a thread before replying
-- `inkbox_send_email` — write a reply (always pass `inReplyToMessageId` for threading)
+- `inkbox_send_email` — send new mail or reply to a queued message (always pass `inReplyToMessageId` when replying)
 - `inkbox_mark_emails_read` (optional, allowlist needed) — clear processed messages
 
 ## Workflow
 
 1. **Pull the queue.** Call `inkbox_list_unread_emails` with `limit` matching how much you intend to process this turn (default 25 is reasonable). Each result has `id`, `threadId`, `subject`, `fromAddress`, and a body preview.
 
-2. **Decide per message.** For each unread email:
+2. **Decide per message.** For each unread email (queued messages are not your current turn, so tool replies are correct here):
    - **Trivial reply** → call `inkbox_send_email` immediately with `inReplyToMessageId` set to the original message's `id`. The recipient's client will thread it.
    - **Needs context** → call `inkbox_get_email_thread` with the message's `threadId` to read the full conversation before composing.
    - **Forward to someone** → call `inkbox_forward_email` (optional tool — must be allowlisted). Prefer `mode: "inline"` to re-attach original parts.
