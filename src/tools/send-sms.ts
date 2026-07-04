@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
+import { recordOutboundDelivery } from "../delivery-failure.js";
 import { SMS_MAX_TEXT_CHARS, smsTextTooLongMessage } from "../message-limits.js";
 
 function normalizeRecipients(value: unknown): string[] | undefined {
@@ -121,6 +122,12 @@ export function registerSendSms(
             : { to: toList!.length === 1 ? toList![0] : toList }),
         };
         const msg = await identity.sendText(payload);
+        recordOutboundDelivery(msg.id, {
+          channel: "sms",
+          recipient: toList?.[0],
+          conversationId: conversationId || undefined,
+          body: params.text,
+        });
         const target = formatTargetSummary(msg, params);
         const status = msg.deliveryStatus ?? "unknown";
         return toolText(

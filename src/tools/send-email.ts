@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipients } from "../allowlist.js";
+import { recordOutboundDelivery } from "../delivery-failure.js";
 
 // Outbound email — the primary write path for the email channel.
 export function registerSendEmail(
@@ -50,6 +51,12 @@ export function registerSendEmail(
           cc: params.cc,
           bcc: params.bcc,
           inReplyToMessageId: params.inReplyToMessageId,
+        });
+        recordOutboundDelivery(msg.id, {
+          channel: "email",
+          recipient: params.to[0],
+          subject: params.subject,
+          body: params.bodyText ?? params.bodyHtml,
         });
         return toolText(
           `Sent email id=${msg.id} to=${params.to.join(",")} subject="${params.subject}"`,

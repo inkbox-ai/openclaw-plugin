@@ -1,6 +1,7 @@
 import { createInkboxRuntime } from "./client.js";
 import { checkOutboundRecipient } from "./allowlist.js";
 import { resolveInkboxAccount } from "./accounts.js";
+import { recordOutboundDelivery } from "./delivery-failure.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "./message-limits.js";
 
 export type InkboxTargetMode =
@@ -258,10 +259,20 @@ export async function sendInkboxChannelText(
       conversationId: target.value,
       text: params.text,
     });
+    recordOutboundDelivery(msg.id, {
+      channel: "sms",
+      conversationId: target.value,
+      body: params.text,
+    });
     return { messageId: msg.id };
   }
   if (target.mode === "sms") {
     const msg = await identity.sendText({ to: target.value, text: params.text });
+    recordOutboundDelivery(msg.id, {
+      channel: "sms",
+      recipient: target.value,
+      body: params.text,
+    });
     return { messageId: msg.id };
   }
   // Recipient-first channel: sends only work toward people already connected
@@ -272,21 +283,39 @@ export async function sendInkboxChannelText(
       conversationId: target.value,
       text: params.text,
     });
+    recordOutboundDelivery(msg.id, {
+      channel: "imessage",
+      conversationId: target.value,
+      body: params.text,
+    });
     return { messageId: msg.id };
   }
   if (target.mode === "imessage") {
     const msg = await identity.sendIMessage({ to: target.value, text: params.text });
+    recordOutboundDelivery(msg.id, {
+      channel: "imessage",
+      recipient: target.value,
+      body: params.text,
+    });
     return { messageId: msg.id };
   }
 
+  const subject = await resolveEmailReplySubject(identity, params);
   const msg = await identity.sendEmail({
     to: [target.value],
-    subject: await resolveEmailReplySubject(identity, params),
+    subject,
     bodyText: params.text,
     inReplyToMessageId:
       params.replyToId !== undefined && params.replyToId !== null
         ? String(params.replyToId)
         : undefined,
+  });
+  recordOutboundDelivery(msg.id, {
+    channel: "email",
+    recipient: target.value,
+    subject,
+    body: params.text,
+    emailThreadId: normalizeEmailThreadId(params.threadId),
   });
   return { messageId: msg.id };
 }

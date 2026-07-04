@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
+import { recordOutboundDelivery } from "../delivery-failure.js";
 import { IMESSAGE_MAX_TEXT_CHARS, imessageTextTooLongMessage } from "../message-limits.js";
 
 // Outbound iMessage — recipient-first channel: a person must have connected
@@ -96,6 +97,12 @@ export function registerSendIMessage(
           ...(text ? { text } : {}),
           ...(mediaUrls?.length ? { mediaUrls } : {}),
           ...(params.sendStyle ? { sendStyle: params.sendStyle } : {}),
+        });
+        recordOutboundDelivery(msg.id, {
+          channel: "imessage",
+          recipient: to || undefined,
+          conversationId: conversationId || msg.conversationId || undefined,
+          body: text || undefined,
         });
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
         return toolText(

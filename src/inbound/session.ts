@@ -26,6 +26,17 @@ import {
 import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
 import { recordInboundChannelHint } from "../channel-hint.js";
+import {
+  buildDeliveryFailurePrompt,
+  claimDeliveryFailure,
+  claimRecoveryAttempt,
+  imessageDeliveryFailure,
+  lookupOutboundDelivery,
+  mailDeliveryFailure,
+  recordOutboundDelivery,
+  textDeliveryFailure,
+  type DeliveryFailure,
+} from "../delivery-failure.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../message-limits.js";
 import {
   consumeOutboundCallContextFromUrl,
@@ -70,6 +81,10 @@ type InkboxInboundTurn = {
   replyToId?: string;
   threadId?: string;
   timestamp?: number;
+  // Set on delivery-failure recovery turns: the resend this turn produces is
+  // recorded as a recovery send, so its own failure cannot wake the agent
+  // again (loop guard).
+  recovery?: boolean;
   raw: unknown;
 };
 
@@ -1107,6 +1122,14 @@ async function deliverReply(
       ...(conversationId ? { conversationId } : { to: params.turn.remoteAddress }),
       text,
     });
+    recordOutboundDelivery(msg.id, {
+      channel: "imessage",
+      contactKey: params.turn.contactKey,
+      recipient: params.turn.remoteAddress,
+      body: text,
+      conversationId,
+      recovery: params.turn.recovery,
+    });
     return msg.id;
   }
   if (params.turn.mode === "sms") {
@@ -1119,6 +1142,14 @@ async function deliverReply(
     const msg = await identity.sendText({
       ...(conversationId ? { conversationId } : { to: params.turn.remoteAddress }),
       text,
+    });
+    recordOutboundDelivery(msg.id, {
+      channel: "sms",
+      contactKey: params.turn.contactKey,
+      recipient: params.turn.remoteAddress,
+      body: text,
+      conversationId,
+      recovery: params.turn.recovery,
     });
     return msg.id;
   }
@@ -1137,6 +1168,15 @@ async function deliverReply(
     subject,
     bodyText: text,
     inReplyToMessageId: params.turn.replyToId,
+  });
+  recordOutboundDelivery(msg.id, {
+    channel: "email",
+    contactKey: params.turn.contactKey,
+    recipient: params.turn.remoteAddress,
+    body: text,
+    emailThreadId: params.turn.threadId?.replace(/^email:/, ""),
+    subject,
+    recovery: params.turn.recovery,
   });
   return msg.id;
 }
@@ -3501,6 +3541,117 @@ async function runRealtimeCallWebSocket(
   }
 }
 
+// Turn a hard delivery-failure webhook into a recovery turn on the failed
+// conversation. Correlates through the outbound context recorded at send
+// time first (fills in whatever the webhook payload is missing), then the
+// webhook's own conversation/recipient fields. When nothing usable resolves,
+// logs and does NOT wake — a failure the agent can't act on is telemetry.
+// The turn's reply rides the normal deliverReply path, so it lands on the
+// same channel/thread and the existing [SILENT] check applies unchanged.
+async function handleDeliveryFailure(
+  opts: InkboxSessionBridgeOptions & { activeCalls: Map<string, ActiveCall> },
+  failure: DeliveryFailure | null,
+): Promise<void> {
+  if (!failure) {
+    opts.logger?.info?.(
+      "Inkbox delivery-failure webhook ignored (no message payload).",
+    );
+    return;
+  }
+  if (
+    !claimDeliveryFailure({
+      channel: failure.channel,
+      eventType: failure.eventType,
+      messageId: failure.messageId,
+      payload: failure.raw,
+    })
+  ) {
+    opts.logger?.info?.(
+      `Inkbox duplicate delivery-failure webhook ignored: ${failure.eventType} message=${failure.messageId ?? "unknown"}`,
+    );
+    return;
+  }
+  const context = lookupOutboundDelivery(failure.messageId, failure.rfcMessageId);
+  if (context?.recovery) {
+    opts.logger?.warn?.(
+      `Inkbox recovery send itself failed on ${failure.channel} (message=${failure.messageId ?? "unknown"}); not waking the agent again.`,
+    );
+    return;
+  }
+  const recipient = context?.recipient ?? failure.recipient;
+  const conversationId = context?.conversationId ?? failure.conversationId;
+  const emailThreadId = context?.emailThreadId ?? failure.emailThreadId;
+  const subject = context?.subject ?? failure.subject;
+  const failedBody = failure.body ?? context?.body;
+  const routable =
+    failure.channel === "email" ? Boolean(recipient) : Boolean(conversationId || recipient);
+  if (!routable) {
+    opts.logger?.warn?.(
+      `Inkbox delivery failure not correlated to a conversation; not waking the agent: ${failure.eventType} message=${failure.messageId ?? "unknown"}`,
+    );
+    return;
+  }
+  const contact = recipient
+    ? await lookupContact(
+        opts.runtime,
+        failure.channel === "email" ? "email" : "phone",
+        recipient,
+      )
+    : undefined;
+  const contactKey =
+    context?.contactKey ?? contact?.id ?? recipient ?? `${failure.channel}:${conversationId}`;
+  if (!claimRecoveryAttempt(contactKey)) {
+    opts.logger?.warn?.(
+      `Inkbox delivery-failure recovery cap reached for ${contactKey}; not waking the agent.`,
+    );
+    return;
+  }
+  const recipientLabel = contact?.name ?? recipient ?? `conversation ${conversationId}`;
+  const marker = [
+    `[inkbox:delivery_failure channel=${failure.channel} event=${failure.eventType}`,
+    recipient ? `to=${recipient}` : undefined,
+    conversationId ? `conversation_id=${conversationId}` : undefined,
+    `| ${renderContactMarker(contact)}]`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const prompt = buildDeliveryFailurePrompt({
+    channel: failure.channel,
+    recipientLabel,
+    reason: failure.reason,
+    body: failedBody,
+  });
+  const turn: InkboxInboundTurn = {
+    mode: failure.channel,
+    contactKey,
+    contact,
+    fromLabel: recipientLabel,
+    remoteAddress: recipient,
+    ...(failure.channel === "email"
+      ? {
+          subject,
+          // Thread the retry under the message that bounced.
+          replyToId: failure.rfcMessageId,
+          threadId: emailThreadId ? `email:${emailThreadId}` : undefined,
+        }
+      : {
+          conversationId,
+          conversationKind: "direct" as const,
+          conversationLabel: recipientLabel,
+          threadId: conversationId ? `${failure.channel}:${conversationId}` : undefined,
+        }),
+    body: `${marker}\n${prompt}`,
+    messageId: `delivery-failure:${failure.eventType}:${failure.messageId ?? Date.now()}`,
+    timestamp: parseTimestamp(failure.createdAt),
+    recovery: true,
+    raw: failure.raw,
+  };
+  opts.logger?.info?.(
+    `Inkbox delivery failure waking agent: ${failure.eventType} message=${failure.messageId ?? "unknown"} contact=${contactKey}`,
+  );
+  await dispatchInboundTurn({ ...opts, turn, activeCalls: opts.activeCalls });
+}
+
 export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): InkboxSessionBridge {
   const activeCalls = new Map<string, ActiveCall>();
   const callMetaById = new Map<string, Partial<InkboxInboundTurn> & { callId: string }>();
@@ -3508,6 +3659,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
 
   const handlers: InboundHandlers = {
     async onMail(event) {
+      // Hard failure events wake the agent for recovery; the rest of the
+      // outbound lifecycle (sent/delivered/forwarded) stays log-only.
+      if (event.event_type === "message.bounced" || event.event_type === "message.failed") {
+        await handleDeliveryFailure({ ...opts, activeCalls }, mailDeliveryFailure(event));
+        return;
+      }
       const turn = await buildMailTurn(opts.runtime, opts.account, event, opts.logger);
       if (!turn) {
         if (event.event_type !== "message.received") {
@@ -3518,6 +3675,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
     },
     async onText(event) {
+      // Only the hard failure wakes the agent — text.delivery_unconfirmed is
+      // status uncertainty, not a failed delivery, and stays log-only below.
+      if (event.event_type === "text.delivery_failed") {
+        await handleDeliveryFailure({ ...opts, activeCalls }, textDeliveryFailure(event));
+        return;
+      }
       const turn = await buildTextTurn(opts.runtime, opts.account, event, opts.logger);
       if (!turn) {
         opts.logger?.info?.(`Inkbox text lifecycle event: ${event.event_type}`);
@@ -3526,6 +3689,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
     },
     async onIMessage(event) {
+      if (event.event_type === "imessage.delivery_failed") {
+        await handleDeliveryFailure({ ...opts, activeCalls }, imessageDeliveryFailure(event));
+        return;
+      }
       if (event.event_type === "imessage.reaction_received") {
         const turn = await buildIMessageReactionTurn(
           opts.runtime, opts.account, event, opts.logger,
