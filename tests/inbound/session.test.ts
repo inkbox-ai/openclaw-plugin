@@ -221,6 +221,49 @@ function createRuntime(options: { conversations?: any[] } = {}) {
   return { runtime, sendText, sendIMessage, sendIMessageTyping, listTextConversations };
 }
 
+function createContactRuntime(contacts: { list?: any; lookup?: any }) {
+  const { runtime } = createRuntime();
+  runtime.getClient = vi.fn(async () => ({
+    calls: {
+      get: vi.fn(async () => ({
+        remotePhoneNumber: "+15551234567",
+        direction: "inbound",
+      })),
+    },
+    contacts: {
+      lookup: contacts.lookup ?? vi.fn(async () => []),
+      list: contacts.list ?? vi.fn(async () => []),
+    },
+  })) as any;
+  return runtime;
+}
+
+function findSubmittedToolResult(session: any, callId: string): any {
+  const call = session.submitToolResult.mock.calls.find(
+    (entry: any[]) => entry[0] === callId,
+  );
+  return call?.[1];
+}
+
+async function flushMicrotasks(times = 12): Promise<void> {
+  for (let i = 0; i < times; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+const contactMediaMessages = (): FakeInkboxWebSocketMessage[] => [
+  JSON.stringify({ event: "start", stream_id: "stream-1" }),
+  {
+    advanceMs: 800,
+    message: JSON.stringify({
+      event: "media",
+      stream_id: "stream-1",
+      media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+    }),
+  },
+  JSON.stringify({ event: "stop" }),
+];
+
 function createChannelRuntime(replyText = "I can hear you on the call.") {
   const deliveryResults: any[] = [];
   const dispatchReply = vi.fn(async (params: any) => {
@@ -878,7 +921,15 @@ describe("createInkboxSessionBridge", () => {
       "edit_post_call_action",
       "delete_post_call_action",
       "hang_up_call",
+      "inkbox_lookup_contact",
+      "inkbox_list_contacts",
     ]);
+    // Capability map drives the spoken consult list, and quick contact questions
+    // route to the direct read tools with a third-party disclosure guardrail.
+    expect(params.instructions).toContain("The main agent can:");
+    expect(params.instructions).toContain("inkbox_lookup_contact");
+    expect(params.instructions).toContain("inkbox_list_contacts");
+    expect(params.instructions.toLowerCase()).toContain("third");
     expect(realtimeSession.triggerGreeting).toHaveBeenCalledWith(
       "Greet there in one short sentence and ask how you can help.",
     );
@@ -1337,6 +1388,173 @@ describe("createInkboxSessionBridge", () => {
         is_final: true,
       }),
     );
+  });
+
+  it("submits a spoken fallback when an in-call consult blows past the timeout backstop", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = "consult";
+    const { runtime } = createRuntime();
+    // The main agent loop never returns for this consult. Without the timeout
+    // backstop the tool result would never be submitted and the model would sit
+    // on dead air waiting for it.
+    const dispatchReply = vi.fn(() => new Promise<void>(() => {}));
+    const channelRuntime = {
+      inbound: {
+        buildContext: vi.fn((input: any) => input),
+        dispatchReply,
+      },
+      session: { recordInboundSession: vi.fn() },
+      reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
+      deliveryResults: [] as any[],
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: channelRuntime as any,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+      // Hold the call open past the consult timeout backstop, then end it.
+      {
+        advanceMs: 300_000,
+        message: JSON.stringify({ event: "stop" }),
+      },
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    // The consult was dispatched and the filler cue spoken up front...
+    expect(dispatchReply).toHaveBeenCalled();
+    expect(realtimeSession.sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("One moment"),
+    );
+    // ...and when the agent loop never returned, a graceful spoken fallback was
+    // submitted as the tool result rather than leaving the model on dead air.
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
+      error: "consult timed out",
+      result:
+        "Tell the caller you couldn't get an answer right now. Offer to follow up after the call.",
+    });
+  });
+
+  it("answers a realtime contact-list question with a voice-trimmed, capped result", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = {
+      callId: "contact-1",
+      name: "inkbox_list_contacts",
+      args: { q: "alex" },
+    };
+    let listArgs: any;
+    const list = vi.fn(async (params: any) => {
+      listArgs = params;
+      // Seven fat cards from the SDK: the direct read must cap to five and trim
+      // each card down to what is worth saying aloud.
+      return Array.from({ length: 7 }, (_value, i) => ({
+        id: `c${i}`,
+        preferredName: `Contact ${i}`,
+        companyName: "Acme",
+        jobTitle: "Engineer",
+        emails: [{ value: `c${i}@example.com`, isPrimary: true }],
+        phones: [{ value: `+1555000${String(i).padStart(4, "0")}` }],
+        notes: "x".repeat(500),
+        createdAt: "2026-01-01T00:00:00Z",
+      }));
+    });
+    const runtime = createContactRuntime({ list });
+    const channelRuntime = createChannelRuntime("Handled.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket(contactMediaMessages());
+
+    await bridge.wsHandler(ws as any);
+    await flushMicrotasks();
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    // The list call is forced to the small voice page size.
+    expect(listArgs.limit).toBe(5);
+    const result = findSubmittedToolResult(realtimeSession, "contact-1");
+    expect(result).toBeTruthy();
+    expect(result.contacts).toHaveLength(5);
+    expect(result.count).toBe(7);
+    expect(result.truncated_to).toBe(5);
+    const first = result.contacts[0];
+    // Cards are flattened + clipped for speech: bare values, short notes, no
+    // incidental metadata.
+    expect(first.name).toBe("Contact 0");
+    expect(first.emails).toEqual(["c0@example.com"]);
+    expect(first.phones).toHaveLength(1);
+    expect(first.phones[0]).toMatch(/^\+1555000/);
+    expect(first.notes).toHaveLength(200);
+    expect(first).not.toHaveProperty("createdAt");
+  });
+
+  it("passes a realtime contact-read failure through as an error result", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = {
+      callId: "contact-err",
+      name: "inkbox_lookup_contact",
+      args: {},
+    };
+    const lookup = vi.fn(async () => {
+      throw new Error("Specify exactly one of email, phone, emailContains, or phoneContains.");
+    });
+    const runtime = createContactRuntime({ lookup });
+    const channelRuntime = createChannelRuntime("Handled.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket(contactMediaMessages());
+
+    await bridge.wsHandler(ws as any);
+    await flushMicrotasks();
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    const result = findSubmittedToolResult(realtimeSession, "contact-err");
+    expect(result).toBeTruthy();
+    expect(result.error).toContain("Specify exactly one");
   });
 
   it("deduplicates repeated in-call SMS consults while the first is running", async () => {
