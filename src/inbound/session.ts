@@ -172,7 +172,85 @@ const REALTIME_POST_CALL_ACTION_TOOL_NAME = "register_post_call_action";
 const REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME = "edit_post_call_action";
 const REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME = "delete_post_call_action";
 const REALTIME_HANG_UP_CALL_TOOL_NAME = "hang_up_call";
+// Read-only contact tools exposed directly to the realtime model, so common
+// "who is X?" / "what's their email?" questions answer in one SDK round-trip
+// instead of a full consult_agent loop. Reads only, on purpose: writes stay
+// brokered through consult_agent / post-call actions, where the main agent can
+// apply judgment before anything mutates. No get-by-id here — lookup and list
+// already return full cards, so a by-id fetch adds nothing mid-call. Names match
+// the main-agent contact tools so the model already knows them. Mirrors the
+// Hermes plugin's realtime contact reads (hermes-agent-plugin#33).
+const REALTIME_CONTACT_LOOKUP_TOOL_NAME = "inkbox_lookup_contact";
+const REALTIME_CONTACT_LIST_TOOL_NAME = "inkbox_list_contacts";
+const REALTIME_CONTACT_READ_TOOLS: readonly string[] = [
+  REALTIME_CONTACT_LOOKUP_TOOL_NAME,
+  REALTIME_CONTACT_LIST_TOOL_NAME,
+];
+// Voice results must stay small — everything in the session competes with audio
+// for context. Cap matches and clip notes before submitting results.
+const REALTIME_CONTACT_READ_MAX_RESULTS = 5;
+const REALTIME_CONTACT_READ_NOTES_MAX_CHARS = 200;
+const REALTIME_CONTACT_READ_MAX_VALUES = 3;
 const REALTIME_HANGUP_CONFIRM_WINDOW_MS = 60 * 1000;
+
+// What the main OpenClaw agent can do on behalf of a live call, grouped for
+// speech. Single source of truth rendered into the session instructions, so the
+// spoken capability list can't drift from what the tools actually are. Each
+// entry is [group, spoken summary, backing plugin tool names]; the "general"
+// group covers host-level abilities with no dedicated plugin tool and stays
+// empty on purpose. Mirrors Hermes MAIN_AGENT_CAPABILITIES (hermes-agent-plugin#33).
+const MAIN_AGENT_CAPABILITIES: ReadonlyArray<
+  readonly [string, string, readonly string[]]
+> = [
+  [
+    "contacts",
+    "look up, list, create, update, or delete contacts",
+    [
+      "inkbox_lookup_contact",
+      "inkbox_list_contacts",
+      "inkbox_get_contact",
+      "inkbox_create_contact",
+      "inkbox_update_contact",
+      "inkbox_delete_contact",
+    ],
+  ],
+  [
+    "sms",
+    "send SMS and read or manage past SMS conversations",
+    [
+      "inkbox_send_sms",
+      "inkbox_list_text_conversations",
+      "inkbox_get_text_conversation",
+      "inkbox_list_texts",
+      "inkbox_get_text",
+      "inkbox_mark_text_read",
+      "inkbox_mark_text_conversation_read",
+    ],
+  ],
+  [
+    "imessage",
+    "send iMessages and tapback reactions and read past iMessage conversations",
+    [
+      "inkbox_send_imessage",
+      "inkbox_list_imessage_conversations",
+      "inkbox_get_imessage_conversation",
+      "inkbox_send_imessage_reaction",
+      "inkbox_mark_imessage_conversation_read",
+    ],
+  ],
+  ["email", "send email", ["inkbox_send_email"]],
+  ["calls", "place a separate outbound phone call", ["inkbox_place_call"]],
+  ["identity", "check its own Inkbox identity and numbers", ["inkbox_whoami"]],
+  [
+    "general",
+    "search session history and notes, do research or computation, call external APIs, and draft long-form replies",
+    [],
+  ],
+];
+
+function realtimeCapabilitySummaries(): string[] {
+  return MAIN_AGENT_CAPABILITIES.map(([, summary]) => summary);
+}
 // Backstop for a stuck in-call consult. The consult runs the full main agent
 // loop off the audio path (fire-and-forget in handleRealtimeToolCall), so the
 // caller already hears the "One moment" cue and can keep talking while it runs.
@@ -1260,6 +1338,113 @@ function realtimeHangUpCallTool(): RealtimeVoiceTool {
   };
 }
 
+function realtimeContactLookupTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_CONTACT_LOOKUP_TOOL_NAME,
+    description:
+      `Look up an Inkbox contact by exactly ONE filter: email, phone, emailContains, or phoneContains. Fast direct read; returns full contact cards. Use this when the caller gives you an email address or phone number. To search by NAME, use ${REALTIME_CONTACT_LIST_TOOL_NAME} instead.`,
+    parameters: {
+      type: "object",
+      properties: {
+        email: { type: "string", description: "Exact email address." },
+        phone: { type: "string", description: "Exact phone number, E.164 preferred." },
+        emailContains: { type: "string", description: "Substring of the email address." },
+        phoneContains: { type: "string", description: "Substring of the phone number." },
+      },
+      required: [],
+    },
+  };
+}
+
+function realtimeContactListTool(): RealtimeVoiceTool {
+  return {
+    type: "function",
+    name: REALTIME_CONTACT_LIST_TOOL_NAME,
+    description:
+      `Search the Inkbox contact book by name or free text. Fast direct read; returns up to ${REALTIME_CONTACT_READ_MAX_RESULTS} full contact cards. Use this when the caller asks who someone is or what email/phone is on file for a person, mentioning them by name.`,
+    parameters: {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "Name or free-text search query." },
+      },
+      required: [],
+    },
+  };
+}
+
+type RealtimeContactCard = {
+  id?: string;
+  name?: string;
+  company?: string;
+  jobTitle?: string;
+  emails?: string[];
+  phones?: string[];
+  notes?: string;
+};
+
+type RealtimeContactReadResult =
+  | { contacts: RealtimeContactCard[]; count: number; truncated_to?: number }
+  | { error: string };
+
+// Cut a flattened contact summary down to what is worth saying aloud: names,
+// company/title, at most a few bare email/phone values, and a clipped note.
+function voiceTrimContact(summary: ContactSummary): RealtimeContactCard {
+  const card: RealtimeContactCard = {};
+  if (summary.id) card.id = summary.id;
+  if (summary.name) card.name = summary.name;
+  if (summary.company) card.company = summary.company;
+  if (summary.jobTitle) card.jobTitle = summary.jobTitle;
+  const emails = (summary.emails ?? []).filter(Boolean);
+  if (emails.length > 0) card.emails = emails.slice(0, REALTIME_CONTACT_READ_MAX_VALUES);
+  const phones = (summary.phones ?? []).filter(Boolean);
+  if (phones.length > 0) card.phones = phones.slice(0, REALTIME_CONTACT_READ_MAX_VALUES);
+  if (summary.notes) {
+    card.notes = String(summary.notes).slice(0, REALTIME_CONTACT_READ_NOTES_MAX_CHARS);
+  }
+  return card;
+}
+
+// Execute one direct contact read against the Inkbox SDK and shape it for the
+// audio session. Never throws — a failed read comes back as { error } so the
+// model can speak a graceful fallback. The list call forces the small page size
+// so an over-broad search can't flood the session with cards.
+async function runRealtimeContactRead(
+  runtime: InkboxRuntime,
+  name: string,
+  args: any,
+): Promise<RealtimeContactReadResult> {
+  try {
+    const inkbox = await runtime.getClient();
+    let matches: any[];
+    if (name === REALTIME_CONTACT_LIST_TOOL_NAME) {
+      matches = await inkbox.contacts.list({
+        q: typeof args?.q === "string" ? args.q : undefined,
+        limit: REALTIME_CONTACT_READ_MAX_RESULTS,
+        offset: 0,
+      });
+    } else {
+      matches = await inkbox.contacts.lookup((args ?? {}) as any);
+    }
+    const total = Array.isArray(matches) ? matches.length : 0;
+    const cards = (Array.isArray(matches) ? matches : [])
+      .slice(0, REALTIME_CONTACT_READ_MAX_RESULTS)
+      .map((entry) => voiceTrimContact(contactSummary(entry) ?? {}));
+    const result: { contacts: RealtimeContactCard[]; count: number; truncated_to?: number } = {
+      contacts: cards,
+      count: total,
+    };
+    if (total > REALTIME_CONTACT_READ_MAX_RESULTS) {
+      result.truncated_to = REALTIME_CONTACT_READ_MAX_RESULTS;
+    }
+    return result;
+  } catch (error) {
+    return {
+      error: `contact read failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 function buildRealtimeInstructions(
   account: ResolvedInkboxAccount,
   meta: RealtimeCallMeta,
@@ -1296,7 +1481,9 @@ function buildRealtimeInstructions(
     meta.outboundContext
       ? "For outbound calls, do not open with a generic offer to help. Start by explaining why you are calling, then ask the next specific question or give the requested update."
       : undefined,
-    `If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call ${REALTIME_CONSULT_TOOL_NAME}. This includes sending SMS/email, reading SMS/email/call history, creating notes, or updating contacts. Do not say it cannot be done unless the consult result says it cannot be done.`,
+    `If the caller asks for work to happen now during the live call and it needs OpenClaw/Inkbox tools, call ${REALTIME_CONSULT_TOOL_NAME}. The main agent can: ${realtimeCapabilitySummaries().join("; ")}. Do not say it cannot be done unless the consult result says it cannot be done, and do not promise work outside that list.`,
+    `Exception — quick contact questions (who someone is, what email or phone is on file): answer those yourself with ${REALTIME_CONTACT_LIST_TOOL_NAME} (search by name via q) or ${REALTIME_CONTACT_LOOKUP_TOOL_NAME} (exact email/phone), NOT ${REALTIME_CONSULT_TOOL_NAME}; the direct tools answer instantly. Contact changes still go through ${REALTIME_CONSULT_TOOL_NAME} or after-call actions.`,
+    "Never recite contact details or message history involving third parties to a caller you have not recognized; offer a follow-up after the call instead.",
     `If the caller explicitly asks for work to happen after the call or accepts an after-call deferral, call ${REALTIME_POST_CALL_ACTION_TOOL_NAME}. Tell the caller the action is queued for after the call; do not claim it has already been completed.`,
     `If the caller changes, cancels, or no longer needs previously queued after-call work, call ${REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME} or ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} using the action_index returned when the work was queued.`,
     `If ${REALTIME_CONSULT_TOOL_NAME} completes or queues work that matches a previously registered after-call action, call ${REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME} for that action so it is not executed twice after hangup.`,
@@ -2326,6 +2513,26 @@ function handleRealtimeToolCall(
     });
     return;
   }
+  if (REALTIME_CONTACT_READ_TOOLS.includes(opts.toolEvent.name)) {
+    // Direct read dispatched off the audio pump: the async SDK call runs in the
+    // background so audio keeps streaming, and the trimmed result is submitted
+    // when it lands, which prompts the model to speak it. Log the tool name
+    // only — args/results carry contact PII and live-suite logs reach CI output.
+    const toolName = opts.toolEvent.name;
+    void runRealtimeContactRead(opts.runtime, toolName, opts.toolEvent.args)
+      .then((result) => {
+        opts.logger?.info?.(
+          `Inkbox realtime direct contact read ${toolName} for call_id=${opts.meta.callId}`,
+        );
+        opts.session.submitToolResult(callId, result);
+      })
+      .catch((error) => {
+        opts.session.submitToolResult(callId, {
+          error: `contact read failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      });
+    return;
+  }
   if (
     opts.toolEvent.name !== REALTIME_CONSULT_TOOL_NAME &&
     opts.toolEvent.name !== OPENCLAW_REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME
@@ -3110,6 +3317,8 @@ async function runRealtimeCallWebSocket(
         realtimeEditPostCallActionTool(),
         realtimeDeletePostCallActionTool(),
         realtimeHangUpCallTool(),
+        realtimeContactLookupTool(),
+        realtimeContactListTool(),
       ]),
     ),
     audioSink: {

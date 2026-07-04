@@ -4,6 +4,10 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- Realtime voice: direct read-only contact tools (`inkbox_lookup_contact`, `inkbox_list_contacts`) are exposed straight to the realtime model, so common "who is this?" / "what email is on file?" questions answer in one SDK round-trip instead of a full `consult_agent` loop. Results are dispatched off the audio pump and trimmed for speech (≤5 cards, ≤3 emails/phones each, notes clipped to 200 chars); writes still route through `consult_agent`/post-call actions. A single-source `MAIN_AGENT_CAPABILITIES` map now renders the spoken consult capability list so it can't drift, plus guardrails routing quick contact questions to the direct tools and forbidding recital of third-party details to unrecognized callers. Mirrors the Hermes plugin (hermes-agent-plugin#33); first step toward realtime/contact parity across the fleet (#29-equivalent).
+
 ### Fixed
 
 - Realtime voice: an in-call `consult_agent` (which runs the full main agent loop off the audio path) is now bounded by a 300s timeout backstop. If the agent loop never returns, the bridge submits a graceful spoken fallback ("couldn't get an answer right now… follow up after the call") as the tool result instead of leaving the model waiting on dead air. Mirrors the Hermes plugin's `consult_timeout_s` (hermes-agent-plugin#4); addresses the long-running-tool-call-blocks-mid-call class of issues (#9).
