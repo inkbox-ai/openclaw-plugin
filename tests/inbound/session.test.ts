@@ -1339,6 +1339,73 @@ describe("createInkboxSessionBridge", () => {
     );
   });
 
+  it("submits a spoken fallback when an in-call consult blows past the timeout backstop", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = "consult";
+    const { runtime } = createRuntime();
+    // The main agent loop never returns for this consult. Without the timeout
+    // backstop the tool result would never be submitted and the model would sit
+    // on dead air waiting for it.
+    const dispatchReply = vi.fn(() => new Promise<void>(() => {}));
+    const channelRuntime = {
+      inbound: {
+        buildContext: vi.fn((input: any) => input),
+        dispatchReply,
+      },
+      session: { recordInboundSession: vi.fn() },
+      reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
+      deliveryResults: [] as any[],
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: channelRuntime as any,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+      // Hold the call open past the consult timeout backstop, then end it.
+      {
+        advanceMs: 300_000,
+        message: JSON.stringify({ event: "stop" }),
+      },
+    ]);
+
+    await bridge.wsHandler(ws as any);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const realtimeSession = realtimeMock.sessions[0].session;
+    // The consult was dispatched and the filler cue spoken up front...
+    expect(dispatchReply).toHaveBeenCalled();
+    expect(realtimeSession.sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("One moment"),
+    );
+    // ...and when the agent loop never returned, a graceful spoken fallback was
+    // submitted as the tool result rather than leaving the model on dead air.
+    expect(realtimeSession.submitToolResult).toHaveBeenCalledWith("tool-1", {
+      error: "consult timed out",
+      result:
+        "Tell the caller you couldn't get an answer right now. Offer to follow up after the call.",
+    });
+  });
+
   it("deduplicates repeated in-call SMS consults while the first is running", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

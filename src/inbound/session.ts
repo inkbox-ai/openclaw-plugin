@@ -173,6 +173,13 @@ const REALTIME_EDIT_POST_CALL_ACTION_TOOL_NAME = "edit_post_call_action";
 const REALTIME_DELETE_POST_CALL_ACTION_TOOL_NAME = "delete_post_call_action";
 const REALTIME_HANG_UP_CALL_TOOL_NAME = "hang_up_call";
 const REALTIME_HANGUP_CONFIRM_WINDOW_MS = 60 * 1000;
+// Backstop for a stuck in-call consult. The consult runs the full main agent
+// loop off the audio path (fire-and-forget in handleRealtimeToolCall), so the
+// caller already hears the "One moment" cue and can keep talking while it runs.
+// But if the agent loop never returns, the tool result is never submitted and
+// the model is left waiting — dead air. Bound it and speak a graceful fallback
+// instead. Mirrors Hermes' consult_timeout_s (see hermes-agent-plugin#4 / #9).
+const REALTIME_CONSULT_TIMEOUT_MS = 300 * 1000;
 const REALTIME_HANGUP_CLOSE_DELAY_MS = 2000;
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
@@ -1810,6 +1817,28 @@ async function dispatchInboundTurn(
   });
 }
 
+const REALTIME_CONSULT_TIMED_OUT = Symbol("realtime-consult-timed-out");
+
+// Race the agent loop against a timeout. JS promises aren't cancellable, so the
+// underlying dispatch keeps running and settles harmlessly in the background if
+// the timeout wins — the caller just stops waiting on it and degrades.
+async function raceRealtimeConsultTimeout<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+): Promise<T | typeof REALTIME_CONSULT_TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<typeof REALTIME_CONSULT_TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(REALTIME_CONSULT_TIMED_OUT), timeoutMs);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 async function runRealtimeAgentConsult(
   opts: InkboxSessionBridgeOptions & {
     activeCalls: Map<string, ActiveCall>;
@@ -1832,7 +1861,8 @@ async function runRealtimeAgentConsult(
   const recentTranscript = renderRealtimeTranscript(opts.transcript);
   const priorConsultResults = renderRealtimeConsultResults(opts.consultResults);
   const visibleText: string[] = [];
-  await dispatchInboundTurn({
+  const outcome = await raceRealtimeConsultTimeout(
+    dispatchInboundTurn({
     ...opts,
     activeCalls: opts.activeCalls,
     replyOptionsOverride: {
@@ -1893,7 +1923,17 @@ async function runRealtimeAgentConsult(
         args: opts.toolEvent.args,
       },
     },
-  });
+    }),
+    REALTIME_CONSULT_TIMEOUT_MS,
+  );
+
+  if (outcome === REALTIME_CONSULT_TIMED_OUT) {
+    return {
+      error: "consult timed out",
+      result:
+        "Tell the caller you couldn't get an answer right now. Offer to follow up after the call.",
+    };
+  }
 
   const result = visibleText.join("\n\n").trim();
   const response: Record<string, unknown> = {

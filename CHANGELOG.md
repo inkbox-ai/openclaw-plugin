@@ -2,6 +2,12 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Realtime voice: an in-call `consult_agent` (which runs the full main agent loop off the audio path) is now bounded by a 300s timeout backstop. If the agent loop never returns, the bridge submits a graceful spoken fallback ("couldn't get an answer right now… follow up after the call") as the tool result instead of leaving the model waiting on dead air. Mirrors the Hermes plugin's `consult_timeout_s` (hermes-agent-plugin#4); addresses the long-running-tool-call-blocks-mid-call class of issues (#9).
+
 ## [0.2.1] - 2026-07-03
 
 ### Added
