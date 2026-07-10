@@ -2,10 +2,11 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.2.2] - 2026-07-10
 
 ### Added
 
+- Outbound delivery-failure feedback loop: undelivered outbound messages (SMS/iMessage/email) now wake the agent to fix and resend, across both the synchronous send-rejection surface and the asynchronous delivery-failure webhooks (`text.delivery_failed` / `imessage.delivery_failed` / `message.bounced` / `message.failed`). Hard-capped at 3 sends per logical reply via a shared budget that resets on a fresh inbound, a delivered receipt, or a 30-minute TTL; webhook replays are deduped. Raises the `@inkbox/sdk` floor to 0.4.20.
 - Realtime voice: direct read-only contact tools (`inkbox_lookup_contact`, `inkbox_list_contacts`) are exposed straight to the realtime model, so common "who is this?" / "what email is on file?" questions answer in one SDK round-trip instead of a full `consult_agent` loop. Results are dispatched off the audio pump and trimmed for speech (≤5 cards, ≤3 emails/phones each, notes clipped to 200 chars); writes still route through `consult_agent`/post-call actions. A single-source `MAIN_AGENT_CAPABILITIES` map now renders the spoken consult capability list so it can't drift, plus guardrails routing quick contact questions to the direct tools and forbidding recital of third-party details to unrecognized callers. Mirrors the Hermes plugin (hermes-agent-plugin#33); first step toward realtime/contact parity across the fleet (#29-equivalent).
 
 ### Fixed

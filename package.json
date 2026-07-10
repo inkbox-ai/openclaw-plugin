@@ -1,6 +1,6 @@
 {
   "name": "@inkbox/inkbox",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Inkbox plugin for OpenClaw — adds email, SMS, iMessage, and voice messaging tools and inbound webhook handling",
   "license": "MIT",
   "type": "module",
@@ -20,7 +20,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@inkbox/sdk": ">=0.4.15 <1.0.0",
+    "@inkbox/sdk": ">=0.4.20 <1.0.0",
     "json5": "^2.2.3",
     "qrcode-terminal": "^0.12.0",
     "typebox": "^1.1.38"
