@@ -603,14 +603,66 @@ function webhookContacts(data: any): { id: string; name: string }[] {
   return [];
 }
 
-function webhookAgentIdentities(data: any): Array<{ id: string; agent_handle?: string; display_name?: string | null }> {
+type WebhookAgentIdentitySummary = {
+  id: string;
+  agent_handle?: string;
+  display_name?: string | null;
+};
+
+function webhookAgentIdentities(data: any): WebhookAgentIdentitySummary[] {
   return Array.isArray(data?.agent_identities)
     ? data.agent_identities.filter((entry: any) => typeof entry?.id === "string")
     : [];
 }
 
-function renderContactMarker(contact: ContactSummary | undefined): string {
+// The remote party's agent identity, but only when exactly one was resolved.
+// Text/iMessage webhooks surface `agent_identities` for the remote party
+// directly, so a single entry unambiguously identifies a 1:1 peer agent. Two
+// or more means a group (or ambiguous), where a single sender marker doesn't
+// apply.
+function singleWebhookAgentIdentity(data: any): WebhookAgentIdentitySummary | undefined {
+  const identities = webhookAgentIdentities(data);
+  return identities.length === 1 ? identities[0] : undefined;
+}
+
+// Mail resolves agent identities per recipient bucket, so the sender's
+// identity is the `from`-bucket entry whose address matches the sender —
+// returned only when exactly one matches.
+function mailSenderAgentIdentity(
+  event: MailWebhookPayload,
+  fromAddress: string,
+): WebhookAgentIdentitySummary | undefined {
+  const identities = Array.isArray(event.data.agent_identities)
+    ? event.data.agent_identities
+    : [];
+  const matches = identities.filter(
+    (entry) =>
+      typeof entry?.id === "string" &&
+      entry.bucket === "from" &&
+      normalizeEmailAddress(entry.address) === fromAddress,
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+// The sender marker for an inbound turn. Prefers an address-book contact;
+// falling back to a resolved peer agent identity (a sender Inkbox recognized
+// as an agent in the same org) so the agent sees the handle/display name
+// instead of `unknown_in_inkbox`.
+function renderContactMarker(
+  contact: ContactSummary | undefined,
+  agentIdentity?: WebhookAgentIdentitySummary,
+): string {
   if (!contact?.id) {
+    if (agentIdentity) {
+      const parts = [`contact_agent_identity_id=${agentIdentity.id}`];
+      if (agentIdentity.agent_handle) {
+        parts.push(`contact_agent_handle=${agentIdentity.agent_handle}`);
+      }
+      if (agentIdentity.display_name) {
+        parts.push(`contact_name=${JSON.stringify(agentIdentity.display_name)}`);
+      }
+      return parts.join(" ");
+    }
     return "contact=unknown_in_inkbox";
   }
   const parts = [`contact_id=${contact.id}`];
@@ -2826,16 +2878,17 @@ async function buildMailTurn(
   }
   const contact = await lookupContact(runtime, "email", from);
   const contactKey = contact?.id ?? from;
+  const senderIdentity = contact ? undefined : mailSenderAgentIdentity(event, from);
   const bodyText = message.snippet || message.subject || "";
   const subjectPart = message.subject ? ` subject=${JSON.stringify(message.subject)}` : "";
   return {
     mode: "email",
     contactKey,
     contact,
-    fromLabel: contact?.name ?? from,
+    fromLabel: contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? from,
     remoteAddress: from,
     subject: message.subject ?? undefined,
-    body: `[inkbox:email from=${from}${subjectPart} | ${renderContactMarker(contact)}]\n${bodyText}`,
+    body: `[inkbox:email from=${from}${subjectPart} | ${renderContactMarker(contact, senderIdentity)}]\n${bodyText}`,
     messageId: message.message_id || message.id,
     replyToId: message.message_id ?? undefined,
     threadId: message.thread_id ? `email:${message.thread_id}` : undefined,
@@ -2882,6 +2935,10 @@ async function buildTextTurn(
     contacts.length > 1 || agentIdentities.length > 1;
   const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
+  // 1:1 only — a group resolves multiple identities, where a single sender
+  // marker doesn't apply.
+  const senderIdentity =
+    contact || isGroup ? undefined : singleWebhookAgentIdentity(event.data);
   const mediaMarkers = textMediaMarkers(message.media);
   const text = [rawText, ...mediaMarkers].filter(Boolean).join("\n");
   const conversationLabel = isGroup
@@ -2904,12 +2961,12 @@ async function buildTextTurn(
         `reply_mode=conversation_id`,
         `| ${renderContactMarker(contact)}]`,
       ].filter(Boolean).join(" ")
-    : `[inkbox:sms from=${remote} | ${renderContactMarker(contact)}]`;
+    : `[inkbox:sms from=${remote} | ${renderContactMarker(contact, senderIdentity)}]`;
   return {
     mode: "sms",
     contactKey,
     contact,
-    fromLabel: contact?.name ?? remote,
+    fromLabel: contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? remote,
     remoteAddress: remote,
     localAddress: message.local_phone_number,
     conversationId,
@@ -2957,19 +3014,22 @@ async function buildIMessageTurn(
       : undefined;
   const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
+  const senderIdentity = contact ? undefined : singleWebhookAgentIdentity(event.data);
+  const senderLabel =
+    contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? remote;
   const mediaMarkers = textMediaMarkers(message.media as any, "imessage_attachment");
   const text = [message.content ?? "", ...mediaMarkers].filter(Boolean).join("\n");
   const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
-  const marker = `[inkbox:imessage from=${remote}${conversationPart} | ${renderContactMarker(contact)}]`;
+  const marker = `[inkbox:imessage from=${remote}${conversationPart} | ${renderContactMarker(contact, senderIdentity)}]`;
   return {
     mode: "imessage",
     contactKey,
     contact,
-    fromLabel: contact?.name ?? remote,
+    fromLabel: senderLabel,
     remoteAddress: remote,
     conversationId,
     conversationKind: "direct",
-    conversationLabel: contact?.name ?? remote,
+    conversationLabel: senderLabel,
     body: [marker, text].filter(Boolean).join("\n"),
     messageId: message.id,
     replyToId: message.id,
@@ -3019,13 +3079,16 @@ async function buildIMessageReactionTurn(
       : reactionType) || "unknown";
   const contact = await lookupContact(runtime, "phone", remote);
   const contactKey = contact?.id ?? remote;
+  const senderIdentity = contact ? undefined : singleWebhookAgentIdentity(event.data);
+  const senderLabel =
+    contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? remote;
   const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
   const targetPart = targetMessageId ? ` target_message_id=${targetMessageId}` : "";
   const marker =
     `[inkbox:imessage_reaction from=${remote} reaction=${reactionLabel}` +
-    `${conversationPart}${targetPart} | ${renderContactMarker(contact)}]`;
+    `${conversationPart}${targetPart} | ${renderContactMarker(contact, senderIdentity)}]`;
   const policy = [
-    `${contact?.name ?? remote} reacted with a '${reactionLabel}' tapback to your message.`,
+    `${senderLabel} reacted with a '${reactionLabel}' tapback to your message.`,
     "A reaction is a lightweight signal, not always a request for a reply.",
     "Reply only when the reaction plausibly warrants one — e.g. a 'question' " +
       "tapback usually asks for clarification or a follow-up, 'emphasize' may " +
@@ -3037,11 +3100,11 @@ async function buildIMessageReactionTurn(
     mode: "imessage",
     contactKey,
     contact,
-    fromLabel: contact?.name ?? remote,
+    fromLabel: senderLabel,
     remoteAddress: remote,
     conversationId,
     conversationKind: "direct",
-    conversationLabel: contact?.name ?? remote,
+    conversationLabel: senderLabel,
     body: `${marker}\n${policy}`,
     messageId: reaction.id || targetMessageId,
     replyToId: targetMessageId || reaction.id,
