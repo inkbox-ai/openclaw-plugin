@@ -22,6 +22,41 @@ export interface OpenTunnelOptions {
   serve?: boolean;
 }
 
+// The tunnel server idle-caps parked intake streams on a timer, and the SDK
+// warns once per slot via bare console.warn each time — a healthy gateway
+// emits these continuously, burying real logs. Drop exactly that line and
+// pass everything else (401 owner-token, disconnects, ...) through.
+const IDLE_CAP_WARNING_PARTS = [
+  "/_system/intake slot=",
+  "status=408",
+  "reason=intake-idle-cap",
+];
+
+// Tags our wrapper so repeat installs can recognize it and no-op.
+const WARN_FILTER_INSTALLED = Symbol.for("inkbox.tunnelWarnFilter");
+
+export function isExpectedIdleCapWarning(first: unknown): boolean {
+  return (
+    typeof first === "string" &&
+    IDLE_CAP_WARNING_PARTS.every((part) => first.includes(part))
+  );
+}
+
+// Wrap console.warn once, keeping a reference to the original so every
+// non-matching call passes through unchanged (fail-open). Idempotent.
+export function installTunnelWarnFilter(): void {
+  const current = console.warn as typeof console.warn & {
+    [WARN_FILTER_INSTALLED]?: true;
+  };
+  if (current[WARN_FILTER_INSTALLED]) return;
+  const wrapper = ((...args: unknown[]) => {
+    if (isExpectedIdleCapWarning(args[0])) return;
+    current(...args);
+  }) as typeof console.warn & { [WARN_FILTER_INSTALLED]?: true };
+  wrapper[WARN_FILTER_INSTALLED] = true;
+  console.warn = wrapper;
+}
+
 // Open an Inkbox tunnel that terminates at our in-process Fetch handler.
 // Returns the listener. By default this starts `.serveForever()` in the
 // background; pass `serve: false` when the caller wants to drive it manually.
@@ -29,6 +64,7 @@ export interface OpenTunnelOptions {
 // a separate package subpath (POSIX-only, not browser-safe) — keeping it
 // out of the main require graph means tool-only sessions don't pay the cost.
 export async function openInkboxTunnel(opts: OpenTunnelOptions) {
+  installTunnelWarnFilter();
   const { connect } = await import("@inkbox/sdk/tunnels/connect");
   const dedup = new RequestIdDedup(10000);
 
