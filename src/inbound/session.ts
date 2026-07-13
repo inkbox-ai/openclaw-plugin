@@ -27,6 +27,12 @@ import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
 import { recordInboundChannelHint } from "../channel-hint.js";
 import {
+  buildSpawnContextBlock,
+  consumeSpawnLink,
+  normalizeRecipientKey,
+  setActiveConversation,
+} from "../spawn-context.js";
+import {
   classifySendRejection,
   claimDeliveryFailure,
   clearOutboundFailures,
@@ -1940,11 +1946,21 @@ async function dispatchInboundTurn(
   const baseSessionKey = route.sessionKey;
   const effectiveSessionKey =
     opts.turn.mode === "voice" ? voiceSessionKey(route.agentId, opts.turn) : baseSessionKey;
+  // A spun-off thread: this reply is from someone the agent messaged during
+  // another conversation. Inherit that parent so the turn knows why it exists
+  // and can relay the answer back — see spawn-context.ts.
+  const isMessagingMode =
+    opts.turn.mode === "sms" || opts.turn.mode === "imessage" || opts.turn.mode === "email";
+  const spawnLink = isMessagingMode ? consumeSpawnLink(opts.turn.remoteAddress) : undefined;
+  const spawnContextBlock = spawnLink ? buildSpawnContextBlock(spawnLink) : undefined;
+  const agentBody = spawnContextBlock ? `${spawnContextBlock}\n${opts.turn.body}` : opts.turn.body;
+  const modelParentSessionKey =
+    opts.turn.mode === "voice" ? baseSessionKey : spawnLink?.parentSessionKey;
   const { storePath, body } = buildEnvelope({
     channel: "Inkbox",
     from: opts.turn.fromLabel,
     timestamp,
-    body: opts.turn.body,
+    body: agentBody,
   });
   const conversationPrefix = opts.turn.mode === "imessage" ? "imessage" : "sms";
   const smsReplyTarget = opts.turn.conversationId
@@ -1975,7 +1991,7 @@ async function dispatchInboundTurn(
       agentId: route.agentId,
       accountId: routeAccountId,
       routeSessionKey: effectiveSessionKey,
-      ...(opts.turn.mode === "voice" ? { modelParentSessionKey: baseSessionKey } : {}),
+      ...(modelParentSessionKey ? { modelParentSessionKey } : {}),
     },
     reply: {
       to:
@@ -1999,9 +2015,9 @@ async function dispatchInboundTurn(
     },
     message: {
       body,
-      bodyForAgent: opts.turn.body,
-      rawBody: opts.turn.body,
-      commandBody: opts.turn.body,
+      bodyForAgent: agentBody,
+      rawBody: agentBody,
+      commandBody: agentBody,
       envelopeFrom: opts.turn.fromLabel,
     },
     extra: {
@@ -2087,28 +2103,45 @@ async function dispatchInboundTurn(
       );
     },
   };
-  await core.inbound.dispatchReply({
-    cfg: opts.cfg as any,
-    channel: "inkbox",
-    accountId: opts.account.accountId,
-    agentId: route.agentId,
-    routeSessionKey: effectiveSessionKey,
-    storePath,
-    ctxPayload,
-    recordInboundSession: core.session.recordInboundSession,
-    dispatchReplyWithBufferedBlockDispatcher:
-      core.reply.dispatchReplyWithBufferedBlockDispatcher,
-    ...(replyOptions ? { replyOptions } : {}),
-    delivery,
-    replyPipeline: {},
-    record: {
-      onRecordError: (error: unknown) => {
-        opts.logger?.warn?.(
-          `Inkbox session record failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+  // Mark this conversation active while the agent runs, so a send tool it
+  // invokes to a new recipient parents the spin-off back to here. Only real
+  // messaging turns can be relayed back to; voice/warmup/external cannot.
+  if (isMessagingMode) {
+    setActiveConversation({
+      sessionKey: baseSessionKey,
+      replyTarget: smsReplyTarget,
+      label: opts.turn.conversationLabel ?? opts.turn.fromLabel,
+      party: normalizeRecipientKey(opts.turn.remoteAddress),
+    });
+  }
+  try {
+    await core.inbound.dispatchReply({
+      cfg: opts.cfg as any,
+      channel: "inkbox",
+      accountId: opts.account.accountId,
+      agentId: route.agentId,
+      routeSessionKey: effectiveSessionKey,
+      storePath,
+      ctxPayload,
+      recordInboundSession: core.session.recordInboundSession,
+      dispatchReplyWithBufferedBlockDispatcher:
+        core.reply.dispatchReplyWithBufferedBlockDispatcher,
+      ...(replyOptions ? { replyOptions } : {}),
+      delivery,
+      replyPipeline: {},
+      record: {
+        onRecordError: (error: unknown) => {
+          opts.logger?.warn?.(
+            `Inkbox session record failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
       },
-    },
-  });
+    });
+  } finally {
+    if (isMessagingMode) {
+      setActiveConversation(undefined);
+    }
+  }
 }
 
 const REALTIME_CONSULT_TIMED_OUT = Symbol("realtime-consult-timed-out");

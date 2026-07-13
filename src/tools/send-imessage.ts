@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
+import { recordSpawnFromActive } from "../spawn-context.js";
 import { IMESSAGE_MAX_TEXT_CHARS, imessageTextTooLongMessage } from "../message-limits.js";
 
 // Outbound iMessage — recipient-first channel: a person must have connected
@@ -97,6 +98,11 @@ export function registerSendIMessage(
           ...(mediaUrls?.length ? { mediaUrls } : {}),
           ...(params.sendStyle ? { sendStyle: params.sendStyle } : {}),
         });
+        // A send addressed to a new number (not an existing conversation) is a
+        // spin-off; link it back so the reply inherits the parent thread.
+        if (to) {
+          recordSpawnFromActive({ recipient: to, body: text || undefined });
+        }
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
         return toolText(
           `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} status=${msg.status ?? "unknown"}`,
