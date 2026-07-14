@@ -25,6 +25,7 @@ import re
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -33,9 +34,6 @@ AUT_KEY = os.environ.get("OPENCLAW_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 TIMEOUT_S = float(os.environ.get("LIVE_EMAIL_TIMEOUT", "150"))
 POLL_EVERY_S = 5.0
-# After the first reply, keep polling this long for follow-up messages in the
-# same thread (the agent may split its answer across two sends).
-REPLY_GRACE_S = float(os.environ.get("LIVE_EMAIL_REPLY_GRACE", "15"))
 # "something went wrong" is the host's canned agent-loop failure reply.
 ERROR_MARKERS = ("non-retryable error", "missing authentication", "http 401", "http 403", "traceback",
                  "something went wrong")
@@ -95,17 +93,20 @@ def _plugin_tool_names() -> list[str]:
     return sorted(names)
 
 
-def _ask(remote, aut_email: str, remote_email: str, question: str) -> str:
-    """Email the agent a question; return every reply body (lowercased, joined).
-
-    The agent may answer across more than one message (e.g. a tool-sent reply
-    followed by its closing turn text), so after the first reply we keep
-    polling for a short grace window and return the union of what the sender
-    actually received — assertions then hold regardless of which message
-    carries the substance.
-    """
+def _ask(
+    remote,
+    aut_email: str,
+    remote_email: str,
+    question: str,
+    accept: Callable[[str], bool] | None = None,
+) -> str:
+    """Return a matching new AUT email, whether in-thread or tool-sent."""
     from inkbox.mail.types import MessageDirection
 
+    def _inbound():
+        return list(remote.messages.list(remote_email, direction=MessageDirection.INBOUND))
+
+    before = {str(msg.id) for msg in _inbound()}
     nonce = f"smoke-{uuid.uuid4().hex[:8]}"
     sent = remote.messages.send(remote_email, to=[aut_email], subject=f"[{nonce}] {question[:40]}", body_text=question)
     thread_id = str(getattr(sent, "thread_id", "") or "")
@@ -116,24 +117,31 @@ def _ask(remote, aut_email: str, remote_email: str, question: str) -> str:
         frm = (getattr(msg, "from_address", "") or "").lower()
         return aut_email.lower() in frm and nonce in (getattr(msg, "subject", "") or "")
 
-    replies: dict[str, str] = {}  # message id -> body, insertion-ordered
+    seen: set[str] = set()
+    candidates: list[str] = []
     deadline = time.monotonic() + TIMEOUT_S
-    grace_until = 0.0
-    while time.monotonic() < (grace_until or deadline):
-        for msg in remote.messages.list(remote_email, direction=MessageDirection.INBOUND):
+    while time.monotonic() < deadline:
+        for msg in _inbound():
             msg_id = str(msg.id)
-            if msg_id in replies or not _is_reply(msg):
+            if msg_id in before or msg_id in seen:
                 continue
+            sender = (getattr(msg, "from_address", "") or "").lower()
+            if aut_email.lower() not in sender:
+                continue
+            seen.add(msg_id)
             body = getattr(remote.messages.get(remote_email, msg.id), "body_text", "") or ""
-            bad = [m for m in ERROR_MARKERS if m in body.lower()]
+            lowered = body.lower()
+            bad = [m for m in ERROR_MARKERS if m in lowered]
             assert not bad, f"reply is an error, not a real answer: {bad}\n{body[:300]}"
-            replies[msg_id] = body
-            # A reply landed — linger briefly for stragglers in the same thread.
-            grace_until = time.monotonic() + REPLY_GRACE_S
+            candidates.append(body)
+            if (accept is None and _is_reply(msg)) or (accept is not None and accept(lowered)):
+                return lowered
         time.sleep(POLL_EVERY_S)
-    if replies:
-        return "\n".join(replies.values()).lower()
-    pytest.fail(f"no reply within {TIMEOUT_S:.0f}s to: {question!r}")
+    previews = "\n---\n".join(body[:500] for body in candidates) or "(none)"
+    pytest.fail(
+        f"no acceptable reply within {TIMEOUT_S:.0f}s to: {question!r}\n"
+        f"new emails from AUT:\n{previews}"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -161,10 +169,15 @@ def test_reports_own_identity(ctx):
     aut_phone = _first_phone(aut)
     assert aut_phone, "AUT identity has no phone number to report"
 
-    body = _ask(ctx["remote"], aut_email, ctx["remote_email"],
-                "What is your full Inkbox identity? Reply with your handle, display "
-                "name, email address, and phone number. Write the phone number in "
-                "full — every digit, with no masking, asterisks, or abbreviation.")
+    body = _ask(
+        ctx["remote"], aut_email, ctx["remote_email"],
+        "What is your full Inkbox identity? Reply with your handle, display "
+        "name, email address, and phone number. Write the phone number in "
+        "full — every digit, with no masking, asterisks, or abbreviation.",
+        accept=lambda candidate: (
+            handle in candidate and aut_email in candidate and _phone_present(aut_phone, candidate)
+        ),
+    )
     assert handle in body, f"reply missing handle {handle!r}\n{body[:400]}"
     assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:400]}"
     # Accept a privacy-masked phone (the model self-redacts the middle digits
@@ -195,11 +208,17 @@ def test_reports_sender_details(ctx):
     emails = [e.value for e in getattr(contact, "emails", [])]
     phones = [p.value for p in getattr(contact, "phones", [])]
 
-    body = _ask(ctx["remote"], ctx["aut_email"], remote_email,
-                "Who am I to you? Tell me everything you have on file about me. "
-                "Include my phone number in full — every digit, with no masking, "
-                "asterisks, or abbreviation. Reply in this same email thread — "
-                "do not send the details as a separate email.")
+    body = _ask(
+        ctx["remote"], ctx["aut_email"], remote_email,
+        "Who am I to you? Tell me everything you have on file about me. "
+        "Include my phone number in full — every digit, with no masking, "
+        "asterisks, or abbreviation.",
+        accept=lambda candidate: (
+            (not name or name.lower() in candidate)
+            and any(e.lower() in candidate for e in emails)
+            and (not phones or any(_phone_present(p, candidate) for p in phones))
+        ),
+    )
     if name:
         assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:400]}"
     assert any(e.lower() in body for e in emails), f"reply missing sender email {emails}\n{body[:400]}"
@@ -244,10 +263,12 @@ def test_aware_of_inkbox_tools(ctx):
         emails=[ContactEmail(label="work", value=probe_email)],
     )
     try:
-        body = _ask(ctx["remote"], ctx["aut_email"], ctx["remote_email"],
-                    "Use your Inkbox contact tools to look up the contact whose "
-                    f"email address is {probe_email}, then reply in this same "
-                    "email thread with that contact's full name.")
+        body = _ask(
+            ctx["remote"], ctx["aut_email"], ctx["remote_email"],
+            "Use your Inkbox contact tools to look up the contact whose "
+            f"email address is {probe_email}, then reply with that contact's full name.",
+            accept=lambda candidate: surname in candidate,
+        )
         assert surname in body, \
             f"agent did not report the looked-up contact surname {surname!r}\n{body[:500]}"
     finally:
@@ -286,6 +307,7 @@ def test_contact_crud_tool_use(ctx):
             "Use inkbox_create_contact now. Create a new contact named "
             f"{contact_name} with email {contact_email}. Do not just describe the action. "
             f"After the tool succeeds, reply exactly: CREATED {nonce}",
+            accept=lambda candidate: "created" in candidate and nonce in candidate,
         )
         assert "created" in created and nonce in created, created[:500]
         matches = _contacts_by_email(aut, contact_email)
@@ -300,6 +322,7 @@ def test_contact_crud_tool_use(ctx):
             "Use inkbox_update_contact now. Update contactId "
             f"{contact_id} and set notes to {updated_notes}. Do not create a second contact. "
             f"After the tool succeeds, reply exactly: UPDATED {nonce}",
+            accept=lambda candidate: "updated" in candidate and nonce in candidate,
         )
         assert "updated" in updated and nonce in updated, updated[:500]
         fetched = aut.contacts.get(contact_id)
@@ -311,6 +334,7 @@ def test_contact_crud_tool_use(ctx):
             ctx["remote_email"],
             "I confirm this is a temporary test contact. Use inkbox_delete_contact now "
             f"to delete contactId {contact_id}. After the tool succeeds, reply exactly: DELETED {nonce}",
+            accept=lambda candidate: "deleted" in candidate and nonce in candidate,
         )
         assert "deleted" in deleted and nonce in deleted, deleted[:500]
         assert not _contacts_by_email(aut, contact_email)
