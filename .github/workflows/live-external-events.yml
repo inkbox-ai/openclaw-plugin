@@ -59,7 +59,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install live-test deps (Inkbox SDK + pytest)
-        run: pip install 'inkbox>=0.4.24,<1.0.0' pytest
+        run: pip install 'inkbox>=0.5.0,<1.0.0' pytest
 
       - name: Build the plugin
         run: |

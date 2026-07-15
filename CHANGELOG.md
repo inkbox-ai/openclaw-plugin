@@ -2,6 +2,12 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Raised the Inkbox SDK dependency floor to 0.5.0 for the plugin and live CI.
+
 ## [0.2.2] - 2026-07-10
 
 ### Added
