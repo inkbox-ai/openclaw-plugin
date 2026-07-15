@@ -59,7 +59,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install live-test deps (Inkbox SDK + pytest)
-        run: pip install 'inkbox>=0.4.20,<1.0.0' pytest
+        run: pip install 'inkbox>=0.4.24,<1.0.0' pytest
 
       - name: Build the plugin
         run: |
@@ -82,7 +82,7 @@ jobs:
           openclaw onboard --non-interactive \
             --auth-choice custom-api-key \
             --custom-base-url "https://api.openai.com/v1" \
-            --custom-model-id "gpt-5.5" \
+            --custom-model-id "gpt-5.4-mini" \
             --custom-api-key "$OPENAI_API_KEY" \
             --custom-compatibility openai \
             --secret-input-mode plaintext \

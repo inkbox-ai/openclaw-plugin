@@ -27,5 +27,9 @@ describe("inkbox channel agent prompt", () => {
       "Inbound messages may start with an [inkbox:...] routing marker",
     );
     expect(rules?.join("\n")).toContain("never echo it");
+    expect(rules?.join("\n")).toContain(
+      "NEVER call inkbox_send_email, inkbox_send_sms, or inkbox_send_imessage",
+    );
+    expect(rules?.join("\n")).toContain("include the literal requested values");
   });
 });
