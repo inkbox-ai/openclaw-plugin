@@ -20,11 +20,20 @@ on:
         required: false
         type: boolean
         default: false
+      include_inbound:
+        description: "Run the carrier-dependent inbound PSTN diagnostic"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       timeout_s:
         description: "Seconds to wait for the call/transcript"
         default: "220"
+      include_inbound:
+        description: "Run the carrier-dependent inbound PSTN diagnostic"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -42,7 +51,7 @@ jobs:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → one at a time
       matrix:
-        scenario: [inbound_inkbox, outbound_realtime]
+        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_realtime"]' || '["outbound_realtime"]') }}
 
     steps:
       - uses: actions/checkout@v7
