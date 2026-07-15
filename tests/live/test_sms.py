@@ -246,10 +246,44 @@ def test_sms_reports_sender_details(sms):
 
 @real_only
 def test_sms_aware_of_inkbox_tools(sms):
+    """Prove tool wiring by using a contact lookup, not by exposing internals.
+
+    OpenClaw's host prompt discourages disclosing internal tool names. Asking
+    for an inventory can therefore trigger an unnecessary tool call or a safe
+    refusal; neither says whether the Inkbox tools actually work. A nonce
+    surname that is absent from the SMS can only be returned by a live lookup.
+    """
     tool_names = _plugin_tool_names()
-    body = _ask_sms(sms, "Name three of your Inkbox tools (exact names).")
-    hits = [t for t in tool_names if t.lower() in body]
-    assert len(hits) >= 2, f"agent named only {hits} of its tools\n{body[:300]}"
+    contact_tools = {
+        "inkbox_lookup_contact",
+        "inkbox_list_contacts",
+        "inkbox_get_contact",
+    }
+    assert contact_tools <= set(tool_names)
+
+    from inkbox.contacts.types import ContactEmail
+
+    aut = sms["aut"]
+    probe_email = f"sms-tool-probe-{uuid.uuid4().hex[:8]}@example.com"
+    surname = f"fenwick-{uuid.uuid4().hex[:8]}"
+    try:
+        aut.contacts.create(
+            given_name="Probe",
+            family_name=surname,
+            emails=[ContactEmail(label="work", value=probe_email)],
+        )
+        body = _ask_sms(
+            sms,
+            "Use your Inkbox contact tools to look up the contact whose email "
+            f"is {probe_email}, then reply with that contact's full name.",
+        )
+        assert surname in body, \
+            f"agent did not report the looked-up contact surname {surname!r}\n{body[:300]}"
+    finally:
+        for contact in aut.contacts.lookup(email=probe_email) or []:
+            contact_id = str(getattr(contact, "id", "") or "")
+            if contact_id:
+                aut.contacts.delete(contact_id)
 
 
 # ── Outbound delivery-failure retry loop ────────────────────────────────
