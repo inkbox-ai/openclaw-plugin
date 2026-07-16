@@ -34,6 +34,12 @@ BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 REAL = os.environ.get("LIVE_REAL_MODEL") == "1"
 TIMEOUT_S = float(os.environ.get("LIVE_XCHANNEL_TIMEOUT", "200"))
 POLL_EVERY_S = 6.0
+# A cross-channel assertion observes the tool side effect before OpenClaw has
+# necessarily finished the agent turn that produced it.  Starting the next test
+# against the same contact/session at that boundary can race the still-active
+# turn and lose the new inbound webhook.  Give delivery of the source-channel
+# final reply (and session teardown) a short bounded window to finish.
+POST_TOOL_TURN_SETTLE_S = 5.0
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY and REAL),
@@ -53,6 +59,10 @@ def _client(key):
 
 def _token() -> str:
     return uuid.uuid4().hex[:6]
+
+
+def _settle_after_tool_side_effect() -> None:
+    time.sleep(POST_TOOL_TURN_SETTLE_S)
 
 
 @pytest.fixture(scope="module")
@@ -119,6 +129,7 @@ def test_email_request_gets_sms_response(xc):
     while time.monotonic() < deadline:
         for m in _sms_from_aut():
             if m.id not in before and token in (getattr(m, "text", "") or "").lower():
+                _settle_after_tool_side_effect()
                 return  # cross-channel confirmed: email request -> SMS response with the token
         time.sleep(POLL_EVERY_S)
     pytest.fail(f"agent did not send an SMS containing {token!r} within {TIMEOUT_S:.0f}s")
@@ -148,6 +159,7 @@ def test_sms_request_gets_email_response(xc):
                 body = getattr(remote.messages.get(remote_email, m.id), "body_text", "") or ""
                 hay = body.lower()
             if token in hay:
+                _settle_after_tool_side_effect()
                 return  # cross-channel confirmed: SMS request -> email response with the token
         time.sleep(POLL_EVERY_S)
     pytest.fail(f"agent did not send an email containing {token!r} within {TIMEOUT_S:.0f}s")
@@ -171,6 +183,7 @@ def _wait_for_new_call(remote, remote_pid: str, aut_phone: str, before: set):
     while time.monotonic() < deadline:
         for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone):
             if c.id not in before:
+                _settle_after_tool_side_effect()
                 return  # a fresh call from the AUT landed on the driver's number
         time.sleep(POLL_EVERY_S)
     pytest.fail(f"agent did not place a call to the driver within {TIMEOUT_S:.0f}s")
