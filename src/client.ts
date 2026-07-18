@@ -122,8 +122,8 @@ export function createInkboxRuntime(
       const inkbox = new Inkbox(inkboxClientOptions(cfg.apiKey, cfg.baseUrl));
       const promise = (async () => {
         // Confirm the key shape before we go any further. Agent-scoped is the
-        // expected mode; admin-scoped works for outbound but we surface a warning
-        // since several plugin features assume the agent-scoped access pattern.
+        // expected mode; admin-scoped works for outbound but channel and
+        // note/vault reads may not use the configured identity's scope.
         try {
           const info = await inkbox.whoami();
           if (info.authType === "api_key") {
@@ -133,7 +133,7 @@ export function createInkboxRuntime(
               sub === AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED;
             if (!isAgentScoped) {
               logger?.warn?.(
-                `Inkbox plugin: API key is not agent-scoped (subtype=${sub}). Outbound tools will work but access-scoped reads (contacts, notes, vault) may behave differently.`,
+                `Inkbox plugin: API key is not agent-scoped (subtype=${sub}). Outbound tools will work but channel, note, and vault reads may behave differently.`,
               );
             }
           } else {

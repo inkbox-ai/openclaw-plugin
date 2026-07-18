@@ -45,7 +45,7 @@ Two shapes are possible:
 | **Tool plugin** (`definePluginEntry`) | Simple, fastest to ship | Inbound webhook events don't naturally become sessions — would have to fake it |
 | **Channel plugin** (`defineChannelPluginEntry`) | Inbound emails/SMS/calls become real OpenClaw sessions; matches Telegram/Discord/Slack shape | More moving parts (channel config, runtime setter, ingress contract) |
 
-**Decision: start as tool plugin (Phase 0–1), promote to channel plugin in Phase 2** when we wire inbound. The Telegram plugin at `/home/ec2-user/repos/openclaw/extensions/telegram/` is the template — copy its file layout (`channel-plugin-api.ts`, `runtime-setter-api.ts`, `setup-entry.ts`, `configured-state.ts`).
+**Decision: start as tool plugin (Phase 0–1), promote to channel plugin in Phase 2** when we wire inbound. Follow OpenClaw's public channel-plugin conventions.
 
 ### Agent-scoped focus
 
@@ -54,12 +54,12 @@ The plugin authenticates with an **agent-scoped API key** (`AUTH_SUBTYPE_API_KEY
 - ✅ Send/read its own email, SMS, calls
 - ✅ Manage its own phone number (provision/release)
 - ✅ Use vault credentials it has access to via grants
-- ✅ Read contacts and notes it has access to via grants
+- ✅ Read organization-wide contacts and access-granted notes
 - ❌ Create / list / delete other identities
 - ❌ Flip filter modes on mailboxes or phone numbers
 - ❌ Manage domains
 - ❌ Write SMS opt-in registry programmatically
-- ❌ Grant/revoke contact or note access (the human admin does this in the Inkbox Console)
+- ⚠️ Optional note-access tools remain subject to the caller's authorization
 
 This separation matches Inkbox's own auth model (`AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED` vs `AGENT_SCOPED`). The wizard creates an agent-scoped key and the runtime refuses to construct an admin client.
 
@@ -227,7 +227,7 @@ Branch B — Existing agent-scoped key
 
 ## Phase 4 — Read & lifecycle tools
 
-**Goal:** agent can introspect its own inbox, conversations, and call history. Plus read access-granted contacts and notes.
+**Goal:** agent can introspect its own inbox, conversations, and call history. Plus read organization-wide contacts and access-granted notes.
 
 ### Email reads
 
@@ -257,9 +257,9 @@ Branch B — Existing agent-scoped key
 | `inkbox_list_calls` | `identity.listCalls({limit?, offset?})` | required |
 | `inkbox_list_call_transcripts` | `identity.listTranscripts(callId)` | required |
 
-### Contacts (access-scoped CRUD)
+### Contacts (organization-wide CRUD)
 
-The agent reads and writes contacts it has access to via grants set by an admin in the Inkbox Console. Grant management is separate from ordinary contact CRUD.
+The agent reads and writes the organization's contacts. Generated contact facts share that organization-wide visibility, while correspondence remains scoped to the configured identity's channel history.
 
 | Tool | SDK | Optional? |
 |---|---|---|
@@ -270,7 +270,7 @@ The agent reads and writes contacts it has access to via grants set by an admin 
 | `inkbox_update_contact` | `inkbox.contacts.update(contactId, {...})` | required |
 | `inkbox_delete_contact` | `inkbox.contacts.delete(contactId)` | required |
 
-> Note: with an agent-scoped key, the SDK already filters contact operations to contacts the agent has access to. We don't need to re-implement the filter.
+> Note: unified contact correspondence and generated-fact tools remain deferred until the SDK exposes those resources.
 
 ### Notes (access-scoped)
 
@@ -336,15 +336,15 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 | `inkbox-sms-responder` | "text X", inbound `text.received` event | Conversational SMS reply, conversation-history-aware |
 | `inkbox-outbound-calling` | "call X", "place a call to Y" | Place calls from the configured Inkbox phone number |
 | `inkbox-call-review` | "what happened on the call", "show transcripts" | Review call history and transcript segments |
-| `inkbox-contact-lookup` | "who is X", "find email for Y" | Lookup-first; surfaces vcard + notes if access-granted |
+| `inkbox-contact-lookup` | "who is X", "find email for Y" | Lookup-first; surfaces organization-wide contact cards and user-managed notes |
 | `inkbox-contact-rules` | "block/allow this sender/number" | Manage mailbox and phone contact rules |
-| `inkbox-identity-access` | "share this contact/note with identity X" | Manage contact/note access grants |
+| `inkbox-identity-access` | "share this note with identity X" | Manage note access grants |
 | `inkbox-credential-use` | "log into X", "I need the TOTP for Y" | Gates plaintext credential access with explicit confirmation |
 | `inkbox-outreach-sequence` | "follow up with X over 3 days" | Multi-step outbound (email + SMS) with delay scheduling |
 
 ### Skill authoring rules
 
-- Read `/home/ec2-user/repos/inkbox/skills/inkbox-ts/SKILL.md` for the canonical SDK usage model — that's the source of truth for tool semantics.
+- Use the public Inkbox SDK documentation as the source of truth for tool semantics.
 - Each skill cites `inkbox_*` tools by exact name so the agent can find them in `tools.allow`.
 - Skills are `user-invocable: false` by default (they auto-trigger on context) unless they're explicitly user-facing.
 - No vendor names. No "soft-delete" / "tombstone" language. Use "admin API key or manage from the Inkbox Console" not "Clerk JWT" (per project policy).
@@ -391,7 +391,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 
 ## Phase 8 — Publish
 
-- [ ] Hit `pluginApi` compatibility per `openclaw.plugin.json` — verify against the openclaw version in `/home/ec2-user/repos/openclaw/package.json`
+- [ ] Hit `pluginApi` compatibility per `openclaw.plugin.json` and the supported OpenClaw release.
 - [ ] CI: typecheck + unit tests on push
 - [ ] `npm run build` → `dist/` artifact
 - [ ] **ClawHub publish (primary):**
@@ -404,7 +404,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
   npm publish --access public  # @inkbox/inkbox
   ```
 - [ ] GitHub release with changelog
-- [ ] Update the inkbox website docs (`website/docs/`) with an "OpenClaw" page that points at `clawhub:inkbox/openclaw-plugin`
+- [ ] Publish an OpenClaw setup page that points at `clawhub:inkbox/openclaw-plugin`.
 - [ ] Don't forget the no-attribution-footer rule on any PR descriptions
 
 ---
@@ -457,7 +457,7 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 **Phase 7 — Diagnostics**
 - `inkbox_whoami` ✱
 
-**Contact rules + access grants**
+**Contact rules + note access grants**
 - `inkbox_list_mail_contact_rules` ✱
 - `inkbox_create_mail_contact_rule` ✱
 - `inkbox_update_mail_contact_rule` ✱
@@ -466,9 +466,6 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 - `inkbox_create_phone_contact_rule` ✱
 - `inkbox_update_phone_contact_rule` ✱
 - `inkbox_delete_phone_contact_rule` ✱
-- `inkbox_list_contact_access` ✱
-- `inkbox_grant_contact_access` ✱
-- `inkbox_revoke_contact_access` ✱
 - `inkbox_list_note_access` ✱
 - `inkbox_grant_note_access` ✱
 - `inkbox_revoke_note_access` ✱
@@ -512,7 +509,7 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 
 ### C. Webhook event taxonomy (what we route on)
 
-Reference: `/home/ec2-user/repos/inkbox/skills/inkbox-ts/SKILL.md:761-771`.
+Reference the public Inkbox TypeScript SDK tunnel documentation.
 
 | Source URL | Events | Envelope shape | What we do |
 |---|---|---|---|
@@ -608,7 +605,7 @@ openclaw-plugin/
 
 ### G. Source-of-truth pointers
 
-- Inkbox TS SDK reference: `/home/ec2-user/repos/inkbox/skills/inkbox-ts/SKILL.md`
-- Inkbox TS SDK source: `/home/ec2-user/repos/inkbox/sdk/typescript/src/`
-- OpenClaw plugin docs: `/home/ec2-user/repos/openclaw/docs/plugins/`
-- OpenClaw channel-plugin template: `/home/ec2-user/repos/openclaw/extensions/telegram/`
+- Inkbox TypeScript SDK documentation
+- Inkbox TypeScript SDK source
+- OpenClaw plugin documentation
+- OpenClaw channel-plugin examples

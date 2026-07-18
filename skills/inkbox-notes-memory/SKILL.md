@@ -25,6 +25,8 @@ The Inkbox plugin exposes persistent notes scoped by the configured Inkbox ident
 
 2. **Do not store contact details as notes.** If the user asks to save a person, phone number, email, address-book entry, or "my contact", use the contact workflow: lookup first, then create or update an Inkbox contact.
 
+   Contact `notes`, generated contact facts, and Inkbox notes are distinct. Generated facts are source-grounded organization-wide memory and must not be copied into either user-managed notes surface.
+
 3. **Search before editing.** For "update the note about X", call `inkbox_list_notes` with a focused query, then `inkbox_get_note` if needed before using `inkbox_update_note`.
 
 4. **Be explicit about optional tools.** If update/delete is not available, say that the note was found but the update/delete tool is not allowlisted.
