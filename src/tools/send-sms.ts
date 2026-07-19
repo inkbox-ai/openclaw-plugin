@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
+import { recordSpawnFromActive } from "../spawn-context.js";
 import { SMS_MAX_TEXT_CHARS, smsTextTooLongMessage } from "../message-limits.js";
 
 function normalizeRecipients(value: unknown): string[] | undefined {
@@ -121,6 +122,11 @@ export function registerSendSms(
             : { to: toList!.length === 1 ? toList![0] : toList }),
         };
         const msg = await identity.sendText(payload);
+        // A 1:1 send to a new number mid-conversation is a spin-off; link it
+        // back so the recipient's reply inherits the parent thread.
+        if (!hasConversation && toList && toList.length === 1) {
+          recordSpawnFromActive({ recipient: toList[0], body: params.text });
+        }
         const target = formatTargetSummary(msg, params);
         const status = msg.deliveryStatus ?? "unknown";
         return toolText(

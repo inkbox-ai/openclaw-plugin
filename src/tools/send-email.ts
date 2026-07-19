@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipients } from "../allowlist.js";
+import { recordSpawnFromActive } from "../spawn-context.js";
 
 // Outbound email — the primary write path for the email channel.
 export function registerSendEmail(
@@ -51,6 +52,11 @@ export function registerSendEmail(
           bcc: params.bcc,
           inReplyToMessageId: params.inReplyToMessageId,
         });
+        // A single-recipient email to a new address mid-conversation is a
+        // spin-off; link it back so the reply inherits the parent thread.
+        if (Array.isArray(params.to) && params.to.length === 1) {
+          recordSpawnFromActive({ recipient: params.to[0], body: params.bodyText ?? params.bodyHtml });
+        }
         return toolText(
           `Sent email id=${msg.id} to=${params.to.join(",")} subject="${params.subject}"`,
         );
