@@ -347,7 +347,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 - Use the public Inkbox SDK documentation as the source of truth for tool semantics.
 - Each skill cites `inkbox_*` tools by exact name so the agent can find them in `tools.allow`.
 - Skills are `user-invocable: false` by default (they auto-trigger on context) unless they're explicitly user-facing.
-- No vendor names. No "soft-delete" / "tombstone" language. Use "admin API key or manage from the Inkbox Console" not "Clerk JWT" (per project policy).
+- Describe authorization and lifecycle behavior using the public product contract.
 
 ---
 
@@ -405,7 +405,6 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
   ```
 - [ ] GitHub release with changelog
 - [ ] Publish an OpenClaw setup page that points at `clawhub:inkbox/openclaw-plugin`.
-- [ ] Don't forget the no-attribution-footer rule on any PR descriptions
 
 ---
 
