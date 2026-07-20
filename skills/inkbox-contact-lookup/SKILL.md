@@ -1,12 +1,12 @@
 ---
 name: inkbox-contact-lookup
-description: Use when the user asks "who is X", "what's the email for Y", "find a contact named Z", "save this contact", or any question that needs organization-wide contact context.
+description: Use when the user asks "who is X", "what's the email for Y", "find a contact named Z", "save this contact", or any question that needs contact context. OpenClaw can read and write Inkbox contacts visible to this identity, but contact access/rules and vCard flows are separate admin surfaces.
 user-invocable: false
 ---
 
 # Inkbox contact lookup
 
-OpenClaw is the Inkbox personal-assistant tier. It receives contact context on inbound email, SMS, iMessage, and calls when Inkbox resolves the sender, and it can read or update organization-wide contacts.
+OpenClaw is the Inkbox personal-assistant tier. It receives contact context on inbound email, SMS, iMessage, and calls when Inkbox resolves the sender, and it can read or update contacts visible to the configured identity.
 
 ## Required tools
 
@@ -17,7 +17,7 @@ OpenClaw is the Inkbox personal-assistant tier. It receives contact context on i
 - `inkbox_update_contact` — change an existing contact after you know its UUID
 - `inkbox_delete_contact` — delete a contact only after the target is explicit and confirmed
 
-There is no vCard export/import tool in this harness. Contact rule tools are separate admin tools; use those only when the user explicitly asks to manage allow/block rules.
+There is no vCard export/import tool in this harness. Contact access and contact rule tools are separate admin tools; use those only when the user explicitly asks to manage sharing or allow/block rules.
 
 ## Workflow
 
@@ -29,13 +29,11 @@ There is no vCard export/import tool in this harness. Contact rule tools are sep
 6. **Delete cautiously.** If the user asks to delete a contact, confirm the exact target when there is any ambiguity, then call `inkbox_delete_contact` with the UUID.
 7. **Ask when the target is ambiguous.** If lookup returns multiple plausible contacts, ask which contact the user means before sending, calling, updating, or deleting.
 
-## Contact memory semantics
+## Access semantics
 
-- Active contacts and generated contact facts are organization-wide.
+- Contact tools operate only on contacts visible/writable to the configured identity.
 - Contacts created through `inkbox_create_contact` are Inkbox address-book records, not workspace memories.
-- Contact `notes` are user-managed profile text. Generated facts are separate, source-grounded memory; do not copy or overwrite them through the `notes` field.
-- Correspondence remains limited to the configured identity's authorized email, text, iMessage, and call history.
-- The installed SDK does not expose unified contact correspondence or generated-fact reads, so this plugin does not register those tools. Do not reconstruct them with raw requests.
+- Grant management is handled by the `inkbox-identity-access` skill when the user asks to share contacts across Inkbox identities.
 
 ## What this skill does NOT cover
 

@@ -175,6 +175,9 @@ openclaw config set tools.allow '[
   "inkbox_create_phone_contact_rule",
   "inkbox_update_phone_contact_rule",
   "inkbox_delete_phone_contact_rule",
+  "inkbox_list_contact_access",
+  "inkbox_grant_contact_access",
+  "inkbox_revoke_contact_access",
   "inkbox_list_note_access",
   "inkbox_grant_note_access",
   "inkbox_revoke_note_access",
@@ -325,8 +328,6 @@ Required by default:
 - Contacts: `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact`, `inkbox_delete_contact`
 - Notes: `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`
 
-Contacts and generated contact facts are organization-wide. Contact `notes` remain user-managed profile text, separate from source-grounded generated facts. Correspondence still follows the configured identity's channel permissions. Unified correspondence and generated-fact tools are deferred until the installed SDK exposes those resources; this plugin does not use raw API calls as a substitute.
-
 Optional:
 
 - Outbound: `inkbox_forward_email`, `inkbox_place_call`
@@ -334,7 +335,7 @@ Optional:
 - iMessage: `inkbox_imessage_triage_number`, `inkbox_list_imessage_assignments`, `inkbox_send_imessage_reaction`
 - Notes: `inkbox_update_note`, `inkbox_delete_note`
 - Contact rules: `inkbox_list_mail_contact_rules`, `inkbox_create_mail_contact_rule`, `inkbox_update_mail_contact_rule`, `inkbox_delete_mail_contact_rule`, `inkbox_list_phone_contact_rules`, `inkbox_create_phone_contact_rule`, `inkbox_update_phone_contact_rule`, `inkbox_delete_phone_contact_rule`
-- Note access: `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`
+- Identity access: `inkbox_list_contact_access`, `inkbox_grant_contact_access`, `inkbox_revoke_contact_access`, `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`
 - Vault: `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
 - Diagnostic: `inkbox_whoami`
 
@@ -352,7 +353,7 @@ The package includes all `skills/*/SKILL.md` files in npm tarballs.
 | `inkbox-call-review` | Reviewing calls and transcripts |
 | `inkbox-contact-lookup` | Resolving, creating, or updating contacts |
 | `inkbox-contact-rules` | Managing mail/phone allow and block rules |
-| `inkbox-identity-access` | Granting/revoking note visibility |
+| `inkbox-identity-access` | Granting/revoking contact or note visibility |
 | `inkbox-notes-memory` | Saving, retrieving, or updating Inkbox notes |
 | `inkbox-credential-use` | Fetching vault credentials or TOTP codes |
 | `inkbox-outreach-sequence` | Multi-step outreach over email/SMS |

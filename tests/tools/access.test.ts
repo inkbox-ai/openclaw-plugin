@@ -26,30 +26,53 @@ function createApi(): {
 }
 
 function createRuntime(access: {
+  contacts?: any;
   notes?: any;
 }): InkboxRuntime {
   return {
     getIdentity: () => Promise.resolve({} as any),
     getClient: () =>
       Promise.resolve({
+        contacts: { access: access.contacts ?? {} },
         notes: { access: access.notes ?? {} },
       } as any),
   };
 }
 
 describe("registerIdentityAccessTools", () => {
-  it("registers only note access tools", () => {
+  it("grants wildcard contact access", async () => {
     const { api, tools, options } = createApi();
-    registerIdentityAccessTools(api, createRuntime({}));
+    const grant = vi.fn().mockResolvedValue({ wildcard: true });
+    registerIdentityAccessTools(api, createRuntime({ contacts: { grant } }));
 
-    expect([...tools.keys()]).toEqual([
-      "inkbox_list_note_access",
-      "inkbox_grant_note_access",
-      "inkbox_revoke_note_access",
-    ]);
-    for (const name of tools.keys()) {
-      expect(options.get(name)).toEqual({ optional: true });
-    }
+    const out = await tools.get("inkbox_grant_contact_access")!.execute("turn-1", {
+      contactId: "contact-1",
+      wildcard: true,
+    });
+
+    expect(options.get("inkbox_grant_contact_access")).toEqual({ optional: true });
+    expect(grant).toHaveBeenCalledWith("contact-1", {
+      identityId: undefined,
+      wildcard: true,
+    });
+    expect(out.isError).toBeUndefined();
+    expect(out.content[0].text).toContain("Granted contact access.");
+  });
+
+  it("rejects ambiguous contact access grant requests", async () => {
+    const { api, tools } = createApi();
+    const grant = vi.fn();
+    registerIdentityAccessTools(api, createRuntime({ contacts: { grant } }));
+
+    const out = await tools.get("inkbox_grant_contact_access")!.execute("turn-1", {
+      contactId: "contact-1",
+      identityId: "identity-1",
+      wildcard: true,
+    });
+
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("either identityId or wildcard=true");
+    expect(grant).not.toHaveBeenCalled();
   });
 
   it("grants note access to a specific identity", async () => {

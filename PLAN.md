@@ -54,12 +54,12 @@ The plugin authenticates with an **agent-scoped API key** (`AUTH_SUBTYPE_API_KEY
 - ✅ Send/read its own email, SMS, calls
 - ✅ Manage its own phone number (provision/release)
 - ✅ Use vault credentials it has access to via grants
-- ✅ Read organization-wide contacts and access-granted notes
+- ✅ Read contacts and notes it has access to via grants
 - ❌ Create / list / delete other identities
 - ❌ Flip filter modes on mailboxes or phone numbers
 - ❌ Manage domains
 - ❌ Write SMS opt-in registry programmatically
-- ⚠️ Optional note-access tools remain subject to the caller's authorization
+- ❌ Grant/revoke contact or note access (the human admin does this in the Inkbox Console)
 
 This separation matches Inkbox's own auth model (`AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED` vs `AGENT_SCOPED`). The wizard creates an agent-scoped key and the runtime refuses to construct an admin client.
 
@@ -227,7 +227,7 @@ Branch B — Existing agent-scoped key
 
 ## Phase 4 — Read & lifecycle tools
 
-**Goal:** agent can introspect its own inbox, conversations, and call history. Plus read organization-wide contacts and access-granted notes.
+**Goal:** agent can introspect its own inbox, conversations, and call history. Plus read access-granted contacts and notes.
 
 ### Email reads
 
@@ -257,9 +257,9 @@ Branch B — Existing agent-scoped key
 | `inkbox_list_calls` | `identity.listCalls({limit?, offset?})` | required |
 | `inkbox_list_call_transcripts` | `identity.listTranscripts(callId)` | required |
 
-### Contacts (organization-wide CRUD)
+### Contacts (access-scoped CRUD)
 
-The agent reads and writes the organization's contacts. Generated contact facts share that organization-wide visibility, while correspondence remains scoped to the configured identity's channel history.
+The agent reads and writes contacts it has access to via grants set by an admin in the Inkbox Console. Grant management is separate from ordinary contact CRUD.
 
 | Tool | SDK | Optional? |
 |---|---|---|
@@ -270,7 +270,7 @@ The agent reads and writes the organization's contacts. Generated contact facts 
 | `inkbox_update_contact` | `inkbox.contacts.update(contactId, {...})` | required |
 | `inkbox_delete_contact` | `inkbox.contacts.delete(contactId)` | required |
 
-> Note: unified contact correspondence and generated-fact tools remain deferred until the SDK exposes those resources.
+> Note: with an agent-scoped key, the SDK already filters contact operations to contacts the agent has access to. We don't need to re-implement the filter.
 
 ### Notes (access-scoped)
 
@@ -336,9 +336,9 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 | `inkbox-sms-responder` | "text X", inbound `text.received` event | Conversational SMS reply, conversation-history-aware |
 | `inkbox-outbound-calling` | "call X", "place a call to Y" | Place calls from the configured Inkbox phone number |
 | `inkbox-call-review` | "what happened on the call", "show transcripts" | Review call history and transcript segments |
-| `inkbox-contact-lookup` | "who is X", "find email for Y" | Lookup-first; surfaces organization-wide contact cards and user-managed notes |
+| `inkbox-contact-lookup` | "who is X", "find email for Y" | Lookup-first; surfaces vcard + notes if access-granted |
 | `inkbox-contact-rules` | "block/allow this sender/number" | Manage mailbox and phone contact rules |
-| `inkbox-identity-access` | "share this note with identity X" | Manage note access grants |
+| `inkbox-identity-access` | "share this contact/note with identity X" | Manage contact/note access grants |
 | `inkbox-credential-use` | "log into X", "I need the TOTP for Y" | Gates plaintext credential access with explicit confirmation |
 | `inkbox-outreach-sequence` | "follow up with X over 3 days" | Multi-step outbound (email + SMS) with delay scheduling |
 
@@ -456,7 +456,7 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 **Phase 7 — Diagnostics**
 - `inkbox_whoami` ✱
 
-**Contact rules + note access grants**
+**Contact rules + access grants**
 - `inkbox_list_mail_contact_rules` ✱
 - `inkbox_create_mail_contact_rule` ✱
 - `inkbox_update_mail_contact_rule` ✱
@@ -465,6 +465,9 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 - `inkbox_create_phone_contact_rule` ✱
 - `inkbox_update_phone_contact_rule` ✱
 - `inkbox_delete_phone_contact_rule` ✱
+- `inkbox_list_contact_access` ✱
+- `inkbox_grant_contact_access` ✱
+- `inkbox_revoke_contact_access` ✱
 - `inkbox_list_note_access` ✱
 - `inkbox_grant_note_access` ✱
 - `inkbox_revoke_note_access` ✱

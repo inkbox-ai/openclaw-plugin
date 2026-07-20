@@ -54,13 +54,15 @@ function buildContactWritePayload(params: any) {
   return payload;
 }
 
-// Contacts and generated contact facts are organization-wide. Correspondence
-// remains scoped to the configured identity's authorized channel history.
+// Contacts are an org-level address book filtered server-side by per-identity
+// access grants. With an agent-scoped key, list/lookup/get already return only
+// the contacts this identity has access to — we don't filter client-side.
+// Grant management stays admin-only and is not exposed.
 export function registerContactTools(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_lookup_contact",
     description:
-      "Reverse-lookup organization-wide contacts by email or phone. Exactly one filter must be provided — email, phone, emailDomain, emailContains, or phoneContains.",
+      "Reverse-lookup contacts by email or phone. Exactly one filter must be provided — email, phone, emailDomain, emailContains, or phoneContains. Returns contacts this identity has access to.",
     parameters: Type.Object({
       email: Type.Optional(Type.String({ description: "Exact email address." })),
       phone: Type.Optional(Type.String({ description: "Exact E.164 phone number." })),
@@ -104,7 +106,7 @@ export function registerContactTools(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_list_contacts",
     description:
-      "List organization-wide contacts. Optional free-text search via `q`.",
+      "List contacts this identity has access to. Optional free-text search via `q`; results scoped by per-identity grants.",
     parameters: Type.Object({
       q: Type.Optional(
         Type.String({
@@ -148,7 +150,7 @@ export function registerContactTools(api: any, runtime: InkboxRuntime): void {
       familyName: Type.Optional(Type.String({ description: "Family/last name." })),
       companyName: Type.Optional(Type.String({ description: "Company or organization." })),
       jobTitle: Type.Optional(Type.String({ description: "Job title." })),
-      notes: Type.Optional(Type.String({ description: "User-managed contact notes, separate from generated contact facts." })),
+      notes: Type.Optional(Type.String({ description: "Free-form contact notes." })),
       emails: Type.Optional(Type.Array(contactEmailSchema, { description: "Email addresses." })),
       phones: Type.Optional(Type.Array(contactPhoneSchema, { description: "Phone numbers." })),
     }),
