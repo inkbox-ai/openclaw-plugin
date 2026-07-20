@@ -45,7 +45,7 @@ Two shapes are possible:
 | **Tool plugin** (`definePluginEntry`) | Simple, fastest to ship | Inbound webhook events don't naturally become sessions — would have to fake it |
 | **Channel plugin** (`defineChannelPluginEntry`) | Inbound emails/SMS/calls become real OpenClaw sessions; matches Telegram/Discord/Slack shape | More moving parts (channel config, runtime setter, ingress contract) |
 
-**Decision: start as tool plugin (Phase 0–1), promote to channel plugin in Phase 2** when we wire inbound. The Telegram plugin at `/home/ec2-user/repos/openclaw/extensions/telegram/` is the template — copy its file layout (`channel-plugin-api.ts`, `runtime-setter-api.ts`, `setup-entry.ts`, `configured-state.ts`).
+**Decision: start as tool plugin (Phase 0–1), promote to channel plugin in Phase 2** when we wire inbound. Follow OpenClaw's public channel-plugin conventions.
 
 ### Agent-scoped focus
 
@@ -344,10 +344,10 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 
 ### Skill authoring rules
 
-- Read `/home/ec2-user/repos/inkbox/skills/inkbox-ts/SKILL.md` for the canonical SDK usage model — that's the source of truth for tool semantics.
+- Use the public Inkbox SDK documentation as the source of truth for tool semantics.
 - Each skill cites `inkbox_*` tools by exact name so the agent can find them in `tools.allow`.
 - Skills are `user-invocable: false` by default (they auto-trigger on context) unless they're explicitly user-facing.
-- No vendor names. No "soft-delete" / "tombstone" language. Use "admin API key or manage from the Inkbox Console" not "Clerk JWT" (per project policy).
+- Describe authorization and lifecycle behavior using the public product contract.
 
 ---
 
@@ -391,7 +391,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 
 ## Phase 8 — Publish
 
-- [ ] Hit `pluginApi` compatibility per `openclaw.plugin.json` — verify against the openclaw version in `/home/ec2-user/repos/openclaw/package.json`
+- [ ] Hit `pluginApi` compatibility per `openclaw.plugin.json` and the supported OpenClaw release.
 - [ ] CI: typecheck + unit tests on push
 - [ ] `npm run build` → `dist/` artifact
 - [ ] **ClawHub publish (primary):**
@@ -404,8 +404,7 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
   npm publish --access public  # @inkbox/inkbox
   ```
 - [ ] GitHub release with changelog
-- [ ] Update the inkbox website docs (`website/docs/`) with an "OpenClaw" page that points at `clawhub:inkbox/openclaw-plugin`
-- [ ] Don't forget the no-attribution-footer rule on any PR descriptions
+- [ ] Publish an OpenClaw setup page that points at `clawhub:inkbox/openclaw-plugin`.
 
 ---
 
@@ -512,7 +511,7 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 
 ### C. Webhook event taxonomy (what we route on)
 
-Reference: `/home/ec2-user/repos/inkbox/skills/inkbox-ts/SKILL.md:761-771`.
+Reference the public Inkbox TypeScript SDK tunnel documentation.
 
 | Source URL | Events | Envelope shape | What we do |
 |---|---|---|---|
@@ -608,7 +607,7 @@ openclaw-plugin/
 
 ### G. Source-of-truth pointers
 
-- Inkbox TS SDK reference: `/home/ec2-user/repos/inkbox/skills/inkbox-ts/SKILL.md`
-- Inkbox TS SDK source: `/home/ec2-user/repos/inkbox/sdk/typescript/src/`
-- OpenClaw plugin docs: `/home/ec2-user/repos/openclaw/docs/plugins/`
-- OpenClaw channel-plugin template: `/home/ec2-user/repos/openclaw/extensions/telegram/`
+- Inkbox TypeScript SDK documentation
+- Inkbox TypeScript SDK source
+- OpenClaw plugin documentation
+- OpenClaw channel-plugin examples
