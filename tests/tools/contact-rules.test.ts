@@ -93,6 +93,27 @@ describe("registerContactRuleTools", () => {
     expect(out.content[0].text).toContain("Returned 1 phone rule(s).");
   });
 
+  it("updates a mailbox rule with an action-only payload", async () => {
+    const { api, tools } = createApi();
+    const update = vi.fn().mockResolvedValue({ id: "rule-1", action: "allow" });
+    registerContactRuleTools(
+      api,
+      createRuntime({
+        identity: { mailbox: { emailAddress: "agent@inkboxmail.com" } },
+        mailContactRules: { update },
+      }),
+    );
+
+    await tools.get("inkbox_update_mail_contact_rule")!.execute("turn-1", {
+      ruleId: "rule-1",
+      action: "allow",
+    });
+
+    expect(update).toHaveBeenCalledWith("agent@inkboxmail.com", "rule-1", {
+      action: "allow",
+    });
+  });
+
   it("returns a tool error when phone rules are requested without a phone number", async () => {
     const { api, tools } = createApi();
     registerContactRuleTools(api, createRuntime({ identity: {} }));
