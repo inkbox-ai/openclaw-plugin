@@ -336,9 +336,9 @@ OpenClaw skills are markdown files that scope agent behavior for a domain. Ship 
 | `inkbox-sms-responder` | "text X", inbound `text.received` event | Conversational SMS reply, conversation-history-aware |
 | `inkbox-outbound-calling` | "call X", "place a call to Y" | Place calls from the configured Inkbox phone number |
 | `inkbox-call-review` | "what happened on the call", "show transcripts" | Review call history and transcript segments |
-| `inkbox-contact-lookup` | "who is X", "find email for Y" | Lookup-first; surfaces vcard + notes if access-granted |
+| `inkbox-contact-lookup` | "who is X", "find email for Y" | Lookup-first access to the shared organization address book |
 | `inkbox-contact-rules` | "block/allow this sender/number" | Manage mailbox and phone contact rules |
-| `inkbox-identity-access` | "share this contact/note with identity X" | Manage contact/note access grants |
+| `inkbox-identity-access` | "share this note with identity X" | Explain shared contact visibility and manage note access grants |
 | `inkbox-credential-use` | "log into X", "I need the TOTP for Y" | Gates plaintext credential access with explicit confirmation |
 | `inkbox-outreach-sequence` | "follow up with X over 3 days" | Multi-step outbound (email + SMS) with delay scheduling |
 
@@ -456,7 +456,7 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 **Phase 7 — Diagnostics**
 - `inkbox_whoami` ✱
 
-**Contact rules + access grants**
+**Contact rules + note access grants**
 - `inkbox_list_mail_contact_rules` ✱
 - `inkbox_create_mail_contact_rule` ✱
 - `inkbox_update_mail_contact_rule` ✱
@@ -465,9 +465,6 @@ Grouped by phase. ✱ = optional (user must opt-in via `tools: { allow: [...] }`
 - `inkbox_create_phone_contact_rule` ✱
 - `inkbox_update_phone_contact_rule` ✱
 - `inkbox_delete_phone_contact_rule` ✱
-- `inkbox_list_contact_access` ✱
-- `inkbox_grant_contact_access` ✱
-- `inkbox_revoke_contact_access` ✱
 - `inkbox_list_note_access` ✱
 - `inkbox_grant_note_access` ✱
 - `inkbox_revoke_note_access` ✱
