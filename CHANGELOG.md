@@ -6,7 +6,8 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Changed
 
-- Raised the Inkbox SDK dependency floor to 0.5.0 for the plugin and live CI.
+- Raised the Inkbox SDK dependency floor to 0.5.1 for the plugin and live CI.
+- Removed contact access tools because contacts are organization-wide. Note access tools remain identity-scoped.
 
 ## [0.2.2] - 2026-07-10
 

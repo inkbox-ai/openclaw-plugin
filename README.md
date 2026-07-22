@@ -175,9 +175,6 @@ openclaw config set tools.allow '[
   "inkbox_create_phone_contact_rule",
   "inkbox_update_phone_contact_rule",
   "inkbox_delete_phone_contact_rule",
-  "inkbox_list_contact_access",
-  "inkbox_grant_contact_access",
-  "inkbox_revoke_contact_access",
   "inkbox_list_note_access",
   "inkbox_grant_note_access",
   "inkbox_revoke_note_access",
@@ -335,7 +332,7 @@ Optional:
 - iMessage: `inkbox_imessage_triage_number`, `inkbox_list_imessage_assignments`, `inkbox_send_imessage_reaction`
 - Notes: `inkbox_update_note`, `inkbox_delete_note`
 - Contact rules: `inkbox_list_mail_contact_rules`, `inkbox_create_mail_contact_rule`, `inkbox_update_mail_contact_rule`, `inkbox_delete_mail_contact_rule`, `inkbox_list_phone_contact_rules`, `inkbox_create_phone_contact_rule`, `inkbox_update_phone_contact_rule`, `inkbox_delete_phone_contact_rule`
-- Identity access: `inkbox_list_contact_access`, `inkbox_grant_contact_access`, `inkbox_revoke_contact_access`, `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`
+- Note access: `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`
 - Vault: `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
 - Diagnostic: `inkbox_whoami`
 

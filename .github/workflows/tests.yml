@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: inkbox-ai/inkbox
-          ref: 8f4b37c56cd153a2acc6cfabe27dbbeb43510f00
+          ref: 199bbd27c8dab2f70e379de52ca9cc910b0e141d
           path: .ci/inkbox
 
       - uses: actions/setup-node@v7
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: inkbox-ai/inkbox
-          ref: 8f4b37c56cd153a2acc6cfabe27dbbeb43510f00
+          ref: 199bbd27c8dab2f70e379de52ca9cc910b0e141d
           path: .ci/inkbox
 
       - uses: actions/setup-node@v7

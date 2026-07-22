@@ -54,15 +54,12 @@ function buildContactWritePayload(params: any) {
   return payload;
 }
 
-// Contacts are an org-level address book filtered server-side by per-identity
-// access grants. With an agent-scoped key, list/lookup/get already return only
-// the contacts this identity has access to — we don't filter client-side.
-// Grant management stays admin-only and is not exposed.
+// Contacts are shared across every identity in the organization.
 export function registerContactTools(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_lookup_contact",
     description:
-      "Reverse-lookup contacts by email or phone. Exactly one filter must be provided — email, phone, emailDomain, emailContains, or phoneContains. Returns contacts this identity has access to.",
+      "Reverse-lookup organization contacts by email or phone. Exactly one filter must be provided — email, phone, emailDomain, emailContains, or phoneContains.",
     parameters: Type.Object({
       email: Type.Optional(Type.String({ description: "Exact email address." })),
       phone: Type.Optional(Type.String({ description: "Exact E.164 phone number." })),
@@ -106,7 +103,7 @@ export function registerContactTools(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_list_contacts",
     description:
-      "List contacts this identity has access to. Optional free-text search via `q`; results scoped by per-identity grants.",
+      "List organization-wide contacts. Optional free-text search via `q`.",
     parameters: Type.Object({
       q: Type.Optional(
         Type.String({
@@ -143,7 +140,7 @@ export function registerContactTools(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_create_contact",
     description:
-      "Create an Inkbox address-book contact. Use when the user asks to save a person/contact in Inkbox. Include phone/email when known; notes can hold free-form context.",
+      "Create an organization-wide Inkbox address-book contact. Use when the user asks to save a person/contact in Inkbox. Include phone/email when known; notes can hold free-form context.",
     parameters: Type.Object({
       preferredName: Type.Optional(Type.String({ description: "Display/preferred name." })),
       givenName: Type.Optional(Type.String({ description: "Given/first name." })),
@@ -166,7 +163,7 @@ export function registerContactTools(api: any, runtime: InkboxRuntime): void {
   api.registerTool({
     name: "inkbox_update_contact",
     description:
-      "Update an Inkbox address-book contact by UUID. Use after lookup/get when the user asks to add or correct contact details.",
+      "Update an organization-wide Inkbox address-book contact by UUID. Use after lookup/get when the user asks to add or correct contact details.",
     parameters: Type.Object({
       contactId: Type.String({ description: "UUID of the contact to update." }),
       preferredName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
@@ -192,7 +189,7 @@ export function registerContactTools(api: any, runtime: InkboxRuntime): void {
 
   api.registerTool({
     name: "inkbox_delete_contact",
-    description: "Delete an Inkbox address-book contact by UUID. Irreversible.",
+    description: "Delete an organization-wide Inkbox address-book contact by UUID. Irreversible.",
     parameters: Type.Object({
       contactId: Type.String({ description: "UUID of the contact to delete." }),
     }),
