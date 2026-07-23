@@ -22,6 +22,7 @@ import { registerContactRuleTools } from "./src/tools/contact-rules.js";
 import { registerIdentityAccessTools } from "./src/tools/access.js";
 import { registerVaultTools } from "./src/tools/vault.js";
 import { registerWhoami } from "./src/tools/whoami.js";
+import { registerA2ATools } from "./src/tools/a2a.js";
 import { registerPlaceCall } from "./src/tools/place-call.js";
 import { createVaultRuntime } from "./src/vault.js";
 import { deriveConfiguredCallWebsocketUrl } from "./src/call-websocket.js";
@@ -84,6 +85,7 @@ function registerInkboxTools(api: any): void {
   registerSendEmail(api, runtime, cfg.allowedRecipients);
   registerSendSms(api, runtime, cfg.allowedRecipients);
   registerSendIMessage(api, runtime, cfg.allowedRecipients);
+  registerA2ATools(api, runtime, cfg.allowedRecipients);
 
   // Optional outbound tools — require explicit opt-in via tools.allow.
   registerForwardEmail(api, runtime, cfg.allowedRecipients);
@@ -135,7 +137,8 @@ function registerInkboxTools(api: any): void {
 const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   id: "inkbox",
   name: "Inkbox",
-  description: "Adds Inkbox messaging tools (email, SMS, iMessage, voice) to OpenClaw",
+  description:
+    "Adds Inkbox messaging and A2A tools (email, SMS, iMessage, voice) to OpenClaw",
   plugin: inkboxPlugin,
   registerCliMetadata: registerInkboxCli,
   registerFull(api: any) {

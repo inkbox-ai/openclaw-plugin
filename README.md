@@ -298,7 +298,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `baseUrl` | no | SDK default | Override Inkbox API base URL. |
 | `tunnelName` | no | identity handle | Override Inkbox tunnel name. |
 | `publicUrl` | no | - | Public OpenClaw URL. If omitted, the plugin opens an Inkbox tunnel. |
-| `allowedRecipients` | no | - | Outbound recipient allowlist. Empty means no local outbound filtering. |
+| `allowedRecipients` | no | - | Outbound recipient allowlist for messaging targets and A2A Agent Card URLs. Empty means no local outbound filtering. |
 | `allowedInboundContactIds` | no | - | Optional local inbound allowlist by Inkbox contact UUID. Empty means Inkbox contact rules decide reachability. |
 | `sms.batchDelayMs` | no | `0` | Inbound SMS and iMessage fragment batching window. |
 | `voiceTranscriptCoalesceMs` | no | plugin default | Non-realtime voice transcript coalescing window. |
@@ -318,6 +318,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 Required by default:
 
 - Outbound: `inkbox_send_email`, `inkbox_send_sms`, `inkbox_send_imessage`
+- A2A: `inkbox_a2a_call`, `inkbox_a2a_check`, `inkbox_a2a_reply`
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`

@@ -8,6 +8,11 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 - The plugin now identifies itself and its version to the API as a `User-Agent` prefix (`inkbox-openclaw/<version> inkbox-typescript/<sdk version>`), using the SDK's existing `userAgentPrefix` option. The version is read from `package.json` at runtime so the token cannot drift.
 
+### Added
+
+- Identity-bound A2A 1.0 tools for sending, checking, waiting on, and replying
+  to remote tasks. A2A writes use the existing outbound recipient allowlist.
+
 ### Changed
 
 - Version realigned to 0.2.5, the shared number across the Inkbox plugin fleet, so a version answers "which fleet release is this" rather than a per-repo count.

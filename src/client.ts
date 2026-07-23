@@ -44,9 +44,9 @@ export interface InkboxPluginConfig {
     providers?: Record<string, Record<string, unknown>>;
     fallbackToInkboxSttTts?: boolean;
   };
-  // Outbound recipient allowlist. When set, send_email / send_sms /
-  // forward_email reject any recipient not on the list. Phone matches in
-  // E.164, email matches by exact address. Empty/undefined → no filtering.
+  // Outbound recipient allowlist. When set, messaging and A2A write tools
+  // reject any target not on the list. Phone matches in E.164; email and
+  // Agent Card URLs match exactly. Empty/undefined means no filtering.
   allowedRecipients?: string[];
   // Inbound contact-id allowlist. When set, the webhook dispatcher drops
   // any event whose contact id is not on the list. Events with no contact
