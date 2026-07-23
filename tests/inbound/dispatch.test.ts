@@ -104,6 +104,23 @@ describe("dispatchInbound", () => {
     expect(onIMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("routes A2A lifecycle events to onA2A without applying contact filters", async () => {
+    const onA2A = vi.fn();
+    const payload = {
+      event_type: "a2a.task.created",
+      data: { task_id: "task-1", context_id: "context-1" },
+    };
+
+    const result = await dispatchInbound(
+      payload,
+      { onA2A },
+      ["contact-allowed"],
+    );
+
+    expect(result.kind).toBe("a2a");
+    expect(onA2A).toHaveBeenCalledWith(payload);
+  });
+
   it("routes flat call payload to onCall", async () => {
     const onCall = vi.fn().mockReturnValue({ action: "answer", clientWebsocketUrl: "wss://x" });
     const result = await dispatchInbound(callEvent(), { onCall });

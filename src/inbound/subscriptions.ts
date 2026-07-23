@@ -34,6 +34,12 @@ export const IMESSAGE_EVENT_TYPES: readonly string[] = [
   "imessage.delivery_failed",
   "imessage.reaction_received",
 ];
+export const A2A_EVENT_TYPES: readonly string[] = [
+  "a2a.task.created",
+  "a2a.task.message",
+  "a2a.task.canceled",
+  "a2a.sent_task.updated",
+];
 
 export interface DesiredSubscriptionSet {
   mailboxId?: string;

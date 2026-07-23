@@ -25,6 +25,17 @@ import {
 } from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
 import type { ResolvedInkboxAccount } from "../accounts.js";
+import {
+  clearActiveA2ATurn,
+  setActiveA2ATurn,
+  type ActiveA2ATurn,
+} from "../a2a-context.js";
+import {
+  readA2ARegistry,
+  writeA2ARegistry,
+  type A2ARegistryData,
+} from "../a2a-registry.js";
+import { findDelegationByTask } from "../a2a-delegations.js";
 import { recordInboundChannelHint } from "../channel-hint.js";
 import {
   classifySendRejection,
@@ -46,6 +57,7 @@ import {
 import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
 import {
   IMESSAGE_EVENT_TYPES,
+  A2A_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
   reconcileWebhookSubscription,
@@ -53,7 +65,14 @@ import {
 
 type ChannelRuntime = any;
 
-type InboundMode = "email" | "sms" | "imessage" | "voice" | "warmup" | "external";
+type InboundMode =
+  | "email"
+  | "sms"
+  | "imessage"
+  | "voice"
+  | "warmup"
+  | "external"
+  | "a2a";
 
 type ContactSummary = {
   id?: string;
@@ -74,6 +93,7 @@ type InkboxInboundTurn = {
   localAddress?: string;
   conversationId?: string;
   conversationKind?: "direct" | "group";
+  sessionKeyOverride?: string;
   conversationLabel?: string;
   conversationParticipants?: string[];
   subject?: string;
@@ -160,6 +180,7 @@ export interface InkboxSessionBridge {
   handlers: InboundHandlers;
   wsHandler: InkboxWsHandler;
   activeCalls: Map<string, ActiveCall>;
+  catchUpA2A(): Promise<void>;
 }
 
 export interface ConfigureIdentityDeliveryOptions {
@@ -1899,6 +1920,7 @@ async function dispatchInboundTurn(
       onError?: (error: unknown) => void;
     };
     replyOptionsOverride?: Record<string, unknown>;
+    a2aContext?: ActiveA2ATurn;
   },
 ): Promise<void> {
   const core = opts.channelRuntime;
@@ -1939,7 +1961,10 @@ async function dispatchInboundTurn(
     (route as { accountId?: string | null }).accountId ?? opts.account.accountId;
   const baseSessionKey = route.sessionKey;
   const effectiveSessionKey =
-    opts.turn.mode === "voice" ? voiceSessionKey(route.agentId, opts.turn) : baseSessionKey;
+    opts.turn.sessionKeyOverride ??
+    (opts.turn.mode === "voice"
+      ? voiceSessionKey(route.agentId, opts.turn)
+      : baseSessionKey);
   const { storePath, body } = buildEnvelope({
     channel: "Inkbox",
     from: opts.turn.fromLabel,
@@ -2087,28 +2112,37 @@ async function dispatchInboundTurn(
       );
     },
   };
-  await core.inbound.dispatchReply({
-    cfg: opts.cfg as any,
-    channel: "inkbox",
-    accountId: opts.account.accountId,
-    agentId: route.agentId,
-    routeSessionKey: effectiveSessionKey,
-    storePath,
-    ctxPayload,
-    recordInboundSession: core.session.recordInboundSession,
-    dispatchReplyWithBufferedBlockDispatcher:
-      core.reply.dispatchReplyWithBufferedBlockDispatcher,
-    ...(replyOptions ? { replyOptions } : {}),
-    delivery,
-    replyPipeline: {},
-    record: {
-      onRecordError: (error: unknown) => {
-        opts.logger?.warn?.(
-          `Inkbox session record failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+  if (opts.a2aContext) {
+    setActiveA2ATurn(effectiveSessionKey, opts.a2aContext);
+  }
+  try {
+    await core.inbound.dispatchReply({
+      cfg: opts.cfg as any,
+      channel: "inkbox",
+      accountId: opts.account.accountId,
+      agentId: route.agentId,
+      routeSessionKey: effectiveSessionKey,
+      storePath,
+      ctxPayload,
+      recordInboundSession: core.session.recordInboundSession,
+      dispatchReplyWithBufferedBlockDispatcher:
+        core.reply.dispatchReplyWithBufferedBlockDispatcher,
+      ...(replyOptions ? { replyOptions } : {}),
+      delivery,
+      replyPipeline: {},
+      record: {
+        onRecordError: (error: unknown) => {
+          opts.logger?.warn?.(
+            `Inkbox session record failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
       },
-    },
-  });
+    });
+  } finally {
+    if (opts.a2aContext) {
+      clearActiveA2ATurn(effectiveSessionKey, opts.a2aContext);
+    }
+  }
 }
 
 const REALTIME_CONSULT_TIMED_OUT = Symbol("realtime-consult-timed-out");
@@ -3778,8 +3812,242 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   const activeCalls = new Map<string, ActiveCall>();
   const callMetaById = new Map<string, Partial<InkboxInboundTurn> & { callId: string }>();
   const imessageTyping = createIMessageTypingPulse(opts.runtime, opts.logger);
+  const a2aRuns = new Map<
+    string,
+    Set<{ contextId: string; controller: AbortController }>
+  >();
+  const a2aTerminalStates = new Set([
+    "completed",
+    "failed",
+    "canceled",
+    "rejected",
+  ]);
+
+  async function runA2ATurn(
+    key: string,
+    data: A2ARegistryData,
+  ): Promise<void> {
+    const identity = await opts.runtime.getIdentity() as any;
+    const controller = new AbortController();
+    const taskRuns = a2aRuns.get(data.task_id) ?? new Set();
+    const activeRun = {
+      contextId: data.context_id,
+      controller,
+    };
+    taskRuns.add(activeRun);
+    a2aRuns.set(data.task_id, taskRuns);
+    const context: ActiveA2ATurn = {
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id ?? "",
+      replyIntentCommitted: false,
+    };
+    const caller = data.caller ?? {};
+    const body = (data.parts ?? [])
+      .map((part) => (typeof part.text === "string" ? part.text : ""))
+      .filter(Boolean)
+      .join("\n");
+    const marker =
+      `[inkbox:a2a_task caller=@${String(caller.handle ?? "unknown").replace(/^@/, "")} ` +
+      `caller_org=${caller.organization_id ?? "unknown"}]`;
+    const delivered: string[] = [];
+    const turn: InkboxInboundTurn = {
+      mode: "a2a",
+      contactKey: `${identity.id}:${data.context_id}`,
+      fromLabel: caller.handle
+        ? `@${String(caller.handle).replace(/^@/, "")}`
+        : "A2A caller",
+      conversationKind: "direct",
+      sessionKeyOverride: `a2a:${identity.id}:${data.context_id}`,
+      conversationLabel: `A2A context ${data.context_id}`,
+      body: `${marker}\n${body}`.trim(),
+      messageId: data.message_id ?? key,
+      threadId: `a2a:${data.context_id}`,
+      raw: data,
+    };
+    await writeA2ARegistry(key, data, "running");
+    try {
+      await dispatchInboundTurn({
+        ...opts,
+        turn,
+        activeCalls,
+        dispatchAbortSignal: controller.signal,
+        a2aContext: context,
+        replyOptionsOverride: {
+          sourceReplyDeliveryMode: "automatic",
+          bootstrapContextMode: "lightweight",
+          abortSignal: controller.signal,
+        },
+        deliveryOverride: {
+          deliver: async (payload: unknown) => {
+            const text = payloadText(payload).trim();
+            if (text) delivered.push(text);
+            return { visibleReplySent: false };
+          },
+          onError: (error: unknown) => {
+            opts.logger?.warn?.(
+              `Inkbox A2A reply collection failed: ${errorMessage(error)}`,
+            );
+          },
+        },
+      });
+      if (controller.signal.aborted) {
+        const task = await identity.a2aTask(data.task_id);
+        if (a2aTerminalStates.has(String(task.state))) {
+          await writeA2ARegistry(key, data, "finalized");
+        }
+        return;
+      }
+      const reply = delivered.at(-1)?.trim();
+      if (
+        !context.replyIntentCommitted &&
+        reply &&
+        reply.toUpperCase() !== "[SILENT]"
+      ) {
+        const task = await identity.a2aTask(data.task_id);
+        if (!a2aTerminalStates.has(String(task.state))) {
+          await identity.a2aReply(data.task_id, {
+            intent: "complete",
+            text: reply,
+          });
+        }
+      }
+      await writeA2ARegistry(key, data, "finalized");
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        opts.logger?.warn?.(
+          `Inkbox A2A turn failed: task_id=${data.task_id} ${errorMessage(error)}`,
+        );
+      }
+    } finally {
+      taskRuns.delete(activeRun);
+      if (taskRuns.size === 0) {
+        a2aRuns.delete(data.task_id);
+      }
+    }
+  }
+
+  async function ingestA2A(
+    event: Record<string, unknown>,
+  ): Promise<void> {
+    const eventType = String(event.event_type ?? "");
+    const data =
+      event.data && typeof event.data === "object" && !Array.isArray(event.data)
+        ? event.data as A2ARegistryData
+        : undefined;
+    if (!data?.task_id || !data.context_id) return;
+    if (eventType === "a2a.task.canceled") {
+      for (const run of a2aRuns.get(data.task_id) ?? []) {
+        if (run.contextId === data.context_id) run.controller.abort();
+      }
+      return;
+    }
+    if (eventType === "a2a.sent_task.updated") {
+      const delegation = await findDelegationByTask(data.task_id);
+      if (delegation?.sessionKey) {
+        const text = (data.parts ?? [])
+          .map((part) => (typeof part.text === "string" ? part.text : ""))
+          .filter(Boolean)
+          .join("\n");
+        const prompt =
+          `[inkbox:a2a_sent_task_updated task_id=${data.task_id} ` +
+          `context_id=${data.context_id} state=${data.state ?? "unknown"}]\n` +
+          "An A2A task you delegated changed state. Use inkbox_a2a_check or " +
+          "inkbox_a2a_reply with the stored Agent Card URL " +
+          `${delegation.cardUrl} if follow-up is needed.` +
+          (text ? `\n\nRemote agent message:\n${text}` : "");
+        void dispatchInboundTurn({
+          ...opts,
+          activeCalls,
+          turn: {
+            mode: "external",
+            contactKey: `a2a-sent:${data.task_id}`,
+            fromLabel: "A2A task update",
+            conversationKind: "direct",
+            sessionKeyOverride: delegation.sessionKey,
+            body: prompt,
+            messageId: String(event.id ?? `a2a-sent:${data.task_id}`),
+            raw: event,
+          },
+          replyOptionsOverride: {
+            sourceReplyDeliveryMode: "automatic",
+            bootstrapContextMode: "lightweight",
+          },
+          deliveryOverride: {
+            deliver: async () => ({ visibleReplySent: false }),
+          },
+        }).catch((error) => {
+          opts.logger?.warn?.(
+            `Inkbox outbound A2A update turn failed: task_id=${data.task_id} ${errorMessage(error)}`,
+          );
+        });
+      } else {
+        opts.logger?.info?.(
+          `Inkbox outbound A2A task updated without a local session: task_id=${data.task_id}`,
+        );
+      }
+      return;
+    }
+    const messageId = data.message_id ?? String(event.id ?? "");
+    const normalized = { ...data, message_id: messageId };
+    const key = `${data.task_id}:${messageId}`;
+    if ((await readA2ARegistry())[key]) return;
+    await writeA2ARegistry(key, normalized, "queued");
+    void runA2ATurn(key, normalized);
+  }
+
+  async function catchUpA2A(): Promise<void> {
+    const identity = await opts.runtime.getIdentity() as any;
+    if (
+      typeof identity.a2aTask !== "function" ||
+      typeof identity.iterA2ATasks !== "function" ||
+      typeof identity.a2aReply !== "function"
+    ) {
+      opts.logger?.warn?.(
+        "Inkbox A2A task serving requires @inkbox/sdk 0.5.5 or newer.",
+      );
+      return;
+    }
+    for (const [key, entry] of Object.entries(await readA2ARegistry())) {
+      if (entry.state === "finalized") continue;
+      try {
+        const task = await identity.a2aTask(entry.taskId);
+        if (a2aTerminalStates.has(String(task.state))) {
+          await writeA2ARegistry(key, entry.data, "finalized");
+        } else if (!a2aRuns.has(entry.taskId)) {
+          void runA2ATurn(key, entry.data);
+        }
+      } catch (error) {
+        opts.logger?.warn?.(
+          `Inkbox A2A registry reconcile failed: task_id=${entry.taskId} ${errorMessage(error)}`,
+        );
+      }
+    }
+    for await (const task of identity.iterA2ATasks({ state: "submitted" })) {
+      const message = task.messages.at(-1);
+      await ingestA2A({
+        id: `catchup:${task.id}:${message?.messageId ?? ""}`,
+        event_type: "a2a.task.created",
+        data: {
+          task_id: String(task.id),
+          context_id: String(task.contextId),
+          state: String(task.state),
+          caller: {
+            identity_id: String(task.caller.identityId),
+            organization_id: task.caller.organizationId,
+            handle: task.caller.handle,
+          },
+          message_id: message?.messageId ?? `task:${task.id}`,
+          parts: message?.parts ?? [],
+        },
+      });
+    }
+  }
 
   const handlers: InboundHandlers = {
+    async onA2A(event) {
+      await ingestA2A(event);
+    },
     async onMail(event) {
       // Hard failure events wake the agent for recovery; the success
       // transitions (sent/delivered/forwarded) stay log-only. Email budget
@@ -4164,7 +4432,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   };
 
-  return { handlers, wsHandler, activeCalls };
+  return { handlers, wsHandler, activeCalls, catchUpA2A };
 }
 
 export async function configureInkboxIdentityDelivery(
@@ -4257,29 +4525,31 @@ export async function configureInkboxIdentityDelivery(
       );
     }
   }
-  // iMessage: identity-owned subscription, only while the identity is
-  // enabled (the server rejects imessage.* subscriptions otherwise).
-  if (identity.imessageEnabled && identity.id) {
+  // Identity-owned events always include A2A; add iMessage events when that
+  // channel is enabled. One owner/url row avoids competing subscriptions.
+  if (identity.id) {
     try {
-      const imessageSub = await reconcileWebhookSubscription(
+      const identitySub = await reconcileWebhookSubscription(
         inkbox,
         {
           agentIdentityId: identity.id,
           url: opts.webhookUrl,
-          eventTypes: IMESSAGE_EVENT_TYPES,
+          eventTypes: identity.imessageEnabled
+            ? [...IMESSAGE_EVENT_TYPES, ...A2A_EVENT_TYPES]
+            : A2A_EVENT_TYPES,
         },
         opts.logger,
       );
-      if (imessageSub) {
-        opts.logger?.info?.(`Inkbox iMessage events subscribed at ${opts.webhookUrl}`);
+      if (identitySub) {
+        opts.logger?.info?.(`Inkbox identity events subscribed at ${opts.webhookUrl}`);
       } else {
         opts.logger?.warn?.(
-          `Inkbox iMessage subscription was not created at ${opts.webhookUrl}; inbound iMessage will not be delivered until that is resolved.`,
+          `Inkbox identity subscription was not created at ${opts.webhookUrl}; inbound A2A tasks will not be delivered until that is resolved.`,
         );
       }
     } catch (error) {
       opts.logger?.warn?.(
-        `Inkbox iMessage subscription reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Inkbox identity subscription reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

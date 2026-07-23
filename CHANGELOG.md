@@ -12,6 +12,8 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 - Identity-bound A2A 1.0 tools for sending, checking, waiting on, and replying
   to remote tasks. A2A writes use the existing outbound recipient allowlist.
+- Durable inbound A2A task serving with isolated context sessions, restart
+  recovery, cancellation, and context-gated complete, ask, and fail intents.
 
 ### Changed
 

@@ -318,7 +318,12 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 Required by default:
 
 - Outbound: `inkbox_send_email`, `inkbox_send_sms`, `inkbox_send_imessage`
-- A2A: `inkbox_a2a_call`, `inkbox_a2a_check`, `inkbox_a2a_reply`
+- A2A client: `inkbox_a2a_call`, `inkbox_a2a_check`, `inkbox_a2a_reply`
+- Inbound A2A tasks are delivered into isolated context sessions. During those
+  turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
+  `inkbox_a2a_fail` commit the task outcome explicitly.
+- A2A features require `@inkbox/sdk` 0.5.5 or newer. Other plugin features
+  continue to support the base SDK range in `package.json`.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`

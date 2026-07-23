@@ -39,10 +39,17 @@ function collectRuntimeTools(): {
       debug: vi.fn(),
       error: vi.fn(),
     },
-    registerTool(definition: { name: string }, options?: { optional?: boolean }) {
-      tools.push(definition.name);
+    registerTool(
+      definition: { name: string } | ((context: unknown) => unknown),
+      options?: { optional?: boolean; names?: string[] },
+    ) {
+      const names =
+        typeof definition === "function"
+          ? (options?.names ?? [])
+          : [definition.name];
+      tools.push(...names);
       if (options?.optional === true) {
-        optionalTools.push(definition.name);
+        optionalTools.push(...names);
       }
     },
   };

@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  clearActiveA2ATurn,
+  setActiveA2ATurn,
+  type ActiveA2ATurn,
+} from "../../src/a2a-context.js";
 import type { InkboxRuntime } from "../../src/client.js";
 import { registerA2ATools } from "../../src/tools/a2a.js";
 
@@ -7,22 +12,47 @@ interface RegisteredTool {
   execute: (id: string, params: any) => Promise<any>;
 }
 
-function createApi(): { api: any; tools: Map<string, RegisteredTool> } {
+function createApi(): {
+  api: any;
+  tools: Map<string, RegisteredTool>;
+  contextualTools: (sessionKey: string) => Map<string, RegisteredTool>;
+} {
   const tools = new Map<string, RegisteredTool>();
+  const contextualFactories: Array<
+    (context: { sessionKey: string }) => RegisteredTool[]
+  > = [];
   return {
     api: {
-      registerTool: (definition: RegisteredTool) => {
-        tools.set(definition.name, definition);
+      registerTool: (
+        definition:
+          | RegisteredTool
+          | ((context: { sessionKey: string }) => RegisteredTool[]),
+      ) => {
+        if (typeof definition === "function") {
+          contextualFactories.push(definition);
+        } else {
+          tools.set(definition.name, definition);
+        }
       },
     },
     tools,
+    contextualTools(sessionKey: string) {
+      return new Map(
+        contextualFactories
+          .flatMap((factory) => factory({ sessionKey }))
+          .map((tool) => [tool.name, tool]),
+      );
+    },
   };
 }
 
 function createRuntime() {
   const a2a = {
     fetchCard: vi.fn(async (url: string) => ({ rpcUrl: `${url}/rpc` })),
-    send: vi.fn(async () => ({ kind: "task", task: { id: "task-1" } })),
+    send: vi.fn(async () => ({
+      kind: "task",
+      task: { id: "task-1", contextId: "context-1" },
+    })),
     getTask: vi.fn(async () => ({
       id: "task-1",
       status: { state: "TASK_STATE_WORKING" },
@@ -36,7 +66,9 @@ function createRuntime() {
   const runtime: InkboxRuntime = {
     getIdentity: async () =>
       ({
+        id: "identity-1",
         a2aClient: vi.fn(async () => a2a),
+        a2aReply: vi.fn(async () => ({ id: "task-1", state: "completed" })),
       }) as any,
     getClient: async () => ({}) as any,
   };
@@ -44,12 +76,19 @@ function createRuntime() {
 }
 
 describe("registerA2ATools", () => {
+  beforeEach(() => {
+    process.env.INKBOX_OPENCLAW_HOME =
+      `${process.env.TMPDIR ?? "/tmp"}/openclaw-a2a-${crypto.randomUUID()}`;
+  });
+
   it("sends a task and closes the A2A client", async () => {
-    const { api, tools } = createApi();
+    const { api, contextualTools } = createApi();
     const { a2a, runtime } = createRuntime();
     registerA2ATools(api, runtime);
 
-    const result = await tools.get("inkbox_a2a_call")!.execute("turn-1", {
+    const result = await contextualTools("session-1")
+      .get("inkbox_a2a_call")!
+      .execute("turn-1", {
       cardUrl: "https://target.example/card",
       text: "Investigate.",
       messageId: "msg-1",
@@ -63,12 +102,43 @@ describe("registerA2ATools", () => {
     expect(a2a.close).toHaveBeenCalledTimes(1);
   });
 
+  it("only exposes inbound intent against the matching A2A session", async () => {
+    const { api, contextualTools } = createApi();
+    const { runtime } = createRuntime();
+    registerA2ATools(api, runtime);
+    const context: ActiveA2ATurn = {
+      taskId: "task-1",
+      contextId: "context-1",
+      messageId: "message-1",
+      replyIntentCommitted: false,
+    };
+    setActiveA2ATurn("a2a:identity-1:context-1", context);
+
+    try {
+      const wrongSession = await contextualTools("other-session")
+        .get("inkbox_a2a_complete")!
+        .execute("turn-1", { text: "Done." });
+      expect(wrongSession.isError).toBe(true);
+      expect(context.replyIntentCommitted).toBe(false);
+
+      const result = await contextualTools("a2a:identity-1:context-1")
+        .get("inkbox_a2a_complete")!
+        .execute("turn-1", { text: "Done." });
+      expect(result.isError).not.toBe(true);
+      expect(context.replyIntentCommitted).toBe(true);
+    } finally {
+      clearActiveA2ATurn("a2a:identity-1:context-1", context);
+    }
+  });
+
   it("waits for a remote task", async () => {
-    const { api, tools } = createApi();
+    const { api, contextualTools } = createApi();
     const { a2a, runtime } = createRuntime();
     registerA2ATools(api, runtime);
 
-    const result = await tools.get("inkbox_a2a_check")!.execute("turn-1", {
+    const result = await contextualTools("session-1")
+      .get("inkbox_a2a_check")!
+      .execute("turn-1", {
       cardUrl: "https://target.example/card",
       taskId: "task-1",
       wait: true,
@@ -82,11 +152,13 @@ describe("registerA2ATools", () => {
   });
 
   it("blocks A2A writes outside the outbound allowlist", async () => {
-    const { api, tools } = createApi();
+    const { api, contextualTools } = createApi();
     const { a2a, runtime } = createRuntime();
     registerA2ATools(api, runtime, ["https://allowed.example/card"]);
 
-    const result = await tools.get("inkbox_a2a_reply")!.execute("turn-1", {
+    const result = await contextualTools("session-1")
+      .get("inkbox_a2a_reply")!
+      .execute("turn-1", {
       cardUrl: "https://blocked.example/card",
       taskId: "task-1",
       text: "More context.",

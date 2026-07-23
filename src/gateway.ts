@@ -155,6 +155,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
       callWebhookUrl: webhookUrl,
       logger: ctx.log,
     });
+    await bridge.catchUpA2A();
     ctx.setStatus({
       accountId: account.accountId,
       running: true,
@@ -202,6 +203,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
     callWebsocketUrl,
     logger: ctx.log,
   });
+  await bridge.catchUpA2A();
   ctx.setStatus({
     accountId: account.accountId,
     running: true,
