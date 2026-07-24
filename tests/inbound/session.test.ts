@@ -569,6 +569,35 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain("Which region?");
   });
 
+  it("continues startup when the A2A API is not deployed yet", async () => {
+    const { runtime, iterA2ATasks } = createRuntime();
+    iterA2ATasks.mockImplementation(() => ({
+      [Symbol.asyncIterator]: () => ({
+        next: vi.fn(async () => {
+          throw Object.assign(new Error("HTTP 404: Not Found"), {
+            statusCode: 404,
+          });
+        }),
+      }),
+    }));
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime(),
+      logger,
+    });
+
+    await expect(bridge.catchUpA2A()).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("A2A API is not deployed"),
+    );
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });

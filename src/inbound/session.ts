@@ -1307,6 +1307,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isA2AApiUnavailable(error: unknown): boolean {
+  return (
+    (typeof error === "object" &&
+      error !== null &&
+      "statusCode" in error &&
+      error.statusCode === 404) ||
+    /\bHTTP 404\b/.test(errorMessage(error))
+  );
+}
+
 async function connectRealtimeSessionBeforeAccept(
   session: RealtimeVoiceBridgeSession,
 ): Promise<void> {
@@ -4023,24 +4033,31 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         );
       }
     }
-    for await (const task of identity.iterA2ATasks({ state: "submitted" })) {
-      const message = task.messages.at(-1);
-      await ingestA2A({
-        id: `catchup:${task.id}:${message?.messageId ?? ""}`,
-        event_type: "a2a.task.created",
-        data: {
-          task_id: String(task.id),
-          context_id: String(task.contextId),
-          state: String(task.state),
-          caller: {
-            identity_id: String(task.caller.identityId),
-            organization_id: task.caller.organizationId,
-            handle: task.caller.handle,
+    try {
+      for await (const task of identity.iterA2ATasks({ state: "submitted" })) {
+        const message = task.messages.at(-1);
+        await ingestA2A({
+          id: `catchup:${task.id}:${message?.messageId ?? ""}`,
+          event_type: "a2a.task.created",
+          data: {
+            task_id: String(task.id),
+            context_id: String(task.contextId),
+            state: String(task.state),
+            caller: {
+              identity_id: String(task.caller.identityId),
+              organization_id: task.caller.organizationId,
+              handle: task.caller.handle,
+            },
+            message_id: message?.messageId ?? `task:${task.id}`,
+            parts: message?.parts ?? [],
           },
-          message_id: message?.messageId ?? `task:${task.id}`,
-          parts: message?.parts ?? [],
-        },
-      });
+        });
+      }
+    } catch (error) {
+      if (!isA2AApiUnavailable(error)) throw error;
+      opts.logger?.warn?.(
+        `Inkbox A2A API is not deployed at this origin yet; skipping catch-up: ${errorMessage(error)}`,
+      );
     }
   }
 
