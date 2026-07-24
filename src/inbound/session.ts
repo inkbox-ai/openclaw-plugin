@@ -4004,7 +4004,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       typeof identity.a2aReply !== "function"
     ) {
       opts.logger?.warn?.(
-        "Inkbox A2A task serving requires @inkbox/sdk 0.5.5 or newer.",
+        "Inkbox A2A task serving requires @inkbox/sdk 0.5.6 or newer.",
       );
       return;
     }

@@ -21,6 +21,52 @@ async function a2aClient(runtime: InkboxRuntime): Promise<any> {
   return factory.call(identity);
 }
 
+const historyCommonParameters = {
+  direction: Type.Optional(
+    Type.Union(
+      [
+        Type.Literal("inbound"),
+        Type.Literal("outbound"),
+        Type.Literal("both"),
+      ],
+      { description: "Which side of the identity's A2A history to return." },
+    ),
+  ),
+  requesterHandle: Type.Optional(
+    Type.String({ minLength: 1, description: "Filter by requester handle." }),
+  ),
+  workerHandle: Type.Optional(
+    Type.String({ minLength: 1, description: "Filter by worker handle." }),
+  ),
+  contextId: Type.Optional(
+    Type.String({ minLength: 1, description: "Filter by A2A context id." }),
+  ),
+  query: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 500,
+      description: "Search task or message text.",
+    }),
+  ),
+  since: Type.Optional(
+    Type.String({ minLength: 1, description: "ISO 8601 lower timestamp bound." }),
+  ),
+  cursor: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description: "Opaque next_cursor from the previous page.",
+    }),
+  ),
+  limit: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      maximum: 100,
+      default: 50,
+      description: "Maximum number of records to return.",
+    }),
+  ),
+};
+
 export function registerA2ATools(
   api: any,
   runtime: InkboxRuntime,
@@ -30,6 +76,8 @@ export function registerA2ATools(
     "inkbox_a2a_call",
     "inkbox_a2a_check",
     "inkbox_a2a_reply",
+    "inkbox_list_a2a_tasks",
+    "inkbox_list_a2a_messages",
   ];
   api.registerTool(
     (toolContext: { sessionKey?: string }) => [
@@ -168,6 +216,93 @@ export function registerA2ATools(
             } finally {
               a2a.close?.();
             }
+          });
+        },
+      },
+      {
+        name: "inkbox_list_a2a_tasks",
+        description:
+          "List this identity's A2A task history. Direction defaults to inbound; filter by participants, state, context, keywords, or timestamp and follow next_cursor for more.",
+        parameters: Type.Object({
+          ...historyCommonParameters,
+          state: Type.Optional(
+            Type.Union(
+              [
+                Type.Literal("submitted"),
+                Type.Literal("working"),
+                Type.Literal("input_required"),
+                Type.Literal("auth_required"),
+                Type.Literal("completed"),
+                Type.Literal("failed"),
+                Type.Literal("canceled"),
+                Type.Literal("rejected"),
+              ],
+              { description: "Filter by current task state." },
+            ),
+          ),
+        }),
+        async execute(_id: string, params: any) {
+          return runTool(async () => {
+            const identity = await runtime.getIdentity();
+            const list = (identity as any).a2aTasks;
+            if (typeof list !== "function") {
+              throw new Error(
+                "This A2A tool requires @inkbox/sdk with identity.a2aTasks() support.",
+              );
+            }
+            const result = await list.call(identity, {
+              direction: params.direction,
+              requesterHandle: params.requesterHandle,
+              workerHandle: params.workerHandle,
+              state: params.state,
+              contextId: params.contextId,
+              q: params.query,
+              since: params.since,
+              cursor: params.cursor,
+              limit: params.limit ?? 50,
+            });
+            return toolText(formatJson(result));
+          });
+        },
+      },
+      {
+        name: "inkbox_list_a2a_messages",
+        description:
+          "List messages from this identity's inbound and outbound A2A history. Filter by direction, participants, task, context, role, keywords, or timestamp and follow next_cursor for more.",
+        parameters: Type.Object({
+          ...historyCommonParameters,
+          taskId: Type.Optional(
+            Type.String({ minLength: 1, description: "Filter by A2A task id." }),
+          ),
+          role: Type.Optional(
+            Type.Union(
+              [Type.Literal("caller"), Type.Literal("agent")],
+              { description: "Filter by A2A message role." },
+            ),
+          ),
+        }),
+        async execute(_id: string, params: any) {
+          return runTool(async () => {
+            const identity = await runtime.getIdentity();
+            const list = (identity as any).a2aMessages;
+            if (typeof list !== "function") {
+              throw new Error(
+                "This A2A tool requires @inkbox/sdk with identity.a2aMessages() support.",
+              );
+            }
+            const result = await list.call(identity, {
+              direction: params.direction,
+              requesterHandle: params.requesterHandle,
+              workerHandle: params.workerHandle,
+              taskId: params.taskId,
+              contextId: params.contextId,
+              role: params.role,
+              q: params.query,
+              since: params.since,
+              cursor: params.cursor,
+              limit: params.limit ?? 50,
+            });
+            return toolText(formatJson(result));
           });
         },
       },

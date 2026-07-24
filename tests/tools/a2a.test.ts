@@ -63,16 +63,25 @@ function createRuntime() {
     })),
     close: vi.fn(),
   };
+  const identity = {
+    id: "identity-1",
+    a2aClient: vi.fn(async () => a2a),
+    a2aTasks: vi.fn(async (options: unknown) => ({
+      items: [{ id: "task-1", options }],
+      nextCursor: "task-next",
+    })),
+    a2aMessages: vi.fn(async (options: unknown) => ({
+      items: [{ id: "message-1", options }],
+      nextCursor: "message-next",
+    })),
+    a2aReply: vi.fn(async () => ({ id: "task-1", state: "completed" })),
+  };
   const runtime: InkboxRuntime = {
     getIdentity: async () =>
-      ({
-        id: "identity-1",
-        a2aClient: vi.fn(async () => a2a),
-        a2aReply: vi.fn(async () => ({ id: "task-1", state: "completed" })),
-      }) as any,
+      identity as any,
     getClient: async () => ({}) as any,
   };
-  return { a2a, runtime };
+  return { a2a, identity, runtime };
 }
 
 describe("registerA2ATools", () => {
@@ -149,6 +158,65 @@ describe("registerA2ATools", () => {
       "task-1",
     );
     expect(result.content[0].text).toContain("TASK_STATE_COMPLETED");
+  });
+
+  it("lists filtered task and message history with cursors", async () => {
+    const { api, contextualTools } = createApi();
+    const { identity, runtime } = createRuntime();
+    registerA2ATools(api, runtime);
+    const tools = contextualTools("session-1");
+
+    const tasks = await tools.get("inkbox_list_a2a_tasks")!.execute("turn-1", {
+      direction: "both",
+      requesterHandle: "requester",
+      workerHandle: "worker",
+      state: "completed",
+      contextId: "context-1",
+      query: "summary",
+      since: "2026-07-01T00:00:00Z",
+      cursor: "task-cursor",
+      limit: 3,
+    });
+    const messages = await tools
+      .get("inkbox_list_a2a_messages")!
+      .execute("turn-1", {
+        direction: "outbound",
+        requesterHandle: "requester",
+        workerHandle: "worker",
+        taskId: "task-1",
+        contextId: "context-1",
+        role: "agent",
+        query: "done",
+        since: "2026-07-01T00:00:00Z",
+        cursor: "message-cursor",
+        limit: 4,
+      });
+
+    expect(tasks.content[0].text).toContain("task-next");
+    expect(messages.content[0].text).toContain("message-next");
+    expect(identity.a2aTasks).toHaveBeenCalledWith({
+      direction: "both",
+      requesterHandle: "requester",
+      workerHandle: "worker",
+      state: "completed",
+      contextId: "context-1",
+      q: "summary",
+      since: "2026-07-01T00:00:00Z",
+      cursor: "task-cursor",
+      limit: 3,
+    });
+    expect(identity.a2aMessages).toHaveBeenCalledWith({
+      direction: "outbound",
+      requesterHandle: "requester",
+      workerHandle: "worker",
+      taskId: "task-1",
+      contextId: "context-1",
+      role: "agent",
+      q: "done",
+      since: "2026-07-01T00:00:00Z",
+      cursor: "message-cursor",
+      limit: 4,
+    });
   });
 
   it("blocks A2A writes outside the outbound allowlist", async () => {

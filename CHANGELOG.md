@@ -14,11 +14,13 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
   to remote tasks. A2A writes use the existing outbound recipient allowlist.
 - Durable inbound A2A task serving with isolated context sessions, restart
   recovery, cancellation, and context-gated complete, ask, and fail intents.
+- Filterable, cursor-paginated A2A task and message history for both requester
+  and worker identities.
 
 ### Changed
 
 - Version realigned to 0.2.5, the shared number across the Inkbox plugin fleet, so a version answers "which fleet release is this" rather than a per-repo count.
-- Raised the Inkbox SDK dependency floor to 0.5.1 for the plugin and live CI.
+- Raised the Inkbox SDK dependency floor to 0.5.6 for the plugin and live CI.
 - Removed contact access tools because contacts are organization-wide. Note access tools remain identity-scoped.
 
 ### Fixed
