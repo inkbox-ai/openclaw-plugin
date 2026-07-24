@@ -4525,32 +4525,55 @@ export async function configureInkboxIdentityDelivery(
       );
     }
   }
-  // Identity-owned events always include A2A; add iMessage events when that
-  // channel is enabled. One owner/url row avoids competing subscriptions.
+  // Identity-owned A2A and iMessage events use separate URLs because each
+  // subscription must contain one event channel and owner+URL is unique.
   if (identity.id) {
     try {
-      const identitySub = await reconcileWebhookSubscription(
+      const a2aWebhookUrl = `${opts.webhookUrl}?channel=a2a`;
+      const a2aSub = await reconcileWebhookSubscription(
         inkbox,
         {
           agentIdentityId: identity.id,
-          url: opts.webhookUrl,
-          eventTypes: identity.imessageEnabled
-            ? [...IMESSAGE_EVENT_TYPES, ...A2A_EVENT_TYPES]
-            : A2A_EVENT_TYPES,
+          url: a2aWebhookUrl,
+          eventTypes: A2A_EVENT_TYPES,
         },
         opts.logger,
       );
-      if (identitySub) {
-        opts.logger?.info?.(`Inkbox identity events subscribed at ${opts.webhookUrl}`);
+      if (a2aSub) {
+        opts.logger?.info?.(`Inkbox A2A events subscribed at ${a2aWebhookUrl}`);
       } else {
         opts.logger?.warn?.(
-          `Inkbox identity subscription was not created at ${opts.webhookUrl}; inbound A2A tasks will not be delivered until that is resolved.`,
+          `Inkbox A2A subscription was not created at ${a2aWebhookUrl}; inbound A2A tasks will not be delivered until that is resolved.`,
         );
       }
     } catch (error) {
       opts.logger?.warn?.(
-        `Inkbox identity subscription reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Inkbox A2A subscription reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+    if (identity.imessageEnabled) {
+      try {
+        const imessageSub = await reconcileWebhookSubscription(
+          inkbox,
+          {
+            agentIdentityId: identity.id,
+            url: opts.webhookUrl,
+            eventTypes: IMESSAGE_EVENT_TYPES,
+          },
+          opts.logger,
+        );
+        if (imessageSub) {
+          opts.logger?.info?.(`Inkbox iMessage events subscribed at ${opts.webhookUrl}`);
+        } else {
+          opts.logger?.warn?.(
+            `Inkbox iMessage subscription was not created at ${opts.webhookUrl}; inbound iMessage will not be delivered until that is resolved.`,
+          );
+        }
+      } catch (error) {
+        opts.logger?.warn?.(
+          `Inkbox iMessage subscription reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 }

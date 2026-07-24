@@ -2606,6 +2606,7 @@ describe("configureInkboxIdentityDelivery", () => {
           list: vi.fn(async () => []),
           create: vi.fn(async (opts: any) => ({ id: "sub-1", ...opts })),
           update: vi.fn(async () => ({})),
+          delete: vi.fn(async () => undefined),
         },
       },
       phoneNumbers: { update: vi.fn(async () => ({})) },
@@ -2661,6 +2662,45 @@ describe("configureInkboxIdentityDelivery", () => {
 
     // No dedicated number, but calls can arrive over the shared line.
     expect(setIncomingCallAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses separate owner URLs for A2A and iMessage subscriptions", async () => {
+    const identity = {
+      id: "identity-1",
+      mailbox: null,
+      phoneNumber: null,
+      imessageEnabled: true,
+      setIncomingCallAction: vi.fn(async () => ({})),
+    };
+    const runtime = deliveryRuntime(identity);
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://example.com/inkbox/webhook",
+    });
+
+    const inkbox = await runtime.getClient();
+    expect(inkbox.webhooks.subscriptions.create).toHaveBeenCalledWith({
+      agentIdentityId: "identity-1",
+      url: "https://example.com/inkbox/webhook?channel=a2a",
+      eventTypes: [
+        "a2a.task.created",
+        "a2a.task.message",
+        "a2a.task.canceled",
+        "a2a.sent_task.updated",
+      ],
+    });
+    expect(inkbox.webhooks.subscriptions.create).toHaveBeenCalledWith({
+      agentIdentityId: "identity-1",
+      url: "https://example.com/inkbox/webhook",
+      eventTypes: [
+        "imessage.received",
+        "imessage.sent",
+        "imessage.delivered",
+        "imessage.delivery_failed",
+        "imessage.reaction_received",
+      ],
+    });
   });
 
   it("falls back to the number-scoped update when the SDK lacks the method", async () => {

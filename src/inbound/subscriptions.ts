@@ -88,6 +88,10 @@ function urlPathname(url: string): string | null {
   }
 }
 
+function eventFamilies(eventTypes: readonly string[]): Set<string> {
+  return new Set(eventTypes.map((eventType) => eventType.split(".", 1)[0]));
+}
+
 // A same-owner row is one of OUR stale rows when it points somewhere else
 // but at this plugin's webhook route (`/inkbox[/account]/webhook`). The
 // pathname is the plugin's fingerprint: the base host changes across boots
@@ -97,7 +101,11 @@ function isStalePluginSubscription(sub: WebhookSubscription, desired: DesiredSub
   if (sub.url === desired.url) return false;
   const desiredPath = urlPathname(desired.url);
   if (!desiredPath) return false;
-  return urlPathname(sub.url) === desiredPath;
+  if (urlPathname(sub.url) !== desiredPath) return false;
+  const desiredFamilies = eventFamilies(desired.eventTypes);
+  return [...eventFamilies(sub.eventTypes)].some((family) =>
+    desiredFamilies.has(family),
+  );
 }
 
 // Best-effort removal of a redundant stale row; a delete failure must never
