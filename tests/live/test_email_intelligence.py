@@ -51,17 +51,17 @@ def _digits(s: str) -> str:
 def _phone_present(phone: str, body: str) -> bool:
     """True if the agent reported ``phone`` in ``body``.
 
-    Accepts either the full number (all digits present) or a privacy-masked
-    form the model tends to emit in formal identity listings, where it keeps a
-    leading prefix + the last 4 and masks the middle (e.g. ``+192****3235``).
-    The masked branch requires a run of mask chars immediately followed by the
-    real last-4, so it won't false-match on markdown bold (``**name:**``).
+    Accepts the full number, a privacy-masked form ending in the real last 4,
+    or an explicit ``ending in 3235`` reference.
     """
     want = _digits(phone)
     if want[-10:] in _digits(body):
         return True
     tail = re.escape(want[-4:])
-    return bool(re.search(r"[*xX•·]{2,}\D{0,2}" + tail, body))
+    return bool(
+        re.search(r"[*xX•·]{2,}\D{0,2}" + tail, body)
+        or re.search(r"\bending\s+in\D{0,4}" + tail + r"\b", body, re.IGNORECASE)
+    )
 
 
 def _mailbox(client) -> str:
