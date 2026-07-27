@@ -3,7 +3,6 @@ import type { InkboxRuntime } from "../client.js";
 import { runTool, toolError, toolText, type ToolTextResult } from "../errors.js";
 import { formatWithHeader } from "../format.js";
 
-const ruleStatusSchema = Type.Union([Type.Literal("active"), Type.Literal("paused")]);
 const mailRuleActionSchema = Type.Union([Type.Literal("allow"), Type.Literal("block")]);
 const mailRuleMatchTypeSchema = Type.Union([
   Type.Literal("exact_email"),
@@ -100,12 +99,10 @@ export function registerContactRuleTools(api: any, runtime: InkboxRuntime): void
   api.registerTool(
     {
       name: "inkbox_update_mail_contact_rule",
-      description:
-        "Update a mailbox contact rule's action or status. Use status=paused to temporarily disable a rule without deleting it.",
+      description: "Update a mailbox contact rule's allow/block action.",
       parameters: Type.Object({
         ruleId: Type.String({ description: "Mail contact rule UUID." }),
-        action: Type.Optional(mailRuleActionSchema),
-        status: Type.Optional(ruleStatusSchema),
+        action: mailRuleActionSchema,
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
@@ -114,7 +111,6 @@ export function registerContactRuleTools(api: any, runtime: InkboxRuntime): void
           const inkbox = await runtime.getClient();
           const rule = await inkbox.mailContactRules.update(mailbox.emailAddress, params.ruleId, {
             action: params.action,
-            status: params.status,
           });
           return toolText(formatWithHeader(`Updated mail contact rule id=${rule.id}.`, rule));
         });
@@ -205,12 +201,10 @@ export function registerContactRuleTools(api: any, runtime: InkboxRuntime): void
   api.registerTool(
     {
       name: "inkbox_update_phone_contact_rule",
-      description:
-        "Update a phone contact rule's action or status. Use status=paused to temporarily disable a rule without deleting it.",
+      description: "Update a phone contact rule's allow/block action.",
       parameters: Type.Object({
         ruleId: Type.String({ description: "Phone contact rule UUID." }),
-        action: Type.Optional(phoneRuleActionSchema),
-        status: Type.Optional(ruleStatusSchema),
+        action: phoneRuleActionSchema,
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
@@ -219,7 +213,6 @@ export function registerContactRuleTools(api: any, runtime: InkboxRuntime): void
           const inkbox = await runtime.getClient();
           const rule = await inkbox.phoneContactRules.update(phone.phoneNumberId, params.ruleId, {
             action: params.action,
-            status: params.status,
           });
           return toolText(formatWithHeader(`Updated phone contact rule id=${rule.id}.`, rule));
         });

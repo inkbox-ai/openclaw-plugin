@@ -1,12 +1,20 @@
 {
   "id": "inkbox",
   "name": "Inkbox",
-  "description": "Adds Inkbox messaging tools (email, SMS, iMessage, voice) to OpenClaw",
+  "description": "Adds Inkbox messaging and A2A tools (email, SMS, iMessage, voice) to OpenClaw",
   "contracts": {
     "tools": [
       "inkbox_send_email",
       "inkbox_send_sms",
       "inkbox_send_imessage",
+      "inkbox_a2a_call",
+      "inkbox_a2a_check",
+      "inkbox_a2a_reply",
+      "inkbox_list_a2a_tasks",
+      "inkbox_list_a2a_messages",
+      "inkbox_a2a_complete",
+      "inkbox_a2a_ask_caller",
+      "inkbox_a2a_fail",
       "inkbox_forward_email",
       "inkbox_list_unread_emails",
       "inkbox_list_emails",
@@ -367,7 +375,7 @@
       "allowedRecipients": {
         "type": "array",
         "items": { "type": "string" },
-        "description": "Outbound recipient allowlist. When set, send_email / send_sms / forward_email reject any recipient (to/cc/bcc) not on this list. Phone numbers in E.164, emails as exact addresses."
+        "description": "Outbound recipient allowlist. When set, messaging and A2A write tools reject any recipient not on this list. Phone numbers in E.164, emails and Agent Card URLs as exact values."
       },
       "allowedInboundContactIds": {
         "type": "array",

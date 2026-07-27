@@ -1,6 +1,6 @@
 ---
 name: inkbox-contact-rules
-description: Use when the user wants to block, allow, pause, delete, or list Inkbox contact-rule filters for the agent's mailbox or phone number, including email allow/block rules, SMS/call allow/block rules, allowlists, blocklists, spam blocking, or "only accept from" requests.
+description: Use when the user wants to block, allow, delete, or list Inkbox contact-rule filters for the agent's mailbox or phone number, including email allow/block rules, SMS/call allow/block rules, allowlists, blocklists, spam blocking, or "only accept from" requests.
 user-invocable: false
 ---
 
@@ -30,7 +30,7 @@ Use this skill when managing who can reach the agent's Inkbox mailbox or phone n
 3. For phone rules:
    - `matchType: "exact_number"` for E.164 numbers.
    - Rules apply to SMS and voice calls for that phone number.
-4. Use `status: "paused"` to temporarily disable a rule without deleting it.
+4. Use the update tools to change an existing rule between `allow` and `block`.
 5. Explain that blocked inbound messages/calls may be rejected before the agent sees an event.
 
 ## Safety

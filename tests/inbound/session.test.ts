@@ -8,8 +8,35 @@ const realtimeMock = vi.hoisted(() => ({
   connectError: undefined as Error | undefined,
 }));
 
+const a2aRegistryMock = vi.hoisted(() => ({
+  entries: {} as Record<string, any>,
+  writes: [] as Array<{ key: string; state: string }>,
+}));
+const a2aDelegationMock = vi.hoisted(() => ({
+  record: undefined as any,
+}));
+
 vi.mock("@inkbox/sdk", () => ({
   verifyWebhook: vi.fn(() => true),
+}));
+
+vi.mock("../../src/a2a-registry.js", () => ({
+  readA2ARegistry: vi.fn(async () => a2aRegistryMock.entries),
+  writeA2ARegistry: vi.fn(async (key: string, data: any, state: string) => {
+    a2aRegistryMock.entries[key] = {
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id ?? "",
+      state,
+      data,
+      updatedAt: Date.now(),
+    };
+    a2aRegistryMock.writes.push({ key, state });
+  }),
+}));
+
+vi.mock("../../src/a2a-delegations.js", () => ({
+  findDelegationByTask: vi.fn(async () => a2aDelegationMock.record),
 }));
 
 vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
@@ -187,6 +214,9 @@ function createRuntime(options: { conversations?: any[] } = {}) {
   }));
   const sendIMessageTyping = vi.fn(async () => undefined);
   const listTextConversations = vi.fn(async () => options.conversations ?? []);
+  const a2aReply = vi.fn(async () => ({ id: "task-1", state: "completed" }));
+  const a2aTask = vi.fn(async () => ({ id: "task-1", state: "working" }));
+  const iterA2ATasks = vi.fn(() => (async function* () {})());
   const runtime = {
     getIdentity: vi.fn(async () => ({
       agentHandle: "smoke-agent",
@@ -205,6 +235,9 @@ function createRuntime(options: { conversations?: any[] } = {}) {
       sendIMessage,
       sendIMessageTyping,
       listTextConversations,
+      a2aReply,
+      a2aTask,
+      iterA2ATasks,
     })),
     getClient: vi.fn(async () => ({
       calls: {
@@ -218,7 +251,16 @@ function createRuntime(options: { conversations?: any[] } = {}) {
       },
     })),
   };
-  return { runtime, sendText, sendIMessage, sendIMessageTyping, listTextConversations };
+  return {
+    runtime,
+    sendText,
+    sendIMessage,
+    sendIMessageTyping,
+    listTextConversations,
+    a2aReply,
+    a2aTask,
+    iterA2ATasks,
+  };
 }
 
 function createContactRuntime(contacts: { list?: any; lookup?: any }) {
@@ -437,6 +479,123 @@ describe("createInkboxSessionBridge", () => {
     realtimeMock.toolCallOnAudio = false;
     realtimeMock.resolveCalls = [];
     realtimeMock.connectError = undefined;
+    a2aRegistryMock.entries = {};
+    a2aRegistryMock.writes = [];
+    a2aDelegationMock.record = undefined;
+  });
+
+  it("serves an inbound A2A task in its context session and completes it once", async () => {
+    const { runtime, a2aReply } = createRuntime();
+    const channelRuntime = createChannelRuntime("Investigation complete.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = {
+      id: "event-1",
+      event_type: "a2a.task.created",
+      data: {
+        task_id: "task-1",
+        context_id: "context-1",
+        message_id: "message-1",
+        caller: {
+          identity_id: "caller-1",
+          organization_id: "org-1",
+          handle: "caller",
+        },
+        parts: [{ text: "Investigate this." }],
+      },
+    };
+
+    await bridge.handlers.onA2A?.(event);
+    await flushMicrotasks();
+    await bridge.handlers.onA2A?.(event);
+    await flushMicrotasks();
+
+    expect(a2aRegistryMock.writes.map((write) => write.state)).toEqual([
+      "queued",
+      "running",
+      "finalized",
+    ]);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.routeSessionKey).toBe("a2a:identity-1:context-1");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Investigate this.");
+    expect(a2aReply).toHaveBeenCalledWith("task-1", {
+      intent: "complete",
+      text: "Investigation complete.",
+    });
+  });
+
+  it("injects sent-task updates into the session that delegated", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("I will follow up.");
+    a2aDelegationMock.record = {
+      sessionKey: "agent:main:inkbox:direct:contact-1",
+      cardUrl: "https://target.example/card",
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: "event-update-1",
+      event_type: "a2a.sent_task.updated",
+      data: {
+        task_id: "task-1",
+        context_id: "context-1",
+        state: "input_required",
+        parts: [{ text: "Which region?" }],
+      },
+    });
+    await flushMicrotasks();
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.routeSessionKey).toBe(
+      "agent:main:inkbox:direct:contact-1",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Which region?");
+  });
+
+  it("continues startup when the A2A API is not deployed yet", async () => {
+    const { runtime, iterA2ATasks } = createRuntime();
+    iterA2ATasks.mockImplementation(() => ({
+      [Symbol.asyncIterator]: () => ({
+        next: vi.fn(async () => {
+          throw Object.assign(new Error("HTTP 404: Not Found"), {
+            statusCode: 404,
+          });
+        }),
+      }),
+    }));
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime(),
+      logger,
+    });
+
+    await expect(bridge.catchUpA2A()).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("A2A API is not deployed"),
+    );
   });
 
   afterEach(() => {
@@ -2476,6 +2635,7 @@ describe("configureInkboxIdentityDelivery", () => {
           list: vi.fn(async () => []),
           create: vi.fn(async (opts: any) => ({ id: "sub-1", ...opts })),
           update: vi.fn(async () => ({})),
+          delete: vi.fn(async () => undefined),
         },
       },
       phoneNumbers: { update: vi.fn(async () => ({})) },
@@ -2531,6 +2691,45 @@ describe("configureInkboxIdentityDelivery", () => {
 
     // No dedicated number, but calls can arrive over the shared line.
     expect(setIncomingCallAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses separate owner URLs for A2A and iMessage subscriptions", async () => {
+    const identity = {
+      id: "identity-1",
+      mailbox: null,
+      phoneNumber: null,
+      imessageEnabled: true,
+      setIncomingCallAction: vi.fn(async () => ({})),
+    };
+    const runtime = deliveryRuntime(identity);
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://example.com/inkbox/webhook",
+    });
+
+    const inkbox = await runtime.getClient();
+    expect(inkbox.webhooks.subscriptions.create).toHaveBeenCalledWith({
+      agentIdentityId: "identity-1",
+      url: "https://example.com/inkbox/webhook?channel=a2a",
+      eventTypes: [
+        "a2a.task.created",
+        "a2a.task.message",
+        "a2a.task.canceled",
+        "a2a.sent_task.updated",
+      ],
+    });
+    expect(inkbox.webhooks.subscriptions.create).toHaveBeenCalledWith({
+      agentIdentityId: "identity-1",
+      url: "https://example.com/inkbox/webhook",
+      eventTypes: [
+        "imessage.received",
+        "imessage.sent",
+        "imessage.delivered",
+        "imessage.delivery_failed",
+        "imessage.reaction_received",
+      ],
+    });
   });
 
   it("falls back to the number-scoped update when the SDK lacks the method", async () => {

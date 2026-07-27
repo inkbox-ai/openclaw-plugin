@@ -45,6 +45,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: inkbox-ai/inkbox
+          ref: fdea6e55ac117f246624852aedeef0feabe08b9a
+          path: .ci/inkbox
 
       - name: Set up env paths (gateway log)
         run: echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
@@ -59,11 +64,17 @@ jobs:
           python-version: "3.12"
 
       - name: Install live-test deps (Inkbox SDK + pytest)
-        run: pip install 'inkbox>=0.5.1,<1.0.0' pytest
+        run: |
+          pip install \
+            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@fdea6e55ac117f246624852aedeef0feabe08b9a#subdirectory=sdk/python" \
+            pytest
 
       - name: Build the plugin
         run: |
-          npm ci
+          npm ci --prefix .ci/inkbox/sdk/typescript
+          npm run build --prefix .ci/inkbox/sdk/typescript
+          npm install --no-save --package-lock=false \
+            ./.ci/inkbox/sdk/typescript openclaw@2026.5.27
           npm run build
 
       - name: Install OpenClaw host

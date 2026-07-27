@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InkboxAPIError } from "@inkbox/sdk";
 import {
+  A2A_EVENT_TYPES,
   IMESSAGE_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
@@ -80,6 +81,29 @@ describe("reconcileWebhookSubscription", () => {
       eventTypes: [...IMESSAGE_EVENT_TYPES],
     });
     expect(result?.url).toBe("https://example.com/inkbox/webhook");
+  });
+
+  it("keeps a same-path A2A subscription while creating iMessage", async () => {
+    const a2a = makeSub({
+      id: "sub-a2a",
+      agentIdentityId: "identity-1",
+      url: "https://example.com/inkbox/webhook?channel=a2a",
+      eventTypes: [...A2A_EVENT_TYPES],
+    });
+    const { client, create, update, delete: del } = makeClient({
+      list: vi.fn(async () => [a2a]),
+      create: vi.fn(async (opts: any) => makeSub({ ...opts })),
+    });
+
+    await reconcileWebhookSubscription(client, {
+      agentIdentityId: "identity-1",
+      url: "https://example.com/inkbox/webhook",
+      eventTypes: IMESSAGE_EVENT_TYPES,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
   });
 
   it("rejects more than one subscription owner", async () => {

@@ -298,7 +298,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `baseUrl` | no | SDK default | Override Inkbox API base URL. |
 | `tunnelName` | no | identity handle | Override Inkbox tunnel name. |
 | `publicUrl` | no | - | Public OpenClaw URL. If omitted, the plugin opens an Inkbox tunnel. |
-| `allowedRecipients` | no | - | Outbound recipient allowlist. Empty means no local outbound filtering. |
+| `allowedRecipients` | no | - | Outbound recipient allowlist for messaging targets and A2A Agent Card URLs. Empty means no local outbound filtering. |
 | `allowedInboundContactIds` | no | - | Optional local inbound allowlist by Inkbox contact UUID. Empty means Inkbox contact rules decide reachability. |
 | `sms.batchDelayMs` | no | `0` | Inbound SMS and iMessage fragment batching window. |
 | `voiceTranscriptCoalesceMs` | no | plugin default | Non-realtime voice transcript coalescing window. |
@@ -318,6 +318,14 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 Required by default:
 
 - Outbound: `inkbox_send_email`, `inkbox_send_sms`, `inkbox_send_imessage`
+- A2A client: `inkbox_a2a_call`, `inkbox_a2a_check`, `inkbox_a2a_reply`,
+  `inkbox_list_a2a_tasks`, `inkbox_list_a2a_messages`
+- A2A history supports optional direction, requester, worker, task/context,
+  state/role, keyword, timestamp, cursor, and limit filters as applicable.
+- Inbound A2A tasks are delivered into isolated context sessions. During those
+  turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
+  `inkbox_a2a_fail` commit the task outcome explicitly.
+- The plugin requires `@inkbox/sdk` 0.5.6 or newer.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
