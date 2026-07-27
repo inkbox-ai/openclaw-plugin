@@ -9,6 +9,10 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Raised the Inkbox SDK dependency floor to 0.5.1 for the plugin and live CI.
 - Removed contact access tools because contacts are organization-wide. Note access tools remain identity-scoped.
 
+### Fixed
+
+- Inbound email turns use the full body carried on `message.received` instead of the 200-char snippet, so the agent no longer sees long emails cut off mid-sentence. A body too large to ship whole arrives with a notice giving the character counts and the message id to fetch for the remainder. Payloads carrying no body (replays, events predating the field) still fall back to the snippet.
+
 ## [0.2.2] - 2026-07-10
 
 ### Added
