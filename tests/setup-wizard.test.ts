@@ -10,6 +10,7 @@ import {
   smsToQrPayload,
   validateOpenAiRealtimeApiKey,
 } from "../src/setup-wizard.js";
+import { inkboxClientOptions } from "../src/sdk-options.js";
 import type { Prompter } from "../src/prompt.js";
 
 const sdk = vi.hoisted(() => {
@@ -495,8 +496,8 @@ describe("runSetupWizard", () => {
       scopedIdentityId: "identity-2",
       label: "openclaw-plugin-selected-agent",
     });
-    expect(sdk.Inkbox).toHaveBeenNthCalledWith(1, { apiKey: "ApiKey_admin" });
-    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, { apiKey: "ApiKey_agent_selected" });
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(1, inkboxClientOptions("ApiKey_admin", undefined));
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, inkboxClientOptions("ApiKey_agent_selected", undefined));
   });
 
   it("lets an admin-scoped API key create an identity and mints an agent key", async () => {
@@ -544,7 +545,7 @@ describe("runSetupWizard", () => {
       scopedIdentityId: "identity-new",
       label: "openclaw-plugin-new-agent",
     });
-    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, { apiKey: "ApiKey_agent_new" });
+    expect(sdk.Inkbox).toHaveBeenNthCalledWith(2, inkboxClientOptions("ApiKey_agent_new", undefined));
   });
 
   it("uses and stores an OpenClaw OpenAI API-key auth profile for realtime calls", async () => {
@@ -746,7 +747,7 @@ describe("runSetupWizard", () => {
     expect(prompter.ask.mock.calls.map(([question]) => question)).toContain(
       "Paste your Inkbox API key (starts with ApiKey_)",
     );
-    expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_new" });
+    expect(sdk.Inkbox).toHaveBeenCalledWith(inkboxClientOptions("ApiKey_new", undefined));
     expect(persistConfig).toHaveBeenCalledWith(
       {
         apiKey: "ApiKey_new",

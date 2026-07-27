@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inkboxClientOptions } from "../src/sdk-options.js";
 import { detectInkboxHealthFindings } from "../src/health.js";
 
 const sdk = vi.hoisted(() => {
@@ -114,7 +115,7 @@ describe("detectInkboxHealthFindings", () => {
       // The fixture phone has no incoming-call config wired.
       "inkbox/incoming-call-route",
     ]);
-    expect(sdk.Inkbox).toHaveBeenCalledWith({ apiKey: "ApiKey_test" });
+    expect(sdk.Inkbox).toHaveBeenCalledWith(inkboxClientOptions("ApiKey_test", undefined));
     expect(sdk.getIdentity).toHaveBeenCalledWith("agent");
   });
 

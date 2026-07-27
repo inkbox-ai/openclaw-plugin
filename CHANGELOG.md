@@ -2,10 +2,15 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.2.5] - 2026-07-27
+
+### Added
+
+- The plugin now identifies itself and its version to the API as a `User-Agent` prefix (`inkbox-openclaw/<version> inkbox-typescript/<sdk version>`), using the SDK's existing `userAgentPrefix` option. The version is read from `package.json` at runtime so the token cannot drift.
 
 ### Changed
 
+- Version realigned to 0.2.5, the shared number across the Inkbox plugin fleet, so a version answers "which fleet release is this" rather than a per-repo count.
 - Raised the Inkbox SDK dependency floor to 0.5.1 for the plugin and live CI.
 - Removed contact access tools because contacts are organization-wide. Note access tools remain identity-scoped.
 
