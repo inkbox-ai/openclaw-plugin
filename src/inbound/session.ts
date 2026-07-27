@@ -2857,6 +2857,18 @@ export async function prewarmInkboxAgent(
   }
 }
 
+// `message.received` carries the full body; older payloads and replays only
+// have the 200-char snippet, so fall back to it.
+function inboundMailBody(message: MailWebhookPayload["data"]["message"]): string {
+  const body = message.body ?? "";
+  if (!body.trim()) return message.snippet ?? "";
+  if (message.body_state !== "truncated") return body;
+  const { body_total_chars: total, body_included_chars: included } = message;
+  const counts = total && included ? `${included} of ${total} characters` : "part";
+  const fetchHint = message.id ? ` Fetch email ${message.id} to read the rest.` : "";
+  return `${body}\n\n[inkbox: this email was too long to deliver in full. You are seeing ${counts}.${fetchHint}]`;
+}
+
 async function buildMailTurn(
   runtime: InkboxRuntime,
   account: ResolvedInkboxAccount,
@@ -2879,7 +2891,7 @@ async function buildMailTurn(
   const contact = await lookupContact(runtime, "email", from);
   const contactKey = contact?.id ?? from;
   const senderIdentity = contact ? undefined : mailSenderAgentIdentity(event, from);
-  const bodyText = message.snippet || message.subject || "";
+  const bodyText = inboundMailBody(message) || message.subject || "";
   const subjectPart = message.subject ? ` subject=${JSON.stringify(message.subject)}` : "";
   return {
     mode: "email",
