@@ -24,14 +24,6 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
   command when the gateway ends up live, instead of a to-do list with nothing
   left to do.
 
-### Fixed
-
-- `openclaw plugins install git:inkbox-ai/openclaw-plugin` failed outright: the
-  host clones and runs `npm install`, but `dist/` is gitignored and nothing
-  built it, so the plugin had no loadable entry point. A `prepare` script now
-  compiles on install, and a CI job installs through the same path with no
-  pre-build so it cannot regress unnoticed.
-
 ## [0.2.5] - 2026-07-27
 
 ### Added
