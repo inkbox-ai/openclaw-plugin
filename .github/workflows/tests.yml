@@ -83,3 +83,39 @@ jobs:
 
       - name: Contract tests vs latest OpenClaw
         run: npx vitest run tests/contract
+
+  # Installs the way a user does: `openclaw plugins install git:<repo>`, with no
+  # pre-build step. That path clones, runs `npm install`, and then refuses to
+  # load the plugin unless compiled output exists — which every other job here
+  # hides, because they all run `npm run build` first and then install from a
+  # linked local path (where the host accepts TypeScript source). Nothing
+  # exercised the real install until it broke in a user's hands.
+  #
+  # A bare clone of this checkout stands in for the remote: `git:file://...`
+  # takes the identical code path in the host as `git:owner/repo`, without
+  # needing the branch to exist anywhere public.
+  git-install:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0          # a bare clone cannot be made from a shallow one
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install the OpenClaw host
+        run: npm install -g openclaw@latest
+
+      - name: Publish this commit as a bare repo
+        run: git clone --bare "$GITHUB_WORKSPACE" /tmp/openclaw-plugin.git
+
+      - name: Install the plugin from git (no pre-build)
+        run: openclaw plugins install "git:file:///tmp/openclaw-plugin.git"
+
+      - name: Confirm the host loaded it
+        run: |
+          openclaw plugins list | tee /tmp/plugins.txt
+          grep -q inkbox /tmp/plugins.txt
