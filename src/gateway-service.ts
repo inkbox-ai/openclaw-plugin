@@ -23,6 +23,10 @@ const STATUS_TIMEOUT_MS = 20_000;
 // A restart drains active gateway work before coming back up, and `install`
 // can compile a service unit, so give the lifecycle actions real room.
 const LIFECYCLE_TIMEOUT_MS = 180_000;
+// A freshly started gateway is not visible to `gateway status` until it has
+// finished claiming its runtime state, so confirm by polling, not one probe.
+const START_CONFIRM_TIMEOUT_MS = 15_000;
+const START_CONFIRM_POLL_MS = 1_000;
 
 // Re-invoke the entry script running this wizard rather than trusting PATH,
 // mirroring how the host shells back into its own `gateway` commands.
@@ -111,17 +115,44 @@ function runLifecycle(run: GatewayCommandRunner, action: string): boolean {
 }
 
 /**
+ * Poll for gateway liveness after a start or install.
+ *
+ * @param run - Host-CLI runner.
+ * @param timeoutMs - How long to keep polling before giving up.
+ * @param sleep - Injectable delay so tests do not wait in real time.
+ * @returns True once a gateway reports running. A single immediate probe
+ *   races a gateway that is still coming up, so poll rather than ask once.
+ */
+export async function waitForGatewayRunning(
+  run: GatewayCommandRunner,
+  timeoutMs: number = START_CONFIRM_TIMEOUT_MS,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (detectGatewayState(run).running) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(START_CONFIRM_POLL_MS);
+  }
+}
+
+/**
  * Offer to restart (or start, or install) the gateway so the config this
  * wizard just wrote actually takes effect.
  *
  * @param prompter - Prompter used for the yes/no questions.
  * @param run - Host-CLI runner; injectable so tests never spawn a process.
- * @returns True when a gateway is running by the time this returns.
+ * @param opts - Start-confirmation knobs, injectable so tests do not wait.
+ * @returns True when the caller should NOT tell the operator to start a
+ *   gateway - either one is confirmed running, or a start/install we ran
+ *   reported success and a second one would duplicate it.
  */
 export async function offerGatewayRestart(
   prompter: Prompter,
   run: GatewayCommandRunner = defaultGatewayCommandRunner,
+  opts: { sleep?: (ms: number) => Promise<void>; confirmTimeoutMs?: number } = {},
 ): Promise<boolean> {
+  const confirmTimeoutMs = opts.confirmTimeoutMs ?? START_CONFIRM_TIMEOUT_MS;
   console.log("\nOpenClaw gateway:");
 
   const { running, serviceInstalled } = detectGatewayState(run);
@@ -181,13 +212,20 @@ export async function offerGatewayRestart(
     return false;
   }
 
-  // `install` does not guarantee the service came up, so re-check rather
-  // than assuming it did.
-  if (detectGatewayState(run).running) {
+  // `install` brings the gateway up in whatever way the platform allows - a
+  // service slot, or a plain background process when the service manager
+  // refuses the bootstrap. Either way it needs a moment to become visible.
+  if (await waitForGatewayRunning(run, confirmTimeoutMs, opts.sleep)) {
     console.log("  Gateway installed and running with the new Inkbox config.");
     return true;
   }
-  console.log("  Gateway service installed.");
-  console.log("  Start it with: openclaw gateway start");
-  return false;
+
+  // Install reported success, so never answer it with "now go start one":
+  // if it did bring a gateway up, a second start would duplicate it.
+  console.log("  Gateway install completed.");
+  console.log(
+    `  Could not confirm the gateway came up within ${Math.round(confirmTimeoutMs / 1000)}s.`,
+  );
+  console.log("  Check it with: openclaw gateway status");
+  return true;
 }

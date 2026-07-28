@@ -4,6 +4,7 @@ import {
   hostCommandPrefix,
   offerGatewayRestart,
   parseGatewayStatus,
+  waitForGatewayRunning,
   type GatewayCommandRunner,
 } from "../src/gateway-service.js";
 import type { Prompter } from "../src/prompt.js";
@@ -18,6 +19,10 @@ function createPrompter(confirms: boolean[] = []): Prompter & { confirm: ReturnT
     close: vi.fn(),
   };
 }
+
+// Skip the real inter-poll delay and the 15s start-confirmation window.
+const noSleep = async (): Promise<void> => {};
+const fastConfirm = { sleep: noSleep, confirmTimeoutMs: 0 };
 
 function statusJson(params: { running?: boolean; loaded?: boolean; pid?: number }): string {
   return JSON.stringify({
@@ -138,26 +143,33 @@ describe("offerGatewayRestart", () => {
     expect(actions).toEqual(["start"]);
   });
 
-  it("installs when there is no service slot, then re-checks liveness", async () => {
+  it("installs when there is no service slot, then confirms liveness", async () => {
     const { run, actions } = createRunner([
       statusJson({ running: false, loaded: false }),
       statusJson({ running: true, loaded: true }),
     ]);
 
-    await expect(offerGatewayRestart(createPrompter([true]), run)).resolves.toBe(true);
+    await expect(offerGatewayRestart(createPrompter([true]), run, fastConfirm)).resolves.toBe(true);
 
     expect(actions).toEqual(["install"]);
   });
 
-  it("reports not-live when install leaves the service down", async () => {
-    const { run, actions } = createRunner([
-      statusJson({ running: false, loaded: false }),
-      statusJson({ running: false, loaded: true }),
-    ]);
+  it("never tells the operator to start one when install is unconfirmed", async () => {
+    // `install` can come up as a plain background process when the platform's
+    // service manager refuses the bootstrap. Telling the operator to start
+    // another one on top of that would duplicate the gateway.
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((msg) => void lines.push(String(msg)));
+    const { run, actions } = createRunner([statusJson({ running: false, loaded: false })]);
 
-    await expect(offerGatewayRestart(createPrompter([true]), run)).resolves.toBe(false);
+    await expect(offerGatewayRestart(createPrompter([true]), run, fastConfirm)).resolves.toBe(true);
 
     expect(actions).toEqual(["install"]);
+    const output = lines.join("\n");
+    expect(output).toContain("openclaw gateway status");
+    expect(output).not.toContain("openclaw gateway start");
+    expect(output).not.toContain("openclaw gateway run");
+    log.mockRestore();
   });
 
   it("runs nothing when the install offer is declined", async () => {
@@ -174,7 +186,7 @@ describe("offerGatewayRestart", () => {
       1,
     );
 
-    await expect(offerGatewayRestart(createPrompter([true]), run)).resolves.toBe(false);
+    await expect(offerGatewayRestart(createPrompter([true]), run, fastConfirm)).resolves.toBe(false);
 
     expect(actions).toEqual(["install"]);
   });
@@ -186,5 +198,28 @@ describe("offerGatewayRestart", () => {
     await expect(offerGatewayRestart(prompter, run)).resolves.toBe(false);
 
     expect(prompter.confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("waitForGatewayRunning", () => {
+  it("keeps polling until the gateway becomes visible", async () => {
+    // A gateway is not visible to `gateway status` until it finishes claiming
+    // its runtime state, so the first probe after a start can miss it.
+    const { run } = createRunner([
+      statusJson({ running: false, loaded: true }),
+      statusJson({ running: false, loaded: true }),
+      statusJson({ running: true, loaded: true }),
+    ]);
+
+    await expect(waitForGatewayRunning(run, 30_000, noSleep)).resolves.toBe(true);
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up at the timeout", async () => {
+    const { run } = createRunner([statusJson({ running: false, loaded: true })]);
+
+    await expect(waitForGatewayRunning(run, 0, noSleep)).resolves.toBe(false);
+    // Timeout 0 still probes once before giving up.
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });
