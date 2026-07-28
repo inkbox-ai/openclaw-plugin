@@ -2,6 +2,28 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.6] - 2026-07-28
+
+### Added
+
+- Setup now finishes by bringing the gateway up. It detects the host gateway
+  service and offers to restart a running one, launch an installed-but-stopped
+  one, or install and launch a service when none exists — each defaulting to
+  yes. The wizard writes `channels.inkbox` straight to the config file, so a
+  gateway that was already running kept serving the old settings until someone
+  restarted it by hand.
+
+### Changed
+
+- Dropped the mid-flow restart hint from the iMessage walkthrough and the
+  unconditional `openclaw gateway run` sign-off; the closing step covers both.
+- The post-install and post-start liveness checks poll instead of probing once,
+  and an unconfirmed start or install no longer tells the operator to launch a
+  gateway that may already be up.
+- Setup closes on a status banner naming the Inkbox identity and the health
+  command when the gateway ends up live, instead of a to-do list with nothing
+  left to do.
+
 ## [0.2.5] - 2026-07-27
 
 ### Added

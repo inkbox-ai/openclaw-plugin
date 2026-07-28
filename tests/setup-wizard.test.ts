@@ -418,12 +418,15 @@ describe("runSetupWizard", () => {
     sdk.getIdentity.mockResolvedValue(identity);
     const prompter = createPrompter({ confirms: [false, true] });
     const persistConfig = vi.fn(async () => ({ ok: true }));
+    // Keep the closing gateway step from shelling out to the host CLI.
+    const runGatewayCommand = vi.fn(() => ({ code: 1, stdout: "", stderr: "" }));
     const currentConfig = { tools: { profile: "coding" } };
 
     const result = await runSetupWizard({
       prompter,
       currentConfig,
       persistConfig,
+      runGatewayCommand,
       env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
     });
 
@@ -724,6 +727,8 @@ describe("runSetupWizard", () => {
       confirms: [true, true, false, false, true],
     });
     const persistConfig = vi.fn(async () => ({ ok: true }));
+    // Keep the closing gateway step from shelling out to the host CLI.
+    const runGatewayCommand = vi.fn(() => ({ code: 1, stdout: "", stderr: "" }));
 
     const result = await runSetupWizard({
       prompter,
@@ -737,6 +742,7 @@ describe("runSetupWizard", () => {
         },
       },
       persistConfig,
+      runGatewayCommand,
       env: {} as any,
     });
 
