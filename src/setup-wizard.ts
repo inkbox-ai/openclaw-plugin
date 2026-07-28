@@ -14,6 +14,11 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import type { Prompter } from "./prompt.js";
+import {
+  defaultGatewayCommandRunner,
+  offerGatewayRestart,
+  type GatewayCommandRunner,
+} from "./gateway-service.js";
 import { writeIdentityState, readIdentityState } from "./state.js";
 import { DEFAULT_ACCOUNT_ID, resolveInkboxAccount } from "./accounts.js";
 import { inkboxBaseUrlOptions, inkboxClientOptions } from "./sdk-options.js";
@@ -66,6 +71,8 @@ export interface WizardOptions {
   currentConfig?: unknown;
   persistConfig?: WizardConfigPersister;
   validateOpenAiRealtimeApiKey?: OpenAiRealtimeValidator;
+  // Lets tests drive the gateway (re)start step without spawning the host CLI.
+  runGatewayCommand?: GatewayCommandRunner;
   // Lets tests inject env without poking process.env.
   env?: NodeJS.ProcessEnv;
 }
@@ -1223,9 +1230,9 @@ async function waitForIMessageFirstMessage(params: {
   } catch {
     // Best-effort; unread state is cosmetic here.
   }
-  console.log(
-    "If the gateway is already running, restart it so it picks up this new iMessage connection.",
-  );
+  // Setup's closing step brings the gateway up, so point at that rather than
+  // handing out a restart instruction mid-flow.
+  console.log("Setup finishes by bringing the gateway up so it picks up this connection.");
 }
 
 async function askRequiredVerificationCode(prompter: Prompter): Promise<string> {
@@ -1608,7 +1615,20 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       };
     }
     console.log("\n✅ Setup complete. Saved Inkbox settings to the active OpenClaw config.");
-    console.log("Run `openclaw inkbox doctor` to verify the connection.\n");
+    // Step 9 — the config file is written straight to disk, so a gateway that
+    // is already up is still serving the old channels.inkbox. Offer to reload
+    // it here instead of leaving that as a printed instruction. Only on the
+    // persisted path: when the snippet is printed for manual paste there is
+    // nothing on disk yet to pick up.
+    const gatewayLive = await offerGatewayRestart(
+      opts.prompter,
+      opts.runGatewayCommand ?? defaultGatewayCommandRunner,
+    );
+    console.log("\nRun `openclaw inkbox doctor` to verify the connection.");
+    if (!gatewayLive) {
+      console.log("Start the gateway with `openclaw gateway run` when you're ready.");
+    }
+    console.log("");
     return { ok: true, config: snippet, persisted: true };
   }
 
