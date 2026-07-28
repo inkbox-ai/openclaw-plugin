@@ -190,12 +190,22 @@ export async function offerGatewayRestart(
       return false;
     }
     console.log("  Starting...");
-    if (runLifecycle(run, "start")) {
+    if (!runLifecycle(run, "start")) {
+      console.log("  Start it manually: openclaw gateway start");
+      return false;
+    }
+    // Exit 0 only means the command ran. A gateway that fails to bind is gone
+    // a second or two later, so confirm rather than take its word for it.
+    if (await waitForGatewayRunning(run, confirmTimeoutMs, opts.sleep)) {
       console.log("  Gateway started with the new Inkbox config.");
       return true;
     }
-    console.log("  Start it manually: openclaw gateway start");
-    return false;
+    console.log("  Gateway start completed.");
+    console.log(
+      `  Could not confirm the gateway came up within ${Math.round(confirmTimeoutMs / 1000)}s.`,
+    );
+    console.log("  Check it with: openclaw gateway status");
+    return true;
   }
 
   // No service slot yet: `install` registers one with launchd/systemd/schtasks

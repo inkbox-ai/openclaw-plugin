@@ -17,9 +17,9 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 - Dropped the mid-flow restart hint from the iMessage walkthrough and the
   unconditional `openclaw gateway run` sign-off; the closing step covers both.
-- The post-install liveness check polls instead of probing once, and an
-  unconfirmed install no longer tells the operator to start a gateway that may
-  already be up.
+- The post-install and post-start liveness checks poll instead of probing once,
+  and an unconfirmed start or install no longer tells the operator to launch a
+  gateway that may already be up.
 - Setup closes on a status banner naming the Inkbox identity and the health
   command when the gateway ends up live, instead of a to-do list with nothing
   left to do.

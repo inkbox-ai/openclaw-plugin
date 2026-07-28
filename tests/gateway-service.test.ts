@@ -136,12 +136,31 @@ describe("offerGatewayRestart", () => {
     expect(actions).toEqual([]);
   });
 
-  it("starts an installed-but-stopped gateway", async () => {
-    const { run, actions } = createRunner([statusJson({ running: false, loaded: true })]);
+  it("starts an installed-but-stopped gateway, then confirms it came up", async () => {
+    const { run, actions } = createRunner([
+      statusJson({ running: false, loaded: true }),
+      statusJson({ running: true, loaded: true }),
+    ]);
 
-    await expect(offerGatewayRestart(createPrompter([true]), run)).resolves.toBe(true);
+    await expect(offerGatewayRestart(createPrompter([true]), run, fastConfirm)).resolves.toBe(true);
 
     expect(actions).toEqual(["start"]);
+  });
+
+  it("never claims a start that could not be confirmed", async () => {
+    // `gateway start` exits 0 as soon as the command ran; a gateway that fails
+    // to bind is gone a second later and must not get a success line.
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((msg) => void lines.push(String(msg)));
+    const { run, actions } = createRunner([statusJson({ running: false, loaded: true })]);
+
+    await expect(offerGatewayRestart(createPrompter([true]), run, fastConfirm)).resolves.toBe(true);
+
+    expect(actions).toEqual(["start"]);
+    const output = lines.join("\n");
+    expect(output).toContain("openclaw gateway status");
+    expect(output).not.toContain("started with the new Inkbox config");
+    log.mockRestore();
   });
 
   it("installs when there is no service slot, then confirms liveness", async () => {
