@@ -229,3 +229,32 @@ export async function offerGatewayRestart(
   console.log("  Check it with: openclaw gateway status");
   return true;
 }
+
+/**
+ * Print the closing banner for a setup that ended with a live gateway.
+ *
+ * @param handle - Inkbox agent identity the gateway is now running as.
+ * @param product - Host name shown in the headline.
+ * @param doctorCommand - Command that checks the connection.
+ */
+export function printReadyBanner(
+  handle: string,
+  product = "OpenClaw",
+  doctorCommand = "openclaw inkbox doctor",
+): void {
+  const rows: Array<[string, string]> = [
+    ["Inkbox identity", handle],
+    ["Check its health", doctorCommand],
+  ];
+  const labelWidth = Math.max(...rows.map(([label]) => label.length)) + 1; // +1 for the colon
+  const body = [
+    `Your ${product} agent is set up and running on Inkbox.`,
+    "",
+    ...rows.map(([label, value]) => `  ${`${label}:`.padEnd(labelWidth)}  ${value}`),
+  ];
+  const width = Math.max(...body.map((line) => line.length)) + 4;
+  console.log("");
+  console.log(`╭${"─".repeat(width - 2)}╮`);
+  for (const line of body) console.log(`│ ${line.padEnd(width - 4)} │`);
+  console.log(`╰${"─".repeat(width - 2)}╯`);
+}

@@ -4,6 +4,7 @@ import {
   hostCommandPrefix,
   offerGatewayRestart,
   parseGatewayStatus,
+  printReadyBanner,
   waitForGatewayRunning,
   type GatewayCommandRunner,
 } from "../src/gateway-service.js";
@@ -221,5 +222,29 @@ describe("waitForGatewayRunning", () => {
     await expect(waitForGatewayRunning(run, 0, noSleep)).resolves.toBe(false);
     // Timeout 0 still probes once before giving up.
     expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("printReadyBanner", () => {
+  function render(handle: string): string[] {
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((msg) => void lines.push(String(msg)));
+    printReadyBanner(handle);
+    log.mockRestore();
+    return lines.filter(Boolean);
+  }
+
+  it("names the identity and the health command", () => {
+    const lines = render("smoke-agent");
+    const output = lines.join("\n");
+    expect(output).toContain("smoke-agent");
+    expect(output).toContain("openclaw inkbox doctor");
+  });
+
+  it("keeps the box square for short and long handles", () => {
+    for (const handle of ["a", "a-very-long-agent-handle-that-sets-the-width"]) {
+      const widths = new Set(render(handle).map((line) => line.length));
+      expect(widths.size).toBe(1);
+    }
   });
 });

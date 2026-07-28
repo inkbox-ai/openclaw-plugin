@@ -17,6 +17,7 @@ import type { Prompter } from "./prompt.js";
 import {
   defaultGatewayCommandRunner,
   offerGatewayRestart,
+  printReadyBanner,
   type GatewayCommandRunner,
 } from "./gateway-service.js";
 import { writeIdentityState, readIdentityState } from "./state.js";
@@ -1624,8 +1625,12 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       opts.prompter,
       opts.runGatewayCommand ?? defaultGatewayCommandRunner,
     );
-    console.log("\nRun `openclaw inkbox doctor` to verify the connection.");
-    if (!gatewayLive) {
+    // A live gateway means setup finished the job, so close on that rather
+    // than a to-do list. Only when nothing is listening is there a step left.
+    if (gatewayLive) {
+      printReadyBanner(identityHandle);
+    } else {
+      console.log("\nRun `openclaw inkbox doctor` to verify the connection.");
       console.log("Start the gateway with `openclaw gateway run` when you're ready.");
     }
     console.log("");

@@ -20,6 +20,9 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - The post-install liveness check polls instead of probing once, and an
   unconfirmed install no longer tells the operator to start a gateway that may
   already be up.
+- Setup closes on a status banner naming the Inkbox identity and the health
+  command when the gateway ends up live, instead of a to-do list with nothing
+  left to do.
 
 ## [0.2.5] - 2026-07-27
 
