@@ -2,6 +2,12 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.7] - 2026-07-29
+
+### Added
+
+- Inbound email, SMS, iMessage, reactions, and calls now include memories from the matched contact as safely delimited background context. Set `channels.inkbox.includeContactMemories` to `false` to opt out for an account.
+
 ## [0.2.6] - 2026-07-28
 
 ### Added

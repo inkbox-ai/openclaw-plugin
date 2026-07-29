@@ -136,6 +136,9 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "includeContactMemories": {
+            "type": "boolean"
+          },
           "externalEvents": {
             "type": "boolean"
           },
@@ -209,6 +212,9 @@
                 "allowedInboundContactIds": {
                   "type": "array",
                   "items": { "type": "string" }
+                },
+                "includeContactMemories": {
+                  "type": "boolean"
                 },
                 "externalEvents": {
                   "type": "boolean"
@@ -381,6 +387,10 @@
         "type": "array",
         "items": { "type": "string" },
         "description": "Inbound contact-id allowlist. When set, webhook events whose remote contact id is not on this list are dropped (mail/text become no-ops, calls are rejected). Events with no contact resolution are also dropped."
+      },
+      "includeContactMemories": {
+        "type": "boolean",
+        "description": "Include memories from the matched webhook contact in inbound agent context. Defaults to true."
       },
       "externalEvents": {
         "type": "boolean",

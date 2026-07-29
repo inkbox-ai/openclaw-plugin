@@ -20,6 +20,7 @@ describe("inkbox account config", () => {
                 voiceAgentPrewarm: false,
                 voiceAgentPrewarmTtlMs: 120000,
                 voiceAgentPrewarmTimeoutMs: 45000,
+                includeContactMemories: false,
                 voiceRealtime: {
                   enabled: true,
                   provider: "openai",
@@ -49,6 +50,7 @@ describe("inkbox account config", () => {
     expect(account.config.voiceAgentPrewarm).toBe(false);
     expect(account.config.voiceAgentPrewarmTtlMs).toBe(120000);
     expect(account.config.voiceAgentPrewarmTimeoutMs).toBe(45000);
+    expect(account.config.includeContactMemories).toBe(false);
     expect(account.config.voiceRealtime).toEqual({
       enabled: true,
       provider: "openai",
@@ -80,10 +82,12 @@ describe("inkbox account config", () => {
         inkbox: {
           defaultAccount: "work",
           apiKey: "ApiKey_shared",
+          includeContactMemories: true,
           accounts: {
             work: {
               identity: "work-agent",
               signingKey: "sign_work",
+              includeContactMemories: false,
             },
           },
         },
@@ -96,5 +100,6 @@ describe("inkbox account config", () => {
     expect(account.apiKey).toBe("ApiKey_shared");
     expect(account.identity).toBe("work-agent");
     expect(account.signingKey).toBe("sign_work");
+    expect(account.config.includeContactMemories).toBe(false);
   });
 });
