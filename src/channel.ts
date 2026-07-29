@@ -164,6 +164,9 @@ function applyInkboxAccountConfig(params: {
   if (allowedInboundContactIds) {
     account.allowedInboundContactIds = allowedInboundContactIds;
   }
+  if (typeof input.includeContactMemories === "boolean") {
+    account.includeContactMemories = input.includeContactMemories;
+  }
   return next;
 }
 

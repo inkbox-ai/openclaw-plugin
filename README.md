@@ -300,6 +300,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `publicUrl` | no | - | Public OpenClaw URL. If omitted, the plugin opens an Inkbox tunnel. |
 | `allowedRecipients` | no | - | Outbound recipient allowlist for messaging targets and A2A Agent Card URLs. Empty means no local outbound filtering. |
 | `allowedInboundContactIds` | no | - | Optional local inbound allowlist by Inkbox contact UUID. Empty means Inkbox contact rules decide reachability. |
+| `includeContactMemories` | no | `true` | Include memories from the matched contact as background context for inbound email, messaging, reactions, and calls. Set `false` to disable them. |
 | `sms.batchDelayMs` | no | `0` | Inbound SMS and iMessage fragment batching window. |
 | `voiceTranscriptCoalesceMs` | no | plugin default | Non-realtime voice transcript coalescing window. |
 | `voiceAgentPrewarm` | no | plugin default | Prewarm the voice path when the gateway starts. |

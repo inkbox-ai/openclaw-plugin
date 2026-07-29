@@ -57,6 +57,21 @@ describe("SmsBatcher", () => {
     expect(batched.__batch.remotePhoneNumber).toBe("+15551234567");
   });
 
+  it("keeps one contact-memory source on a synthesized batch", async () => {
+    const flush = vi.fn();
+    const b = new SmsBatcher({ batchDelayMs: 100, maxMessages: 8, maxChars: 4000 }, flush);
+    const first = textEvent("+15551234567", "one");
+    first.data.contacts = [{ id: "contact-a", memories: ["first"] }];
+    const second = textEvent("+15551234567", "two");
+    second.data.contacts = [{ id: "contact-a", memories: ["second"] }];
+
+    b.accept(first);
+    b.accept(second);
+    await vi.advanceTimersByTimeAsync(110);
+
+    expect(flush.mock.calls[0][0].data.contacts).toEqual(first.data.contacts);
+  });
+
   it("flushes per remote number — bursts from different senders do not merge", async () => {
     const flush = vi.fn();
     const b = new SmsBatcher({ batchDelayMs: 100, maxMessages: 8, maxChars: 4000 }, flush);

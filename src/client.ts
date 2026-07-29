@@ -52,6 +52,8 @@ export interface InkboxPluginConfig {
   // any event whose contact id is not on the list. Events with no contact
   // resolution are also dropped (conservative default).
   allowedInboundContactIds?: string[];
+  // Include memories attached to the matched webhook contact in inbound context.
+  includeContactMemories?: boolean;
   // Inbound: pass non-Inkbox ("external") webhooks through to the agent.
   // These are signed by the source, not with our signing key, so unknown
   // sources are delivered UNVERIFIED when enabled. Off by default for that

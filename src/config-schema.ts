@@ -166,6 +166,11 @@ export const inkboxAccountConfigJsonSchema = {
       items: { type: "string" },
       description: "Inbound Inkbox contact-id allowlist.",
     },
+    includeContactMemories: {
+      type: "boolean",
+      description:
+        "Include memories from the matched webhook contact in inbound agent context. Defaults to true.",
+    },
     externalEvents: {
       type: "boolean",
       description:
