@@ -372,6 +372,8 @@ function imessageWebhookEvent(params: {
   direction?: string;
   eventType?: string;
   contacts?: any[];
+  participants?: string[];
+  isGroup?: boolean;
 }): any {
   return {
     event_type: params.eventType ?? "imessage.received",
@@ -388,6 +390,8 @@ function imessageWebhookEvent(params: {
         content: params.content,
         message_type: "message",
         service: "imessage",
+        ...(params.participants ? { participants: params.participants } : {}),
+        ...(params.isGroup === undefined ? {} : { is_group: params.isGroup }),
         send_style: null,
         media: null,
         was_downgraded: null,
@@ -2358,6 +2362,41 @@ describe("createInkboxSessionBridge", () => {
       expect(body).toContain("\\u005binkbox:contact_memories\\u005d");
       expect(body).toContain("\\u005b/inkbox:contact_memories\\u005d");
     }
+  });
+
+  it("routes a group iMessage into one shared conversation with the silent policy", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("On my way!");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        identity: "smoke-agent",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onIMessage?.(
+      imessageWebhookEvent({
+        content: "Dinner moved to 7.",
+        conversationId: "imconv-777",
+        participants: ["+15551234567", "+15557654321"],
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    const body = run.ctxPayload.message.bodyForAgent;
+    expect(body).toContain("[inkbox:group_imessage conversation_id=imconv-777");
+    expect(body).toContain("participants=+15551234567,+15557654321");
+    expect(body).toContain("reply_mode=conversation_id");
+    expect(body).toContain("Group iMessage response policy");
+    expect(body).toContain("return exactly [SILENT]");
+    expect(body).toContain("Dinner moved to 7.");
+    // One shared context: the conversation keys the chat, not the sender.
+    expect(run.ctxPayload.conversation.id).toBe("imessage:imconv-777");
   });
 
   it("resolves inbound iMessage contact via SDK lookup and injects Hermes-style marker", async () => {

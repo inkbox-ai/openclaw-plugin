@@ -1020,6 +1020,25 @@ async function lookupTextConversationSummary(
   }
 }
 
+async function lookupImessageConversationSummary(
+  identity: AgentIdentity | undefined,
+  conversationId: string | undefined,
+): Promise<any | undefined> {
+  if (!identity || !conversationId) {
+    return undefined;
+  }
+  try {
+    const convos = await (identity as any).listImessageConversations({
+      limit: 200,
+      offset: 0,
+      includeGroups: true,
+    });
+    return convos?.find((entry: any) => entry?.id === conversationId);
+  } catch {
+    return undefined;
+  }
+}
+
 function payloadText(payload: unknown): string {
   if (typeof payload === "string") {
     return payload;
@@ -3167,10 +3186,7 @@ async function buildTextTurn(
   };
 }
 
-// Mirrors buildTextTurn minus the SMS-only concerns: no group support, no
-// opt-in control words, and no local number — iMessage rides a shared
-// Inkbox-managed line, so the conversation id is the only stable reply
-// target.
+// Mirrors buildTextTurn minus SMS-only opt-in control words and local numbers.
 async function buildIMessageTurn(
   runtime: InkboxRuntime,
   account: ResolvedInkboxAccount,
@@ -3197,29 +3213,72 @@ async function buildIMessageTurn(
     typeof conversationIdRaw === "string" && conversationIdRaw.trim()
       ? conversationIdRaw.trim()
       : undefined;
+  let imessageIdentity: AgentIdentity | undefined;
+  try {
+    imessageIdentity = await runtime.getIdentity();
+  } catch {
+    imessageIdentity = undefined;
+  }
+  const summary = await lookupImessageConversationSummary(imessageIdentity, conversationId);
+  // Events may carry participants inline; fall back to the conversation record.
+  const participants = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(summary?.participants) ? summary.participants : []),
+        ...(Array.isArray((message as any).participants) ? (message as any).participants : []),
+      ].filter((entry: unknown): entry is string => typeof entry === "string" && entry.trim() !== ""),
+    ),
+  );
+  const isGroup =
+    Boolean(summary?.isGroup) ||
+    Boolean((message as any).is_group ?? (message as any).isGroup) ||
+    participants.length > 1;
   const contact = await lookupContact(runtime, "phone", remote);
   const contactMemories = normalizeContactMemories(
     selectPhoneWebhookContact(event.data, contact?.id)?.memories,
   );
   const contactKey = contact?.id ?? remote;
-  const senderIdentity = contact ? undefined : singleWebhookAgentIdentity(event.data);
+  // 1:1 only — a group resolves multiple identities, where a single sender
+  // marker doesn't apply.
+  const senderIdentity = contact || isGroup ? undefined : singleWebhookAgentIdentity(event.data);
   const senderLabel =
     contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? remote;
   const mediaMarkers = textMediaMarkers(message.media as any, "imessage_attachment");
   const text = [escapeContactMemoryTokens(message.content ?? ""), ...mediaMarkers]
     .filter(Boolean).join("\n");
   const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
-  const marker = `[inkbox:imessage from=${remote}${conversationPart} | ${renderContactMarker(contact, senderIdentity)}]`;
+  const groupPolicy = isGroup
+    ? [
+        "Group iMessage response policy: you receive every message in this group so you can track context.",
+        "Reply only when the latest message clearly addresses this Inkbox agent, asks it to act, or a visible answer would be expected from the agent.",
+        "Treat ordinary group chatter as context only.",
+        "If no visible reply is warranted, return exactly [SILENT].",
+      ].join("\n")
+    : undefined;
+  const marker = isGroup
+    ? [
+        `[inkbox:group_imessage conversation_id=${conversationId ?? "unknown"}`,
+        `from=${remote}`,
+        participants.length ? `participants=${participants.join(",")}` : undefined,
+        `reply_mode=conversation_id`,
+        `| ${renderContactMarker(contact)}]`,
+      ].filter(Boolean).join(" ")
+    : `[inkbox:imessage from=${remote}${conversationPart} | ${renderContactMarker(contact, senderIdentity)}]`;
   return {
     mode: "imessage",
-    contactKey,
+    // A group is one shared context for everyone in it, so the conversation -
+    // not the sender - keys the chat. 1:1 keeps its per-contact key.
+    contactKey: isGroup && conversationId ? `imessage:${conversationId}` : contactKey,
     contact,
     fromLabel: senderLabel,
     remoteAddress: remote,
     conversationId,
-    conversationKind: "direct",
-    conversationLabel: senderLabel,
-    body: [marker, renderContactMemories(account, contactMemories), text]
+    conversationKind: isGroup ? "group" : "direct",
+    conversationLabel: isGroup
+      ? `Inkbox iMessage group ${conversationId ?? remote}`
+      : senderLabel,
+    conversationParticipants: participants.length ? participants : undefined,
+    body: [marker, renderContactMemories(account, contactMemories), groupPolicy, text]
       .filter(Boolean).join("\n"),
     messageId: message.id,
     replyToId: message.id,

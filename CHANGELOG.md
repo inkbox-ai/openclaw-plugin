@@ -7,6 +7,12 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 ### Added
 
 - Inbound email, SMS, iMessage, reactions, and calls now include memories from the matched contact as safely delimited background context. Set `channels.inkbox.includeContactMemories` to `false` to opt out for an account.
+- Dedicated-outbound iMessage group chats, matching the Hermes bridge. A group
+  is one shared context, so the conversation keys the chat rather than the
+  sender and every participant lands in the same session; the prompt carries the
+  participant list, `reply_mode=conversation_id`, and the same reply-only-when-
+  addressed policy the group SMS path uses. `to` now accepts 1-8 recipients, and
+  opening a group requires a dedicated outbound iMessage line.
 
 ## [0.2.6] - 2026-07-28
 
