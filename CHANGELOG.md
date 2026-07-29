@@ -2,6 +2,17 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.7] - 2026-07-29
+
+### Added
+
+- Dedicated-outbound iMessage group chats, matching the Hermes bridge. A group
+  is one shared context, so the conversation keys the chat rather than the
+  sender and every participant lands in the same session; the prompt carries the
+  participant list, `reply_mode=conversation_id`, and the same reply-only-when-
+  addressed policy the group SMS path uses. `to` now accepts 1-8 recipients, and
+  opening a group requires a dedicated outbound iMessage line.
+
 ## [0.2.6] - 2026-07-28
 
 ### Added

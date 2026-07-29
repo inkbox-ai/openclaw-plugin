@@ -9,6 +9,31 @@ import { IMESSAGE_MAX_TEXT_CHARS, imessageTextTooLongMessage } from "../message-
 // outbound sends work, so there is no cold outreach. Server-side gates
 // (recipient hasn't messaged yet, released connection, quota) surface as
 // API errors rather than being pre-checked here.
+const MAX_GROUP_RECIPIENTS = 8;
+
+// `to` accepts one recipient or a list; normalize both to a trimmed array.
+function normalizeRecipients(value: unknown): string[] {
+  if (typeof value === "string") {
+    const entry = value.trim();
+    return entry ? [entry] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry).trim()).filter(Boolean);
+  }
+  return [];
+}
+
+// Only a dedicated outbound line may open a conversation; everything else is
+// recipient-first, so a group send would fail at the API without this check.
+function identityCanStartImessageConversations(identity: any): boolean {
+  const number = identity?.imessageNumber ?? identity?.imessage_number;
+  if (!number) return false;
+  const canStart = number.canStartConversations ?? number.can_start_conversations;
+  if (typeof canStart === "boolean") return canStart;
+  const numberType = number.type?.value ?? number.type;
+  return String(numberType ?? "").trim().toLowerCase() === "dedicated_outbound";
+}
+
 export function registerSendIMessage(
   api: any,
   runtime: InkboxRuntime,
