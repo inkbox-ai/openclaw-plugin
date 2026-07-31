@@ -83,11 +83,11 @@ describe("reconcileWebhookSubscription", () => {
     expect(result?.url).toBe("https://example.com/inkbox/webhook");
   });
 
-  it("keeps a same-path A2A subscription while creating iMessage", async () => {
+  it("keeps a same-URL A2A subscription while creating iMessage", async () => {
     const a2a = makeSub({
       id: "sub-a2a",
       agentIdentityId: "identity-1",
-      url: "https://example.com/inkbox/webhook?channel=a2a",
+      url: "https://example.com/inkbox/webhook",
       eventTypes: [...A2A_EVENT_TYPES],
     });
     const { client, create, update, delete: del } = makeClient({

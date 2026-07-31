@@ -4754,25 +4754,24 @@ export async function configureInkboxIdentityDelivery(
       );
     }
   }
-  // Identity-owned A2A and iMessage events use separate URLs because each
-  // subscription must contain one event channel and owner+URL is unique.
+  // Identity-owned channels use independent subscription rows at the same
+  // canonical receiver URL.
   if (identity.id) {
     try {
-      const a2aWebhookUrl = `${opts.webhookUrl}?channel=a2a`;
       const a2aSub = await reconcileWebhookSubscription(
         inkbox,
         {
           agentIdentityId: identity.id,
-          url: a2aWebhookUrl,
+          url: opts.webhookUrl,
           eventTypes: A2A_EVENT_TYPES,
         },
         opts.logger,
       );
       if (a2aSub) {
-        opts.logger?.info?.(`Inkbox A2A events subscribed at ${a2aWebhookUrl}`);
+        opts.logger?.info?.(`Inkbox A2A events subscribed at ${opts.webhookUrl}`);
       } else {
         opts.logger?.warn?.(
-          `Inkbox A2A subscription was not created at ${a2aWebhookUrl}; inbound A2A tasks will not be delivered until that is resolved.`,
+          `Inkbox A2A subscription was not created at ${opts.webhookUrl}; inbound A2A tasks will not be delivered until that is resolved.`,
         );
       }
     } catch (error) {

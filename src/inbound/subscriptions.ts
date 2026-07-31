@@ -153,7 +153,14 @@ export async function reconcileWebhookSubscription(
       : { agentIdentityId: desired.agentIdentityId! };
 
   const existing = await inkbox.webhooks.subscriptions.list(ownerFilter);
-  const match = existing.find((sub) => sub.url === desired.url);
+  const desiredFamilies = eventFamilies(desired.eventTypes);
+  const belongsToDesiredChannel = (sub: WebhookSubscription) =>
+    [...eventFamilies(sub.eventTypes)].some((family) =>
+      desiredFamilies.has(family),
+    );
+  const match = existing.find(
+    (sub) => sub.url === desired.url && belongsToDesiredChannel(sub),
+  );
   // Rows left by earlier boots of this plugin (same route, old base URL —
   // e.g. a prior tunnel host, or a CI run in publicUrl mode). Repointed or
   // removed below so Inkbox never keeps delivering to a dead URL.
@@ -194,7 +201,9 @@ export async function reconcileWebhookSubscription(
       // A concurrent activation already owns the desired URL — adopt that
       // row and drop our stale ones.
       const refreshed = await inkbox.webhooks.subscriptions.list(ownerFilter);
-      const raced = refreshed.find((sub) => sub.url === desired.url);
+      const raced = refreshed.find(
+        (sub) => sub.url === desired.url && belongsToDesiredChannel(sub),
+      );
       if (!raced) throw err;
       const result = sameEventTypes(raced.eventTypes, desired.eventTypes)
         ? raced
@@ -219,7 +228,9 @@ export async function reconcileWebhookSubscription(
       // Concurrent activation created the row first; re-list and treat
       // as the create-result (PATCH event-types if they drift).
       const refreshed = await inkbox.webhooks.subscriptions.list(ownerFilter);
-      const racedMatch = refreshed.find((sub) => sub.url === desired.url);
+      const racedMatch = refreshed.find(
+        (sub) => sub.url === desired.url && belongsToDesiredChannel(sub),
+      );
       if (racedMatch) {
         if (sameEventTypes(racedMatch.eventTypes, desired.eventTypes)) {
           return racedMatch;

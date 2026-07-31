@@ -303,6 +303,27 @@ describe("registerPlaceCall", () => {
     expect(placeCall).not.toHaveBeenCalled();
   });
 
+  it("forwards disabled voicemail detection when requested", async () => {
+    const { api, tools } = createApi();
+    const placeCall = vi.fn().mockResolvedValue({
+      id: "call-voicemail",
+      status: "queued",
+    });
+    registerPlaceCall(api, createMockRuntime({ placeCall }));
+    const tool = tools.get("inkbox_place_call")!;
+
+    await tool.execute("turn-1", {
+      toNumber: "+15551234567",
+      purpose: "Run the CI voice check",
+      clientWebsocketUrl: "wss://example.com/ws",
+      voicemailDetection: "disabled",
+    });
+
+    expect(placeCall).toHaveBeenCalledWith(
+      expect.objectContaining({ voicemailDetection: "disabled" }),
+    );
+  });
+
   it("uses the resolver WebSocket URL when the caller omits one", async () => {
     const { api, tools } = createApi();
     const placeCall = vi.fn().mockResolvedValue({
