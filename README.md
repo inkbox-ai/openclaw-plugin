@@ -54,7 +54,7 @@ cd openclaw-plugin
 npm install
 npm run build
 openclaw --version
-openclaw plugins install -l ./
+openclaw plugins install -l --dangerously-force-unsafe-install ./
 ```
 
 Configure Inkbox:
