@@ -122,7 +122,11 @@ def test_email_request_gets_sms_response(xc):
     before = {m.id for m in _sms_from_aut()}
     remote.messages.send(
         xc["remote_email"], to=[xc["aut_email"]], subject=f"[{token}] text me please",
-        body_text=f"Please send me a text message (SMS) that says: lalala {token}",
+        body_text=(
+            "Use inkbox_send_sms to send my phone number from my contact "
+            f"details an SMS that says: lalala {token}. Do not reply by email; "
+            "this is complete only after the SMS is sent."
+        ),
     )
 
     deadline = time.monotonic() + TIMEOUT_S
@@ -205,8 +209,9 @@ def test_email_request_gets_call(xc):
     remote.messages.send(
         xc["remote_email"], to=[xc["aut_email"]], subject="please call me",
         body_text=(
-            "Please place a phone call to my number now with "
-            "voicemailDetection disabled — I'd rather talk than type."
+            "Use inkbox_place_call to call my phone number from my contact "
+            "details now. Set voicemailDetection to disabled. Do not reply by "
+            "email; this is complete only after the call is placed."
         ),
     )
     _wait_for_new_call(remote, remote_pid, aut_phone, before)
@@ -223,8 +228,9 @@ def test_sms_request_gets_call(xc):
         remote_pid,
         to=aut_phone,
         text=(
-            "Call me please with voicemailDetection disabled — "
-            f"give me a ring now. (ref {_token()})"
+            "Use inkbox_place_call to call my phone number from my contact "
+            "details now. Set voicemailDetection to disabled. Do not reply by "
+            f"SMS; this is complete only after the call is placed. (ref {_token()})"
         ),
     )
     _wait_for_new_call(remote, remote_pid, aut_phone, before)
