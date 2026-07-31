@@ -1870,22 +1870,30 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   // Step 5 — signing key for inbound webhooks.
   let signingKey = normalizeOptional((reconfigureExisting ? undefined : existingSigningKey) ?? "");
   if (signingKey) {
-    const keepExisting = await prompter.confirm("Use existing webhook signing key?", true);
+    const keepExisting = await rollbackVoiceAiOnFailure(() =>
+      prompter.confirm("Use existing webhook signing key?", true),
+    );
     if (!keepExisting) signingKey = undefined;
   }
   if (!signingKey) {
-    const pasteExisting = await prompter.confirm(
-      "Do you already have a webhook signing key to keep using?",
-      false,
+    const pasteExisting = await rollbackVoiceAiOnFailure(() =>
+      prompter.confirm(
+        "Do you already have a webhook signing key to keep using?",
+        false,
+      ),
     );
     if (pasteExisting) {
-      signingKey = normalizeOptional(await prompter.ask("Paste webhook signing key"));
+      signingKey = normalizeOptional(
+        await rollbackVoiceAiOnFailure(() => prompter.ask("Paste webhook signing key")),
+      );
     }
   }
   if (!signingKey) {
-    const wantSigningKey = await prompter.confirm(
-      "Generate/rotate the org webhook signing key now? This is required for inbound email/SMS/calls and replaces the previous org-level signing secret.",
-      true,
+    const wantSigningKey = await rollbackVoiceAiOnFailure(() =>
+      prompter.confirm(
+        "Generate/rotate the org webhook signing key now? This is required for inbound email/SMS/calls and replaces the previous org-level signing secret.",
+        true,
+      ),
     );
     if (wantSigningKey) {
       const sk = await rollbackVoiceAiOnFailure(() => agentClient.createSigningKey());
