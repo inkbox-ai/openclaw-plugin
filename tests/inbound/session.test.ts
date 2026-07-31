@@ -3108,7 +3108,7 @@ describe("configureInkboxIdentityDelivery", () => {
     expect(setIncomingCallAction).toHaveBeenCalledTimes(1);
   });
 
-  it("uses separate owner URLs for A2A and iMessage subscriptions", async () => {
+  it("uses the canonical URL for A2A and iMessage subscriptions", async () => {
     const identity = {
       id: "identity-1",
       mailbox: null,
@@ -3126,7 +3126,7 @@ describe("configureInkboxIdentityDelivery", () => {
     const inkbox = await runtime.getClient();
     expect(inkbox.webhooks.subscriptions.create).toHaveBeenCalledWith({
       agentIdentityId: "identity-1",
-      url: "https://example.com/inkbox/webhook?channel=a2a",
+      url: "https://example.com/inkbox/webhook",
       eventTypes: [
         "a2a.task.created",
         "a2a.task.message",

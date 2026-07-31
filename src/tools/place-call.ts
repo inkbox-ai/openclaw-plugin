@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { CallOrigin } from "@inkbox/sdk";
+import { CallOrigin, VoicemailDetection } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
@@ -98,6 +98,15 @@ export function registerPlaceCall(
               "Optional WebSocket URL (wss://...) that Inkbox will connect to for the call stream. Omit to use the plugin's active Inkbox tunnel.",
           }),
         ),
+        voicemailDetection: Type.Optional(
+          Type.Union(
+            [Type.Literal("enabled"), Type.Literal("disabled")],
+            {
+              description:
+                "Whether the call should end when voicemail is detected. Omit to keep detection enabled.",
+            },
+          ),
+        ),
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
@@ -156,6 +165,14 @@ export function registerPlaceCall(
                   ? CallOrigin.SHARED_IMESSAGE_NUMBER
                   : CallOrigin.DEDICATED_NUMBER,
               clientWebsocketUrl: decoratedClientWebsocketUrl,
+              ...(params.voicemailDetection !== undefined
+                ? {
+                    voicemailDetection:
+                      params.voicemailDetection === "disabled"
+                        ? VoicemailDetection.DISABLED
+                        : VoicemailDetection.ENABLED,
+                  }
+                : {}),
             });
           } catch (error) {
             // A shared-line call to someone who isn't connected over iMessage
