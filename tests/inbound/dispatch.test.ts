@@ -70,6 +70,26 @@ function callEvent(contactId: string | null = "contact-call-1") {
   };
 }
 
+function callEndedEvent(
+  direction: "inbound" | "outbound" | undefined,
+  contactId: string | null = "contact-call-1",
+) {
+  return {
+    id: "event-call-ended-1",
+    event_type: "call.ended",
+    timestamp: "2026-07-31T00:00:00Z",
+    data: {
+      contacts: contactId ? [{ id: contactId, name: "Ada" }] : [],
+      call: {
+        id: "call-1",
+        mode: "hosted_agent",
+        ...(direction ? { direction } : {}),
+        remote_phone_number: "+15551234567",
+      },
+    },
+  };
+}
+
 describe("dispatchInbound", () => {
   it("routes message.received to onMail", async () => {
     const onMail = vi.fn();
@@ -188,6 +208,33 @@ describe("dispatchInbound", () => {
       const result = await dispatchInbound(callEvent("contact-blocked"), { onCall }, ["contact-allowed"]);
       expect(result.callDecision).toEqual({ action: "reject" });
       expect(onCall).not.toHaveBeenCalled();
+    });
+
+    it("delivers outbound call completions despite the inbound contact allowlist", async () => {
+      const onCallEnded = vi.fn();
+      const event = callEndedEvent("outbound", "contact-blocked");
+      await dispatchInbound(event, { onCallEnded }, ["contact-allowed"]);
+      expect(onCallEnded).toHaveBeenCalledWith(event);
+    });
+
+    it("drops inbound call completions when the contact is not allowed", async () => {
+      const onCallEnded = vi.fn();
+      await dispatchInbound(
+        callEndedEvent("inbound", "contact-blocked"),
+        { onCallEnded },
+        ["contact-allowed"],
+      );
+      expect(onCallEnded).not.toHaveBeenCalled();
+    });
+
+    it("fails safe when a call completion has no direction", async () => {
+      const onCallEnded = vi.fn();
+      await dispatchInbound(
+        callEndedEvent(undefined, "contact-blocked"),
+        { onCallEnded },
+        ["contact-allowed"],
+      );
+      expect(onCallEnded).not.toHaveBeenCalled();
     });
 
     it("drops events with null contact id when an allowlist is set", async () => {

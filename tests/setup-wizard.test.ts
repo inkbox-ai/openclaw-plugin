@@ -156,6 +156,12 @@ function createIdentity(overrides: Record<string, unknown> = {}) {
       smsStatus: "ready",
     },
     tunnel: { publicHost: "smoke-agent.inkboxwire.com" },
+    getIncomingCallAction: vi.fn(async () => ({
+      agentIdentityId: "identity-1",
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/calls",
+      incomingCallWebhookUrl: null,
+    })),
     refresh: vi.fn(async () => identity),
     provisionPhoneNumber: vi.fn(),
     listTexts: vi.fn(),
@@ -742,6 +748,183 @@ describe("runSetupWizard", () => {
       voiceAiAuthorityMode: "yolo",
     });
     expect(JSON.stringify(result.config)).not.toContain("ApiKey_admin_ephemeral");
+  });
+
+  it("restores the hosted config and keeps the local stack when Voice AI setup fails", async () => {
+    const previous = {
+      authorityMode: "contact_scoped",
+      voice: "alloy",
+      model: "voice-model",
+      instructions: "Previous instructions",
+    };
+    const setHostedAgentConfig = vi.fn()
+      .mockRejectedValueOnce(new Error("hosted config write failed"))
+      .mockResolvedValueOnce(previous);
+    const setIncomingCallAction = vi.fn(async () => ({}));
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => previous),
+      setHostedAgentConfig,
+      setIncomingCallAction,
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key", authSubtype: "agent_claimed", organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      selections: ["inkbox_voice_ai", "contact_scoped", "inkbox_tts_stt"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect(setHostedAgentConfig.mock.calls).toEqual([
+      [{}],
+      [{ voice: "alloy", model: "voice-model", instructions: "Previous instructions" }],
+    ]);
+    expect(setIncomingCallAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ incomingCallAction: "hosted_agent" }),
+    );
+  });
+
+  it("restores authority, hosted config, and incoming routing after a later Voice AI failure", async () => {
+    const previousHosted = {
+      authorityMode: "contact_scoped", voice: null, model: null, instructions: null,
+    };
+    const previousIncoming = {
+      agentIdentityId: "identity-1",
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/calls",
+      incomingCallWebhookUrl: null,
+    };
+    const setHostedAgentConfig = vi.fn(async () => previousHosted);
+    const setHostedAgentAuthorityMode = vi.fn(async () => previousHosted);
+    const setIncomingCallAction = vi.fn()
+      .mockRejectedValueOnce(new Error("incoming route failed"))
+      .mockResolvedValue({});
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => previousHosted),
+      getIncomingCallAction: vi.fn(async () => previousIncoming),
+      setHostedAgentConfig,
+      setHostedAgentAuthorityMode,
+      setIncomingCallAction,
+    });
+    sdk.whoami
+      .mockResolvedValueOnce({
+        authType: "api_key", authSubtype: "agent_claimed", organizationId: "org-1",
+      })
+      .mockResolvedValueOnce({
+        authType: "api_key", authSubtype: "admin", organizationId: "org-1",
+      });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      asks: ["ApiKey_admin_ephemeral"],
+      selections: ["inkbox_voice_ai", "yolo", "inkbox_tts_stt"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_agent", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect(setHostedAgentAuthorityMode.mock.calls).toEqual([
+      [{ authorityMode: "yolo" }],
+      [{ authorityMode: "contact_scoped" }],
+    ]);
+    expect(setHostedAgentConfig.mock.calls).toEqual([[{}], [{}]]);
+    expect(setIncomingCallAction).toHaveBeenNthCalledWith(1, {
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
+    });
+    expect(setIncomingCallAction).toHaveBeenNthCalledWith(2, {
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/calls",
+    });
+  });
+
+  it("continues to the stack selector when rollback itself is incomplete", async () => {
+    const setHostedAgentConfig = vi.fn(async () => {
+      throw new Error("hosted config unavailable");
+    });
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => ({ authorityMode: "contact_scoped" })),
+      setHostedAgentConfig,
+      setIncomingCallAction: vi.fn(async () => ({})),
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key", authSubtype: "agent_claimed", organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      selections: ["inkbox_voice_ai", "contact_scoped", "inkbox_tts_stt"],
+      confirms: [true],
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect(setHostedAgentConfig).toHaveBeenCalledTimes(2);
+    expect(log.mock.calls.flat().join("\n")).toContain(
+      "Could not fully restore the prior phone-call configuration",
+    );
+  });
+
+  it("rolls Voice AI remote state back when the local config write fails later", async () => {
+    const previousHosted = {
+      authorityMode: "contact_scoped", voice: "sage", model: null, instructions: null,
+    };
+    const previousIncoming = {
+      agentIdentityId: "identity-1",
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/calls",
+      incomingCallWebhookUrl: null,
+    };
+    const setHostedAgentConfig = vi.fn(async () => previousHosted);
+    const setIncomingCallAction = vi.fn(async () => previousIncoming);
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => previousHosted),
+      getIncomingCallAction: vi.fn(async () => previousIncoming),
+      setHostedAgentConfig,
+      setIncomingCallAction,
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key", authSubtype: "agent_claimed", organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      selections: ["inkbox_voice_ai", "contact_scoped"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      persistConfig: vi.fn(async () => ({ ok: false, message: "disk full" })),
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(setIncomingCallAction.mock.calls).toEqual([
+      [{ incomingCallAction: "hosted_agent", clientWebsocketUrl: null, incomingCallWebhookUrl: null }],
+      [{ incomingCallAction: "auto_accept", clientWebsocketUrl: "wss://old.example/calls" }],
+    ]);
+    expect(setHostedAgentConfig.mock.calls).toEqual([[{}], [{ voice: "sage" }]]);
   });
 
   it("re-asks the realtime opt-in question after a failed OpenAI key validation", async () => {

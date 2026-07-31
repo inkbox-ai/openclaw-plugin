@@ -53,6 +53,10 @@ function anyInboundContactAllowed(contactIds: string[], allowedContactIds?: stri
   return contactIds.some((id) => inboundContactAllowed(id, allowedContactIds));
 }
 
+function isExplicitOutboundCallEnded(parsed: any): boolean {
+  return parsed?.data?.call?.direction === "outbound";
+}
+
 export interface InboundHandlers {
   // Mail events fire-and-forget. Six event_types: message.received/sent/
   // forwarded/delivered/bounced/failed. Most workflows only care about
@@ -164,7 +168,12 @@ export async function dispatchInbound(
     }
     if (eventType === "call.ended") {
       const contactIds = resolveRemoteContactIds(parsed, "call-ended");
-      if (!anyInboundContactAllowed(contactIds, allowedContactIds)) {
+      // Outbound calls were already authorized by allowedRecipients when
+      // placed. Missing/unknown direction remains fail-safe as inbound.
+      if (
+        !isExplicitOutboundCallEnded(parsed) &&
+        !anyInboundContactAllowed(contactIds, allowedContactIds)
+      ) {
         return { kind: "call-ended" };
       }
       await handlers.onCallEnded?.(parsed as CallEndedWebhookPayload);

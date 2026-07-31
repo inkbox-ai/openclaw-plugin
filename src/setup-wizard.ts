@@ -835,25 +835,69 @@ async function loadAdminIdentity(params: {
   }
 }
 
+interface VoiceAiSetupTransaction {
+  rollback(): Promise<void>;
+}
+
+function hostedAgentConfigValues(config: any): {
+  voice?: string;
+  model?: string;
+  instructions?: string;
+} {
+  return {
+    ...(typeof config?.voice === "string" ? { voice: config.voice } : {}),
+    ...(typeof config?.model === "string" ? { model: config.model } : {}),
+    ...(typeof config?.instructions === "string"
+      ? { instructions: config.instructions }
+      : {}),
+  };
+}
+
+function incomingCallActionValues(config: any): {
+  incomingCallAction: string;
+  clientWebsocketUrl?: string;
+  incomingCallWebhookUrl?: string;
+} {
+  return {
+    incomingCallAction: String(config?.incomingCallAction ?? "auto_reject"),
+    ...(typeof config?.clientWebsocketUrl === "string"
+      ? { clientWebsocketUrl: config.clientWebsocketUrl }
+      : {}),
+    ...(typeof config?.incomingCallWebhookUrl === "string"
+      ? { incomingCallWebhookUrl: config.incomingCallWebhookUrl }
+      : {}),
+  };
+}
+
 async function configureVoiceAi(params: {
   identity: AgentIdentity;
   identityHandle: string;
   authorityIdentity?: AgentIdentity;
   baseUrl?: string;
   prompter: Prompter;
-}): Promise<{ authorityMode: VoiceAiAuthorityMode; authorityIdentity?: AgentIdentity } | undefined> {
+}): Promise<{
+  authorityMode: VoiceAiAuthorityMode;
+  authorityIdentity?: AgentIdentity;
+  transaction: VoiceAiSetupTransaction;
+} | undefined> {
   if (
     typeof (params.identity as any).getHostedAgentConfig !== "function" ||
-    typeof (params.identity as any).setHostedAgentConfig !== "function"
+    typeof (params.identity as any).setHostedAgentConfig !== "function" ||
+    typeof (params.identity as any).getIncomingCallAction !== "function" ||
+    typeof (params.identity as any).setIncomingCallAction !== "function"
   ) {
     console.log("  Inkbox Voice AI setup requires @inkbox/sdk 0.5.9.");
     return undefined;
   }
   let previous: any;
+  let previousIncoming: any;
   try {
-    previous = await (params.identity as any).getHostedAgentConfig();
+    [previous, previousIncoming] = await Promise.all([
+      (params.identity as any).getHostedAgentConfig(),
+      (params.identity as any).getIncomingCallAction(),
+    ]);
   } catch (error) {
-    console.log(`  Could not read Inkbox Voice AI configuration: ${messageFromError(error)}`);
+    console.log(`  Could not read the current phone-call configuration: ${messageFromError(error)}`);
     return undefined;
   }
   const previousAuthority: VoiceAiAuthorityMode =
@@ -884,11 +928,56 @@ async function configureVoiceAi(params: {
     }
   }
 
+  let hostedChanged = false;
+  let authorityChanged = false;
+  let incomingChanged = false;
+  let rolledBack = false;
+  const transaction: VoiceAiSetupTransaction = {
+    async rollback() {
+      if (rolledBack) return;
+      rolledBack = true;
+      const failures: string[] = [];
+      if (incomingChanged) {
+        try {
+          await (params.identity as any).setIncomingCallAction(
+            incomingCallActionValues(previousIncoming),
+          );
+        } catch (error) {
+          failures.push(`incoming-call action (${messageFromError(error)})`);
+        }
+      }
+      if (authorityChanged && authorityIdentity) {
+        try {
+          await (authorityIdentity as any).setHostedAgentAuthorityMode({
+            authorityMode: previousAuthority,
+          });
+        } catch (error) {
+          failures.push(`authority mode (${messageFromError(error)})`);
+        }
+      }
+      if (hostedChanged) {
+        try {
+          await (params.identity as any).setHostedAgentConfig(
+            hostedAgentConfigValues(previous),
+          );
+        } catch (error) {
+          failures.push(`Voice AI config (${messageFromError(error)})`);
+        }
+      }
+      if (failures.length > 0) {
+        console.log("  Could not fully restore the prior phone-call configuration:");
+        for (const failure of failures) console.log(`    ${failure}`);
+      }
+    },
+  };
+
   try {
     // Voice/model/instructions remain server defaults; OpenClaw owns only the
     // stack choice and authority selection.
+    hostedChanged = true;
     await (params.identity as any).setHostedAgentConfig({});
     if (authorityMode !== previousAuthority) {
+      authorityChanged = true;
       await (authorityIdentity as any).setHostedAgentAuthorityMode({
         authorityMode:
           authorityMode === "yolo"
@@ -896,11 +985,19 @@ async function configureVoiceAi(params: {
             : "contact_scoped",
       });
     }
+    incomingChanged = true;
+    await (params.identity as any).setIncomingCallAction({
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
+    });
   } catch (error) {
     console.log(`  Inkbox Voice AI configuration failed: ${messageFromError(error)}`);
+    await transaction.rollback();
+    console.log("  The previous local voice-stack selection remains active.");
     return undefined;
   }
-  return { authorityMode, authorityIdentity };
+  return { authorityMode, authorityIdentity, transaction };
 }
 
 async function configurePhoneVoiceStack(params: {
@@ -918,6 +1015,7 @@ async function configurePhoneVoiceStack(params: {
   realtime: WizardVoiceRealtimeConfig;
   authorityMode?: VoiceAiAuthorityMode;
   authorityIdentity?: AgentIdentity;
+  voiceAiTransaction?: VoiceAiSetupTransaction;
 }> {
   const configuredStack = params.existingAccount.config?.voiceStack;
   let initialValue: PhoneVoiceStack =
@@ -967,6 +1065,7 @@ async function configurePhoneVoiceStack(params: {
         realtime: defaultVoiceRealtimeConfig(false),
         authorityMode: configured.authorityMode,
         authorityIdentity,
+        voiceAiTransaction: configured.transaction,
       };
     }
   }
@@ -1071,19 +1170,14 @@ async function configureIdentityGatewayDelivery(params: {
   // on either.
   const imessageEnabled = params.imessageEnabled || Boolean(params.identity.imessageEnabled);
   const canReceiveCalls = Boolean(params.identity.phoneNumber || imessageEnabled);
-  if (canReceiveCalls) {
-    const callConfig =
-      params.voiceStack === "inkbox_voice_ai"
-        ? {
-            incomingCallAction: "hosted_agent",
-            clientWebsocketUrl: null,
-            incomingCallWebhookUrl: null,
-          }
-        : {
-            incomingCallAction: "auto_accept",
-            clientWebsocketUrl: callWebsocketUrl,
-            incomingCallWebhookUrl: null,
-          };
+  // Voice AI routing was applied transactionally with hosted config and
+  // authority. Local stacks are configured here once their WebSocket is known.
+  if (canReceiveCalls && params.voiceStack !== "inkbox_voice_ai") {
+    const callConfig = {
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: callWebsocketUrl,
+      incomingCallWebhookUrl: null,
+    };
     if (typeof (params.identity as any).setIncomingCallAction === "function") {
       await (params.identity as any).setIncomingCallAction(callConfig);
     } else if (params.identity.phoneNumber?.id) {
@@ -1091,11 +1185,9 @@ async function configureIdentityGatewayDelivery(params: {
       // configure a shared-iMessage-only identity.
       await params.client.phoneNumbers.update(params.identity.phoneNumber.id, callConfig);
     }
-    console.log(
-      params.voiceStack === "inkbox_voice_ai"
-        ? "Incoming calls use Inkbox Voice AI."
-        : `Incoming calls bridge to ${callWebsocketUrl}.`,
-    );
+    console.log(`Incoming calls bridge to ${callWebsocketUrl}.`);
+  } else if (canReceiveCalls) {
+    console.log("Incoming calls use Inkbox Voice AI.");
   }
 
   if (params.identity.id && canReceiveCalls) {
@@ -1764,6 +1856,15 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       : undefined;
   authorityIdentity = phoneVoice?.authorityIdentity ?? authorityIdentity;
 
+  const rollbackVoiceAiOnFailure = async <T>(work: () => Promise<T>): Promise<T> => {
+    try {
+      return await work();
+    } catch (error) {
+      await phoneVoice?.voiceAiTransaction?.rollback();
+      throw error;
+    }
+  };
+
   printInkboxAuthorizationInfo();
 
   // Step 5 — signing key for inbound webhooks.
@@ -1787,7 +1888,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
       true,
     );
     if (wantSigningKey) {
-      const sk = await agentClient.createSigningKey();
+      const sk = await rollbackVoiceAiOnFailure(() => agentClient.createSigningKey());
       signingKey = (sk as any).signingKey ?? (sk as any).key;
       if (!signingKey) {
         console.log("⚠️  Signing key call succeeded but the response shape was unexpected — fall back to creating one in the Console.");
@@ -1797,6 +1898,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     }
   }
   if (!signingKey) {
+    await phoneVoice?.voiceAiTransaction?.rollback();
     return {
       ok: false,
       message:
@@ -1818,6 +1920,7 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     });
     tunnelName = delivery.tunnelName;
   } catch (error) {
+    await phoneVoice?.voiceAiTransaction?.rollback();
     return {
       ok: false,
       message: `Inkbox delivery setup failed: ${messageFromError(error)}`,
@@ -1825,15 +1928,17 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   }
 
   // Step 7 — persist non-secret state for future doctor/CLI runs.
-  identity = await identity.refresh();
-  await writeIdentityState({
-    identityHandle,
-    emailAddress: identity.mailbox?.emailAddress ?? null,
-    phoneNumber: identity.phoneNumber?.number ?? null,
-    imessageEnabled: Boolean(identity.imessageEnabled),
-    tunnelPublicHost: identity.tunnel?.publicHost ?? null,
-    savedAt: new Date().toISOString(),
-  });
+  identity = await rollbackVoiceAiOnFailure(() => identity!.refresh());
+  await rollbackVoiceAiOnFailure(() =>
+    writeIdentityState({
+      identityHandle,
+      emailAddress: identity.mailbox?.emailAddress ?? null,
+      phoneNumber: identity.phoneNumber?.number ?? null,
+      imessageEnabled: Boolean(identity.imessageEnabled),
+      tunnelPublicHost: identity.tunnel?.publicHost ?? null,
+      savedAt: new Date().toISOString(),
+    }),
+  );
   printAgentSummary(identity);
 
   // Step 8 — persist the channel config in the active OpenClaw profile when
@@ -1853,15 +1958,18 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
     ...(phoneVoice ? { voiceRealtime: phoneVoice.realtime } : {}),
   };
   if (opts.persistConfig) {
-    const persisted = await opts.persistConfig(snippet, {
-      currentConfig: opts.currentConfig,
-      env,
-    });
+    const persisted = await rollbackVoiceAiOnFailure(() =>
+      opts.persistConfig!(snippet, {
+        currentConfig: opts.currentConfig,
+        env,
+      }),
+    );
     if (!persisted.ok) {
       console.log("\n❌ Inkbox setup completed, but OpenClaw config was not updated.");
       console.log(persisted.message ?? "Unknown config write error.");
       console.log("\nManual fallback for channels.inkbox:\n");
       console.log(JSON.stringify(snippet, null, 2));
+      await phoneVoice?.voiceAiTransaction?.rollback();
       return {
         ok: false,
         message: "OpenClaw config write failed.",
