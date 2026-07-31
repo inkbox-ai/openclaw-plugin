@@ -153,9 +153,11 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
       runtime,
       webhookUrl,
       callWebhookUrl: webhookUrl,
+      voiceStack: account.config.voiceStack,
       logger: ctx.log,
     });
     await bridge.catchUpA2A();
+    await bridge.catchUpHostedCalls();
     ctx.setStatus({
       accountId: account.accountId,
       running: true,
@@ -200,10 +202,14 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
   await configureInkboxIdentityDelivery({
     runtime,
     webhookUrl,
-    callWebsocketUrl,
+    ...(account.config.voiceStack === "inkbox_voice_ai"
+      ? {}
+      : { callWebsocketUrl }),
+    voiceStack: account.config.voiceStack,
     logger: ctx.log,
   });
   await bridge.catchUpA2A();
+  await bridge.catchUpHostedCalls();
   ctx.setStatus({
     accountId: account.accountId,
     running: true,

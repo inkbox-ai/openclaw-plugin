@@ -120,14 +120,24 @@ function enabledOpenAiRealtime(apiKey: string) {
 function createPrompter(params: {
   asks?: string[];
   confirms?: boolean[];
+  selections?: string[];
 } = {}): Prompter & { ask: ReturnType<typeof vi.fn>; confirm: ReturnType<typeof vi.fn> } {
   const asks = [...(params.asks ?? [])];
   const confirms = [...(params.confirms ?? [])];
+  const selections = [...(params.selections ?? [])];
+  const confirm = vi.fn(async (_question: string, defaultYes?: boolean) =>
+    confirms.length ? confirms.shift()! : Boolean(defaultYes),
+  );
   return {
     ask: vi.fn(async () => asks.shift() ?? ""),
-    confirm: vi.fn(async (_question: string, defaultYes?: boolean) =>
-      confirms.length ? confirms.shift()! : Boolean(defaultYes),
-    ),
+    confirm,
+    select: vi.fn(async (_question: string, _options: any[], defaultValue?: string) => {
+      if (selections.length) return selections.shift() as any;
+      // Preserve the legacy tests' yes/no realtime answer while exercising
+      // the new native three-option selector.
+      const realtime = await confirm("Use OpenAI Realtime API for phone calls?", false);
+      return (realtime ? "openai_realtime" : defaultValue ?? "inkbox_tts_stt") as any;
+    }) as any,
     close: vi.fn(),
   };
 }
@@ -437,6 +447,8 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceStack: "inkbox_tts_stt",
+        voicemailDetection: "enabled",
         voiceRealtime: disabledOpenAiRealtime,
       },
       {
@@ -642,6 +654,96 @@ describe("runSetupWizard", () => {
     );
   });
 
+  it("configures Inkbox Voice AI contact-scoped without requesting an admin credential", async () => {
+    const setHostedAgentConfig = vi.fn(async () => ({}));
+    const setIncomingCallAction = vi.fn(async () => ({}));
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => ({ authorityMode: "contact_scoped" })),
+      setHostedAgentConfig,
+      setIncomingCallAction,
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      selections: ["inkbox_voice_ai", "contact_scoped"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config).toMatchObject({
+      voiceStack: "inkbox_voice_ai",
+      voiceAiAuthorityMode: "contact_scoped",
+      voicemailDetection: "enabled",
+    });
+    expect(setHostedAgentConfig).toHaveBeenCalledWith({});
+    expect(setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
+    });
+    expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
+      "Paste an admin-scoped Inkbox API key for this authority change",
+    );
+  });
+
+  it("uses an admin key to elevate Voice AI to YOLO without persisting that key", async () => {
+    const setHostedAgentAuthorityMode = vi.fn(async () => ({}));
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => ({ authorityMode: "contact_scoped" })),
+      setHostedAgentConfig: vi.fn(async () => ({})),
+      setHostedAgentAuthorityMode,
+      setIncomingCallAction: vi.fn(async () => ({})),
+    });
+    sdk.whoami
+      .mockResolvedValueOnce({
+        authType: "api_key",
+        authSubtype: "agent_claimed",
+        organizationId: "org-1",
+      })
+      .mockResolvedValueOnce({
+        authType: "api_key",
+        authSubtype: "admin",
+        organizationId: "org-1",
+      });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      asks: ["ApiKey_admin_ephemeral"],
+      selections: ["inkbox_voice_ai", "yolo"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: {
+        INKBOX_API_KEY: "ApiKey_agent",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(setHostedAgentAuthorityMode).toHaveBeenCalledWith({ authorityMode: "yolo" });
+    expect(result.config).toMatchObject({
+      apiKey: "ApiKey_agent",
+      voiceStack: "inkbox_voice_ai",
+      voiceAiAuthorityMode: "yolo",
+    });
+    expect(JSON.stringify(result.config)).not.toContain("ApiKey_admin_ephemeral");
+  });
+
   it("re-asks the realtime opt-in question after a failed OpenAI key validation", async () => {
     const identity = createIdentity();
     sdk.whoami.mockResolvedValue({
@@ -685,7 +787,7 @@ describe("runSetupWizard", () => {
       ([question]) => question === "Use OpenAI Realtime API for phone calls?",
     );
     expect(realtimeConfirms).toHaveLength(2);
-    expect(realtimeConfirms.map(([, defaultYes]) => defaultYes)).toEqual([false, true]);
+    expect(realtimeConfirms.map(([, defaultYes]) => defaultYes)).toEqual([false, false]);
   });
 
   it("validates OpenAI realtime access with the GA client-secret payload shape", async () => {
@@ -759,6 +861,8 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_new",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceStack: "inkbox_tts_stt",
+        voicemailDetection: "enabled",
         voiceRealtime: disabledOpenAiRealtime,
       },
       {
@@ -994,12 +1098,15 @@ describe("runSetupWizard", () => {
     const url = "https://smoke-agent.inkboxwire.com/inkbox/webhook";
     sdk.subscriptionsList.mockImplementation(async (filter: any) => [
       {
-        id: filter.mailboxId ? "sub-mail" : "sub-text",
+        id: filter.mailboxId ? "sub-mail" : filter.phoneNumberId ? "sub-text" : "sub-call",
         organizationId: "org-1",
         mailboxId: filter.mailboxId ?? null,
         phoneNumberId: filter.phoneNumberId ?? null,
+        agentIdentityId: filter.agentIdentityId ?? null,
         url,
-        eventTypes: filter.mailboxId
+        eventTypes: filter.agentIdentityId
+          ? ["call.ended"]
+          : filter.mailboxId
           ? [
               "message.received",
               "message.sent",
@@ -1150,7 +1257,10 @@ describe("runSetupWizard", () => {
     expect(result.ok).toBe(true);
     expect(identity.update).not.toHaveBeenCalled();
     expect(sdk.subscriptionsCreate).not.toHaveBeenCalledWith(
-      expect.objectContaining({ agentIdentityId: "identity-1" }),
+      expect.objectContaining({
+        agentIdentityId: "identity-1",
+        eventTypes: expect.arrayContaining(["imessage.received"]),
+      }),
     );
   });
 
@@ -1327,8 +1437,8 @@ describe("runSetupWizard", () => {
     expect(result.ok).toBe(true);
     // No dedicated number, but the shared iMessage line can take calls — the
     // realtime opt-in must still be offered.
-    expect(prompter.confirm.mock.calls.map(([question]) => question)).toContain(
-      "Use OpenAI Realtime API for phone calls?",
+    expect((prompter.select as any).mock.calls.map(([question]: [string]) => question)).toContain(
+      "Choose how this agent should handle phone calls",
     );
     expect(result.config?.voiceRealtime).toEqual(
       expect.objectContaining({ enabled: false }),

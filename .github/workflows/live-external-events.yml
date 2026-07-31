@@ -45,12 +45,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: a4dd76b534e33c0a8352148d8f0e9ab25199f05b
-          path: .ci/inkbox
-
       - name: Set up env paths (gateway log)
         run: echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
 
@@ -65,16 +59,12 @@ jobs:
 
       - name: Install live-test deps (Inkbox SDK + pytest)
         run: |
-          pip install \
-            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@a4dd76b534e33c0a8352148d8f0e9ab25199f05b#subdirectory=sdk/python" \
-            pytest
+          pip install 'inkbox==0.5.9' pytest
 
       - name: Build the plugin
         run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
-          npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript openclaw@2026.5.27
+          npm ci
+          npm install --no-save --package-lock=false openclaw@2026.5.27
           npm run build
 
       - name: Install OpenClaw host
@@ -120,6 +110,8 @@ jobs:
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"
+          openclaw config set channels.inkbox.voiceStack inkbox_tts_stt
+          openclaw config set channels.inkbox.voicemailDetection disabled
           openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
           openclaw config set tools.allow '["inkbox"]' --strict-json
           # Onboarding defaults tools.profile to "coding", whose base allowlist

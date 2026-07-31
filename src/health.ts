@@ -404,7 +404,9 @@ export async function detectInkboxHealthFindings(
       callWsUrl = (identity.phoneNumber as any)?.clientWebsocketUrl;
     }
     const callRouteOk =
-      callAction === "auto_accept"
+      callAction === "hosted_agent"
+        ? account.config.voiceStack === "inkbox_voice_ai"
+        : callAction === "auto_accept"
         ? Boolean(callWsUrl)
         : callAction === "webhook"
           ? Boolean(callWebhookUrl)
@@ -424,7 +426,7 @@ export async function detectInkboxHealthFindings(
         finding(
           "inkbox/incoming-call-route",
           "warning",
-          `Identity ${account.identity} has incomingCallAction=${callAction ?? "(unset)"} without a matching URL.`,
+          `Identity ${account.identity} has incomingCallAction=${callAction ?? "(unset)"} that does not match the configured phone call voice stack.`,
           "channels.inkbox",
           "Run `openclaw inkbox setup` to wire the incoming-call route.",
         ),

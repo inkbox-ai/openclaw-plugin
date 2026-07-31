@@ -29,10 +29,10 @@ import pytest
 # cadence. Two identical no-reply sends to the same number trip the
 # duplicate_body rule (422), so every call request must carry a fresh body.
 _CALL_ME_PHRASINGS = (
-    "Please call me right now by phone and set voicemailDetection to disabled.",
-    "Can you ring me now with voicemailDetection disabled?",
-    "Give me a call now, using disabled voicemailDetection.",
-    "Please phone me right away and disable voicemailDetection.",
+    "Please call me right now by phone.",
+    "Can you ring me now?",
+    "Give me a call now.",
+    "Please phone me right away.",
 )
 
 

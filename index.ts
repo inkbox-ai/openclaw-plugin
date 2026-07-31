@@ -106,6 +106,21 @@ function registerInkboxTools(api: any): void {
       capability: "call-websocket",
     }) as { url?: string } | undefined;
     return context?.url ?? deriveConfiguredCallWebsocketUrl(account);
+  }, () => {
+    let currentCfg: unknown;
+    try {
+      currentCfg = api.runtime?.config?.current?.();
+    } catch {
+      currentCfg = undefined;
+    }
+    const account = resolveInkboxAccount({
+      cfg: currentCfg,
+      pluginConfig: api.pluginConfig,
+    });
+    return {
+      voiceStack: account.config.voiceStack,
+      voicemailDetection: account.config.voicemailDetection,
+    };
   });
 
   // Read/lifecycle tools for email, SMS, and calls. Required tools light up

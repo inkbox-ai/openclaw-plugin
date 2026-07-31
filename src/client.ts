@@ -5,6 +5,11 @@ import {
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED,
 } from "@inkbox/sdk";
 import { inkboxClientOptions } from "./sdk-options.js";
+import type {
+  OutboundVoicemailDetection,
+  PhoneVoiceStack,
+  VoiceAiAuthorityMode,
+} from "./voice-stack.js";
 
 // Shape of `plugins.entries.inkbox.config` after configSchema validation.
 export interface InkboxPluginConfig {
@@ -30,6 +35,16 @@ export interface InkboxPluginConfig {
   voiceAgentPrewarm?: boolean;
   voiceAgentPrewarmTtlMs?: number;
   voiceAgentPrewarmTimeoutMs?: number;
+  // Voice: one explicit stack controls inbound routing, outbound calls, and
+  // post-call handling. Omitted preserves the pre-selection auto-detection
+  // behavior for existing installations.
+  voiceStack?: PhoneVoiceStack;
+  // Local copy of the saved Voice AI authority, used by doctor for drift
+  // detection. Outbound calls deliberately omit a per-call override.
+  voiceAiAuthorityMode?: VoiceAiAuthorityMode;
+  // Outbound call policy. Ordinary calls keep detection enabled; isolated
+  // test environments can set disabled explicitly.
+  voicemailDetection?: OutboundVoicemailDetection;
   // Voice: optional raw-media bridge to an OpenClaw realtime voice provider
   // such as OpenAI Realtime. When unavailable, the call falls back to Inkbox
   // managed STT/TTS unless fallbackToInkboxSttTts is false.

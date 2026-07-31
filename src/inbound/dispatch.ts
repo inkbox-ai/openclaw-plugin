@@ -3,6 +3,7 @@ import type {
   MailWebhookPayload,
   TextWebhookPayload,
   PhoneIncomingCallWebhookPayload,
+  CallEndedWebhookPayload,
 } from "@inkbox/sdk";
 import { inboundContactAllowed } from "../allowlist.js";
 
@@ -17,7 +18,10 @@ export interface InboundCallDecision {
 // allowlist decision. Text and call payloads have moved from singular
 // `contact` to plural `contacts`, so tolerate both during rollout. Text/call
 // keep the previous first-contact allowlist behavior.
-function resolveRemoteContactIds(parsed: any, kind: "mail" | "text" | "imessage" | "call"): string[] {
+function resolveRemoteContactIds(
+  parsed: any,
+  kind: "mail" | "text" | "imessage" | "call" | "call-ended",
+): string[] {
   if (kind === "mail") {
     const contacts = parsed?.data?.contacts;
     if (!Array.isArray(contacts)) return [];
@@ -33,7 +37,7 @@ function resolveRemoteContactIds(parsed: any, kind: "mail" | "text" | "imessage"
     const contact = parsed?.data?.contact;
     return typeof contact?.id === "string" ? [contact.id] : [];
   }
-  const contacts = parsed?.contacts;
+  const contacts = kind === "call-ended" ? parsed?.data?.contacts : parsed?.contacts;
   if (Array.isArray(contacts)) {
     const first = contacts.find((c: any) => typeof c?.id === "string");
     return first ? [first.id] : [];
@@ -64,6 +68,7 @@ export interface InboundHandlers {
   // subscription is owned by the agent identity, not a phone number.
   onIMessage?(event: IMessageWebhookPayload): Promise<void> | void;
   onA2A?(event: Record<string, unknown>): Promise<void> | void;
+  onCallEnded?(event: CallEndedWebhookPayload): Promise<void> | void;
 
   // Inbound calls are synchronous — the HTTP response IS the routing decision.
   // Default if unspecified: reject. To answer, return clientWebsocketUrl
@@ -84,7 +89,7 @@ export interface InboundHandlers {
 }
 
 export interface DispatchResult {
-  kind: "mail" | "text" | "imessage" | "a2a" | "call" | "external";
+  kind: "mail" | "text" | "imessage" | "a2a" | "call-ended" | "call" | "external";
   // Only populated for kind="call". The handler builds the response body
   // from this.
   callDecision?: InboundCallDecision;
@@ -156,6 +161,14 @@ export async function dispatchInbound(
     if (eventType.startsWith("a2a.")) {
       await handlers.onA2A?.(parsed as Record<string, unknown>);
       return { kind: "a2a" };
+    }
+    if (eventType === "call.ended") {
+      const contactIds = resolveRemoteContactIds(parsed, "call-ended");
+      if (!anyInboundContactAllowed(contactIds, allowedContactIds)) {
+        return { kind: "call-ended" };
+      }
+      await handlers.onCallEnded?.(parsed as CallEndedWebhookPayload);
+      return { kind: "call-ended" };
     }
     // Enveloped but not a known Inkbox event family — a forwarded external
     // event that happened to arrive signed (e.g. a CI escalation).

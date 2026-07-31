@@ -15,6 +15,10 @@ const a2aRegistryMock = vi.hoisted(() => ({
 const a2aDelegationMock = vi.hoisted(() => ({
   record: undefined as any,
 }));
+const hostedRegistryMock = vi.hoisted(() => ({
+  entries: {} as Record<string, any>,
+  writes: [] as any[],
+}));
 
 vi.mock("@inkbox/sdk", () => ({
   verifyWebhook: vi.fn(() => true),
@@ -37,6 +41,15 @@ vi.mock("../../src/a2a-registry.js", () => ({
 
 vi.mock("../../src/a2a-delegations.js", () => ({
   findDelegationByTask: vi.fn(async () => a2aDelegationMock.record),
+}));
+
+vi.mock("../../src/hosted-call-registry.js", () => ({
+  hostedCallRegistryKey: (accountId: string, callId: string) => `${accountId}:${callId}`,
+  readHostedCallRegistry: vi.fn(async () => hostedRegistryMock.entries),
+  writeHostedCallRegistryEntry: vi.fn(async (entry: any) => {
+    hostedRegistryMock.entries[`${entry.accountId}:${entry.callId}`] = entry;
+    hostedRegistryMock.writes.push(entry);
+  }),
 }));
 
 vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
@@ -489,6 +502,69 @@ describe("createInkboxSessionBridge", () => {
     a2aRegistryMock.entries = {};
     a2aRegistryMock.writes = [];
     a2aDelegationMock.record = undefined;
+    hostedRegistryMock.entries = {};
+    hostedRegistryMock.writes = [];
+  });
+
+  it("reconciles a hosted call once using the authoritative number and full transcript", async () => {
+    const { runtime } = createRuntime();
+    const identity = await runtime.getIdentity();
+    (identity as any).listTranscripts = vi.fn(async () => [
+      { party: "remote", text: "Please send the release update." },
+      { party: "local", text: "I will handle that after this call." },
+    ]);
+    runtime.getIdentity = vi.fn(async () => identity) as any;
+    const channelRuntime = createChannelRuntime("This text must not be delivered.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event: any = {
+      id: "evt-call-ended-1",
+      event_type: "call.ended",
+      timestamp: "2026-07-31T00:00:00Z",
+      data: {
+        outcome: "completed",
+        contacts: [{ id: "contact-1", name: "Caller" }],
+        post_call_action_items: [
+          { action: "Send the release update", details: "Use email", status: "open" },
+        ],
+        call: {
+          id: "call-hosted-1",
+          mode: "hosted_agent",
+          direction: "outbound",
+          status: "completed",
+          remote_phone_number: "+15550001111",
+          local_phone_number: "+15550002222",
+          reason: "Release update",
+        },
+      },
+    };
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(30);
+
+    expect((identity as any).listTranscripts).toHaveBeenCalledWith("call-hosted-1");
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain("+15550001111");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Please send the release update.");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Send the release update");
+    expect(channelRuntime.deliveryResults).toEqual([{ visibleReplySent: false }]);
+    expect(hostedRegistryMock.writes.map((write) => write.state)).toEqual([
+      "queued",
+      "running",
+      "completed",
+    ]);
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks();
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
   });
 
   it("serves an inbound A2A task in its context session and completes it once", async () => {

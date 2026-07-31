@@ -210,7 +210,7 @@ def test_email_request_gets_call(xc):
         xc["remote_email"], to=[xc["aut_email"]], subject="please call me",
         body_text=(
             "Use inkbox_place_call to call my phone number from my contact "
-            "details now. Set voicemailDetection to disabled. Do not reply by "
+            "details now. Do not reply by "
             "email; this is complete only after the call is placed."
         ),
     )
@@ -229,7 +229,7 @@ def test_sms_request_gets_call(xc):
         to=aut_phone,
         text=(
             "Use inkbox_place_call to call my phone number from my contact "
-            "details now. Set voicemailDetection to disabled. Do not reply by "
+            "details now. Do not reply by "
             f"SMS; this is complete only after the call is placed. (ref {_token()})"
         ),
     )

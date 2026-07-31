@@ -1,4 +1,9 @@
 import type { InkboxPluginConfig } from "./client.js";
+import {
+  isPhoneVoiceStack,
+  type OutboundVoicemailDetection,
+  type VoiceAiAuthorityMode,
+} from "./voice-stack.js";
 
 export const INKBOX_CHANNEL_ID = "inkbox" as const;
 export const DEFAULT_ACCOUNT_ID = "default";
@@ -185,6 +190,15 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
       out[field] = resolved;
     }
   }
+  if (isPhoneVoiceStack(value.voiceStack)) {
+    out.voiceStack = value.voiceStack;
+  }
+  if (value.voiceAiAuthorityMode === "contact_scoped" || value.voiceAiAuthorityMode === "yolo") {
+    out.voiceAiAuthorityMode = value.voiceAiAuthorityMode as VoiceAiAuthorityMode;
+  }
+  if (value.voicemailDetection === "enabled" || value.voicemailDetection === "disabled") {
+    out.voicemailDetection = value.voicemailDetection as OutboundVoicemailDetection;
+  }
   if (typeof value.enabled === "boolean") {
     out.enabled = value.enabled;
   }
@@ -258,6 +272,9 @@ function mergeConfig(...configs: Array<InkboxAccountConfig | undefined>): Inkbox
     }
     if (cfg.vault) {
       out.vault = { ...(out.vault ?? {}), ...cfg.vault };
+    }
+    if (cfg.voiceRealtime) {
+      out.voiceRealtime = { ...(out.voiceRealtime ?? {}), ...cfg.voiceRealtime };
     }
   }
   return out;
