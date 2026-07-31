@@ -3902,10 +3902,12 @@ async function runRealtimeCallWebSocket(
 // funnel here: async delivery-failure webhooks (carrier failure / mail bounce),
 // via the channel extractors, and synchronous send rejections, via
 // wakeOnSendRejection. The wake-up turn rides the normal dispatchInboundTurn
-// path, so it lands on the failed conversation's session/thread and the
-// existing [SILENT] check applies unchanged. The shared 3-send budget (keyed by
-// conversation + recipient) is the loop guard: a recovery send that itself
-// fails just increments the same counter until the cap silences the thread.
+// path, so it lands on the failed conversation's session/thread. Its prompt
+// requires the first safe retry only for a first retryable failure; later,
+// terminal, and unknown failures expose [SILENT] according to policy. The
+// shared 3-send budget (keyed by conversation + recipient) is the loop guard:
+// a recovery send that itself fails increments the same counter until the cap
+// silences the thread.
 async function handleDeliveryFailure(
   opts: InkboxSessionBridgeOptions & { activeCalls: Map<string, ActiveCall> },
   failure: DeliveryFailure | null,
