@@ -23,10 +23,12 @@
     "@inkbox/sdk": "0.5.9",
     "json5": "^2.2.3",
     "qrcode-terminal": "^0.12.0",
-    "typebox": "^1.1.38"
+    "typebox": "^1.1.38",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "openclaw": ">=2026.5.27",
     "typescript": "^5.4.0",
     "vitest": "^2.1.9"

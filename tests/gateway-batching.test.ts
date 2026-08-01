@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   routeOptions: [] as any[],
   rawOnText: vi.fn(),
+  configureDelivery: vi.fn(),
+  wsHandler: vi.fn(),
+  createUpgradeHandler: vi.fn(() => vi.fn(() => true)),
 }));
 
 vi.mock("../src/client.js", () => ({
@@ -16,10 +19,12 @@ vi.mock("../src/inbound/http-route.js", () => ({
 }));
 
 vi.mock("../src/inbound/session.js", () => ({
-  configureInkboxIdentityDelivery: vi.fn(),
+  configureInkboxIdentityDelivery: mocks.configureDelivery,
   createInkboxSessionBridge: vi.fn(() => ({
     handlers: { onText: mocks.rawOnText },
-    wsHandler: vi.fn(),
+    wsHandler: mocks.wsHandler,
+    catchUpA2A: vi.fn(),
+    catchUpHostedCalls: vi.fn(),
   })),
   prewarmInkboxAgent: vi.fn(),
 }));
@@ -28,7 +33,14 @@ vi.mock("../src/inbound/tunnel.js", () => ({
   openInkboxTunnel: vi.fn(),
 }));
 
-import { registerInkboxPublicUrlInboundRoutes } from "../src/gateway.js";
+vi.mock("../src/inbound/websocket-upgrade.js", () => ({
+  createInkboxWebSocketUpgradeHandler: mocks.createUpgradeHandler,
+}));
+
+import {
+  registerInkboxPublicUrlInboundRoutes,
+  startInkboxGatewayAccount,
+} from "../src/gateway.js";
 
 function textEvent(remote: string, text: string): any {
   return {
@@ -50,6 +62,133 @@ describe("gateway inbound batching", () => {
     vi.useFakeTimers();
     mocks.routeOptions.length = 0;
     mocks.rawOnText.mockReset();
+    mocks.configureDelivery.mockReset();
+  });
+
+  it("registers an exact account-aware call websocket upgrade route", () => {
+    const registerHttpRoute = vi.fn();
+    registerInkboxPublicUrlInboundRoutes({
+      registerHttpRoute,
+      logger: { info: vi.fn(), warn: vi.fn() },
+      runtime: {
+        config: {
+          current: () => ({
+            channels: {
+              inkbox: {
+                accounts: {
+                  media: {
+                    apiKey: "ApiKey_test",
+                    identity: "media-agent",
+                    signingKey: "whsec_test",
+                    publicUrl: "https://voice.example/base",
+                    voiceStack: "openai_realtime",
+                  },
+                },
+              },
+            },
+          }),
+        },
+        channel: {},
+      },
+    });
+
+    const wsRoute = registerHttpRoute.mock.calls
+      .map(([route]) => route)
+      .find((route) => route.path === "/inkbox/media/phone/media/ws");
+    expect(wsRoute).toEqual(
+      expect.objectContaining({
+        auth: "plugin",
+        match: "exact",
+        handleUpgrade: expect.any(Function),
+      }),
+    );
+    expect(mocks.createUpgradeHandler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        handler: mocks.wsHandler,
+        publicWebsocketUrl:
+          "wss://voice.example/base/inkbox/media/phone/media/ws",
+      }),
+    );
+    const response = {
+      statusCode: 0,
+      setHeader: vi.fn(),
+      end: vi.fn(),
+    };
+    expect(wsRoute.handler({}, response)).toBe(true);
+    expect(response.statusCode).toBe(426);
+    expect(response.setHeader).toHaveBeenCalledWith("upgrade", "websocket");
+    expect(response.end).toHaveBeenCalledWith("WebSocket upgrade required");
+  });
+
+  it("does not claim a websocket route owned by an external URL", () => {
+    const registerHttpRoute = vi.fn();
+    registerInkboxPublicUrlInboundRoutes({
+      registerHttpRoute,
+      runtime: {
+        config: {
+          current: () => ({
+            channels: {
+              inkbox: {
+                accounts: {
+                  external: {
+                    apiKey: "ApiKey_test",
+                    identity: "external-agent",
+                    signingKey: "whsec_test",
+                    publicUrl: "https://voice.example/base",
+                    callWebsocketUrl: "wss://external.example/calls",
+                    voiceStack: "inkbox_tts_stt",
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+    });
+
+    expect(
+      registerHttpRoute.mock.calls.some(
+        ([route]) => route.path === "/inkbox/external/phone/media/ws",
+      ),
+    ).toBe(false);
+  });
+
+  it("allows websocket route registration to retry after a host rejection", () => {
+    const current = () => ({
+      channels: {
+        inkbox: {
+          accounts: {
+            retry: {
+              apiKey: "ApiKey_test",
+              identity: "retry-agent",
+              signingKey: "whsec_test",
+              publicUrl: "https://voice.example/base",
+              voiceStack: "openai_realtime",
+            },
+          },
+        },
+      },
+    });
+    const failing = vi.fn((route) => {
+      if (route.path.endsWith("/phone/media/ws")) throw new Error("route conflict");
+    });
+    expect(() =>
+      registerInkboxPublicUrlInboundRoutes({
+        registerHttpRoute: failing,
+        runtime: { config: { current } },
+      }),
+    ).toThrow("route conflict");
+
+    const retry = vi.fn();
+    registerInkboxPublicUrlInboundRoutes({
+      registerHttpRoute: retry,
+      runtime: { config: { current } },
+    });
+    expect(
+      retry.mock.calls.some(
+        ([route]) => route.path === "/inkbox/retry/phone/media/ws",
+      ),
+    ).toBe(true);
   });
 
   afterEach(() => {
@@ -91,5 +230,162 @@ describe("gateway inbound batching", () => {
     expect(mocks.rawOnText.mock.calls[0][0].data.text_message.text).toBe(
       "first\nsecond",
     );
+  });
+});
+
+describe("public-url call routing", () => {
+  beforeEach(() => {
+    mocks.configureDelivery.mockReset();
+  });
+
+  it.each([
+    {
+      voiceStack: "openai_realtime",
+      accountId: "default",
+      expected: "wss://voice.example/base/inkbox/phone/media/ws",
+    },
+    {
+      voiceStack: "inkbox_tts_stt",
+      accountId: "secondary",
+      expected: "wss://voice.example/base/inkbox/secondary/phone/media/ws",
+    },
+    {
+      voiceStack: "openai_realtime",
+      accountId: "custom",
+      callWebsocketUrl: "wss://media.example/custom/ws",
+      expected: "wss://media.example/custom/ws",
+    },
+  ] as const)(
+    "wires $voiceStack to the canonical account websocket",
+    async ({ voiceStack, accountId, expected, ...testCase }) => {
+      const abort = new AbortController();
+      abort.abort();
+      const dispose = vi.fn();
+      const register = vi.fn(() => ({ dispose }));
+
+      await startInkboxGatewayAccount({
+        cfg: {},
+        accountId,
+        account: {
+          accountId,
+          enabled: true,
+          configured: true,
+          publicUrl: "https://voice.example/base",
+          config: {
+            apiKey: "ApiKey_test",
+            identity: "agent",
+            signingKey: "whsec_test",
+            publicUrl: "https://voice.example/base",
+            voiceStack,
+            ...(testCase.callWebsocketUrl
+              ? { callWebsocketUrl: testCase.callWebsocketUrl }
+              : {}),
+          },
+        } as any,
+        abortSignal: abort.signal,
+        log: {},
+        setStatus: vi.fn(),
+        channelRuntime: { runtimeContexts: { register } },
+      });
+
+      expect(mocks.configureDelivery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          webhookUrl:
+            accountId === "default"
+              ? "https://voice.example/base/inkbox/webhook"
+              : `https://voice.example/base/inkbox/${accountId}/webhook`,
+          callWebsocketUrl: expected,
+          voiceStack,
+        }),
+      );
+      expect(mocks.configureDelivery.mock.calls[0][0]).not.toHaveProperty(
+        "callWebhookUrl",
+      );
+      expect(register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelId: "inkbox",
+          accountId,
+          capability: "call-websocket",
+          context: { url: expected },
+        }),
+      );
+      expect(dispose).toHaveBeenCalled();
+    },
+  );
+
+  it("keeps Inkbox Voice AI hosted with no local callback", async () => {
+    const abort = new AbortController();
+    abort.abort();
+    const register = vi.fn();
+
+    await startInkboxGatewayAccount({
+      cfg: {},
+      accountId: "default",
+      account: {
+        accountId: "default",
+        enabled: true,
+        configured: true,
+        publicUrl: "https://voice.example/base",
+        config: {
+          apiKey: "ApiKey_test",
+          identity: "agent",
+          signingKey: "whsec_test",
+          publicUrl: "https://voice.example/base",
+          voiceStack: "inkbox_voice_ai",
+        },
+      } as any,
+      abortSignal: abort.signal,
+      log: {},
+      setStatus: vi.fn(),
+      channelRuntime: { runtimeContexts: { register } },
+    });
+
+    expect(mocks.configureDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        webhookUrl: "https://voice.example/base/inkbox/webhook",
+        voiceStack: "inkbox_voice_ai",
+      }),
+    );
+    expect(mocks.configureDelivery.mock.calls[0][0]).not.toHaveProperty(
+      "callWebsocketUrl",
+    );
+    expect(mocks.configureDelivery.mock.calls[0][0]).not.toHaveProperty(
+      "callWebhookUrl",
+    );
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it("disposes the websocket runtime context when startup fails", async () => {
+    mocks.configureDelivery.mockRejectedValueOnce(new Error("route update failed"));
+    const abort = new AbortController();
+    const dispose = vi.fn();
+
+    await expect(
+      startInkboxGatewayAccount({
+        cfg: {},
+        accountId: "default",
+        account: {
+          accountId: "default",
+          enabled: true,
+          configured: true,
+          publicUrl: "https://voice.example/base",
+          config: {
+            apiKey: "ApiKey_test",
+            identity: "agent",
+            signingKey: "whsec_test",
+            publicUrl: "https://voice.example/base",
+            voiceStack: "openai_realtime",
+          },
+        } as any,
+        abortSignal: abort.signal,
+        log: {},
+        setStatus: vi.fn(),
+        channelRuntime: {
+          runtimeContexts: { register: vi.fn(() => ({ dispose })) },
+        },
+      }),
+    ).rejects.toThrow("route update failed");
+
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 });

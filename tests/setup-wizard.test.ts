@@ -476,6 +476,85 @@ describe("runSetupWizard", () => {
     );
   });
 
+  it("uses a previously saved valid voice stack as the rerun default", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ confirms: [false] });
+
+    const result = await runSetupWizard({
+      prompter,
+      currentConfig: {
+        channels: { inkbox: { voiceStack: "inkbox_tts_stt" } },
+      },
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect((prompter.select as any).mock.calls[0][2]).toBe("inkbox_tts_stt");
+  });
+
+  it("falls back to the saved default for an invalid readline selection", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ asks: ["99"] });
+    prompter.select = undefined;
+
+    const result = await runSetupWizard({
+      prompter,
+      currentConfig: {
+        channels: { inkbox: { voiceStack: "inkbox_tts_stt" } },
+      },
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect(prompter.ask).toHaveBeenCalledWith("Select", "3");
+  });
+
+  it("propagates selector cancellation before changing call delivery", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter();
+    (prompter.select as any).mockRejectedValueOnce(new Error("selection cancelled"));
+
+    await expect(
+      runSetupWizard({
+        prompter,
+        env: {
+          INKBOX_API_KEY: "ApiKey_test",
+          INKBOX_SIGNING_KEY: "whsec_test",
+        } as any,
+      }),
+    ).rejects.toThrow("selection cancelled");
+
+    expect(sdk.phoneNumbersUpdate).not.toHaveBeenCalled();
+    expect(sdk.subscriptionsCreate).not.toHaveBeenCalled();
+  });
+
   it("lets an admin-scoped API key select an existing identity and mints an agent key", async () => {
     const firstIdentity = createIdentity({
       id: "identity-1",

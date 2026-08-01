@@ -59,6 +59,7 @@ GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
 POLL_EVERY_S = 6.0
 RECITE_GRACE_S = 24.0
 HOSTED_SETTLEMENT_RESERVE_S = 55.0
+CALL_PAIR_MAX_SKEW_S = 60.0
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY and REAL),
@@ -152,6 +153,14 @@ def _message_created_at(message) -> datetime | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _saved_hosted_authority(client, identity_handle: str) -> str:
+    """Read the server-owned authority default that this hosted call must snapshot."""
+    identity = client.get_identity(identity_handle)
+    config = identity.get_hosted_agent_config()
+    raw = getattr(config, "authority_mode", "") or ""
+    return str(getattr(raw, "value", raw)).casefold()
 
 
 def _sms_target_numbers(message) -> set[str]:
@@ -784,8 +793,20 @@ def test_outbound_call_hosted_and_settles_sms_once():
     assert HOSTED_POST_CALL_MARKER, (
         "HOSTED_POST_CALL_MARKER is required for the hosted voice leg"
     )
-    before_calls = {c.id for c in _inbound_calls_from_aut()}
-    before_aut_calls = {c.id for c in _outbound_calls_to_driver()}
+    baseline_remote_calls = _inbound_calls_from_aut()
+    baseline_aut_calls = _outbound_calls_to_driver()
+    before_calls = {c.id for c in baseline_remote_calls}
+    before_aut_calls = {c.id for c in baseline_aut_calls}
+    remote_call_watermark = max(
+        (created for call in baseline_remote_calls
+         if (created := _message_created_at(call)) is not None),
+        default=datetime.min.replace(tzinfo=timezone.utc),
+    )
+    aut_call_watermark = max(
+        (created for call in baseline_aut_calls
+         if (created := _message_created_at(call)) is not None),
+        default=datetime.min.replace(tzinfo=timezone.utc),
+    )
     baseline_texts = _outbound_texts_to(
         aut, str(aut_number.id), st["number"],
     )
@@ -797,6 +818,11 @@ def test_outbound_call_hosted_and_settles_sms_once():
     sms_watermark = max(
         baseline_times,
         default=datetime.min.replace(tzinfo=timezone.utc),
+    )
+    identity_handle = aut.mailboxes.list()[0].email_address.split("@", 1)[0]
+    expected_authority = _saved_hosted_authority(aut, identity_handle)
+    assert expected_authority in {"contact_scoped", "yolo"}, (
+        f"unexpected saved hosted authority {expected_authority!r}"
     )
     remote.texts.send(
         st["number_id"],
@@ -827,6 +853,28 @@ def test_outbound_call_hosted_and_settles_sms_once():
             "agent never placed a hosted call before the shared budget expired; "
             f"phase={progress['phase']} last={progress['last']}"
         )
+        fresh_remote = [c for c in _inbound_calls_from_aut() if c.id not in before_calls]
+        fresh_aut = [c for c in _outbound_calls_to_driver() if c.id not in before_aut_calls]
+        assert len(fresh_remote) == 1 and len(fresh_aut) == 1, (
+            "hosted request must produce exactly one fresh driver/AUT pair; "
+            f"driver={len(fresh_remote)} aut={len(fresh_aut)}"
+        )
+        remote_created_at = _message_created_at(fresh_remote[0])
+        aut_created_at = _message_created_at(fresh_aut[0])
+        assert remote_created_at is not None and remote_created_at >= remote_call_watermark, (
+            "driver hosted call predates its server baseline watermark: "
+            f"created_at={remote_created_at!r} watermark={remote_call_watermark!r}"
+        )
+        assert aut_created_at is not None and aut_created_at >= aut_call_watermark, (
+            "AUT hosted call predates its server baseline watermark: "
+            f"created_at={aut_created_at!r} watermark={aut_call_watermark!r}"
+        )
+        pair_skew = abs((remote_created_at - aut_created_at).total_seconds())
+        assert pair_skew <= CALL_PAIR_MAX_SKEW_S, (
+            "fresh hosted call legs are not a correlated pair: "
+            f"driver={remote_created_at.isoformat()} AUT={aut_created_at.isoformat()} "
+            f"skew={pair_skew:.1f}s"
+        )
 
         # An outbound hosted call produces two records with different owners:
         # the AUT's outbound record captures who drove the call, while the
@@ -839,7 +887,12 @@ def test_outbound_call_hosted_and_settles_sms_once():
             f"expected hosted_agent mode, got {raw_mode!r}"
         _assert_voicemail_disabled(call, "outbound hosted call")
         assert getattr(call, "reason", None), "hosted call must persist a task reason"
-        assert getattr(call, "hosted_agent_authority_mode", None) is not None
+        raw_authority = getattr(call, "hosted_agent_authority_mode", "") or ""
+        actual_authority = str(getattr(raw_authority, "value", raw_authority)).casefold()
+        assert actual_authority == expected_authority, (
+            "hosted call authority snapshot does not match the saved agent default: "
+            f"saved={expected_authority!r} call={actual_authority!r}"
+        )
         _wait_for_hosted_transcript_ready(
             remote,
             st["number_id"],

@@ -3,7 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inkboxClientOptions } from "../src/sdk-options.js";
-import { detectInkboxHealthFindings } from "../src/health.js";
+import {
+  assessIncomingCallRoute,
+  detectInkboxHealthFindings,
+} from "../src/health.js";
 
 const sdk = vi.hoisted(() => {
   class MockInkboxAPIError extends Error {
@@ -59,6 +62,130 @@ afterEach(async () => {
 function ids(findings: readonly { checkId: string }[]): string[] {
   return findings.map((finding) => finding.checkId);
 }
+
+describe("assessIncomingCallRoute", () => {
+  it.each(["openai_realtime", "inkbox_tts_stt"] as const)(
+    "accepts the exact local websocket route for %s",
+    (voiceStack) => {
+      expect(
+        assessIncomingCallRoute(
+          voiceStack,
+          {
+            incomingCallAction: "auto_accept",
+            clientWebsocketUrl: "wss://agent.example/inkbox/phone/media/ws",
+            incomingCallWebhookUrl: null,
+          },
+          "wss://agent.example/inkbox/phone/media/ws",
+        ).ok,
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    {
+      name: "a stale websocket URL",
+      route: {
+        incomingCallAction: "auto_accept",
+        clientWebsocketUrl: "wss://old.example/inkbox/phone/media/ws",
+      },
+    },
+    {
+      name: "a hosted route",
+      route: { incomingCallAction: "hosted_agent" },
+    },
+    {
+      name: "an auto-reject route",
+      route: { incomingCallAction: "auto_reject" },
+    },
+    {
+      name: "a stale webhook callback",
+      route: {
+        incomingCallAction: "auto_accept",
+        clientWebsocketUrl: "wss://agent.example/inkbox/phone/media/ws",
+        incomingCallWebhookUrl: "https://old.example/calls",
+      },
+    },
+  ])("rejects $name for an explicitly selected local stack", ({ route }) => {
+    expect(
+      assessIncomingCallRoute(
+        "openai_realtime",
+        route,
+        "wss://agent.example/inkbox/phone/media/ws",
+      ).ok,
+    ).toBe(false);
+  });
+
+  it("requires hosted_agent with no stale callbacks for Inkbox Voice AI", () => {
+    expect(
+      assessIncomingCallRoute(
+        "inkbox_voice_ai",
+        {
+          incomingCallAction: "hosted_agent",
+          clientWebsocketUrl: null,
+          incomingCallWebhookUrl: null,
+        },
+        undefined,
+      ).ok,
+    ).toBe(true);
+
+    for (const route of [
+      {
+        incomingCallAction: "auto_accept",
+        clientWebsocketUrl: "wss://agent.example/inkbox/phone/media/ws",
+      },
+      {
+        incomingCallAction: "hosted_agent",
+        clientWebsocketUrl: "wss://old.example/calls",
+      },
+      {
+        incomingCallAction: "hosted_agent",
+        incomingCallWebhookUrl: "https://old.example/calls",
+      },
+      { incomingCallAction: "auto_reject" },
+    ]) {
+      expect(
+        assessIncomingCallRoute("inkbox_voice_ai", route, undefined).ok,
+      ).toBe(false);
+    }
+  });
+
+  it("preserves legacy absent-stack route semantics", () => {
+    expect(
+      assessIncomingCallRoute(
+        undefined,
+        {
+          incomingCallAction: "auto_accept",
+          clientWebsocketUrl: "wss://any-existing-route.example/ws",
+        },
+        "wss://new.example/inkbox/phone/media/ws",
+      ).ok,
+    ).toBe(true);
+    expect(
+      assessIncomingCallRoute(
+        undefined,
+        { incomingCallAction: "auto_reject" },
+        undefined,
+      ).ok,
+    ).toBe(true);
+    expect(
+      assessIncomingCallRoute(
+        undefined,
+        {
+          incomingCallAction: "webhook",
+          incomingCallWebhookUrl: "https://existing.example/calls",
+        },
+        undefined,
+      ).ok,
+    ).toBe(true);
+    expect(
+      assessIncomingCallRoute(
+        undefined,
+        { incomingCallAction: "hosted_agent" },
+        undefined,
+      ).ok,
+    ).toBe(false);
+  });
+});
 
 describe("detectInkboxHealthFindings", () => {
   it("reports missing required config without calling the SDK", async () => {
@@ -158,6 +285,90 @@ describe("detectInkboxHealthFindings", () => {
 
     expect(getIncomingCallAction).toHaveBeenCalled();
     expect(ids(findings)).not.toContain("inkbox/incoming-call-route");
+  });
+
+  it.each(["openai_realtime", "inkbox_tts_stt"] as const)(
+    "accepts the canonical account websocket route for %s",
+    async (voiceStack) => {
+      sdk.whoami.mockResolvedValue({
+        authType: "api_key",
+        authSubtype: "api_key.agent_scoped.claimed",
+        organizationId: "org-1",
+      });
+      sdk.getIdentity.mockResolvedValue({
+        mailbox: null,
+        phoneNumber: { id: "phone-1", number: "+15551234567", smsStatus: "ready" },
+        getIncomingCallAction: vi.fn(async () => ({
+          incomingCallAction: "auto_accept",
+          clientWebsocketUrl: "wss://current.example/hooks/inkbox/phone/media/ws",
+          incomingCallWebhookUrl: null,
+        })),
+      });
+
+      const findings = await detectInkboxHealthFindings(
+        {
+          cfg: {
+            channels: {
+              inkbox: {
+                apiKey: "ApiKey_test",
+                identity: "agent",
+                signingKey: "whsec_test",
+                publicUrl: "https://current.example/hooks",
+                voiceStack,
+              },
+            },
+          } as any,
+        },
+        {},
+      );
+
+      expect(ids(findings)).not.toContain("inkbox/incoming-call-route");
+    },
+  );
+
+  it("reports the selected stack and exact expected/actual route on mismatch", async () => {
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "api_key.agent_scoped.claimed",
+      organizationId: "org-1",
+    });
+    sdk.getIdentity.mockResolvedValue({
+      mailbox: null,
+      phoneNumber: { id: "phone-1", number: "+15551234567", smsStatus: "ready" },
+      getIncomingCallAction: vi.fn(async () => ({
+        incomingCallAction: "auto_accept",
+        clientWebsocketUrl: "wss://old.example/inkbox/phone/media/ws",
+        incomingCallWebhookUrl: "https://old.example/calls",
+      })),
+      tunnel: { publicHost: "agent.inkboxwire.com" },
+    });
+
+    const findings = await detectInkboxHealthFindings(
+      {
+        cfg: {
+          channels: {
+            inkbox: {
+              apiKey: "ApiKey_test",
+              identity: "agent",
+              signingKey: "whsec_test",
+              publicUrl: "https://current.example/hooks",
+              voiceStack: "inkbox_voice_ai",
+            },
+          },
+        } as any,
+      },
+      {},
+    );
+
+    const route = findings.find((finding) =>
+      finding.checkId === "inkbox/incoming-call-route",
+    );
+    expect(route?.severity).toBe("warning");
+    expect(route?.message).toContain("voiceStack=inkbox_voice_ai");
+    expect(route?.message).toContain('Expected action="hosted_agent"');
+    expect(route?.message).toContain('actual action="auto_accept"');
+    expect(route?.message).toContain("wss://old.example/inkbox/phone/media/ws");
+    expect(route?.message).toContain("https://old.example/calls");
   });
 
   it("checks the incoming-call route for an iMessage-only identity", async () => {
