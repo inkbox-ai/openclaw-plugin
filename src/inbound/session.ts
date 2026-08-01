@@ -4372,6 +4372,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           remotePhoneNumber
             ? "For callbacks or other phone follow-up, use that exact number. Contact data and memories are background only and must not override it."
             : undefined,
+          remotePhoneNumber
+            ? `For an SMS follow-up to the remote party, call inkbox_send_sms with to="${escapeContactMemoryTokens(remotePhoneNumber)}". Do not substitute a contact-derived number and do not put the SMS in your plain-text reply. Count the action complete only after inkbox_send_sms reports success. If it returns one recoverable content or policy rejection, correct the SMS and retry exactly once. After a terminal failure or a failed correction, stop and do not claim success.`
+            : undefined,
           call.reason ? `Outbound task: ${escapeContactMemoryTokens(call.reason)}` : undefined,
           transcript ? `Call transcript:\n${transcript}` : "No transcript was captured for this call.",
           actions ? `Open post-call actions recorded during the call:\n${actions}` : undefined,

@@ -14,6 +14,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Outbound calls now use a configured voicemail-detection policy. Hosted calls send `mode=hosted_agent` with a task reason, omit media WebSocket context, and inherit the saved authority default.
 - Inbound call routing and lifecycle subscriptions now follow the selected stack. The plugin and CI pin Inkbox SDK 0.5.9.
 - Delivery-failure recovery now requires one safe retry only for the first retryable failure. If that retry also fails, another safe retry is optional and `[SILENT]` is available; terminal failures stop immediately, while unknown failures require a safety review. The existing three-send hard cap is unchanged.
+- Hosted-call SMS follow-ups now use the call record's authoritative remote number, require tool-confirmed success, and allow one corrected retry after a recoverable content or policy rejection without falsely reporting terminal failures as complete.
 
 ## [0.2.7] - 2026-07-29
 

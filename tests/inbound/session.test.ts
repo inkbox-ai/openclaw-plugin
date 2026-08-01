@@ -553,6 +553,18 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.ctxPayload.message.bodyForAgent).toContain("+15550001111");
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      'inkbox_send_sms with to="+15550001111"',
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Count the action complete only after inkbox_send_sms reports success.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "correct the SMS and retry exactly once",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "After a terminal failure or a failed correction, stop and do not claim success.",
+    );
     expect(run.ctxPayload.message.bodyForAgent).toContain("Please send the release update.");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Send the release update");
     expect(channelRuntime.deliveryResults).toEqual([{ visibleReplySent: false }]);
