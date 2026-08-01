@@ -37,6 +37,7 @@ export interface HostedSmsToolReport {
 
 interface ActiveCapture extends HostedSmsToolReport {
   sessionKey: string;
+  promptMarker: string;
   runId?: string;
   closed: boolean;
 }
@@ -71,8 +72,10 @@ function matchingCapture(
   const capture = captures.get(sessionKey);
   if (!capture || capture.closed) return undefined;
   const runId = eventRunId(event, ctx);
-  if (capture.runId && runId && capture.runId !== runId) return undefined;
-  if (!capture.runId && runId) capture.runId = runId;
+  // A session key can host overlapping work. Never let the first tool event
+  // opportunistically claim a capture: before_agent_run binds the exact host
+  // run, and events without that authoritative correlation fail closed.
+  if (!capture.runId || !runId || capture.runId !== runId) return undefined;
   return capture;
 }
 
@@ -177,14 +180,18 @@ function findAttempt(
 export function beginHostedSmsToolCapture(params: {
   sessionKey: string;
   expectedTarget: string;
+  promptMarker: string;
 }): HostedSmsToolCapture {
   const sessionKey = params.sessionKey.trim();
+  const promptMarker = params.promptMarker.trim();
   if (!sessionKey) throw new Error("Hosted SMS settlement requires a session key.");
+  if (!promptMarker) throw new Error("Hosted SMS settlement requires a prompt marker.");
   if (captures.has(sessionKey)) {
     throw new Error(`Hosted SMS settlement is already active for session ${sessionKey}.`);
   }
   const capture: ActiveCapture = {
     sessionKey,
+    promptMarker,
     expectedTarget: params.expectedTarget.trim(),
     attempts: [],
     aborted: false,
@@ -204,6 +211,20 @@ export function beginHostedSmsToolCapture(params: {
       };
     },
   };
+}
+
+/** Bind a pending capture to the exact OpenClaw run before any tools execute. */
+export function bindHostedSmsCaptureToRun(
+  event: { prompt?: string },
+  ctx: ToolHookContext,
+): void {
+  const sessionKey = ctx.sessionKey?.trim();
+  const runId = ctx.runId?.trim();
+  if (!sessionKey || !runId) return;
+  const capture = captures.get(sessionKey);
+  if (!capture || capture.closed || capture.runId) return;
+  if (typeof event.prompt !== "string" || !event.prompt.includes(capture.promptMarker)) return;
+  capture.runId = runId;
 }
 
 /** OpenClaw `before_tool_call` hook. Records an attempt before side effects begin. */

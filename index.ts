@@ -28,6 +28,7 @@ import { createVaultRuntime } from "./src/vault.js";
 import { deriveConfiguredCallWebsocketUrl } from "./src/call-websocket.js";
 import { registerInkboxHealthChecks } from "./src/health.js";
 import {
+  bindHostedSmsCaptureToRun,
   recordHostedModelCallEnded,
   recordHostedSmsAfterToolCall,
   recordHostedSmsBeforeToolCall,
@@ -155,6 +156,7 @@ function registerInkboxTools(api: any): void {
 }
 
 function registerHostedCallSettlementHooks(api: any): void {
+  api.on("before_agent_run", bindHostedSmsCaptureToRun);
   api.on("before_tool_call", recordHostedSmsBeforeToolCall);
   api.on("after_tool_call", recordHostedSmsAfterToolCall);
   api.on("model_call_ended", recordHostedModelCallEnded);

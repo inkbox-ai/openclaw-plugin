@@ -49,7 +49,10 @@ export async function writeIdentityState(state: InkboxIdentityState): Promise<vo
   const paths = statePaths();
   await ensureStateDir(paths);
   const tmp = `${paths.identityState}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, JSON.stringify(state, null, 2), "utf8");
+  await writeFile(tmp, JSON.stringify(state, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   // 0600 because the file path itself can leak the identity handle (e.g.
   // shoulder-surfing of `ls ~/.openclaw/inkbox/`). State contents aren't
   // secret but this matches the dir mode.

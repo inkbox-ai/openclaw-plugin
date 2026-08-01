@@ -53,8 +53,10 @@ async function mutate(change: (records: Records) => void): Promise<void> {
       mode: 0o700,
     });
     const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(records, null, 2)}\n`, "utf8");
-    await chmod(tmp, 0o600);
+    await writeFile(tmp, `${JSON.stringify(records, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
     await rename(tmp, target);
     await chmod(target, 0o600);
   } finally {

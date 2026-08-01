@@ -83,6 +83,7 @@ describe("openclaw.plugin.json manifest parity", () => {
   it("registers the host-native hooks used for hosted SMS settlement", () => {
     expect(collectRuntimeTools().hookNames).toEqual([
       "after_tool_call",
+      "before_agent_run",
       "before_tool_call",
       "model_call_ended",
     ]);

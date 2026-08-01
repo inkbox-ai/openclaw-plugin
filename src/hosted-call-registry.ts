@@ -73,8 +73,10 @@ export async function writeHostedCallRegistryEntry(
     await ensureStateDir(paths);
     const target = hostedCallRegistryPath();
     const temp = `${target}.${process.pid}.${now}.tmp`;
-    await writeFile(temp, `${JSON.stringify(bounded, null, 2)}\n`, "utf8");
-    await chmod(temp, 0o600);
+    await writeFile(temp, `${JSON.stringify(bounded, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
     await rename(temp, target);
     await chmod(target, 0o600);
   } finally {

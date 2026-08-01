@@ -2086,6 +2086,7 @@ async function dispatchInboundTurn(
     a2aContext?: ActiveA2ATurn;
     hostedSmsSettlement?: {
       expectedTarget: string;
+      promptMarker: string;
       onSettled: (report: HostedSmsToolReport) => void;
     };
   },
@@ -2289,6 +2290,7 @@ async function dispatchInboundTurn(
     ? beginHostedSmsToolCapture({
         sessionKey: effectiveSessionKey,
         expectedTarget: opts.hostedSmsSettlement.expectedTarget,
+        promptMarker: opts.hostedSmsSettlement.promptMarker,
       })
     : undefined;
   try {
@@ -4374,7 +4376,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         .join("\n");
       const remotePhoneNumber = call.remote_phone_number.trim();
       const negatesSms = (value: string) =>
-        /\b(?:do not|don['’]t|never|must not|should not)\s+(?:send\b.{0,60}\b(?:sms|text\s+message)\b|text\b)/i.test(
+        /\b(?:do not|dont|don['’]t|never|must not|should not)\s+(?:ever\s+)?(?:send\b.{0,60}\b(?:sms|text\s+message)\b|text\b)/i.test(
           value,
         );
       const explicitSmsAction = openActionItems.find((action) => {
@@ -4465,6 +4467,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
               ? {
                   hostedSmsSettlement: {
                     expectedTarget: remotePhoneNumber,
+                    promptMarker: call.id,
                     onSettled: (settled: HostedSmsToolReport) => {
                       report = settled;
                     },

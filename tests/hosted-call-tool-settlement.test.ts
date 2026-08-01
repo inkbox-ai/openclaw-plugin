@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   beginHostedSmsToolCapture,
+  bindHostedSmsCaptureToRun,
   evaluateHostedSmsSettlement,
   recordHostedModelCallEnded,
   recordHostedSmsAfterToolCall,
@@ -11,7 +12,16 @@ import {
 
 const sessionKey = "agent:main:inkbox:direct:+15550001111";
 const expectedTarget = "+15550001111";
+const promptMarker = "call-hosted-1";
 const context = { sessionKey, runId: "run-1", toolCallId: "tool-1" };
+
+function beginCapture() {
+  return beginHostedSmsToolCapture({ sessionKey, expectedTarget, promptMarker });
+}
+
+function bindCapture(ctx = context) {
+  bindHostedSmsCaptureToRun({ prompt: `Hosted completion ${promptMarker}` }, ctx);
+}
 
 function successResult() {
   return {
@@ -29,7 +39,8 @@ function captureAttempt(params: {
   result?: unknown;
   error?: string;
 }): HostedSmsToolReport {
-  const capture = beginHostedSmsToolCapture({ sessionKey, expectedTarget });
+  const capture = beginCapture();
+  bindCapture();
   const event = {
     toolName: "inkbox_send_sms",
     params: { to: params.to, text: "Release update" },
@@ -53,10 +64,62 @@ describe("hosted-call SMS tool settlement", () => {
   });
 
   it("requests one correction for a missing initial tool call", () => {
-    const capture = beginHostedSmsToolCapture({ sessionKey, expectedTarget });
+    const capture = beginCapture();
     expect(evaluateHostedSmsSettlement(capture.finish(), "initial").outcome).toBe(
       "correction",
     );
+  });
+
+  it("fails closed until before_agent_run binds the exact run", () => {
+    const capture = beginCapture();
+    recordHostedSmsBeforeToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "Release update" },
+        runId: "run-1",
+        toolCallId: "tool-1",
+      },
+      context,
+    );
+    expect(capture.finish().attempts).toHaveLength(0);
+  });
+
+  it("does not bind an unrelated same-session run without the prompt marker", () => {
+    const capture = beginCapture();
+    bindHostedSmsCaptureToRun({ prompt: "Unrelated same-session work" }, context);
+    recordHostedSmsBeforeToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "Unrelated send" },
+        runId: "run-1",
+        toolCallId: "tool-1",
+      },
+      context,
+    );
+    expect(capture.finish().attempts).toHaveLength(0);
+  });
+
+  it("rejects missing and mismatched run IDs after binding", () => {
+    const capture = beginCapture();
+    bindCapture();
+    recordHostedSmsBeforeToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "missing run" },
+        toolCallId: "tool-missing-run",
+      },
+      { sessionKey, toolCallId: "tool-missing-run" },
+    );
+    recordHostedSmsBeforeToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "wrong run" },
+        runId: "run-other",
+        toolCallId: "tool-other",
+      },
+      { sessionKey, runId: "run-other", toolCallId: "tool-other" },
+    );
+    expect(capture.finish().attempts).toHaveLength(0);
   });
 
   it("requests one correction for a recoverable content rejection", () => {
@@ -142,7 +205,8 @@ describe("hosted-call SMS tool settlement", () => {
   });
 
   it("stops when one turn makes more than one SMS attempt", () => {
-    const capture = beginHostedSmsToolCapture({ sessionKey, expectedTarget });
+    const capture = beginCapture();
+    bindCapture();
     for (const id of ["tool-1", "tool-2"]) {
       const ctx = { sessionKey, runId: "run-1", toolCallId: id };
       const event = {
@@ -160,7 +224,8 @@ describe("hosted-call SMS tool settlement", () => {
   });
 
   it("records an in-flight attempt as unknown if the agent ends before after_tool_call", () => {
-    const capture = beginHostedSmsToolCapture({ sessionKey, expectedTarget });
+    const capture = beginCapture();
+    bindCapture();
     recordHostedSmsBeforeToolCall(
       {
         toolName: "inkbox_send_sms",
@@ -177,7 +242,8 @@ describe("hosted-call SMS tool settlement", () => {
 
   it("marks aborted and terminated model runs terminal", () => {
     for (const failureKind of ["aborted", "terminated"] as const) {
-      const capture = beginHostedSmsToolCapture({ sessionKey, expectedTarget });
+      const capture = beginCapture();
+      bindCapture();
       recordHostedModelCallEnded(
         { runId: "run-1", outcome: "error", failureKind },
         { sessionKey, runId: "run-1" },
@@ -189,7 +255,8 @@ describe("hosted-call SMS tool settlement", () => {
   });
 
   it("ignores tools from other sessions and runs", () => {
-    const capture = beginHostedSmsToolCapture({ sessionKey, expectedTarget });
+    const capture = beginCapture();
+    bindCapture();
     recordHostedSmsBeforeToolCall(
       {
         toolName: "inkbox_send_sms",

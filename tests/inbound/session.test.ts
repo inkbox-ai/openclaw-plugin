@@ -185,6 +185,7 @@ import {
 } from "../../src/outbound-call-context.js";
 import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/message-limits.js";
 import {
+  bindHostedSmsCaptureToRun,
   recordHostedModelCallEnded,
   recordHostedSmsAfterToolCall,
   recordHostedSmsBeforeToolCall,
@@ -547,6 +548,7 @@ function emitHostedSmsTool(params: any, result: any, id = "tool-1"): void {
     runId: context.runId,
     toolCallId: id,
   };
+  bindHostedSmsCaptureToRun({ prompt: params.ctxPayload.message.bodyForAgent }, context);
   recordHostedSmsBeforeToolCall(event, context);
   recordHostedSmsAfterToolCall({ ...event, result }, context);
 }
@@ -884,6 +886,27 @@ describe("createInkboxSessionBridge", () => {
         { party: "local", text: "Understood." },
       ],
     ],
+    [
+      "unapostrophized negated text request",
+      [
+        { party: "remote", text: "Dont text me after the call ends." },
+        { party: "local", text: "Understood." },
+      ],
+    ],
+    [
+      "expanded negated SMS request",
+      [
+        { party: "remote", text: "After the call ends, do not ever send me an SMS." },
+        { party: "local", text: "Understood." },
+      ],
+    ],
+    [
+      "text noun false positive",
+      [
+        { party: "remote", text: "After the call, review the text exchange." },
+        { party: "local", text: "Understood." },
+      ],
+    ],
   ])("does not invent an SMS obligation from a %s", async (_label, transcriptRows) => {
     const { runtime } = createRuntime();
     const identity = await runtime.getIdentity();
@@ -968,6 +991,13 @@ describe("createInkboxSessionBridge", () => {
   it("persists an aborted hosted SMS reconciliation as terminal and does not replay", async () => {
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+      bindHostedSmsCaptureToRun(
+        { prompt: params.ctxPayload.message.bodyForAgent },
+        {
+          sessionKey: params.routeSessionKey,
+          runId: `run-${params.ctxPayload.message.messageIdFull}`,
+        },
+      );
       recordHostedModelCallEnded(
         {
           runId: `run-${params.ctxPayload.message.messageIdFull}`,
