@@ -329,7 +329,15 @@ def test_outbound_call_hosted_and_settles_sms_once():
                 if (getattr(c, "direction", "") or "").lower() == "inbound"
                 and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
+    driver_tail = _digits(st["number"])[-10:]
+
+    def _outbound_calls_to_driver():
+        return [c for c in aut.calls.list(limit=30)
+                if (getattr(c, "direction", "") or "").lower() == "outbound"
+                and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == driver_tail]
+
     before_calls = {c.id for c in _inbound_calls_from_aut()}
+    before_aut_calls = {c.id for c in _outbound_calls_to_driver()}
     before_texts = {m.id for m in _inbound_texts_from(remote, st["number_id"], aut_phone)}
     remote.texts.send(
         st["number_id"],
@@ -341,29 +349,37 @@ def test_outbound_call_hosted_and_settles_sms_once():
         ),
     )
 
-    call_id = None
+    remote_call_id = None
+    aut_call_id = None
     try:
         deadline = time.monotonic() + TIMEOUT_S
         while time.monotonic() < deadline:
-            fresh = [c for c in _inbound_calls_from_aut() if c.id not in before_calls]
-            if fresh:
-                call_id = fresh[0].id
+            fresh_remote = [c for c in _inbound_calls_from_aut() if c.id not in before_calls]
+            fresh_aut = [c for c in _outbound_calls_to_driver() if c.id not in before_aut_calls]
+            if fresh_remote and fresh_aut:
+                remote_call_id = fresh_remote[0].id
+                aut_call_id = fresh_aut[0].id
                 break
             time.sleep(POLL_EVERY_S)
-        assert call_id, f"agent never placed a hosted call within {TIMEOUT_S:.0f}s"
+        assert remote_call_id and aut_call_id, \
+            f"agent never placed a hosted call within {TIMEOUT_S:.0f}s"
 
-        call = remote.calls.get(call_id)
+        # An outbound hosted call produces two records with different owners:
+        # the AUT's outbound record captures who drove the call, while the
+        # driver's inbound record captures its own client WebSocket answer
+        # path. Assert the mode and reconcile completion against the AUT record.
+        call = aut.calls.get(aut_call_id)
         raw_mode = getattr(call, "mode", "") or ""
         mode = getattr(raw_mode, "value", raw_mode)
         assert str(mode).lower() == "hosted_agent", \
             f"expected hosted_agent mode, got {raw_mode!r}"
-        agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
+        agent_said = _wait_for_two_way_call(remote, st["number_id"], remote_call_id)
         assert agent_said, "Inkbox Voice AI produced no speech on the outbound call"
 
         # The driver hangs up after its scripted request. Wait for the durable
         # post-call webhook reconciliation and its recipient-visible side effect.
         _wait_hosted_sms_settlement(
-            remote, st["number_id"], aut_phone, before_texts, call_id,
+            remote, st["number_id"], aut_phone, before_texts, aut_call_id,
         )
     finally:
-        _hangup_call(remote, call_id)
+        _hangup_call(remote, remote_call_id)
