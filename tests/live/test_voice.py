@@ -186,31 +186,45 @@ def _inbound_texts_from(remote, remote_number_id, sender_number):
             and _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == tail]
 
 
-def _wait_hosted_sms_settlement(remote, remote_number_id, aut_phone, before_ids, call_id):
-    """Require recipient delivery and the plugin's durable host-hook success marker."""
+def _outbound_texts_to(aut, aut_number_id, recipient_number):
+    tail = _digits(recipient_number)[-10:]
+    return [m for m in aut.texts.list(aut_number_id, limit=30)
+            if (getattr(m, "direction", "") or "").lower() == "outbound"
+            and _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == tail]
+
+
+def _delivery_status(message) -> str:
+    raw = getattr(message, "delivery_status", "") or ""
+    return str(getattr(raw, "value", raw)).lower()
+
+
+def _wait_hosted_sms_settlement(aut, aut_number_id, remote_phone, before_ids, call_id):
+    """Require provider delivery and the plugin's durable host-hook success marker."""
     assert HOSTED_SMS_MARKER, "HOSTED_SMS_MARKER is required for the hosted voice leg"
     deadline = time.monotonic() + TIMEOUT_S
     matches = []
+    delivered = []
     registry_entry = None
     while time.monotonic() < deadline:
-        fresh = [m for m in _inbound_texts_from(remote, remote_number_id, aut_phone)
+        fresh = [m for m in _outbound_texts_to(aut, aut_number_id, remote_phone)
                  if m.id not in before_ids]
         matches = [m for m in fresh if HOSTED_SMS_MARKER in (getattr(m, "text", "") or "")]
+        delivered = [m for m in matches if _delivery_status(m) == "delivered"]
         registry_path = os.path.expanduser("~/.openclaw/inkbox/hosted-call-completions.json")
         try:
             with open(registry_path) as fh:
                 registry = json.load(fh)
             registry_entry = next(
                 (entry for entry in registry.values()
-                 if str(entry.get("callId", "")) == call_id),
+                 if str(entry.get("callId", "")) == str(call_id)),
                 None,
             )
         except (FileNotFoundError, json.JSONDecodeError):
             registry_entry = None
-        if len(matches) == 1 and registry_entry and registry_entry.get("state") == "completed":
+        if len(delivered) == 1 and registry_entry and registry_entry.get("state") == "completed":
             # Let an accidental duplicate settle before asserting exact-one.
             time.sleep(2 * POLL_EVERY_S)
-            fresh = [m for m in _inbound_texts_from(remote, remote_number_id, aut_phone)
+            fresh = [m for m in _outbound_texts_to(aut, aut_number_id, remote_phone)
                      if m.id not in before_ids]
             matches = [m for m in fresh
                        if HOSTED_SMS_MARKER in (getattr(m, "text", "") or "")]
@@ -221,8 +235,9 @@ def _wait_hosted_sms_settlement(remote, remote_number_id, aut_phone, before_ids,
             pytest.fail(f"hosted SMS settlement failed: {registry_entry!r}")
         time.sleep(POLL_EVERY_S)
     pytest.fail(
-        "hosted reconciliation did not produce one delivered marker SMS and a completed "
-        f"host settlement within {TIMEOUT_S:.0f}s; matches={len(matches)} registry={registry_entry!r}"
+        "hosted reconciliation did not produce one provider-delivered marker SMS and a completed "
+        f"host settlement within {TIMEOUT_S:.0f}s; matches={len(matches)} "
+        f"delivered={len(delivered)} registry={registry_entry!r}"
     )
 
 
@@ -321,7 +336,8 @@ def test_outbound_call_hosted_and_settles_sms_once():
     """Voice AI calls, then OpenClaw proves the exact post-call SMS tool outcome."""
     st = _driver_state()
     remote, aut = _client(REMOTE_KEY), _client(AUT_KEY)
-    aut_phone = _aut_phone(aut)
+    aut_number = aut.phone_numbers.list()[0]
+    aut_phone = aut_number.number
     tail = _digits(aut_phone)[-10:]
 
     def _inbound_calls_from_aut():
@@ -338,7 +354,9 @@ def test_outbound_call_hosted_and_settles_sms_once():
 
     before_calls = {c.id for c in _inbound_calls_from_aut()}
     before_aut_calls = {c.id for c in _outbound_calls_to_driver()}
-    before_texts = {m.id for m in _inbound_texts_from(remote, st["number_id"], aut_phone)}
+    before_texts = {
+        m.id for m in _outbound_texts_to(aut, str(aut_number.id), st["number"])
+    }
     remote.texts.send(
         st["number_id"],
         to=aut_phone,
@@ -377,9 +395,9 @@ def test_outbound_call_hosted_and_settles_sms_once():
         assert agent_said, "Inkbox Voice AI produced no speech on the outbound call"
 
         # The driver hangs up after its scripted request. Wait for the durable
-        # post-call webhook reconciliation and its recipient-visible side effect.
+        # post-call webhook reconciliation and its provider-confirmed side effect.
         _wait_hosted_sms_settlement(
-            remote, st["number_id"], aut_phone, before_texts, aut_call_id,
+            aut, str(aut_number.id), st["number"], before_texts, aut_call_id,
         )
     finally:
         _hangup_call(remote, remote_call_id)
