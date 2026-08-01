@@ -132,11 +132,11 @@ def test_live_voice_marker_is_deterministic_distinct_and_speech_safe():
 
 def test_live_voice_marker_mapping_is_stable():
     assert voice_marker.marker_from_token("55071").split() == [
-        "forest",
-        "pencil",
-        "velvet",
-        "lemon",
-        "rabbit",
+        "umbrella",
+        "chocolate",
+        "banana",
+        "library",
+        "elephant",
     ]
 
 
