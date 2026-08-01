@@ -5,14 +5,15 @@ import { InkboxAPIError } from "@inkbox/sdk";
 export interface ToolTextResult {
   content: { type: "text"; text: string }[];
   isError?: boolean;
+  details?: Record<string, unknown>;
 }
 
-export function toolText(text: string): ToolTextResult {
-  return { content: [{ type: "text", text }] };
+export function toolText(text: string, details?: Record<string, unknown>): ToolTextResult {
+  return { content: [{ type: "text", text }], ...(details ? { details } : {}) };
 }
 
-export function toolError(text: string): ToolTextResult {
-  return { isError: true, content: [{ type: "text", text }] };
+export function toolError(text: string, details?: Record<string, unknown>): ToolTextResult {
+  return { isError: true, content: [{ type: "text", text }], ...(details ? { details } : {}) };
 }
 
 // Translate an Inkbox SDK error into a tool-result error block with the most

@@ -27,6 +27,11 @@ import { registerPlaceCall } from "./src/tools/place-call.js";
 import { createVaultRuntime } from "./src/vault.js";
 import { deriveConfiguredCallWebsocketUrl } from "./src/call-websocket.js";
 import { registerInkboxHealthChecks } from "./src/health.js";
+import {
+  recordHostedModelCallEnded,
+  recordHostedSmsAfterToolCall,
+  recordHostedSmsBeforeToolCall,
+} from "./src/hosted-call-tool-settlement.js";
 
 type OpenClawChannelEntry = {
   id: string;
@@ -149,6 +154,12 @@ function registerInkboxTools(api: any): void {
   registerWhoami(api, runtime);
 }
 
+function registerHostedCallSettlementHooks(api: any): void {
+  api.on("before_tool_call", recordHostedSmsBeforeToolCall);
+  api.on("after_tool_call", recordHostedSmsAfterToolCall);
+  api.on("model_call_ended", recordHostedModelCallEnded);
+}
+
 const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   id: "inkbox",
   name: "Inkbox",
@@ -157,6 +168,7 @@ const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   plugin: inkboxPlugin,
   registerCliMetadata: registerInkboxCli,
   registerFull(api: any) {
+    registerHostedCallSettlementHooks(api);
     registerInkboxTools(api);
     registerInkboxPublicUrlInboundRoutes(api);
   },

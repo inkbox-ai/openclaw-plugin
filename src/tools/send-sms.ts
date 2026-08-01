@@ -125,6 +125,7 @@ export function registerSendSms(
         const status = msg.deliveryStatus ?? "unknown";
         return toolText(
           `Sent text id=${msg.id} ${target} status=${status} (${params.text.length} chars)`,
+          { inkboxSendSms: { sent: true } },
         );
       });
     },

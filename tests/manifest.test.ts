@@ -20,9 +20,11 @@ function sortedKeys(value: { properties?: Record<string, unknown> }): string[] {
 function collectRuntimeTools(): {
   toolNames: string[];
   optionalToolNames: string[];
+  hookNames: string[];
 } {
   const tools: string[] = [];
   const optionalTools: string[] = [];
+  const hookNames: string[] = [];
   const api = {
     registrationMode: "tool-discovery",
     pluginConfig: {
@@ -38,6 +40,9 @@ function collectRuntimeTools(): {
       info: vi.fn(),
       debug: vi.fn(),
       error: vi.fn(),
+    },
+    on(name: string) {
+      hookNames.push(name);
     },
     registerTool(
       definition: { name: string } | ((context: unknown) => unknown),
@@ -58,6 +63,7 @@ function collectRuntimeTools(): {
   return {
     toolNames: [...tools].sort(),
     optionalToolNames: [...optionalTools].sort(),
+    hookNames: [...hookNames].sort(),
   };
 }
 
@@ -72,6 +78,14 @@ describe("openclaw.plugin.json manifest parity", () => {
         .map(([name]) => name)
         .sort(),
     ).toEqual(runtime.optionalToolNames);
+  });
+
+  it("registers the host-native hooks used for hosted SMS settlement", () => {
+    expect(collectRuntimeTools().hookNames).toEqual([
+      "after_tool_call",
+      "before_tool_call",
+      "model_call_ended",
+    ]);
   });
 
   it("keeps static config schemas aligned with source config-schema.ts", () => {

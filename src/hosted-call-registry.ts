@@ -8,9 +8,10 @@ export interface HostedCallRegistryEntry {
   accountId: string;
   callId: string;
   eventId: string;
-  state: "queued" | "running" | "completed";
+  state: "queued" | "running" | "completed" | "failed";
   ownerId: string;
   outcome?: string;
+  retryable?: boolean;
   event: CallEndedWebhookPayload;
   updatedAt: number;
 }

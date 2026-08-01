@@ -1,9 +1,11 @@
-name: Live — voice calls (Inkbox TTS/STT + realtime)
+name: Live — voice calls (Inkbox TTS/STT + realtime + Voice AI)
 
 # Boots the agent-under-test (AUT) gateway plus a driver process that bridges the
-# other side of a real phone call over its own Inkbox tunnel. Two matrix legs:
+# other side of a real phone call over its own Inkbox tunnel. Three matrix legs:
 #   inbound_inkbox    — driver calls the agent; agent answers with Inkbox STT/TTS.
 #   outbound_realtime — driver texts "call me"; agent calls back via the realtime API.
+#   outbound_hosted   — driver requests a call; Inkbox Voice AI calls, records an
+#                       SMS commitment, and OpenClaw settles it after hangup.
 # Each leg verifies the stored call transcript shows the agent spoke to the caller.
 # Real model + real calls, so this runs only on ready (non-draft) PRs + dispatch, and
 # shares the AUT tunnel lock with the other live suites.
@@ -51,7 +53,7 @@ jobs:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → one at a time
       matrix:
-        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_realtime"]' || '["outbound_realtime"]') }}
+        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_realtime","outbound_hosted"]' || '["outbound_realtime","outbound_hosted"]') }}
 
     steps:
       - uses: actions/checkout@v7
@@ -60,6 +62,7 @@ jobs:
           echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
           echo "DRIVER_LOG=$RUNNER_TEMP/driver.log" >> "$GITHUB_ENV"
           echo "DRIVER_STATE=$RUNNER_TEMP/driver_state.json" >> "$GITHUB_ENV"
+          echo "HOSTED_SMS_MARKER=OPENCLAW-HOSTED-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v7
         with:
@@ -138,6 +141,9 @@ jobs:
             openclaw config set channels.inkbox.voiceRealtime.provider openai
             openclaw config set channels.inkbox.voiceRealtime.model gpt-realtime-2
             openclaw config set channels.inkbox.voiceRealtime.providers.openai.apiKey "$OPENAI_API_KEY"
+          elif [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
+            openclaw config set channels.inkbox.voiceStack inkbox_voice_ai
+            openclaw config set channels.inkbox.voiceRealtime.enabled false --strict-json
           else
             # Force the Inkbox STT/TTS path so this leg proves it end to end.
             openclaw config set channels.inkbox.voiceStack inkbox_tts_stt
@@ -163,6 +169,9 @@ jobs:
         env:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
         run: |
+          if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
+            export VOICE_DRIVER_LINE="After we hang up, send me exactly one SMS containing ${HOSTED_SMS_MARKER}. Please explicitly record that as a post-call action, then say goodbye."
+          fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             python3 "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/driver.pid"

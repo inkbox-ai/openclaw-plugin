@@ -184,6 +184,12 @@ import {
   registerOutboundCallContext,
 } from "../../src/outbound-call-context.js";
 import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/message-limits.js";
+import {
+  recordHostedModelCallEnded,
+  recordHostedSmsAfterToolCall,
+  recordHostedSmsBeforeToolCall,
+  resetHostedSmsToolCapturesForTest,
+} from "../../src/hosted-call-tool-settlement.js";
 
 type FakeInkboxWebSocketMessage = string | { message: string; advanceMs?: number };
 
@@ -319,9 +325,13 @@ const contactMediaMessages = (): FakeInkboxWebSocketMessage[] => [
   JSON.stringify({ event: "stop" }),
 ];
 
-function createChannelRuntime(replyText = "I can hear you on the call.") {
+function createChannelRuntime(
+  replyText = "I can hear you on the call.",
+  onDispatch?: (params: any) => Promise<void> | void,
+) {
   const deliveryResults: any[] = [];
   const dispatchReply = vi.fn(async (params: any) => {
+    await onDispatch?.(params);
     deliveryResults.push(await params.delivery.deliver({ text: replyText }));
   });
   return {
@@ -492,6 +502,55 @@ function parseSentTextFrames(ws: FakeInkboxWebSocket) {
   return ws.sent.map((message) => JSON.parse(message));
 }
 
+function hostedCallEndedEvent(params: {
+  id?: string;
+  action?: string;
+  details?: string;
+} = {}): any {
+  const id = params.id ?? "call-hosted-sms";
+  return {
+    id: `evt-${id}`,
+    event_type: "call.ended",
+    timestamp: "2026-07-31T00:00:00Z",
+    data: {
+      outcome: "completed",
+      contacts: [{ id: "contact-1", name: "Caller" }],
+      post_call_action_items: [
+        {
+          action: params.action ?? "Send me an SMS with the release update",
+          details: params.details,
+          status: "open",
+        },
+      ],
+      call: {
+        id,
+        mode: "hosted_agent",
+        direction: "outbound",
+        status: "completed",
+        remote_phone_number: "+15550001111",
+        local_phone_number: "+15550002222",
+        reason: "Release update",
+      },
+    },
+  };
+}
+
+function emitHostedSmsTool(params: any, result: any, id = "tool-1"): void {
+  const context = {
+    sessionKey: params.routeSessionKey,
+    runId: `run-${params.ctxPayload.message.messageIdFull}`,
+    toolCallId: id,
+  };
+  const event = {
+    toolName: "inkbox_send_sms",
+    params: { to: "+15550001111", text: "Release update" },
+    runId: context.runId,
+    toolCallId: id,
+  };
+  recordHostedSmsBeforeToolCall(event, context);
+  recordHostedSmsAfterToolCall({ ...event, result }, context);
+}
+
 describe("createInkboxSessionBridge", () => {
   beforeEach(() => {
     realtimeMock.available = true;
@@ -504,6 +563,7 @@ describe("createInkboxSessionBridge", () => {
     a2aDelegationMock.record = undefined;
     hostedRegistryMock.entries = {};
     hostedRegistryMock.writes = [];
+    resetHostedSmsToolCapturesForTest();
   });
 
   it("reconciles a hosted call once using the authoritative number and full transcript", async () => {
@@ -560,10 +620,10 @@ describe("createInkboxSessionBridge", () => {
       "Count the action complete only after inkbox_send_sms reports success.",
     );
     expect(run.ctxPayload.message.bodyForAgent).toContain(
-      "correct the SMS and retry exactly once",
+      "Make at most one inkbox_send_sms attempt in this turn.",
     );
     expect(run.ctxPayload.message.bodyForAgent).toContain(
-      "After a terminal failure or a failed correction, stop and do not claim success.",
+      "the Inkbox plugin will issue one bounded correction turn",
     );
     expect(run.ctxPayload.message.bodyForAgent).toContain("Please send the release update.");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Send the release update");
@@ -576,6 +636,326 @@ describe("createInkboxSessionBridge", () => {
 
     await bridge.handlers.onCallEnded?.(event);
     await flushMicrotasks();
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes an explicit hosted SMS action only after the native tool hook reports success", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+      emitHostedSmsTool(params, {
+        content: [{ type: "text", text: "Sent text id=text-1 status=queued" }],
+      });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onCallEnded?.(hostedCallEndedEvent());
+    await flushMicrotasks(40);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(hostedRegistryMock.writes.map((write) => write.state)).toEqual([
+      "queued",
+      "running",
+      "completed",
+    ]);
+  });
+
+  it("issues one correction turn when an explicit hosted SMS action made no attempt", async () => {
+    const { runtime } = createRuntime();
+    let dispatches = 0;
+    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+      dispatches += 1;
+      if (dispatches === 2) {
+        emitHostedSmsTool(params, {
+          content: [{ type: "text", text: "Sent text id=text-2 status=queued" }],
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onCallEnded?.(hostedCallEndedEvent({ id: "call-correction" }));
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    const correction = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
+    expect(correction.ctxPayload.message.bodyForAgent).toContain(
+      'inkbox_send_sms exactly once with to="+15550001111"',
+    );
+    expect(correction.ctxPayload.message.bodyForAgent).toContain(
+      "Send me an SMS with the release update",
+    );
+    expect(correction.ctxPayload.message.bodyForAgent).toContain(
+      "Fulfill the commitment exactly as written",
+    );
+    expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
+      state: "completed",
+      outcome: "success",
+    });
+  });
+
+  it("makes one correction after a recoverable hosted SMS failure", async () => {
+    const { runtime } = createRuntime();
+    let dispatches = 0;
+    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+      dispatches += 1;
+      emitHostedSmsTool(
+        params,
+        dispatches === 1
+          ? {
+              isError: true,
+              content: [
+                { type: "text", text: "Validation error (422): markdown content rejected" },
+              ],
+            }
+          : { content: [{ type: "text", text: "Sent text id=text-3 status=queued" }] },
+      );
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onCallEnded?.(
+      hostedCallEndedEvent({ id: "call-recoverable-correction" }),
+    );
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    const correction = channelRuntime.inbound.dispatchReply.mock.calls[1][0];
+    expect(correction.ctxPayload.message.bodyForAgent).toContain(
+      "explicitly rejected by content policy",
+    );
+    expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
+  });
+
+  it("settles a narrow future SMS promise from the transcript when the server omitted the action", async () => {
+    const { runtime } = createRuntime();
+    const identity = await runtime.getIdentity();
+    (identity as any).listTranscripts = vi.fn(async () => [
+      { party: "remote", text: "Can you follow up later?" },
+      {
+        party: "local",
+        text: "I will send you a text message after we hang up containing MARKER-42.",
+      },
+    ]);
+    runtime.getIdentity = vi.fn(async () => identity) as any;
+    let dispatches = 0;
+    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+      dispatches += 1;
+      if (dispatches === 2) {
+        emitHostedSmsTool(params, {
+          details: { inkboxSendSms: { sent: true } },
+          content: [{ type: "text", text: "Sent text id=text-transcript status=queued" }],
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({ id: "call-transcript-promise" });
+    event.data.post_call_action_items = [];
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(
+      channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent,
+    ).toContain("MARKER-42");
+    expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
+  });
+
+  it("settles an explicit remote post-call SMS request when the action item is missing", async () => {
+    const { runtime } = createRuntime();
+    const identity = await runtime.getIdentity();
+    (identity as any).listTranscripts = vi.fn(async () => [
+      {
+        party: "remote",
+        text: "After we hang up, send me one SMS containing REMOTE-MARKER-7.",
+      },
+      { party: "local", text: "Understood." },
+    ]);
+    runtime.getIdentity = vi.fn(async () => identity) as any;
+    let dispatches = 0;
+    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+      dispatches += 1;
+      if (dispatches === 2) {
+        emitHostedSmsTool(params, {
+          details: { inkboxSendSms: { sent: true } },
+          content: [{ type: "text", text: "Sent text id=text-remote status=queued" }],
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({ id: "call-remote-sms-request" });
+    event.data.post_call_action_items = [];
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(
+      channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent,
+    ).toContain("REMOTE-MARKER-7");
+    expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
+  });
+
+  it.each([
+    [
+      "past reference",
+      [
+        { party: "remote", text: "I sent an SMS yesterday." },
+        { party: "local", text: "Thanks, I saw that old text message." },
+      ],
+    ],
+    [
+      "email commitment",
+      [
+        { party: "remote", text: "Send me the report by email." },
+        { party: "local", text: "I will send you the report by email after the call." },
+      ],
+    ],
+    [
+      "medium-free commitment",
+      [
+        { party: "remote", text: "Please send her confirmation." },
+        { party: "local", text: "I will send her confirmation after we hang up." },
+      ],
+    ],
+    [
+      "generic immediate text request",
+      [
+        { party: "remote", text: "Please text me the status." },
+        { party: "local", text: "Okay." },
+      ],
+    ],
+  ])("does not invent an SMS obligation from a %s", async (_label, transcriptRows) => {
+    const { runtime } = createRuntime();
+    const identity = await runtime.getIdentity();
+    (identity as any).listTranscripts = vi.fn(async () => transcriptRows);
+    runtime.getIdentity = vi.fn(async () => identity) as any;
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({ id: "call-old-sms-reference" });
+    event.data.post_call_action_items = [];
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(40);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
+  });
+
+  it("persists terminal hosted SMS failure and does not replay the webhook", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+      emitHostedSmsTool(params, {
+        isError: true,
+        content: [{ type: "text", text: "Recipient has opted out of SMS" }],
+      });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({ id: "call-terminal" });
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(50);
+    expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
+      state: "failed",
+      retryable: false,
+    });
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(20);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists an aborted hosted SMS reconciliation as terminal and does not replay", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+      recordHostedModelCallEnded(
+        {
+          runId: `run-${params.ctxPayload.message.messageIdFull}`,
+          outcome: "error",
+          failureKind: "aborted",
+        },
+        {
+          sessionKey: params.routeSessionKey,
+          runId: `run-${params.ctxPayload.message.messageIdFull}`,
+        },
+      );
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({ id: "call-aborted" });
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(50);
+    expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
+      state: "failed",
+      retryable: false,
+      outcome: "agent_aborted",
+    });
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(20);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
   });
 
