@@ -1521,6 +1521,73 @@ describe("createInkboxSessionBridge", () => {
     expect(sendText).not.toHaveBeenCalled();
   });
 
+  it("suppresses 1:1 source replies after a completed cross-channel action", async () => {
+    const { runtime, sendText } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onMail?.(
+      mailWebhookEvent({
+        from: "Penny <penny@example.com>",
+        snippet: "Text the answer to my phone instead.",
+      }),
+    );
+    await bridge.handlers.onText?.(
+      textWebhookEvent({ text: "Email the answer to me instead." }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    for (const [params] of channelRuntime.inbound.dispatchReply.mock.calls) {
+      const body = params.ctxPayload.message.bodyForAgent;
+      expect(body).toContain("Source-channel completion policy");
+      expect(body).toContain("return exactly [SILENT]");
+      expect(body).toContain("did not also request a reply here");
+      expect(body).toContain("Do not omit [SILENT]");
+    }
+    expect(channelRuntime.deliveryResults).toHaveLength(2);
+    expect(channelRuntime.deliveryResults).toEqual([
+      expect.objectContaining({ visibleReplySent: false }),
+      expect.objectContaining({ visibleReplySent: false }),
+    ]);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("keeps a normal 1:1 reply available for an explicit multipart request", async () => {
+    const { runtime, sendText } = createRuntime();
+    const channelRuntime = createChannelRuntime("Bob is bob@example.com.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onText?.(
+      textWebhookEvent({
+        text: "Email Bob the report, then tell me his email address here.",
+      }),
+    );
+
+    const body = channelRuntime.inbound.dispatchReply.mock.calls[0][0]
+      .ctxPayload.message.bodyForAgent;
+    expect(body).toContain("when the user did not also request a reply here");
+    expect(sendText).toHaveBeenCalledWith({
+      to: "+15551234567",
+      text: "Bob is bob@example.com.",
+    });
+  });
+
   it("ignores self-originated inbound email by mailbox address", async () => {
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime();

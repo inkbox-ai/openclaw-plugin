@@ -3170,6 +3170,12 @@ function inboundMailBody(message: MailWebhookPayload["data"]["message"]): string
   return `${body}\n\n[inkbox: this email was too long to deliver in full. You are seeing ${counts}.${fetchHint}]`;
 }
 
+const CROSS_CHANNEL_COMPLETION_POLICY =
+  "Source-channel completion policy: after a requested action succeeds through " +
+  "another Inkbox channel or send tool, return exactly [SILENT] when the user " +
+  "did not also request a reply here. Do not omit [SILENT] or send confirmation " +
+  "or error prose on this inbound channel.";
+
 async function buildMailTurn(
   runtime: InkboxRuntime,
   account: ResolvedInkboxAccount,
@@ -3209,6 +3215,7 @@ async function buildMailTurn(
     body: [
       `[inkbox:email from=${from}${subjectPart} | ${renderContactMarker(contact, senderIdentity)}]`,
       renderContactMemories(account, contactMemories),
+      CROSS_CHANNEL_COMPLETION_POLICY,
       bodyText,
     ].filter(Boolean).join("\n"),
     messageId: message.message_id || message.id,
@@ -3276,7 +3283,7 @@ async function buildTextTurn(
         "Treat ordinary group chatter as context only.",
         "If no visible reply is warranted, return exactly [SILENT].",
       ].join("\n")
-    : undefined;
+    : CROSS_CHANNEL_COMPLETION_POLICY;
   const marker = isGroup
     ? [
         `[inkbox:group_sms conversation_id=${conversationId ?? "unknown"}${renderIdentityMarker(account)}`,
