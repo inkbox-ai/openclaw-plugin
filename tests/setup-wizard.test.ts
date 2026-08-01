@@ -672,6 +672,84 @@ describe("runSetupWizard", () => {
     );
   });
 
+  it("preserves validated realtime credentials when switching away and back", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const existingRealtime = {
+      ...enabledOpenAiRealtime("sk-saved"),
+      instructions: "Keep this realtime prompt",
+      providers: {
+        openai: {
+          apiKey: "sk-saved",
+          model: "gpt-realtime-2",
+          voice: "cedar",
+          organization: "org-openai",
+        },
+        custom: { apiKey: "custom-secret" },
+      },
+    };
+
+    const disabled = await runSetupWizard({
+      prompter: createPrompter({
+        selections: ["inkbox_tts_stt"],
+        confirms: [true],
+      }),
+      currentConfig: {
+        channels: { inkbox: { voiceRealtime: existingRealtime } },
+      },
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(disabled.ok).toBe(true);
+    expect(disabled.config?.voiceRealtime).toEqual({
+      ...disabledOpenAiRealtime,
+      instructions: "Keep this realtime prompt",
+      providers: existingRealtime.providers,
+    });
+
+    const validateOpenAiRealtimeApiKey = vi.fn(async () => ({ ok: true as const }));
+    const enabledPrompter = createPrompter({
+      selections: ["openai_realtime"],
+      confirms: [true],
+    });
+    const enabled = await runSetupWizard({
+      prompter: enabledPrompter,
+      currentConfig: {
+        channels: {
+          inkbox: { voiceRealtime: disabled.config?.voiceRealtime },
+        },
+      },
+      validateOpenAiRealtimeApiKey,
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(enabled.ok).toBe(true);
+    expect(validateOpenAiRealtimeApiKey).toHaveBeenCalledWith(
+      "sk-saved",
+      "gpt-realtime-2",
+    );
+    expect(enabledPrompter.ask.mock.calls.map(([question]) => question)).not.toContain(
+      "Paste your OpenAI API key for Realtime calls",
+    );
+    expect(enabled.config?.voiceRealtime).toEqual({
+      ...enabledOpenAiRealtime("sk-saved"),
+      instructions: "Keep this realtime prompt",
+      providers: existingRealtime.providers,
+    });
+  });
+
   it("configures Inkbox Voice AI contact-scoped without requesting an admin credential", async () => {
     const setHostedAgentConfig = vi.fn(async () => ({}));
     const setIncomingCallAction = vi.fn(async () => ({}));

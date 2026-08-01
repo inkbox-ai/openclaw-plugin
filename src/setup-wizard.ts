@@ -497,6 +497,38 @@ function defaultVoiceRealtimeConfig(
   };
 }
 
+function mergeVoiceRealtimeConfig(
+  existing: unknown,
+  next: WizardVoiceRealtimeConfig,
+): WizardVoiceRealtimeConfig {
+  if (!isRecord(existing)) {
+    return next;
+  }
+  const existingProviders = isRecord(existing.providers) ? existing.providers : {};
+  const nextProviders = next.providers ?? {};
+  const providers = { ...existingProviders, ...nextProviders } as Record<
+    string,
+    Record<string, unknown>
+  >;
+  if (isRecord(existingProviders.openai) || isRecord(nextProviders.openai)) {
+    providers.openai = {
+      ...(isRecord(existingProviders.openai) ? existingProviders.openai : {}),
+      ...(isRecord(nextProviders.openai) ? nextProviders.openai : {}),
+    };
+  }
+  return {
+    ...defaultVoiceRealtimeConfig(next.enabled),
+    ...(existing as Partial<WizardVoiceRealtimeConfig>),
+    ...next,
+    ...(Object.keys(providers).length > 0 ? { providers } : {}),
+    enabled: next.enabled,
+  };
+}
+
+function disabledVoiceRealtimeConfig(existing: unknown): WizardVoiceRealtimeConfig {
+  return mergeVoiceRealtimeConfig(existing, defaultVoiceRealtimeConfig(false));
+}
+
 function parseOpenAiRealtimeValidationMessage(payload: unknown): string | undefined {
   if (!isRecord(payload)) {
     return undefined;
@@ -812,7 +844,10 @@ async function promptForRealtimeStackConfig(params: {
     return undefined;
   }
   console.log("  OpenAI Realtime validation passed.");
-  return defaultVoiceRealtimeConfig(true, apiKey);
+  return mergeVoiceRealtimeConfig(
+    params.existingAccount.config?.voiceRealtime,
+    defaultVoiceRealtimeConfig(true, apiKey),
+  );
 }
 
 async function loadAdminIdentity(params: {
@@ -1052,7 +1087,13 @@ async function configurePhoneVoiceStack(params: {
     });
     initialValue = stack;
     if (stack === "inkbox_tts_stt") {
-      return { stack, realtime: defaultVoiceRealtimeConfig(false), authorityIdentity };
+      return {
+        stack,
+        realtime: disabledVoiceRealtimeConfig(
+          params.existingAccount.config?.voiceRealtime,
+        ),
+        authorityIdentity,
+      };
     }
     if (stack === "openai_realtime") {
       const realtime = await promptForRealtimeStackConfig(params);
@@ -1074,7 +1115,9 @@ async function configurePhoneVoiceStack(params: {
       console.log("  OpenClaw will be notified when each call ends.");
       return {
         stack,
-        realtime: defaultVoiceRealtimeConfig(false),
+        realtime: disabledVoiceRealtimeConfig(
+          params.existingAccount.config?.voiceRealtime,
+        ),
         authorityMode: configured.authorityMode,
         authorityIdentity,
         voiceAiTransaction: configured.transaction,
