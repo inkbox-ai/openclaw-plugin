@@ -863,6 +863,27 @@ describe("createInkboxSessionBridge", () => {
         { party: "local", text: "Okay." },
       ],
     ],
+    [
+      "negated post-call SMS request",
+      [
+        { party: "remote", text: "After we hang up, do not send me an SMS." },
+        { party: "local", text: "Understood." },
+      ],
+    ],
+    [
+      "contracted negated text request",
+      [
+        { party: "remote", text: "Don't text me after the call ends." },
+        { party: "local", text: "Understood." },
+      ],
+    ],
+    [
+      "never-text request",
+      [
+        { party: "remote", text: "After the call ends, never text me." },
+        { party: "local", text: "Understood." },
+      ],
+    ],
   ])("does not invent an SMS obligation from a %s", async (_label, transcriptRows) => {
     const { runtime } = createRuntime();
     const identity = await runtime.getIdentity();
@@ -880,6 +901,30 @@ describe("createInkboxSessionBridge", () => {
     });
     const event = hostedCallEndedEvent({ id: "call-old-sms-reference" });
     event.data.post_call_action_items = [];
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(40);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
+  });
+
+  it("does not treat a negated open action as an SMS commitment", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({
+      id: "call-negated-action",
+      action: "Do not send me an SMS after this call.",
+    });
 
     await bridge.handlers.onCallEnded?.(event);
     await flushMicrotasks(40);

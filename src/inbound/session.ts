@@ -4373,11 +4373,17 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         )
         .join("\n");
       const remotePhoneNumber = call.remote_phone_number.trim();
-      const explicitSmsAction = openActionItems.find((action) =>
-        /\b(?:sms|text\s+message|text\s+(?:me|you|them|him|her))\b/i.test(
-          `${action.action ?? ""} ${action.details ?? ""}`,
-        ),
-      );
+      const negatesSms = (value: string) =>
+        /\b(?:do not|don['’]t|never|must not|should not)\s+(?:send\b.{0,60}\b(?:sms|text\s+message)\b|text\b)/i.test(
+          value,
+        );
+      const explicitSmsAction = openActionItems.find((action) => {
+        const value = `${action.action ?? ""} ${action.details ?? ""}`;
+        return (
+          /\b(?:sms|text\s+message|text\s+(?:me|you|them|him|her))\b/i.test(value) &&
+          !negatesSms(value)
+        );
+      });
       const explicitTranscriptSmsCommitment = transcriptEntries.find((entry) => {
         const value = entry.text;
         const postCallTiming =
@@ -4387,7 +4393,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         const smsVerb = /\bsend\b.{0,80}\b(?:sms|text\s+message)\b|\btext\s+(?:you|me|them|him|her)\b/i.test(
           value,
         );
-        return postCallTiming && smsVerb;
+        return postCallTiming && smsVerb && !negatesSms(value);
       });
       const smsCommitment = explicitSmsAction
         ? [explicitSmsAction.action, explicitSmsAction.details].filter(Boolean).join("\n")
