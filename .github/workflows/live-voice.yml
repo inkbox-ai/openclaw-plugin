@@ -182,15 +182,16 @@ jobs:
               uniform victor whiskey xray yankee zulu
             )
             marker_value=$((GITHUB_RUN_ID * 10 + GITHUB_RUN_ATTEMPT))
-            HOSTED_MARKER="openclaw"
+            HOSTED_MARKER=""
             for _ in 1 2 3 4 5; do
               marker_index=$((marker_value % ${#RADIO_WORDS[@]}))
-              HOSTED_MARKER="$HOSTED_MARKER ${RADIO_WORDS[$marker_index]}"
+              HOSTED_MARKER="${HOSTED_MARKER:+$HOSTED_MARKER }${RADIO_WORDS[$marker_index]}"
               marker_value=$((marker_value / ${#RADIO_WORDS[@]}))
             done
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
             export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these words: $HOSTED_MARKER. Do not send it during the call."
-            export VOICE_DRIVER_LISTEN=45
+            # The pytest gate, not the driver timer, owns the intentional hangup.
+            export VOICE_DRIVER_LISTEN=180
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
             export VOICE_DRIVER_LISTEN=40

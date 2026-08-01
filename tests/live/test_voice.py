@@ -58,6 +58,7 @@ HOSTED_POST_CALL_MARKER = os.environ.get("HOSTED_POST_CALL_MARKER", "")
 GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
 POLL_EVERY_S = 6.0
 RECITE_GRACE_S = 24.0
+HOSTED_SETTLEMENT_RESERVE_S = 55.0
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY and REAL),
@@ -117,6 +118,28 @@ def _matching_open_post_call_actions(call, marker: str) -> list:
     return matches
 
 
+def _safe_action_diagnostic(value) -> str:
+    """Bound and redact action text before it reaches public failure logs."""
+    text = str(value or "")
+    text = re.sub(r"\b[^\s@]+@[^\s@]+\b", "[email]", text)
+    text = re.sub(r"(?<!\w)\+?\d[\d(). -]{6,}\d(?!\w)", "[phone]", text)
+    return _normalized_spoken_text(text)[:160]
+
+
+def _post_call_action_diagnostics(call) -> list[dict[str, str]]:
+    """Expose only bounded normalized fields needed to classify a mismatch."""
+    diagnostics = []
+    for item in (getattr(call, "post_call_action_items", None) or []):
+        raw_status = _action_item_field(item, "status") or ""
+        status = getattr(raw_status, "value", raw_status)
+        diagnostics.append({
+            "status": _safe_action_diagnostic(status),
+            "action": _safe_action_diagnostic(_action_item_field(item, "action")),
+            "details": _safe_action_diagnostic(_action_item_field(item, "details")),
+        })
+    return diagnostics
+
+
 def _message_created_at(message) -> datetime | None:
     """Return an aware server timestamp from an SDK SMS row."""
     value = getattr(message, "created_at", None)
@@ -164,6 +187,17 @@ def _gateway_log_text() -> str:
             return handle.read()
     except OSError:
         return ""
+
+
+def _gateway_has_direct_contact_read(log_text: str, call_id) -> bool:
+    """Match both console and structured log renderings for one exact call."""
+    direct_read_marker = "realtime direct contact read inkbox_"
+    call_marker = f"call_id={call_id}".casefold()
+    for line in log_text.splitlines():
+        folded = line.casefold()
+        if direct_read_marker in folded and call_marker in folded:
+            return True
+    return False
 
 
 def _aut_phone(aut) -> str:
@@ -336,7 +370,8 @@ def _wait_for_open_post_call_action(aut, call_id, marker, deadline, progress):
             items = getattr(call, "post_call_action_items", None) or []
             matches = _matching_open_post_call_actions(call, marker)
             progress["last"] = (
-                f"open_action_items={len(items)} matching_sms_actions={len(matches)}"
+                f"open_action_items={len(items)} matching_sms_actions={len(matches)} "
+                f"actions={_post_call_action_diagnostics(call)!r}"
             )
             if matches:
                 return
@@ -607,15 +642,11 @@ def test_outbound_call_realtime_direct_contact_lookup():
         call_legs = []
         attempt_states = []
         attempt_error = ""
-        direct_read_marker = "Inkbox realtime direct contact read inkbox_"
-
         def _direct_read_seen(call) -> bool:
             if call is None:
                 return False
-            call_marker = f"call_id={call.id}"
-            return any(
-                direct_read_marker in line and call_marker in line
-                for line in _gateway_log_text().splitlines()
+            return _gateway_has_direct_contact_read(
+                _gateway_log_text(), call.id
             )
 
         for _attempt in (1, 2):
@@ -734,6 +765,9 @@ def test_outbound_call_hosted_and_settles_sms_once():
     tail = _digits(aut_phone)[-10:]
     progress = {"phase": "baseline", "last": ""}
     deadline = time.monotonic() + TIMEOUT_S
+    action_gate_deadline = deadline - (
+        HOSTED_SETTLEMENT_RESERVE_S + 2 * POLL_EVERY_S
+    )
 
     def _inbound_calls_from_aut():
         return [c for c in remote.calls.list(limit=30)
@@ -811,14 +845,14 @@ def test_outbound_call_hosted_and_settles_sms_once():
             st["number_id"],
             remote_call_id,
             HOSTED_POST_CALL_MARKER,
-            deadline,
+            action_gate_deadline,
             progress,
         )
         _wait_for_open_post_call_action(
             aut,
             aut_call_id,
             HOSTED_POST_CALL_MARKER,
-            deadline,
+            action_gate_deadline,
             progress,
         )
 
