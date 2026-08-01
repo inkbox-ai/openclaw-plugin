@@ -278,9 +278,11 @@ def _wait_hosted_sms_settlement(
     """Require one API-accepted exact-target SMS and completed host settlement."""
     assert HOSTED_POST_CALL_MARKER
     expected_marker = _voice_marker_key(HOSTED_POST_CALL_MARKER)
+    duplicate_grace = 2 * POLL_EVERY_S
+    settlement_deadline = deadline - duplicate_grace
     matches = []
     registry_entry = None
-    while time.monotonic() < deadline:
+    while time.monotonic() < settlement_deadline:
         progress["phase"] = "post-call tool settlement"
         fresh = [m for m in _outbound_texts_to(aut, aut_number_id, remote_phone)
                  if m.id not in before_ids
@@ -307,8 +309,10 @@ def _wait_hosted_sms_settlement(
             f"current_marker_rows={len(matches)} registry={registry_entry!r}"
         )
         if len(matches) == 1 and registry_entry and registry_entry.get("state") == "completed":
-            # Let an accidental duplicate settle before asserting exact-one.
-            time.sleep(2 * POLL_EVERY_S)
+            # The grace window is reserved before polling, so exact-one is
+            # observed for its full duration without exceeding the shared
+            # scenario budget.
+            time.sleep(duplicate_grace)
             fresh = [m for m in _outbound_texts_to(aut, aut_number_id, remote_phone)
                      if m.id not in before_ids
                      and (created_at := _message_created_at(m)) is not None
