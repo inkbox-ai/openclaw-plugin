@@ -272,9 +272,9 @@ describe("outbound delivery-failure recovery — session routing", () => {
     });
   });
 
-  it("wakes the agent for an iMessage delivery failure on the same conversation", async () => {
+  it("wakes the agent but does not resend after a terminal iMessage delivery failure", async () => {
     const { runtime, sendIMessage } = createRuntime();
-    const channelRuntime = createChannelRuntime("Retry over iMessage.");
+    const channelRuntime = createChannelRuntime("[SILENT]");
     const bridge = createBridge(runtime, channelRuntime);
 
     await bridge.handlers.onIMessage?.(imessageFailure());
@@ -288,7 +288,7 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(body).toContain("See you at 5!");
     expect(body).toContain("iMessage failure classification: DO NOT RETRY");
     expect(body).toContain("[SILENT]");
-    expect(sendIMessage).toHaveBeenCalledWith({ conversationId: "imconv-123", text: "Retry over iMessage." });
+    expect(sendIMessage).not.toHaveBeenCalled();
   });
 
   it.each(["message.bounced", "message.failed"] as const)(
