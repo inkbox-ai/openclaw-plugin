@@ -117,3 +117,24 @@ def test_live_workflow_uses_nato_only_marker_and_test_owned_hangup():
     assert 'HOSTED_MARKER=""' in workflow
     assert 'HOSTED_MARKER="openclaw"' not in workflow
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
+
+
+def test_every_call_capable_live_ci_gateway_disables_voicemail_detection():
+    workflow_dir = Path(__file__).parents[2] / ".github" / "workflows"
+    configured = []
+    for path in sorted(workflow_dir.glob("*.yml")):
+        workflow = path.read_text(encoding="utf-8")
+        if "channels.inkbox.apiKey" not in workflow:
+            continue
+        configured.append(path.name)
+        assert "channels.inkbox.voicemailDetection disabled" in workflow, (
+            f"{path.name} configures a call-capable Inkbox gateway without "
+            "explicitly disabling voicemail detection"
+        )
+
+    assert configured == [
+        "live-a2a.yml",
+        "live-channels.yml",
+        "live-external-events.yml",
+        "live-voice.yml",
+    ]

@@ -103,6 +103,7 @@ jobs:
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"
+          openclaw config set channels.inkbox.voicemailDetection disabled
           openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
           openclaw config set tools.allow '["inkbox"]' --strict-json
           openclaw config set tools.profile full
