@@ -353,8 +353,10 @@ def test_outbound_call_hosted_and_settles_sms_once():
         assert call_id, f"agent never placed a hosted call within {TIMEOUT_S:.0f}s"
 
         call = remote.calls.get(call_id)
-        assert (getattr(call, "mode", "") or "").lower() == "hosted_agent", \
-            f"expected hosted_agent mode, got {getattr(call, 'mode', None)!r}"
+        raw_mode = getattr(call, "mode", "") or ""
+        mode = getattr(raw_mode, "value", raw_mode)
+        assert str(mode).lower() == "hosted_agent", \
+            f"expected hosted_agent mode, got {raw_mode!r}"
         agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
         assert agent_said, "Inkbox Voice AI produced no speech on the outbound call"
 
