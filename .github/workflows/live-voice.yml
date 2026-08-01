@@ -62,7 +62,6 @@ jobs:
           echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
           echo "DRIVER_LOG=$RUNNER_TEMP/driver.log" >> "$GITHUB_ENV"
           echo "DRIVER_STATE=$RUNNER_TEMP/driver_state.json" >> "$GITHUB_ENV"
-          echo "HOSTED_SMS_MARKER=OPENCLAW-HOSTED-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v7
         with:
@@ -173,7 +172,23 @@ jobs:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
         run: |
           if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
-            export VOICE_DRIVER_LINE="After we hang up, send me exactly one SMS containing ${HOSTED_SMS_MARKER}. Please explicitly record that as a post-call action, then say goodbye."
+            # Long digit strings do not survive TTS/PSTN/STT reliably. Derive
+            # a current-run marker from ordinary radio-alphabet words.
+            RADIO_WORDS=(
+              alpha bravo charlie delta echo foxtrot golf hotel india juliet
+              kilo lima mike november oscar papa quebec romeo sierra tango
+              uniform victor whiskey xray yankee zulu
+            )
+            marker_value=$((GITHUB_RUN_ID * 10 + GITHUB_RUN_ATTEMPT))
+            HOSTED_MARKER="openclaw"
+            for _ in 1 2 3 4 5; do
+              marker_index=$((marker_value % ${#RADIO_WORDS[@]}))
+              HOSTED_MARKER="$HOSTED_MARKER ${RADIO_WORDS[$marker_index]}"
+              marker_value=$((marker_value / ${#RADIO_WORDS[@]}))
+            done
+            echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
+            export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these words: $HOSTED_MARKER. Do not send it during the call."
+            export VOICE_DRIVER_LISTEN=45
           fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             python3 "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &
