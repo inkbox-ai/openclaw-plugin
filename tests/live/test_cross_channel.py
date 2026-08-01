@@ -25,6 +25,8 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
+from email.utils import parseaddr
 
 import pytest
 
@@ -34,6 +36,7 @@ BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 REAL = os.environ.get("LIVE_REAL_MODEL") == "1"
 TIMEOUT_S = float(os.environ.get("LIVE_XCHANNEL_TIMEOUT", "200"))
 CALL_ATTEMPTS = 2
+EMAIL_ATTEMPTS = 2
 POLL_EVERY_S = 6.0
 # A cross-channel assertion observes the tool side effect before OpenClaw has
 # necessarily finished the agent turn that produced it.  Starting the next test
@@ -41,6 +44,7 @@ POLL_EVERY_S = 6.0
 # turn and lose the new inbound webhook.  Give delivery of the source-channel
 # final reply (and session teardown) a short bounded window to finish.
 POST_TOOL_TURN_SETTLE_S = 5.0
+EMAIL_DUPLICATE_GRACE_S = 2 * POLL_EVERY_S
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY and REAL),
@@ -66,6 +70,80 @@ def _settle_after_tool_side_effect() -> None:
     time.sleep(POST_TOOL_TURN_SETTLE_S)
 
 
+def _created_at(value) -> datetime | None:
+    """Return an aware server timestamp from an SDK resource row."""
+    value = getattr(value, "created_at", None)
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _snapshot(rows) -> tuple[set, datetime]:
+    """Capture owner IDs plus the newest server timestamp before one request."""
+    rows = list(rows)
+    timestamps = [created for row in rows if (created := _created_at(row))]
+    return (
+        {row.id for row in rows},
+        max(timestamps, default=datetime.fromtimestamp(0, tz=timezone.utc)),
+    )
+
+
+def _fresh(rows, before_ids: set, watermark: datetime):
+    """Reject stale rows by both owner ID and the pre-request server watermark."""
+    return [
+        row for row in rows
+        if row.id not in before_ids
+        and (created := _created_at(row)) is not None
+        and created >= watermark
+    ]
+
+
+def _email_address(value: str) -> str:
+    return parseaddr(value or "")[1].casefold()
+
+
+def _classify_email_effects(
+    *,
+    token: str,
+    inbound: list[dict],
+    outbound: list[dict],
+    wrong_channel_count: int,
+    prior_tokens: tuple[str, ...] = (),
+) -> tuple[str, str]:
+    """Classify one run's external effects without masking partial failures.
+
+    ``empty`` is the only retryable result. ``pending`` permits the two owners'
+    email rows to settle. Every wrong-channel, wrong-content, wrong-recipient,
+    duplicate, or late-previous-attempt effect is terminal.
+    """
+    if wrong_channel_count:
+        return "terminal", f"wrong-channel SMS rows={wrong_channel_count}"
+    if len(inbound) > 1 or len(outbound) > 1:
+        return (
+            "terminal",
+            f"duplicate email rows: driver={len(inbound)} aut={len(outbound)}",
+        )
+    if not inbound and not outbound:
+        return "empty", "driver=0 aut=0 sms=0"
+
+    for owner, rows in (("driver", inbound), ("aut", outbound)):
+        if rows and token not in rows[0]["content"]:
+            return "terminal", f"{owner} email did not contain current token"
+        if rows and any(old in rows[0]["content"] for old in prior_tokens):
+            return "terminal", f"{owner} email also contained a prior token"
+        if rows and not rows[0]["exact_recipient"]:
+            return "terminal", f"{owner} email targeted a different recipient"
+    if not inbound or not outbound:
+        return "pending", f"driver={len(inbound)} aut={len(outbound)} sms=0"
+    return "success", "driver=1 aut=1 sms=0"
+
+
 @pytest.fixture(scope="module")
 def xc():
     remote = _client(REMOTE_KEY)
@@ -76,7 +154,7 @@ def xc():
     anums = aut.phone_numbers.list()
     assert rnums and anums, "both identities need a phone number for cross-channel"
     remote_phone, remote_pid = rnums[0].number, str(rnums[0].id)
-    aut_phone = anums[0].number
+    aut_phone, aut_pid = anums[0].number, str(anums[0].id)
 
     # The agent can only cross channels if the sender's card has BOTH an email and a
     # phone. Ensure it does (merge in whatever is missing; never clobber existing data).
@@ -106,7 +184,7 @@ def xc():
         "remote": remote, "aut": aut,
         "remote_email": remote_email, "remote_pid": remote_pid,
         "remote_phone": remote_phone,
-        "aut_email": aut_email, "aut_phone": aut_phone,
+        "aut_email": aut_email, "aut_phone": aut_phone, "aut_pid": aut_pid,
     }
 
 
@@ -141,42 +219,271 @@ def test_email_request_gets_sms_response(xc):
     pytest.fail(f"agent did not send an SMS containing {token!r} within {TIMEOUT_S:.0f}s")
 
 
-def test_sms_request_gets_email_response(xc):
-    """SMS asks the agent to EMAIL a code; the code must arrive over email."""
+def _inbound_emails_from_aut(remote, remote_email: str, aut_email: str):
     from inkbox.mail.types import MessageDirection
 
-    remote, remote_email, aut_email = xc["remote"], xc["remote_email"], xc["aut_email"]
-    token = _token()
+    return [
+        message for message in remote.messages.list(
+            remote_email, direction=MessageDirection.INBOUND
+        )
+        if _email_address(getattr(message, "from_address", ""))
+        == aut_email.casefold()
+    ]
 
-    def _email_from_aut():
-        return [m for m in remote.messages.list(remote_email, direction=MessageDirection.INBOUND)
-                if aut_email.lower() in (getattr(m, "from_address", "") or "").lower()]
 
-    before = {m.id for m in _email_from_aut()}
-    remote.texts.send(
-        xc["remote_pid"],
-        to=xc["aut_phone"],
-        text=(
-            "Use your Inkbox email capability to send me an email containing "
-            f"the code {token}. Find my email address in my contact details. "
-            "Do not send the code back by SMS; this is complete only after the email is sent."
-        ),
+def _outbound_emails(aut, aut_email: str):
+    from inkbox.mail.types import MessageDirection
+
+    return list(
+        aut.messages.list(aut_email, direction=MessageDirection.OUTBOUND)
     )
 
-    deadline = time.monotonic() + TIMEOUT_S
-    while time.monotonic() < deadline:
-        for m in _email_from_aut():
-            if m.id in before:
-                continue
-            hay = (getattr(m, "subject", "") or "").lower()
-            if token not in hay:
-                body = getattr(remote.messages.get(remote_email, m.id), "body_text", "") or ""
-                hay = body.lower()
-            if token in hay:
+
+def _inbound_sms_from_aut(remote, remote_pid: str, aut_phone: str):
+    tail = _digits(aut_phone)[-10:]
+    return [
+        message for message in remote.texts.list(remote_pid, limit=30)
+        if (getattr(message, "direction", "") or "").lower() == "inbound"
+        and _digits(
+            getattr(message, "remote_phone_number", "") or ""
+        )[-10:] == tail
+    ]
+
+
+def _outbound_sms(aut, aut_pid: str):
+    return [
+        message for message in aut.texts.list(aut_pid, limit=30)
+        if (getattr(message, "direction", "") or "").lower() == "outbound"
+    ]
+
+
+def _email_effect(client, mailbox: str, message, recipient: str) -> dict:
+    detail = client.messages.get(mailbox, message.id)
+    content = " ".join(
+        str(value or "")
+        for value in (
+            getattr(message, "subject", ""),
+            getattr(message, "snippet", ""),
+            getattr(detail, "body_text", ""),
+        )
+    ).casefold()
+    recipients = {
+        _email_address(value)
+        for value in (getattr(message, "to_addresses", None) or [])
+    }
+    return {
+        "id": message.id,
+        "content": content,
+        "exact_recipient": recipients == {recipient.casefold()},
+    }
+
+
+def _observe_email_run(
+    xc, baselines: dict, token: str, prior_tokens: tuple[str, ...] = ()
+):
+    driver_rows = _fresh(
+        _inbound_emails_from_aut(
+            xc["remote"], xc["remote_email"], xc["aut_email"]
+        ),
+        baselines["driver"][0],
+        baselines["driver"][1],
+    )
+    aut_rows = _fresh(
+        _outbound_emails(xc["aut"], xc["aut_email"]),
+        baselines["aut"][0],
+        baselines["aut"][1],
+    )
+    driver_sms_rows = _fresh(
+        _inbound_sms_from_aut(
+            xc["remote"], xc["remote_pid"], xc["aut_phone"]
+        ),
+        baselines["driver_sms"][0],
+        baselines["driver_sms"][1],
+    )
+    aut_sms_rows = _fresh(
+        _outbound_sms(xc["aut"], xc["aut_pid"]),
+        baselines["aut_sms"][0],
+        baselines["aut_sms"][1],
+    )
+    inbound = [
+        _email_effect(
+            xc["remote"], xc["remote_email"], row, xc["remote_email"]
+        )
+        for row in driver_rows
+    ]
+    outbound = [
+        _email_effect(
+            xc["aut"], xc["aut_email"], row, xc["remote_email"]
+        )
+        for row in aut_rows
+    ]
+    state, detail = _classify_email_effects(
+        token=token,
+        inbound=inbound,
+        outbound=outbound,
+        wrong_channel_count=len(driver_sms_rows) + len(aut_sms_rows),
+        prior_tokens=prior_tokens,
+    )
+    return state, detail, (
+        len(driver_rows),
+        len(aut_rows),
+        len(driver_sms_rows),
+        len(aut_sms_rows),
+    )
+
+
+def test_sms_request_gets_email_response(xc):
+    """SMS asks the agent to EMAIL a code; the code must arrive over email.
+
+    The real model may rarely return an empty turn without invoking a correctly
+    exposed tool. One fresh retry is safe only when both resource owners prove
+    that the prior request created no email and no wrong-channel SMS.
+    """
+    remote = xc["remote"]
+    initial_rows = {
+        "driver": _inbound_emails_from_aut(
+            remote, xc["remote_email"], xc["aut_email"]
+        ),
+        "aut": _outbound_emails(xc["aut"], xc["aut_email"]),
+        "driver_sms": _inbound_sms_from_aut(
+            remote, xc["remote_pid"], xc["aut_phone"]
+        ),
+        "aut_sms": _outbound_sms(xc["aut"], xc["aut_pid"]),
+    }
+    run_baselines = {name: _snapshot(rows) for name, rows in initial_rows.items()}
+    attempt_states = []
+    attempt_tokens = []
+    overall_deadline = time.monotonic() + TIMEOUT_S
+    observation_deadline = (
+        overall_deadline
+        - EMAIL_DUPLICATE_GRACE_S
+        - POST_TOOL_TURN_SETTLE_S
+    )
+    assert observation_deadline > time.monotonic(), (
+        "LIVE_XCHANNEL_TIMEOUT must exceed duplicate and turn-settlement grace"
+    )
+
+    for attempt in range(EMAIL_ATTEMPTS):
+        # Re-snapshot IDs and server watermarks before each fresh token/request.
+        # The original run baseline is retained separately so a late attempt-one
+        # effect can never be claimed by attempt two.
+        attempt_rows = {
+            "driver": _inbound_emails_from_aut(
+                remote, xc["remote_email"], xc["aut_email"]
+            ),
+            "aut": _outbound_emails(xc["aut"], xc["aut_email"]),
+            "driver_sms": _inbound_sms_from_aut(
+                remote, xc["remote_pid"], xc["aut_phone"]
+            ),
+            "aut_sms": _outbound_sms(xc["aut"], xc["aut_pid"]),
+        }
+        attempt_baselines = {
+            name: _snapshot(rows) for name, rows in attempt_rows.items()
+        }
+        if attempt_tokens:
+            state, detail, counts = _observe_email_run(
+                xc,
+                run_baselines,
+                attempt_tokens[-1],
+                tuple(attempt_tokens[:-1]),
+            )
+            if state == "success":
+                time.sleep(EMAIL_DUPLICATE_GRACE_S)
+                state, detail, counts = _observe_email_run(
+                    xc,
+                    run_baselines,
+                    attempt_tokens[-1],
+                    tuple(attempt_tokens[:-1]),
+                )
+                assert state == "success", (
+                    "late email side effects invalidated the exact-one result: "
+                    f"{detail}"
+                )
                 _settle_after_tool_side_effect()
-                return  # cross-channel confirmed: SMS request -> email response with the token
-        time.sleep(POLL_EVERY_S)
-    pytest.fail(f"agent did not send an email containing {token!r} within {TIMEOUT_S:.0f}s")
+                return
+            if state != "empty":
+                pytest.fail(
+                    "prior email attempt produced a late/partial external effect; "
+                    f"refusing to retry: {detail} counts={counts}"
+                )
+
+        token = _token()
+        attempt_tokens.append(token)
+        remote.texts.send(
+            xc["remote_pid"],
+            to=xc["aut_phone"],
+            text=(
+                "Use inkbox_send_email to send my email address from my contact "
+                f"details an email containing the code {token}. Do not send the "
+                "code back by SMS; this is complete only after the email is sent. "
+                f"(attempt {attempt + 1}, ref {token})"
+            ),
+        )
+
+        attempts_left = EMAIL_ATTEMPTS - attempt
+        remaining = max(0.0, observation_deadline - time.monotonic())
+        attempt_deadline = time.monotonic() + remaining / attempts_left
+        while time.monotonic() < attempt_deadline:
+            state, detail, counts = _observe_email_run(
+                xc, run_baselines, token, tuple(attempt_tokens[:-1])
+            )
+            if state == "terminal":
+                pytest.fail(
+                    f"email attempt {attempt + 1} ref={token} produced an "
+                    f"unsafe external effect: {detail} counts={counts}"
+                )
+            if state == "success":
+                time.sleep(EMAIL_DUPLICATE_GRACE_S)
+                state, detail, counts = _observe_email_run(
+                    xc, run_baselines, token, tuple(attempt_tokens[:-1])
+                )
+                assert state == "success", (
+                    "email duplicate grace found a late/duplicate/wrong-channel "
+                    f"effect across refs={attempt_tokens}: {detail} counts={counts}"
+                )
+                _settle_after_tool_side_effect()
+                return
+            time.sleep(
+                min(POLL_EVERY_S, max(0.0, attempt_deadline - time.monotonic()))
+            )
+
+        state, detail, counts = _observe_email_run(
+            xc, run_baselines, token, tuple(attempt_tokens[:-1])
+        )
+        attempt_fresh = {
+            name: len(
+                _fresh(
+                    attempt_rows_now,
+                    attempt_baselines[name][0],
+                    attempt_baselines[name][1],
+                )
+            )
+            for name, attempt_rows_now in {
+                "driver": _inbound_emails_from_aut(
+                    remote, xc["remote_email"], xc["aut_email"]
+                ),
+                "aut": _outbound_emails(xc["aut"], xc["aut_email"]),
+                "driver_sms": _inbound_sms_from_aut(
+                    remote, xc["remote_pid"], xc["aut_phone"]
+                ),
+                "aut_sms": _outbound_sms(xc["aut"], xc["aut_pid"]),
+            }.items()
+        }
+        attempt_states.append(
+            f"attempt={attempt + 1} ref={token} state={state} "
+            f"run_counts={counts} attempt_counts={attempt_fresh} detail={detail}"
+        )
+        if state != "empty" or any(attempt_fresh.values()):
+            pytest.fail(
+                "email request produced a partial, wrong, or late external "
+                f"effect; refusing to retry: {'; '.join(attempt_states)}"
+            )
+
+    pytest.fail(
+        f"agent produced no email or SMS side effect after {EMAIL_ATTEMPTS} "
+        f"fresh requests within one {TIMEOUT_S:.0f}s budget: "
+        f"{' ; '.join(attempt_states)}"
+    )
 
 
 def _inbound_calls_from_aut(remote, remote_pid: str, aut_phone: str):
