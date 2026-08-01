@@ -109,13 +109,20 @@ def test_post_call_action_diagnostics_are_normalized_bounded_and_redacted():
     assert "example.com" not in repr(diagnostic)
 
 
-def test_live_workflow_uses_nato_only_marker_and_test_owned_hangup():
+def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hangup():
     workflow = (
         Path(__file__).parents[2] / ".github" / "workflows" / "live-voice.yml"
     ).read_text(encoding="utf-8")
 
     assert 'HOSTED_MARKER=""' in workflow
     assert 'HOSTED_MARKER="openclaw"' not in workflow
+    assert (
+        'export VOICE_DRIVER_LINE="After we hang up, send me one SMS. '
+        'Create the post-call action now with this exact SMS body: '
+        '$HOSTED_MARKER. Read those five words back to me after the action '
+        'is saved. Do not send it during the call."'
+    ) in workflow
+    assert "send me one SMS containing exactly these words" not in workflow
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
 
 

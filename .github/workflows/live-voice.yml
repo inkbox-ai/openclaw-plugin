@@ -190,7 +190,11 @@ jobs:
               marker_value=$((marker_value / ${#RADIO_WORDS[@]}))
             done
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these words: $HOSTED_MARKER. Do not send it during the call."
+            # State the action lifecycle and exact body separately. Hosted
+            # agents sometimes preserved the SMS intent while omitting the
+            # marker from the summarized post-call action when both were
+            # compressed into one clause.
+            export VOICE_DRIVER_LINE="After we hang up, send me one SMS. Create the post-call action now with this exact SMS body: $HOSTED_MARKER. Read those five words back to me after the action is saved. Do not send it during the call."
             # The pytest gate, not the driver timer, owns the intentional hangup.
             export VOICE_DRIVER_LISTEN=180
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
