@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { verifyWebhook } from "@inkbox/sdk";
 import type {
   AgentIdentity,
+  CallEndedWebhookPayload,
   Contact,
   IMessageWebhookPayload,
   MailWebhookPayload,
@@ -36,6 +37,17 @@ import {
   type A2ARegistryData,
 } from "../a2a-registry.js";
 import { findDelegationByTask } from "../a2a-delegations.js";
+import {
+  hostedCallRegistryKey,
+  readHostedCallRegistry,
+  writeHostedCallRegistryEntry,
+  type HostedCallRegistryEntry,
+} from "../hosted-call-registry.js";
+import {
+  beginHostedSmsToolCapture,
+  evaluateHostedSmsSettlement,
+  type HostedSmsToolReport,
+} from "../hosted-call-tool-settlement.js";
 import { recordInboundChannelHint } from "../channel-hint.js";
 import {
   classifySendRejection,
@@ -58,10 +70,12 @@ import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
 import {
   IMESSAGE_EVENT_TYPES,
   A2A_EVENT_TYPES,
+  CALL_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
   reconcileWebhookSubscription,
 } from "./subscriptions.js";
+import { resolvePhoneVoiceStack, type PhoneVoiceStack } from "../voice-stack.js";
 
 type ChannelRuntime = any;
 
@@ -191,6 +205,7 @@ export interface InkboxSessionBridge {
   wsHandler: InkboxWsHandler;
   activeCalls: Map<string, ActiveCall>;
   catchUpA2A(): Promise<void>;
+  catchUpHostedCalls(): Promise<void>;
 }
 
 export interface ConfigureIdentityDeliveryOptions {
@@ -198,6 +213,7 @@ export interface ConfigureIdentityDeliveryOptions {
   webhookUrl: string;
   callWebhookUrl?: string;
   callWebsocketUrl?: string;
+  voiceStack?: PhoneVoiceStack;
   logger?: PluginLogger;
 }
 
@@ -235,6 +251,81 @@ const REALTIME_CONTACT_READ_MAX_RESULTS = 5;
 const REALTIME_CONTACT_READ_NOTES_MAX_CHARS = 200;
 const REALTIME_CONTACT_READ_MAX_VALUES = 3;
 const REALTIME_HANGUP_CONFIRM_WINDOW_MS = 60 * 1000;
+const hostedCallRuns = new Set<string>();
+let hostedCallCompletionChain: Promise<void> = Promise.resolve();
+
+const HOSTED_POST_CALL_TIMING =
+  String.raw`(?:after|when|once)\s+(?:(?:i|we|you)\s+hang\s*up|(?:this|the)\s+call\s+(?:ends?|is\s+over))`;
+const HOSTED_TEXT_VERB =
+  String.raw`text\s+(?!(?:conversation|exchange|messages?|history|thread|yesterday|earlier|from)\b)[\w@][\w@.'’+-]*\b`;
+const HOSTED_TEXT_CLAUSE_PREFIX =
+  String.raw`(?:please\s+|then\s+|(?:(?:can|could|would|will)\s+you|(?:i|we)\s*(?:will|'ll|’ll|am\s+going\s+to|are\s+going\s+to))\s+)`;
+const HOSTED_SEND_SMS = String.raw`send\b.{0,80}\b(?:an?\s+)?(?:sms|text\s+message)\b`;
+const HOSTED_NEGATED_SMS_ACTION = new RegExp(
+  String.raw`\b(?:do\s+not|don['’]?t|never|must\s+not|should\s+not|will\s+not|won['’]?t|can(?:not|['’]?t))\s+(?:(?:ever|again)\s+)?(?:text\b|send\b.{0,80}\b(?:sms|text\s+message)\b)`,
+  "i",
+);
+const HOSTED_TRANSCRIPT_SMS_COMMITMENTS = [
+  new RegExp(
+    String.raw`\b${HOSTED_POST_CALL_TIMING}\b[\s,;:!—-]*(?:${HOSTED_TEXT_CLAUSE_PREFIX})?${HOSTED_TEXT_VERB}`,
+    "i",
+  ),
+  new RegExp(
+    String.raw`(?:^|[.!?]\s+|\b${HOSTED_TEXT_CLAUSE_PREFIX})${HOSTED_TEXT_VERB}.{0,160}\b${HOSTED_POST_CALL_TIMING}\b`,
+    "i",
+  ),
+  new RegExp(String.raw`\b${HOSTED_POST_CALL_TIMING}\b.{0,160}${HOSTED_SEND_SMS}`, "i"),
+  new RegExp(String.raw`\b${HOSTED_SEND_SMS}.{0,160}\b${HOSTED_POST_CALL_TIMING}\b`, "i"),
+];
+const HOSTED_OPEN_ACTION_SMS_COMMITMENTS = [
+  new RegExp(String.raw`\b${HOSTED_TEXT_VERB}`, "i"),
+  new RegExp(String.raw`\b${HOSTED_SEND_SMS}`, "i"),
+];
+
+function hasHostedSmsCommitment(value: string, source: "action" | "transcript"): boolean {
+  const patterns = source === "action"
+    ? HOSTED_OPEN_ACTION_SMS_COMMITMENTS
+    : HOSTED_TRANSCRIPT_SMS_COMMITMENTS;
+  const clauses = value
+    .split(/(?:[.!?;:\n]+|\s+[—–]\s+|\s+--\s+)/)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  const candidates = source === "transcript"
+    ? clauses.flatMap((clause, index) => [
+        clause,
+        ...(index + 1 < clauses.length ? [`${clause}. ${clauses[index + 1]}`] : []),
+      ])
+    : clauses;
+  return candidates.some(
+    (candidate) =>
+      !HOSTED_NEGATED_SMS_ACTION.test(candidate) &&
+      patterns.some((pattern) => pattern.test(candidate)),
+  );
+}
+
+function hostedSmsRecoveryPhase(
+  entry: HostedCallRegistryEntry,
+):
+  | { phase: "initial" }
+  | { phase: "correction"; reason: "pre_send_validation" | "content_rejected" }
+  | { phase: "terminal" } {
+  const attempts = entry.smsAttempts ?? [];
+  if (attempts.length === 0) return { phase: "initial" };
+  if (
+    attempts.length === 1 &&
+    attempts[0].phase === "initial" &&
+    attempts[0].targetMatches &&
+    attempts[0].state === "failed" &&
+    (attempts[0].errorKind === "pre_send_validation" ||
+      attempts[0].errorKind === "content_rejected")
+  ) {
+    return {
+      phase: "correction",
+      reason: attempts[0].errorKind as "pre_send_validation" | "content_rejected",
+    };
+  }
+  return { phase: "terminal" };
+}
 
 // What the main OpenClaw agent can do on behalf of a live call, grouped for
 // speech. Single source of truth rendered into the session instructions, so the
@@ -1390,14 +1481,21 @@ function resolveVoiceTranscriptCoalesceMs(account: ResolvedInkboxAccount): numbe
 }
 
 function isVoiceRealtimeExplicitlyDisabled(account: ResolvedInkboxAccount): boolean {
+  const stack = resolvePhoneVoiceStack(account.config);
+  if (stack === "inkbox_tts_stt" || stack === "inkbox_voice_ai") return true;
+  if (stack === "openai_realtime") return false;
   return account.config.voiceRealtime?.enabled === false;
 }
 
 function isVoiceRealtimeExplicitlyEnabled(account: ResolvedInkboxAccount): boolean {
+  const stack = resolvePhoneVoiceStack(account.config);
+  if (stack === "openai_realtime") return true;
+  if (stack) return false;
   return account.config.voiceRealtime?.enabled === true;
 }
 
 function shouldFallbackToInkboxSttTts(account: ResolvedInkboxAccount): boolean {
+  if (resolvePhoneVoiceStack(account.config) === "openai_realtime") return false;
   return account.config.voiceRealtime?.fallbackToInkboxSttTts !== false;
 }
 
@@ -2060,6 +2158,14 @@ async function dispatchInboundTurn(
     };
     replyOptionsOverride?: Record<string, unknown>;
     a2aContext?: ActiveA2ATurn;
+    hostedSmsSettlement?: {
+      accountId: string;
+      callId: string;
+      phase: "initial" | "correction";
+      expectedTarget: string;
+      promptMarker: string;
+      onSettled: (report: HostedSmsToolReport) => void;
+    };
   },
 ): Promise<void> {
   const core = opts.channelRuntime;
@@ -2067,6 +2173,9 @@ async function dispatchInboundTurn(
     opts.logger?.warn?.(
       "Inkbox inbound event received, but OpenClaw channelRuntime is unavailable; dropping event.",
     );
+    if (opts.hostedSmsSettlement) {
+      throw new Error("OpenClaw channelRuntime is unavailable for hosted SMS settlement.");
+    }
     return;
   }
 
@@ -2254,6 +2363,16 @@ async function dispatchInboundTurn(
   if (opts.a2aContext) {
     setActiveA2ATurn(effectiveSessionKey, opts.a2aContext);
   }
+  const hostedSmsCapture = opts.hostedSmsSettlement
+    ? beginHostedSmsToolCapture({
+        accountId: opts.hostedSmsSettlement.accountId,
+        callId: opts.hostedSmsSettlement.callId,
+        phase: opts.hostedSmsSettlement.phase,
+        sessionKey: effectiveSessionKey,
+        expectedTarget: opts.hostedSmsSettlement.expectedTarget,
+        promptMarker: opts.hostedSmsSettlement.promptMarker,
+      })
+    : undefined;
   try {
     await core.inbound.dispatchReply({
       cfg: opts.cfg as any,
@@ -2278,6 +2397,9 @@ async function dispatchInboundTurn(
       },
     });
   } finally {
+    if (hostedSmsCapture && opts.hostedSmsSettlement) {
+      opts.hostedSmsSettlement.onSettled(hostedSmsCapture.finish());
+    }
     if (opts.a2aContext) {
       clearActiveA2ATurn(effectiveSessionKey, opts.a2aContext);
     }
@@ -3048,6 +3170,12 @@ function inboundMailBody(message: MailWebhookPayload["data"]["message"]): string
   return `${body}\n\n[inkbox: this email was too long to deliver in full. You are seeing ${counts}.${fetchHint}]`;
 }
 
+const CROSS_CHANNEL_COMPLETION_POLICY =
+  "Source-channel completion policy: after a requested action succeeds through " +
+  "another Inkbox channel or send tool, return exactly [SILENT] when the user " +
+  "did not also request a reply here. Do not omit [SILENT] or send confirmation " +
+  "or error prose on this inbound channel.";
+
 async function buildMailTurn(
   runtime: InkboxRuntime,
   account: ResolvedInkboxAccount,
@@ -3087,6 +3215,7 @@ async function buildMailTurn(
     body: [
       `[inkbox:email from=${from}${subjectPart} | ${renderContactMarker(contact, senderIdentity)}]`,
       renderContactMemories(account, contactMemories),
+      CROSS_CHANNEL_COMPLETION_POLICY,
       bodyText,
     ].filter(Boolean).join("\n"),
     messageId: message.message_id || message.id,
@@ -3154,7 +3283,7 @@ async function buildTextTurn(
         "Treat ordinary group chatter as context only.",
         "If no visible reply is warranted, return exactly [SILENT].",
       ].join("\n")
-    : undefined;
+    : CROSS_CHANNEL_COMPLETION_POLICY;
   const marker = isGroup
     ? [
         `[inkbox:group_sms conversation_id=${conversationId ?? "unknown"}${renderIdentityMarker(account)}`,
@@ -3884,10 +4013,12 @@ async function runRealtimeCallWebSocket(
 // funnel here: async delivery-failure webhooks (carrier failure / mail bounce),
 // via the channel extractors, and synchronous send rejections, via
 // wakeOnSendRejection. The wake-up turn rides the normal dispatchInboundTurn
-// path, so it lands on the failed conversation's session/thread and the
-// existing [SILENT] check applies unchanged. The shared 3-send budget (keyed by
-// conversation + recipient) is the loop guard: a recovery send that itself
-// fails just increments the same counter until the cap silences the thread.
+// path, so it lands on the failed conversation's session/thread. Its prompt
+// requires the first safe retry only for a first retryable failure; later,
+// terminal, and unknown failures expose [SILENT] according to policy. The
+// shared 3-send budget (keyed by conversation + recipient) is the loop guard:
+// a recovery send that itself fails increments the same counter until the cap
+// silences the thread.
 async function handleDeliveryFailure(
   opts: InkboxSessionBridgeOptions & { activeCalls: Map<string, ActiveCall> },
   failure: DeliveryFailure | null,
@@ -4266,7 +4397,382 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   }
 
+  async function runHostedCallCompletion(
+    event: CallEndedWebhookPayload,
+    resumeCorrectionReason?: "pre_send_validation" | "content_rejected",
+  ): Promise<void> {
+    const call = event.data.call;
+    const key = hostedCallRegistryKey(opts.account.accountId, call.id);
+    try {
+      await writeHostedCallRegistryEntry({
+        accountId: opts.account.accountId,
+        callId: call.id,
+        eventId: event.id,
+        state: "running",
+        event,
+      });
+      const identity = await opts.runtime.getIdentity();
+      const matched = firstWebhookContact(webhookContacts(event.data));
+      const contact =
+        (await hydrateContact(opts.runtime, matched)) ??
+        (await lookupContact(opts.runtime, "phone", call.remote_phone_number));
+      const contactMemories = normalizeContactMemories(
+        selectPhoneWebhookContact(event.data, contact?.id)?.memories,
+      );
+
+      let transcriptEntries: Array<{ party: string; text: string }> = [];
+      try {
+        const rows = await identity.listTranscripts(call.id);
+        transcriptEntries = rows
+          .map((row: any) => ({
+            party: String(row.party ?? "unknown"),
+            text: String(row.text ?? "").trim(),
+          }))
+          .filter((row) => row.text.length > 0);
+      } catch (error) {
+        opts.logger?.warn?.(
+          `Inkbox Voice AI transcript fetch failed: call_id=${call.id} ${errorMessage(error)}`,
+        );
+      }
+      if (transcriptEntries.length === 0 && event.data.transcript) {
+        transcriptEntries = event.data.transcript.entries
+          .filter((entry: any) => !("marker" in entry))
+          .map((entry: any) => ({
+            party: String(entry.party ?? "unknown"),
+            text: String(entry.text ?? "").trim(),
+          }))
+          .filter((entry) => entry.text.length > 0);
+      }
+      const transcript = transcriptEntries
+        .map(
+          (entry) =>
+            `- ${escapeContactMemoryTokens(entry.party)}: ${escapeContactMemoryTokens(entry.text)}`,
+        )
+        .join("\n");
+      const openActionItems = (event.data.post_call_action_items ?? []).filter(
+        (action) => String(action.status || "open") === "open",
+      );
+      const actions = openActionItems
+        .map((action, index) =>
+          [
+            `${index + 1}. ${escapeContactMemoryTokens(action.action)}`,
+            action.details
+              ? `Details: ${escapeContactMemoryTokens(action.details)}`
+              : undefined,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        )
+        .join("\n");
+      const remotePhoneNumber = call.remote_phone_number.trim();
+      const explicitSmsAction = openActionItems.find((action) => {
+        const value = `${action.action ?? ""} ${action.details ?? ""}`;
+        return hasHostedSmsCommitment(value, "action");
+      });
+      const explicitTranscriptSmsCommitment = transcriptEntries.find((entry) => {
+        return hasHostedSmsCommitment(entry.text, "transcript");
+      });
+      const smsCommitment = explicitSmsAction
+        ? [explicitSmsAction.action, explicitSmsAction.details].filter(Boolean).join("\n")
+        : explicitTranscriptSmsCommitment?.text;
+      const smsSettlementRequired = Boolean(remotePhoneNumber && smsCommitment);
+      const turn: InkboxInboundTurn = {
+        mode: "external",
+        contactKey: contact?.id ?? remotePhoneNumber ?? call.id,
+        contact,
+        contactMemories,
+        fromLabel: contact?.name ?? remotePhoneNumber ?? "Phone caller",
+        // The call record is authoritative. Contact memories and hydrated
+        // address-book data provide context but never replace this address.
+        remoteAddress: remotePhoneNumber,
+        localAddress: call.local_phone_number ?? undefined,
+        body: [
+          `[inkbox:voice_call call_id=${call.id}${renderIdentityMarker(opts.account)} status=ended mode=inkbox_voice_ai | ${renderContactMarker(contact)}]`,
+          renderContactMemories(opts.account, contactMemories),
+          "[call_ended] Inkbox Voice AI finished this phone call.",
+          `Direction: ${call.direction}`,
+          `Outcome: ${event.data.outcome ?? call.status}`,
+          call.hangup_reason ? `Hangup reason: ${call.hangup_reason}` : undefined,
+          remotePhoneNumber
+            ? `Remote party phone number: ${escapeContactMemoryTokens(remotePhoneNumber)}`
+            : undefined,
+          remotePhoneNumber
+            ? "For callbacks or other phone follow-up, use that exact number. Contact data and memories are background only and must not override it."
+            : undefined,
+          remotePhoneNumber
+            ? `For an SMS follow-up to the remote party, call inkbox_send_sms with to="${escapeContactMemoryTokens(remotePhoneNumber)}". Do not substitute a contact-derived number and do not put the SMS in your plain-text reply. Make at most one inkbox_send_sms attempt in this turn. Count the action complete only after inkbox_send_sms reports success. Do not retry a rejected SMS yourself; the Inkbox plugin will issue one bounded correction turn only for a missing attempt or a recoverable content/policy rejection. After a terminal failure or a failed correction, stop and do not claim success.`
+            : undefined,
+          call.reason ? `Outbound task: ${escapeContactMemoryTokens(call.reason)}` : undefined,
+          transcript ? `Call transcript:\n${transcript}` : "No transcript was captured for this call.",
+          actions ? `Open post-call actions recorded during the call:\n${actions}` : undefined,
+          "Review the outcome, transcript, and open actions in one pass. Execute every still-needed commitment with normal OpenClaw tools. Do not repeat work that was completed, canceled, superseded, or already performed during the call.",
+          "If nothing remains, return [SILENT]. Any plain-text reply is suppressed because the call has ended; side effects must come from tool calls.",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+        messageId: `call:${call.id}:ended`,
+        replyToId: call.id,
+        threadId: call.direction === "outbound" ? undefined : `call:${call.id}`,
+        timestamp: parseTimestamp(event.timestamp),
+        raw: event,
+      };
+      const dispatchHostedTurn = async (
+        hostedTurn: InkboxInboundTurn,
+        phase: "initial" | "correction",
+      ): Promise<{ report?: HostedSmsToolReport; error?: unknown }> => {
+        let report: HostedSmsToolReport | undefined;
+        try {
+          await dispatchInboundTurn({
+            ...opts,
+            activeCalls,
+            turn: hostedTurn,
+            replyOptionsOverride: {
+              sourceReplyDeliveryMode: "automatic",
+              bootstrapContextMode: "lightweight",
+              suppressDefaultToolProgressMessages: true,
+            },
+            deliveryOverride: {
+              deliver: async () => ({ visibleReplySent: false }),
+              onError: (error: unknown) => {
+                opts.logger?.warn?.(
+                  `Inkbox Voice AI post-call reply collection failed: ${errorMessage(error)}`,
+                );
+              },
+            },
+            ...(smsSettlementRequired
+              ? {
+                  hostedSmsSettlement: {
+                    accountId: opts.account.accountId,
+                    callId: call.id,
+                    phase,
+                    expectedTarget: remotePhoneNumber,
+                    promptMarker:
+                      phase === "initial"
+                        ? `[inkbox:voice_call call_id=${call.id}`
+                        : `[inkbox:voice_call_correction call_id=${call.id}`,
+                    onSettled: (settled: HostedSmsToolReport) => {
+                      report = settled;
+                    },
+                  },
+                }
+              : {}),
+          });
+          return { report };
+        } catch (error) {
+          return { report, error };
+        }
+      };
+
+      const dispatchCorrection = async (
+        reason: "missing_attempt" | "pre_send_validation" | "content_rejected",
+      ): Promise<boolean> => {
+        const correctionInstruction =
+          reason === "content_rejected"
+            ? "The first send was explicitly rejected by content policy. Preserve every required fact, literal code, and marker in the commitment, but safely rephrase only the surrounding prose."
+            : "The first turn made no send. Fulfill the commitment exactly as written; preserve every required fact, literal code, marker, and wording constraint.";
+        const correctionTurn: InkboxInboundTurn = {
+          ...turn,
+          body: [
+            `[inkbox:voice_call_correction call_id=${call.id}${renderIdentityMarker(opts.account)} | ${renderContactMarker(contact)}]`,
+            "The previous hosted-call reconciliation did not complete its required SMS follow-up.",
+            "This is the only mandatory correction attempt. Do not return [SILENT], skip the tool, or defer the send.",
+            correctionInstruction,
+            `Exact open SMS commitment:\n${escapeContactMemoryTokens(smsCommitment ?? "")}`,
+            `Call inkbox_send_sms exactly once with to="${escapeContactMemoryTokens(remotePhoneNumber)}". Do not use conversationId, do not send to any other number, and do not make a second attempt in this turn. Plain-text replies are suppressed.`,
+          ].join("\n\n"),
+          messageId: `call:${call.id}:ended:sms-correction`,
+        };
+        const correction = await dispatchHostedTurn(correctionTurn, "correction");
+        const decision = correction.report
+          ? evaluateHostedSmsSettlement(correction.report, "correction")
+          : undefined;
+        if (!correction.error && decision?.outcome === "success") return true;
+        const outcome = correction.error
+          ? "correction_dispatch_failed"
+          : decision?.reason ?? "correction_missing_tool_report";
+        await writeHostedCallRegistryEntry({
+          accountId: opts.account.accountId,
+          callId: call.id,
+          eventId: event.id,
+          state: "failed",
+          outcome,
+          retryable: false,
+          event,
+        });
+        opts.logger?.warn?.(
+          `Inkbox Voice AI post-call SMS settlement stopped: call_id=${call.id} ${outcome}`,
+        );
+        return false;
+      };
+
+      if (resumeCorrectionReason) {
+        if (!smsSettlementRequired) {
+          await writeHostedCallRegistryEntry({
+            accountId: opts.account.accountId,
+            callId: call.id,
+            eventId: event.id,
+            state: "failed",
+            outcome: "correction_context_unavailable",
+            retryable: false,
+            event,
+          });
+          return;
+        }
+        if (!(await dispatchCorrection(resumeCorrectionReason))) return;
+      } else {
+        const initial = await dispatchHostedTurn(turn, "initial");
+        if (smsSettlementRequired) {
+          const initialDecision = initial.report
+            ? evaluateHostedSmsSettlement(initial.report, "initial")
+            : undefined;
+          if (initialDecision?.outcome === "correction" && !initial.error) {
+            if (!(await dispatchCorrection(initialDecision.reason as
+              | "missing_attempt"
+              | "pre_send_validation"
+              | "content_rejected"))) return;
+          } else if (initialDecision?.outcome !== "success") {
+            const noAttempt = (initial.report?.attempts.length ?? 0) === 0;
+            const retryable = Boolean(initial.error && noAttempt && !initial.report?.aborted);
+            const reason = initial.error
+              ? "initial_dispatch_failed_before_settlement"
+              : initialDecision?.reason ?? "initial_missing_tool_report";
+            await writeHostedCallRegistryEntry({
+              accountId: opts.account.accountId,
+              callId: call.id,
+              eventId: event.id,
+              state: "failed",
+              outcome: reason,
+              retryable,
+              event,
+            });
+            opts.logger?.warn?.(
+              `Inkbox Voice AI post-call SMS settlement ${retryable ? "will retry" : "stopped"}: call_id=${call.id} ${reason}`,
+            );
+            return;
+          }
+        } else if (initial.error) {
+          throw initial.error;
+        }
+      }
+      await writeHostedCallRegistryEntry({
+        accountId: opts.account.accountId,
+        callId: call.id,
+        eventId: event.id,
+        state: "completed",
+        outcome: "success",
+        event,
+      });
+      opts.logger?.info?.(
+        `Inkbox Voice AI post-call reconciliation completed: call_id=${call.id}`,
+      );
+    } catch (error) {
+      opts.logger?.warn?.(
+        `Inkbox Voice AI post-call reconciliation failed: call_id=${call.id} ${errorMessage(error)}`,
+      );
+    } finally {
+      hostedCallRuns.delete(key);
+    }
+  }
+
+  async function ingestHostedCallCompletion(event: CallEndedWebhookPayload): Promise<void> {
+    if (event.data.call.mode !== "hosted_agent") return;
+    const callId = event.data.call.id.trim();
+    if (!callId) return;
+    const key = hostedCallRegistryKey(opts.account.accountId, callId);
+    if (hostedCallRuns.has(key)) return;
+    const existing = (await readHostedCallRegistry())[key];
+    if (existing?.state === "completed" || (existing?.state === "failed" && !existing.retryable)) {
+      return;
+    }
+    const recovery = existing
+      ? hostedSmsRecoveryPhase(existing)
+      : { phase: "initial" as const };
+    if (existing && recovery.phase === "terminal") {
+      await writeHostedCallRegistryEntry({
+        accountId: existing.accountId,
+        callId: existing.callId,
+        eventId: existing.eventId,
+        state: "failed",
+        outcome: "durable_sms_attempt_is_ambiguous",
+        retryable: false,
+        event: existing.event,
+        smsAttempts: existing.smsAttempts,
+      });
+      return;
+    }
+    const replayEvent = recovery.phase === "correction" ? existing!.event : event;
+    hostedCallRuns.add(key);
+    try {
+      await writeHostedCallRegistryEntry({
+        accountId: opts.account.accountId,
+        callId,
+        eventId: replayEvent.id,
+        state: "queued",
+        event: replayEvent,
+      });
+    } catch (error) {
+      hostedCallRuns.delete(key);
+      throw error;
+    }
+    hostedCallCompletionChain = hostedCallCompletionChain
+      .catch((error) => {
+        opts.logger?.warn?.(
+          `Inkbox Voice AI completion queue recovered from a prior failure: ${errorMessage(error)}`,
+        );
+      })
+      .then(() =>
+        runHostedCallCompletion(
+          replayEvent,
+          recovery.phase === "correction" ? recovery.reason : undefined,
+        ),
+      );
+  }
+
+  async function catchUpHostedCalls(): Promise<void> {
+    for (const entry of Object.values(await readHostedCallRegistry())) {
+      if (
+        entry.accountId !== opts.account.accountId ||
+        entry.state === "completed" ||
+        (entry.state === "failed" && !entry.retryable)
+      ) {
+        continue;
+      }
+      const recovery = hostedSmsRecoveryPhase(entry);
+      if (recovery.phase === "terminal") {
+        await writeHostedCallRegistryEntry({
+          accountId: entry.accountId,
+          callId: entry.callId,
+          eventId: entry.eventId,
+          state: "failed",
+          outcome: "durable_sms_attempt_is_ambiguous",
+          retryable: false,
+          event: entry.event,
+          smsAttempts: entry.smsAttempts,
+        });
+        continue;
+      }
+      const key = hostedCallRegistryKey(entry.accountId, entry.callId);
+      if (hostedCallRuns.has(key)) continue;
+      hostedCallRuns.add(key);
+      hostedCallCompletionChain = hostedCallCompletionChain
+        .catch((error) => {
+          opts.logger?.warn?.(
+            `Inkbox Voice AI completion queue recovered from a prior failure: ${errorMessage(error)}`,
+          );
+        })
+        .then(() =>
+          runHostedCallCompletion(
+            entry.event,
+            recovery.phase === "correction" ? recovery.reason : undefined,
+          ),
+        );
+    }
+  }
+
   const handlers: InboundHandlers = {
+    async onCallEnded(event) {
+      await ingestHostedCallCompletion(event);
+    },
     async onA2A(event) {
       await ingestA2A(event);
     },
@@ -4661,7 +5167,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   };
 
-  return { handlers, wsHandler, activeCalls, catchUpA2A };
+  return { handlers, wsHandler, activeCalls, catchUpA2A, catchUpHostedCalls };
 }
 
 export async function configureInkboxIdentityDelivery(
@@ -4731,13 +5237,20 @@ export async function configureInkboxIdentityDelivery(
     identity.phoneNumber != null || Boolean(identity.imessageEnabled);
   if (canReceiveCalls) {
     try {
-      const callConfig = {
-        incomingCallAction: opts.callWebsocketUrl ? "auto_accept" : "webhook",
-        clientWebsocketUrl: opts.callWebsocketUrl ?? null,
-        incomingCallWebhookUrl: opts.callWebsocketUrl
-          ? null
-          : (opts.callWebhookUrl ?? opts.webhookUrl),
-      };
+      const callConfig =
+        opts.voiceStack === "inkbox_voice_ai"
+          ? {
+              incomingCallAction: "hosted_agent",
+              clientWebsocketUrl: null,
+              incomingCallWebhookUrl: null,
+            }
+          : {
+              incomingCallAction: opts.callWebsocketUrl ? "auto_accept" : "webhook",
+              clientWebsocketUrl: opts.callWebsocketUrl,
+              incomingCallWebhookUrl: opts.callWebsocketUrl
+                ? null
+                : (opts.callWebhookUrl ?? opts.webhookUrl),
+            };
       if (typeof (identity as any).setIncomingCallAction === "function") {
         await (identity as any).setIncomingCallAction(callConfig);
       } else if (identity.phoneNumber?.id) {
@@ -4746,7 +5259,9 @@ export async function configureInkboxIdentityDelivery(
         await inkbox.phoneNumbers.update(identity.phoneNumber.id, callConfig);
       }
       opts.logger?.info?.(
-        `Inkbox incoming calls route to ${opts.callWebsocketUrl ?? opts.callWebhookUrl ?? opts.webhookUrl}`,
+        opts.voiceStack === "inkbox_voice_ai"
+          ? "Inkbox incoming calls use Inkbox Voice AI"
+          : `Inkbox incoming calls route to ${opts.callWebsocketUrl ?? opts.callWebhookUrl ?? opts.webhookUrl}`,
       );
     } catch (error) {
       opts.logger?.warn?.(
@@ -4756,6 +5271,30 @@ export async function configureInkboxIdentityDelivery(
   }
   // Identity-owned channels use independent subscription rows at the same
   // canonical receiver URL.
+  if (identity.id && canReceiveCalls) {
+    try {
+      const callSub = await reconcileWebhookSubscription(
+        inkbox,
+        {
+          agentIdentityId: identity.id,
+          url: opts.webhookUrl,
+          eventTypes: CALL_EVENT_TYPES,
+        },
+        opts.logger,
+      );
+      if (callSub) {
+        opts.logger?.info?.(`Inkbox call lifecycle events subscribed at ${opts.webhookUrl}`);
+      } else {
+        opts.logger?.warn?.(
+          `Inkbox call lifecycle subscription was not created at ${opts.webhookUrl}; Voice AI completion work will not be delivered until that is resolved.`,
+        );
+      }
+    } catch (error) {
+      opts.logger?.warn?.(
+        `Inkbox call lifecycle subscription reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   if (identity.id) {
     try {
       const a2aSub = await reconcileWebhookSubscription(

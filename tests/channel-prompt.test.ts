@@ -31,5 +31,12 @@ describe("inkbox channel agent prompt", () => {
       "NEVER call inkbox_send_email, inkbox_send_sms, or inkbox_send_imessage",
     );
     expect(rules?.join("\n")).toContain("include the literal requested values");
+    expect(rules?.join("\n")).toContain(
+      "authenticated current sender asks for their own Inkbox contact-card details",
+    );
+    expect(rules?.join("\n")).toContain("do not mask, abbreviate, or refuse");
+    expect(rules?.join("\n")).toContain(
+      "does not authorize disclosing another contact's details",
+    );
   });
 });

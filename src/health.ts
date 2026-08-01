@@ -8,9 +8,16 @@ import {
   type HealthRepairResult,
 } from "openclaw/plugin-sdk/health";
 import { resolveInkboxAccount } from "./accounts.js";
-import { inkboxWebhookPath, publicUrl as composePublicUrl } from "./call-websocket.js";
+import {
+  deriveConfiguredCallWebsocketUrl,
+  inkboxCallWebsocketPath,
+  inkboxWebhookPath,
+  publicUrl as composePublicUrl,
+  websocketUrl,
+} from "./call-websocket.js";
 import { inkboxClientOptions } from "./sdk-options.js";
 import { readIdentityState, writeIdentityState } from "./state.js";
+import type { PhoneVoiceStack } from "./voice-stack.js";
 
 const SOURCE = "@inkbox/inkbox";
 
@@ -86,6 +93,77 @@ function messageFromError(error: unknown): string {
 
 function isNotFound(error: unknown): boolean {
   return error instanceof InkboxAPIError && error.statusCode === 404;
+}
+
+interface IncomingCallRoute {
+  incomingCallAction?: string | null;
+  clientWebsocketUrl?: string | null;
+  incomingCallWebhookUrl?: string | null;
+}
+
+interface IncomingCallRouteAssessment {
+  ok: boolean;
+  expected: string;
+  actual: string;
+}
+
+function displayRouteValue(value: string | undefined): string {
+  return value === undefined ? "(unset)" : JSON.stringify(value);
+}
+
+export function assessIncomingCallRoute(
+  voiceStack: PhoneVoiceStack | undefined,
+  route: IncomingCallRoute,
+  expectedClientWebsocketUrl: string | undefined,
+): IncomingCallRouteAssessment {
+  const action = route.incomingCallAction ?? undefined;
+  const websocket = route.clientWebsocketUrl ?? undefined;
+  const webhook = route.incomingCallWebhookUrl ?? undefined;
+  const actual =
+    `action=${displayRouteValue(action)}, ` +
+    `clientWebsocketUrl=${displayRouteValue(websocket)}, ` +
+    `incomingCallWebhookUrl=${displayRouteValue(webhook)}`;
+
+  // Preserve the pre-voice-stack health behavior for existing installs that
+  // have not run the new wizard yet.
+  if (!voiceStack) {
+    const ok =
+      action === "auto_accept"
+        ? Boolean(websocket)
+        : action === "webhook"
+          ? Boolean(webhook)
+          : action === "auto_reject";
+    return {
+      ok,
+      expected: "legacy configured incoming-call route",
+      actual,
+    };
+  }
+
+  if (voiceStack === "inkbox_voice_ai") {
+    return {
+      ok:
+        action === "hosted_agent" &&
+        websocket === undefined &&
+        webhook === undefined,
+      expected:
+        'action="hosted_agent", clientWebsocketUrl=(unset), incomingCallWebhookUrl=(unset)',
+      actual,
+    };
+  }
+
+  return {
+    ok:
+      Boolean(expectedClientWebsocketUrl) &&
+      action === "auto_accept" &&
+      websocket === expectedClientWebsocketUrl &&
+      webhook === undefined,
+    expected:
+      `action="auto_accept", ` +
+      `clientWebsocketUrl=${displayRouteValue(expectedClientWebsocketUrl)}, ` +
+      "incomingCallWebhookUrl=(unset)",
+    actual,
+  };
 }
 
 export async function detectInkboxHealthFindings(
@@ -269,6 +347,13 @@ export async function detectInkboxHealthFindings(
   const expectedUrl = expectedBase
     ? composePublicUrl(expectedBase, inkboxWebhookPath(account.accountId))
     : undefined;
+  const configuredCallWebsocketUrl = deriveConfiguredCallWebsocketUrl(account);
+  const expectedCallWebsocketUrl =
+    account.callWebsocketUrl || account.publicUrl
+      ? configuredCallWebsocketUrl
+      : expectedBase
+        ? websocketUrl(expectedBase, inkboxCallWebsocketPath(account.accountId))
+        : configuredCallWebsocketUrl;
 
   if (identity.mailbox?.id) {
     if (!expectedUrl) {
@@ -403,12 +488,15 @@ export async function detectInkboxHealthFindings(
       callWebhookUrl = (identity.phoneNumber as any)?.incomingCallWebhookUrl;
       callWsUrl = (identity.phoneNumber as any)?.clientWebsocketUrl;
     }
-    const callRouteOk =
-      callAction === "auto_accept"
-        ? Boolean(callWsUrl)
-        : callAction === "webhook"
-          ? Boolean(callWebhookUrl)
-          : callAction === "auto_reject";
+    const routeAssessment = assessIncomingCallRoute(
+      account.config.voiceStack,
+      {
+        incomingCallAction: callAction,
+        clientWebsocketUrl: callWsUrl,
+        incomingCallWebhookUrl: callWebhookUrl,
+      },
+      expectedCallWebsocketUrl,
+    );
     if (readFailed) {
       findings.push(
         finding(
@@ -419,12 +507,13 @@ export async function detectInkboxHealthFindings(
           "Re-check after the API is reachable.",
         ),
       );
-    } else if (!callRouteOk) {
+    } else if (!routeAssessment.ok) {
+      const selectedStack = account.config.voiceStack ?? "legacy (not selected)";
       findings.push(
         finding(
           "inkbox/incoming-call-route",
           "warning",
-          `Identity ${account.identity} has incomingCallAction=${callAction ?? "(unset)"} without a matching URL.`,
+          `Identity ${account.identity} incoming-call route does not match selected voiceStack=${selectedStack}. Expected ${routeAssessment.expected}; actual ${routeAssessment.actual}.`,
           "channels.inkbox",
           "Run `openclaw inkbox setup` to wire the incoming-call route.",
         ),

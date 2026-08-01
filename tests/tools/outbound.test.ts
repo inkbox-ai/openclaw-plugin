@@ -265,6 +265,38 @@ describe("registerForwardEmail", () => {
 });
 
 describe("registerPlaceCall", () => {
+  it("uses hosted mode with a bounded reason and omits WebSocket and authority fields", async () => {
+    const { api, tools } = createApi();
+    const placeCall = vi.fn().mockResolvedValue({ id: "call-hosted", status: "queued" });
+    registerPlaceCall(
+      api,
+      createMockRuntime({ placeCall }),
+      undefined,
+      () => "wss://must-not-be-used.example/ws",
+      () => ({ voiceStack: "inkbox_voice_ai", voicemailDetection: "disabled" }),
+    );
+    const tool = tools.get("inkbox_place_call")!;
+    expect((tool.parameters as any).properties.clientWebsocketUrl).toBeUndefined();
+
+    await tool.execute("turn-1", {
+      toNumber: "+15551234567",
+      purpose: "Confirm the release",
+      openingMessage: "Hello from Inkbox",
+      context: "Check the final status",
+    });
+
+    expect(placeCall).toHaveBeenCalledWith({
+      toNumber: "+15551234567",
+      origination: "dedicated_number",
+      mode: "hosted_agent",
+      reason:
+        "Purpose: Confirm the release\nOpening message: Hello from Inkbox\nContext: Check the final status",
+      voicemailDetection: "disabled",
+    });
+    const request = placeCall.mock.calls[0][0];
+    expect(request.clientWebsocketUrl).toBeUndefined();
+    expect(request.hostedAgentAuthorityMode).toBeUndefined();
+  });
   it("calls identity.placeCall with toNumber + WS url", async () => {
     const { api, tools } = createApi();
     const placeCall = vi.fn().mockResolvedValue({
@@ -283,6 +315,8 @@ describe("registerPlaceCall", () => {
       toNumber: "+15551234567",
       origination: "dedicated_number",
       clientWebsocketUrl: expect.stringContaining("wss://example.com/ws"),
+      mode: "client_websocket",
+      voicemailDetection: "enabled",
     });
     expect(out.content[0].text).toContain("call-9");
     expect(out.content[0].text).toContain("origination=dedicated_number");
@@ -303,20 +337,25 @@ describe("registerPlaceCall", () => {
     expect(placeCall).not.toHaveBeenCalled();
   });
 
-  it("forwards disabled voicemail detection when requested", async () => {
+  it("uses configured disabled voicemail detection instead of exposing a tool argument", async () => {
     const { api, tools } = createApi();
     const placeCall = vi.fn().mockResolvedValue({
       id: "call-voicemail",
       status: "queued",
     });
-    registerPlaceCall(api, createMockRuntime({ placeCall }));
+    registerPlaceCall(
+      api,
+      createMockRuntime({ placeCall }),
+      undefined,
+      undefined,
+      () => ({ voiceStack: "inkbox_tts_stt", voicemailDetection: "disabled" }),
+    );
     const tool = tools.get("inkbox_place_call")!;
 
     await tool.execute("turn-1", {
       toNumber: "+15551234567",
       purpose: "Run the CI voice check",
       clientWebsocketUrl: "wss://example.com/ws",
-      voicemailDetection: "disabled",
     });
 
     expect(placeCall).toHaveBeenCalledWith(
@@ -345,6 +384,8 @@ describe("registerPlaceCall", () => {
       toNumber: "+15551234567",
       origination: "dedicated_number",
       clientWebsocketUrl: expect.stringContaining("wss://derived.example/ws"),
+      mode: "client_websocket",
+      voicemailDetection: "enabled",
     });
     expect(out.content[0].text).toContain("call-10");
   });

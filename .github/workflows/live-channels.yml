@@ -42,6 +42,7 @@ concurrency:
 jobs:
   live:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → must run one at a time
@@ -50,12 +51,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: a4dd76b534e33c0a8352148d8f0e9ab25199f05b
-          path: .ci/inkbox
-
       - name: Set up env paths (gateway log)
         run: echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
 
@@ -70,16 +65,12 @@ jobs:
 
       - name: Install live-test deps (Inkbox SDK + pytest)
         run: |
-          pip install \
-            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@a4dd76b534e33c0a8352148d8f0e9ab25199f05b#subdirectory=sdk/python" \
-            pytest
+          pip install 'inkbox==0.5.9' pytest
 
       - name: Build the plugin
         run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
-          npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript openclaw@2026.5.27
+          npm ci
+          npm install --no-save --package-lock=false openclaw@2026.5.27
           npm run build
 
       - name: Install OpenClaw host
@@ -133,11 +124,13 @@ jobs:
           echo "AUT handle: $HANDLE"
           # Install the plugin BEFORE writing channels.inkbox.* — the channel id
           # only validates once the plugin is registered.
-          openclaw plugins install -l "$GITHUB_WORKSPACE"
+          openclaw plugins install -l --dangerously-force-unsafe-install "$GITHUB_WORKSPACE"
           openclaw plugins enable inkbox || true
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"
+          openclaw config set channels.inkbox.voiceStack inkbox_tts_stt
+          openclaw config set channels.inkbox.voicemailDetection disabled
           openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
           openclaw config set tools.allow '["inkbox"]' --strict-json
           # Onboarding defaults tools.profile to "coding", whose base allowlist
@@ -151,7 +144,7 @@ jobs:
           nohup python3 "$GITHUB_WORKSPACE/tests/live/mock_openai.py" 8088 > "$RUNNER_TEMP/mock.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/mock.pid"
           for i in $(seq 1 10); do
-            curl -sf http://127.0.0.1:8088/v1/models >/dev/null && { echo "mock model ready"; exit 0; }
+            curl -sf --connect-timeout 1 --max-time 3 http://127.0.0.1:8088/v1/models >/dev/null && { echo "mock model ready"; exit 0; }
             sleep 1
           done
           echo "::error::mock model did not start"; cat "$RUNNER_TEMP/mock.log"; exit 1
@@ -192,7 +185,7 @@ jobs:
       # Failure-only: these logs carry live phone/email/message content and this repo
       # (and its Action logs/artifacts) is public.
       - name: Dump logs (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         run: |
           echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
           echo "=== mock model log ==="; cat "$RUNNER_TEMP/mock.log" 2>/dev/null || true
@@ -205,7 +198,7 @@ jobs:
           kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true
 
       - name: Upload artifacts (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: live-logs-${{ matrix.mode }}

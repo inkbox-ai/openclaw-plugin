@@ -109,6 +109,21 @@
             "type": "string",
             "description": "Explicit outbound-call media WebSocket URL. If omitted, tunnel mode derives it from tunnelName/identity."
           },
+          "voiceStack": {
+            "type": "string",
+            "enum": ["inkbox_voice_ai", "openai_realtime", "inkbox_tts_stt"],
+            "description": "Phone call voice stack. Defaults to Inkbox TTS/STT for backward compatibility."
+          },
+          "voiceAiAuthorityMode": {
+            "type": "string",
+            "enum": ["contact_scoped", "yolo"],
+            "description": "Saved authority for Inkbox Voice AI calls."
+          },
+          "voicemailDetection": {
+            "type": "string",
+            "enum": ["enabled", "disabled"],
+            "description": "Outbound-call voicemail detection policy. Defaults to enabled."
+          },
           "voiceTranscriptCoalesceMs": {
             "type": "integer",
             "minimum": 0,
@@ -201,6 +216,18 @@
                 "tunnelName": { "type": "string" },
                 "publicUrl": { "type": "string" },
                 "callWebsocketUrl": { "type": "string" },
+                "voiceStack": {
+                  "type": "string",
+                  "enum": ["inkbox_voice_ai", "openai_realtime", "inkbox_tts_stt"]
+                },
+                "voiceAiAuthorityMode": {
+                  "type": "string",
+                  "enum": ["contact_scoped", "yolo"]
+                },
+                "voicemailDetection": {
+                  "type": "string",
+                  "enum": ["enabled", "disabled"]
+                },
                 "voiceTranscriptCoalesceMs": { "type": "integer", "minimum": 0 },
                 "voiceAgentPrewarm": { "type": "boolean" },
                 "voiceAgentPrewarmTtlMs": { "type": "integer", "minimum": 0 },
@@ -347,6 +374,21 @@
       "callWebsocketUrl": {
         "type": "string",
         "description": "Explicit outbound-call media WebSocket URL. If omitted, tunnel mode derives it from tunnelName/identity."
+      },
+      "voiceStack": {
+        "type": "string",
+        "enum": ["inkbox_voice_ai", "openai_realtime", "inkbox_tts_stt"],
+        "description": "Phone call voice stack. Defaults to Inkbox TTS/STT for backward compatibility."
+      },
+      "voiceAiAuthorityMode": {
+        "type": "string",
+        "enum": ["contact_scoped", "yolo"],
+        "description": "Saved authority for Inkbox Voice AI calls."
+      },
+      "voicemailDetection": {
+        "type": "string",
+        "enum": ["enabled", "disabled"],
+        "description": "Outbound-call voicemail detection policy. Defaults to enabled."
       },
       "voiceTranscriptCoalesceMs": {
         "type": "integer",

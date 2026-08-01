@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { CallOrigin, VoicemailDetection } from "@inkbox/sdk";
+import { CallMode, CallOrigin, VoicemailDetection } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText, toolError } from "../errors.js";
 import { checkOutboundRecipient } from "../allowlist.js";
@@ -9,6 +9,31 @@ import {
   registerOutboundCallContext,
   type OutboundCallContext,
 } from "../outbound-call-context.js";
+import {
+  resolveVoicemailDetection,
+  type PhoneVoiceStack,
+} from "../voice-stack.js";
+
+interface CallPolicy {
+  voiceStack?: PhoneVoiceStack;
+  voicemailDetection?: "enabled" | "disabled";
+}
+
+export function buildVoiceAiReason(params: {
+  purpose: string;
+  openingMessage?: string;
+  context?: string;
+}): string {
+  const reason = [
+    ["Purpose", params.purpose],
+    ["Opening message", params.openingMessage],
+    ["Context", params.context],
+  ]
+    .filter((entry): entry is [string, string] => Boolean(entry[1]?.trim()))
+    .map(([label, value]) => `${label}: ${value.trim()}`)
+    .join("\n");
+  return reason.length <= 2_000 ? reason : `${reason.slice(0, 1_999).trimEnd()}…`;
+}
 
 // Pick which line an outbound call originates from. Resolution order:
 //   1. An explicit choice (from the agent) always wins.
@@ -57,57 +82,58 @@ export function registerPlaceCall(
   runtime: InkboxRuntime,
   allowedRecipients?: string[],
   resolveClientWebsocketUrl?: (context?: OutboundCallContext) => string | undefined,
+  resolveCallPolicy: () => CallPolicy = () => ({}),
 ): void {
+  const registeredPolicy = resolveCallPolicy();
+  const hostedAtRegistration = registeredPolicy.voiceStack === "inkbox_voice_ai";
+  const callProperties: Record<string, any> = {
+    toNumber: Type.String({
+      description: "Recipient phone number in E.164 format.",
+    }),
+    purpose: Type.String({
+      description: hostedAtRegistration
+        ? "Why this call is being placed; becomes Inkbox Voice AI's task brief."
+        : "Why this call is being placed; loaded before the live greeting.",
+    }),
+    origination: Type.Optional(
+      Type.Union(
+        [Type.Literal("dedicated_number"), Type.Literal("shared_imessage_number")],
+        {
+          description:
+            'Which line to call from. Use "dedicated_number" for the identity phone number and "shared_imessage_number" only for an iMessage-connected recipient. If omitted, the plugin follows the current channel and available lines.',
+        },
+      ),
+    ),
+    openingMessage: Type.Optional(
+      Type.String({
+        description: hostedAtRegistration
+          ? "Optional opening guidance included in the Voice AI task brief."
+          : "Optional first thing to say when the call connects.",
+      }),
+    ),
+    context: Type.Optional(
+      Type.String({
+        description: hostedAtRegistration
+          ? "Optional concise background included in the Voice AI task brief."
+          : "Optional relevant background loaded into the local call session.",
+      }),
+    ),
+  };
+  if (!hostedAtRegistration) {
+    callProperties.clientWebsocketUrl = Type.Optional(
+      Type.String({
+        description:
+          "Optional WebSocket URL (wss://...) for call media. Omit to use the active Inkbox tunnel.",
+      }),
+    );
+  }
   api.registerTool(
     {
       name: "inkbox_place_call",
-      description:
-        "Place an outbound voice call. Calls can go out over two lines: your own dedicated phone number, or the shared Inkbox iMessage line you are already messaging the recipient on. Match the channel you're talking on — call SMS/phone contacts from your dedicated number, and call an iMessage contact over the shared iMessage line (set `origination` accordingly). Always include purpose; it is loaded into the live call so the agent opens with context instead of a generic greeting. Returns the queued call's id + status + origination + rate-limit info.",
-      parameters: Type.Object({
-        toNumber: Type.String({
-          description: "Recipient phone number in E.164 format.",
-        }),
-        purpose: Type.String({
-          description:
-            "Why this call is being placed. If no topic was specified, say that the user asked for a general call. This is loaded into the live call before the greeting.",
-        }),
-        origination: Type.Optional(
-          Type.Union(
-            [Type.Literal("dedicated_number"), Type.Literal("shared_imessage_number")],
-            {
-              description:
-                'Which line to call from. Use "dedicated_number" to call from your own phone number (the same line SMS/voice conversations use). Use "shared_imessage_number" to call someone over the shared iMessage line you are already messaging them on — this only works if they are connected to you over iMessage (otherwise the call is rejected). If omitted, it is resolved automatically: the only available line, or — when both are available — the line matching the current conversation\'s channel.',
-            },
-          ),
-        ),
-        openingMessage: Type.Optional(
-          Type.String({
-            description:
-              "Optional exact or near-exact first thing to say when the call connects. Use this when the user specified what the call is about.",
-          }),
-        ),
-        context: Type.Optional(
-          Type.String({
-            description:
-              "Optional relevant background to load into the call session. Include concise facts the voice agent may need after the opening.",
-          }),
-        ),
-        clientWebsocketUrl: Type.Optional(
-          Type.String({
-            description:
-              "Optional WebSocket URL (wss://...) that Inkbox will connect to for the call stream. Omit to use the plugin's active Inkbox tunnel.",
-          }),
-        ),
-        voicemailDetection: Type.Optional(
-          Type.Union(
-            [Type.Literal("enabled"), Type.Literal("disabled")],
-            {
-              description:
-                "Whether the call should end when voicemail is detected. Omit to keep detection enabled.",
-            },
-          ),
-        ),
-      }),
+      description: hostedAtRegistration
+        ? "Ask Inkbox Voice AI to place an outbound call and complete the stated task. OpenClaw is notified after the call ends."
+        : "Place an outbound voice call through the configured OpenClaw phone call voice stack.",
+      parameters: Type.Object(callProperties),
       async execute(_id: string, params: any) {
         return runTool(async () => {
           const block = checkOutboundRecipient(params.toNumber, allowedRecipients);
@@ -126,23 +152,33 @@ export function registerPlaceCall(
               : undefined;
           const context =
             typeof params.context === "string" ? params.context.trim() || undefined : undefined;
-          const callContext = registerOutboundCallContext({
-            toNumber: params.toNumber,
-            purpose,
-            openingMessage,
-            context,
-          });
-          const clientWebsocketUrl =
-            params.clientWebsocketUrl ?? resolveClientWebsocketUrl?.(callContext);
-          if (!clientWebsocketUrl) {
+          const policy = resolveCallPolicy();
+          if (policy.voiceStack !== registeredPolicy.voiceStack) {
             return toolError(
-              "No Inkbox call WebSocket is available. Start the inkbox channel gateway or pass clientWebsocketUrl explicitly.",
+              "The phone call voice stack changed after tools were registered. Restart the OpenClaw gateway before placing a call.",
             );
           }
-          const decoratedClientWebsocketUrl = decorateCallWebsocketUrlWithContext(
-            clientWebsocketUrl,
-            callContext,
-          );
+          const hosted = policy.voiceStack === "inkbox_voice_ai";
+          let decoratedClientWebsocketUrl: string | undefined;
+          if (!hosted) {
+            const callContext = registerOutboundCallContext({
+              toNumber: params.toNumber,
+              purpose,
+              openingMessage,
+              context,
+            });
+            const clientWebsocketUrl =
+              params.clientWebsocketUrl ?? resolveClientWebsocketUrl?.(callContext);
+            if (!clientWebsocketUrl) {
+              return toolError(
+                "No Inkbox call WebSocket is available. Start the Inkbox channel gateway or pass clientWebsocketUrl explicitly.",
+              );
+            }
+            decoratedClientWebsocketUrl = decorateCallWebsocketUrlWithContext(
+              clientWebsocketUrl,
+              callContext,
+            );
+          }
 
           const identity = await runtime.getIdentity();
           // Resolve the outbound line (dedicated number vs shared iMessage line).
@@ -164,15 +200,14 @@ export function registerPlaceCall(
                 origination === "shared_imessage_number"
                   ? CallOrigin.SHARED_IMESSAGE_NUMBER
                   : CallOrigin.DEDICATED_NUMBER,
-              clientWebsocketUrl: decoratedClientWebsocketUrl,
-              ...(params.voicemailDetection !== undefined
-                ? {
-                    voicemailDetection:
-                      params.voicemailDetection === "disabled"
-                        ? VoicemailDetection.DISABLED
-                        : VoicemailDetection.ENABLED,
-                  }
-                : {}),
+              mode: hosted ? CallMode.HOSTED_AGENT : CallMode.CLIENT_WEBSOCKET,
+              ...(hosted
+                ? { reason: buildVoiceAiReason({ purpose, openingMessage, context }) }
+                : { clientWebsocketUrl: decoratedClientWebsocketUrl }),
+              voicemailDetection:
+                resolveVoicemailDetection(policy) === "disabled"
+                  ? VoicemailDetection.DISABLED
+                  : VoicemailDetection.ENABLED,
             });
           } catch (error) {
             // A shared-line call to someone who isn't connected over iMessage
@@ -189,7 +224,7 @@ export function registerPlaceCall(
           // see remaining capacity before queueing more outbound calls.
           const remaining = call.rateLimit?.callsRemaining;
           return toolText(
-            `Placed call id=${call.id} to=${params.toNumber} status=${call.status} origination=${origination}` +
+            `Placed call id=${call.id} to=${params.toNumber} status=${call.status} origination=${origination} mode=${hosted ? "inkbox_voice_ai" : "client_websocket"}` +
               (remaining !== undefined ? ` callsRemaining=${remaining}` : ""),
           );
         });

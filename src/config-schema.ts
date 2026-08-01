@@ -85,6 +85,25 @@ const voiceRealtimeSchema = {
   },
 };
 
+const voiceStackSchema = {
+  type: "string",
+  enum: ["inkbox_voice_ai", "openai_realtime", "inkbox_tts_stt"],
+  description:
+    "Phone call voice stack. Omit only to preserve legacy Realtime auto-detection on an existing installation.",
+};
+
+const voiceAiAuthorityModeSchema = {
+  type: "string",
+  enum: ["contact_scoped", "yolo"],
+  description: "Saved Inkbox Voice AI authority selected during setup.",
+};
+
+const voicemailDetectionSchema = {
+  type: "string",
+  enum: ["enabled", "disabled"],
+  description: "Outbound call voicemail detection policy. Defaults to enabled.",
+};
+
 export const inkboxAccountConfigJsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -155,6 +174,9 @@ export const inkboxAccountConfigJsonSchema = {
         "Maximum time to let the hidden voice agent warmup run before aborting. Defaults to 70000.",
     },
     voiceRealtime: voiceRealtimeSchema,
+    voiceStack: voiceStackSchema,
+    voiceAiAuthorityMode: voiceAiAuthorityModeSchema,
+    voicemailDetection: voicemailDetectionSchema,
     vault: vaultSchema,
     allowedRecipients: {
       type: "array",

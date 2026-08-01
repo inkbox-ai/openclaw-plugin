@@ -58,13 +58,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install protocol driver
-        run: pip install 'inkbox==0.5.8'
+        run: pip install 'inkbox==0.5.9'
 
       - name: Build plugin
         run: |
           npm ci
           npm install --no-save --package-lock=false \
-            @inkbox/sdk@0.5.8 openclaw@2026.5.27
+            @inkbox/sdk@0.5.9 openclaw@2026.5.27
           npm run build
 
       - name: Install OpenClaw
@@ -98,11 +98,12 @@ jobs:
           print(client.mailboxes.list()[0].email_address.split("@", 1)[0])
           PY
           )"
-          openclaw plugins install -l "$GITHUB_WORKSPACE"
+          openclaw plugins install -l --dangerously-force-unsafe-install "$GITHUB_WORKSPACE"
           openclaw plugins enable inkbox || true
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"
+          openclaw config set channels.inkbox.voicemailDetection disabled
           openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
           openclaw config set tools.allow '["inkbox"]' --strict-json
           openclaw config set tools.profile full

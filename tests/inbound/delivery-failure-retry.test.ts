@@ -91,7 +91,16 @@ function createBridge(runtime: any, channelRuntime: any, logger?: any) {
   });
 }
 
-function textFailure(over: Partial<{ messageId: string | null; text: string | null; conversationId: string | null; remote: string | null; eventType: string; direction: string }> = {}): any {
+function textFailure(over: Partial<{
+  messageId: string | null;
+  text: string | null;
+  conversationId: string | null;
+  remote: string | null;
+  eventType: string;
+  direction: string;
+  errorCode: string | null;
+  errorDetail: string | null;
+}> = {}): any {
   return {
     id: "evt-txt-fail",
     event_type: over.eventType ?? "text.delivery_failed",
@@ -109,8 +118,11 @@ function textFailure(over: Partial<{ messageId: string | null; text: string | nu
         text: over.text === undefined ? "Sorry Kim — the site isn't built yet." : over.text,
         type: "sms",
         delivery_status: "delivery_failed",
-        error_code: "40002",
-        error_detail: "The message was flagged by a SPAM filter and was not delivered.",
+        error_code: over.errorCode === undefined ? "40002" : over.errorCode,
+        error_detail:
+          over.errorDetail === undefined
+            ? "The message was flagged by a SPAM filter and was not delivered."
+            : over.errorDetail,
         recipients: null,
         created_at: "2026-07-01T00:00:00Z",
       },
@@ -226,13 +238,43 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(body).toContain("[40002]");
     expect(body).toContain("flagged by a SPAM filter");
     expect(body).toContain("Sorry Kim — the site isn't built yet.");
-    expect(body).toContain("[SILENT]");
+    expect(body).toContain("SMS failure classification: FIRST SAFE RETRY REQUIRED");
+    expect(body).not.toContain("[SILENT]");
     expect(sendText).toHaveBeenCalledWith({ conversationId: "conv-9", text: "Shorter retry text." });
   });
 
-  it("wakes the agent for an iMessage delivery failure on the same conversation", async () => {
+  it("offers [SILENT] after the first retryable recovery also fails", async () => {
+    const { runtime, sendText } = createRuntime();
+    const channelRuntime = createChannelRuntime((call) =>
+      call === 0 ? "First safe retry." : "Second optional retry.",
+    );
+    const bridge = createBridge(runtime, channelRuntime);
+
+    await bridge.handlers.onText?.(textFailure({ messageId: "txt-out-1" }));
+    await bridge.handlers.onText?.(textFailure({ messageId: "txt-out-2" }));
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    const firstBody = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload.message.bodyForAgent;
+    const secondBody = channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent;
+    expect(firstBody).toContain(`attempt=1/${MAX}`);
+    expect(firstBody).toContain("FIRST SAFE RETRY REQUIRED");
+    expect(firstBody).not.toContain("[SILENT]");
+    expect(secondBody).toContain(`attempt=2/${MAX}`);
+    expect(secondBody).toContain("RETRY OPTIONAL");
+    expect(secondBody).toContain("[SILENT]");
+    expect(sendText).toHaveBeenNthCalledWith(1, {
+      conversationId: "conv-9",
+      text: "First safe retry.",
+    });
+    expect(sendText).toHaveBeenNthCalledWith(2, {
+      conversationId: "conv-9",
+      text: "Second optional retry.",
+    });
+  });
+
+  it("wakes the agent but does not resend after a terminal iMessage delivery failure", async () => {
     const { runtime, sendIMessage } = createRuntime();
-    const channelRuntime = createChannelRuntime("Retry over iMessage.");
+    const channelRuntime = createChannelRuntime("[SILENT]");
     const bridge = createBridge(runtime, channelRuntime);
 
     await bridge.handlers.onIMessage?.(imessageFailure());
@@ -244,7 +286,9 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(body).toContain("channel=imessage stage=delivery_failed");
     expect(body).toContain("[OPTED_OUT]");
     expect(body).toContain("See you at 5!");
-    expect(sendIMessage).toHaveBeenCalledWith({ conversationId: "imconv-123", text: "Retry over iMessage." });
+    expect(body).toContain("iMessage failure classification: DO NOT RETRY");
+    expect(body).toContain("[SILENT]");
+    expect(sendIMessage).not.toHaveBeenCalled();
   });
 
   it.each(["message.bounced", "message.failed"] as const)(
@@ -263,6 +307,8 @@ describe("outbound delivery-failure recovery — session routing", () => {
       const body = run.ctxPayload.message.bodyForAgent;
       expect(body).toContain(`channel=email stage=${eventType === "message.bounced" ? "bounced" : "delivery_failed"}`);
       expect(body).toContain("Original email body.");
+      expect(body).toContain("Email failure classification: REVIEW BEFORE RETRY");
+      expect(body).toContain("[SILENT]");
       expect(sendEmail).toHaveBeenCalledWith({
         to: ["kim@example.com"],
         subject: "Re: Launch checklist",
@@ -313,7 +359,12 @@ describe("outbound delivery-failure recovery — session routing", () => {
     const channelRuntime = createChannelRuntime("[SILENT]");
     const bridge = createBridge(runtime, channelRuntime);
 
-    await bridge.handlers.onText?.(textFailure());
+    await bridge.handlers.onText?.(
+      textFailure({
+        errorCode: "recipient_opted_out",
+        errorDetail: "Recipient opted out",
+      }),
+    );
 
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     expect(sendText).not.toHaveBeenCalled();
@@ -328,7 +379,13 @@ describe("outbound delivery-failure recovery — session routing", () => {
 
     // Distinct message ids (dedup passes), same conversation (shared budget).
     for (let i = 1; i <= MAX + 1; i += 1) {
-      await bridge.handlers.onText?.(textFailure({ messageId: `txt-out-${i}` }));
+      await bridge.handlers.onText?.(
+        textFailure({
+          messageId: `txt-out-${i}`,
+          errorCode: "recipient_opted_out",
+          errorDetail: "Recipient opted out",
+        }),
+      );
     }
 
     // Failures 1..MAX-1 wake; the cap silences the rest.
@@ -341,12 +398,30 @@ describe("outbound delivery-failure recovery — session routing", () => {
     const channelRuntime = createChannelRuntime("[SILENT]");
     const bridge = createBridge(runtime, channelRuntime);
 
-    await bridge.handlers.onText?.(textFailure({ messageId: "txt-out-1" }));
-    await bridge.handlers.onText?.(textFailure({ messageId: "txt-out-2" }));
+    await bridge.handlers.onText?.(
+      textFailure({
+        messageId: "txt-out-1",
+        errorCode: "recipient_opted_out",
+        errorDetail: "Recipient opted out",
+      }),
+    );
+    await bridge.handlers.onText?.(
+      textFailure({
+        messageId: "txt-out-2",
+        errorCode: "recipient_opted_out",
+        errorDetail: "Recipient opted out",
+      }),
+    );
     // A real inbound resets the failed-send budget for this conversation…
     await bridge.handlers.onText?.(inboundText("conv-9"));
     // …so the next failure is back at attempt 1 and wakes again.
-    await bridge.handlers.onText?.(textFailure({ messageId: "txt-out-3" }));
+    await bridge.handlers.onText?.(
+      textFailure({
+        messageId: "txt-out-3",
+        errorCode: "recipient_opted_out",
+        errorDetail: "Recipient opted out",
+      }),
+    );
 
     const failureTurns = channelRuntime.inbound.dispatchReply.mock.calls.filter(
       (c: any[]) => c[0].ctxPayload.message.bodyForAgent.includes("delivery_failure"),
@@ -381,6 +456,8 @@ describe("outbound delivery-failure recovery — session routing", () => {
     const body = lastBody(channelRuntime);
     expect(body).toContain("channel=sms stage=send_rejected");
     expect(body).toContain("message_blocked_spam_filter rule=emoji_overload");
+    expect(body).toContain("SMS failure classification: FIRST SAFE RETRY REQUIRED");
+    expect(body).not.toContain("[SILENT]");
     // The recovery resend actually went out.
     expect(sendText).toHaveBeenCalledTimes(2);
   });

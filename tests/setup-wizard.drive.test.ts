@@ -53,17 +53,21 @@ vi.mock("@inkbox/sdk", () => ({
 interface ScriptedPrompter extends Prompter {
   confirmsAsked: string[];
   asksAsked: string[];
+  selectsAsked: string[];
 }
 
 function scriptedPrompter(script: {
   confirms?: Array<[match: string, answer: boolean]>;
   asks?: Array<[match: string, answer: string]>;
+  selects?: Array<[match: string, answer: string]>;
 }): ScriptedPrompter {
   const confirmsAsked: string[] = [];
   const asksAsked: string[] = [];
+  const selectsAsked: string[] = [];
   return {
     confirmsAsked,
     asksAsked,
+    selectsAsked,
     confirm: async (question: string, defaultYes?: boolean) => {
       confirmsAsked.push(question);
       const hit = script.confirms?.find(([match]) => question.includes(match));
@@ -73,6 +77,16 @@ function scriptedPrompter(script: {
       asksAsked.push(question);
       const hit = script.asks?.find(([match]) => question.includes(match));
       return hit ? hit[1] : (defaultValue ?? "");
+    },
+    select: async (question: string, _options: any[], defaultValue?: string) => {
+      selectsAsked.push(question);
+      const hit = script.selects?.find(([match]) => question.includes(match));
+      if (hit) return hit[1] as any;
+      const legacy = script.confirms?.find(([match]) =>
+        "Use OpenAI Realtime API for phone calls?".includes(match),
+      );
+      confirmsAsked.push("Use OpenAI Realtime API for phone calls?");
+      return (legacy?.[1] ? "openai_realtime" : defaultValue ?? "inkbox_tts_stt") as any;
     },
     close: () => {},
   };
@@ -240,10 +254,8 @@ describe("setup wizard end-to-end drive", () => {
     // (b) the iMessage intro carries the ported voice-calls copy.
     expect(output()).toContain("make and take voice calls");
 
-    // (e) realtime config is offered once a call channel exists.
-    expect(
-      prompter.confirmsAsked.some((q) => q.includes("Use OpenAI Realtime API")),
-    ).toBe(true);
+    // (e) the explicit voice-stack selector is offered once a call channel exists.
+    expect(prompter.selectsAsked).toContain("Choose how this agent should handle phone calls");
 
     // Continuation proof: signing key and inbound delivery ran after channels.
     expect(world.events).toContain("signing-key:create");

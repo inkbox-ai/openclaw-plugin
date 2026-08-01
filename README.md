@@ -54,7 +54,7 @@ cd openclaw-plugin
 npm install
 npm run build
 openclaw --version
-openclaw plugins install -l ./
+openclaw plugins install -l --dangerously-force-unsafe-install ./
 ```
 
 Configure Inkbox:
@@ -65,6 +65,31 @@ openclaw inkbox doctor
 ```
 
 The setup wizard writes `channels.inkbox` into the active OpenClaw profile and adds the Inkbox tool group to the profile's tool policy.
+
+### Docker test shell
+
+This is a **manual testing-only** playground; it is not published and is not an
+automated CI or release artifact. The included image preinstalls OpenClaw and
+builds this checkout. It contains no credentials:
+
+```bash
+docker build -t inkbox-openclaw-plugin .
+docker run -d --name inkbox-openclaw \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  inkbox-openclaw-plugin
+docker exec -it inkbox-openclaw bash
+```
+
+Inside the container, install the already-built local plugin and run setup:
+
+```bash
+openclaw plugins install -l --dangerously-force-unsafe-install /opt/inkbox-plugin-src
+openclaw inkbox setup
+openclaw inkbox doctor
+openclaw gateway run
+```
+
+OpenClaw requires the explicit install acknowledgment because the plugin's gateway setup helper invokes the OpenClaw CLI to start, restart, or install the gateway service.
 
 
 Start the gateway:
@@ -94,11 +119,11 @@ openclaw gateway run
 1. Authenticates to Inkbox or uses the API key already present in config.
 2. Resolves or creates the Inkbox agent identity for this OpenClaw agent.
 3. Stores an agent-scoped API key, the identity handle, and webhook signing key in `channels.inkbox`.
-4. Optionally provisions a local SMS + voice phone number without asking for a state.
-5. Offers to enable iMessage for the agent (existing or freshly created), then walks you through connecting your iPhone: text the connect command to the Inkbox iMessage router, message the agent once, and receive a welcome reply confirming the channel.
-6. Points the identity's mailbox, phone number, and iMessage events at the agent-owned Inkbox tunnel.
-   Existing phone numbers are configured the same way as freshly provisioned numbers: inbound SMS goes to the gateway webhook, and calls use `auto_accept` with the gateway media WebSocket.
-7. Prints the final mailbox/phone summary.
+4. Offers to enable iMessage for the agent, then optionally provisions a local SMS + voice phone number.
+5. Shows a native **Phone call voice stack** selector with Inkbox Voice AI, OpenAI Realtime API, and Inkbox TTS/STT.
+6. For Voice AI, configures contact-scoped or YOLO authority using an admin-scoped key only when authority must change; the admin credential is never persisted. For Realtime, validates the OpenAI API key and returns to the three choices if validation fails.
+7. Points mailbox, text, iMessage, and `call.ended` events at separate canonical subscriptions. Local voice stacks use `auto_accept` with the gateway media WebSocket; Voice AI uses `hosted_agent`.
+8. Prints the final mailbox/phone summary.
 
 If setup provisions a new local phone number, it waits for any inbound SMS `START` to that number before finishing. It also seeds `~/.openclaw/inkbox/identity-state.json` so `openclaw inkbox doctor` can show useful channel state.
 
@@ -114,7 +139,10 @@ Preferred config shape:
     "inkbox": {
       "apiKey": "ApiKey_xxxxxxxxxxxx",
       "identity": "my-agent-handle",
-      "signingKey": "whsec_xxxxxxxxxxxx"
+      "signingKey": "whsec_xxxxxxxxxxxx",
+      "voiceStack": "inkbox_voice_ai",
+      "voiceAiAuthorityMode": "contact_scoped",
+      "voicemailDetection": "enabled"
     }
   },
   "tools": {
@@ -196,7 +224,19 @@ openclaw config set tools.allow '[
 ]' --strict-json
 ```
 
-## Realtime Calls
+## Phone Call Voice Stacks
+
+`openclaw inkbox setup` offers three explicit choices:
+
+1. **Inkbox Voice AI** handles calls on behalf of the agent. OpenClaw receives the final transcript and open post-call actions after hangup. Outbound calls use `mode=hosted_agent`, include a task `reason`, and intentionally omit a per-call authority override so the saved Voice AI default applies.
+2. **OpenAI Realtime API** uses your validated OpenAI API key. The realtime voice agent can consult OpenClaw for complex work.
+3. **Inkbox TTS/STT** keeps the OpenClaw agent in the spoken loop through Inkbox speech services, with increased latency.
+
+Plain-text output from a Voice AI post-call turn is suppressed because the call has ended; requested side effects run through normal tools. Completion receipts are durable and unfinished calls are replayed after gateway restart.
+
+Setup also enables OpenClaw's `plugins.entries.inkbox.hooks.allowConversationAccess` permission. The plugin needs this host permission to bind each Voice AI completion to the exact generated post-call run before accepting side-effecting tool evidence. Conversation bodies are not stored in the completion registry or replay journal.
+
+### OpenAI Realtime
 
 Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. Environment keys are setup-time discovery inputs unless the wizard validates and persists them into `channels.inkbox.voiceRealtime.providers.openai.apiKey`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
 
@@ -207,7 +247,7 @@ openclaw inkbox setup
 openclaw gateway run
 ```
 
-Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. The realtime voice model can call `openclaw_agent_consult`, `inkbox_register_post_call_action`, `inkbox_edit_post_call_action`, `inkbox_delete_post_call_action`, and `inkbox_hang_up_call`. If realtime auth/provider config is unavailable or validation fails, calls use Inkbox STT/TTS unless `voiceRealtime.fallbackToInkboxSttTts` is set to `false`.
+Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. The realtime voice model can call `openclaw_agent_consult`, `inkbox_register_post_call_action`, `inkbox_edit_post_call_action`, `inkbox_delete_post_call_action`, and `inkbox_hang_up_call`. If validation fails during setup, the wizard returns to the three voice-stack choices. An explicitly configured `openai_realtime` stack does not silently fall back to another stack at runtime.
 
 Optional realtime overrides:
 
@@ -230,7 +270,7 @@ Calls — inbound and outbound — can run over either of two lines, and the age
 - **The dedicated phone number.** The agent's own number (the same line SMS uses). Outbound calls present this number; inbound calls to it ring the agent.
 - **The shared Inkbox iMessage line.** The agent can also place and receive voice calls with a person it's connected to over iMessage, over the same shared line that person already messages. The underlying number is never surfaced — Inkbox resolves it from the iMessage connection — and it only works for people already connected over iMessage (an unknown caller is rejected; an outbound call with no connection is refused).
 
-Inbound answering is configured once per identity (`auto_accept` → open the call bridge WebSocket), so a single setting governs both lines. Outbound, the agent sets `origination` on `inkbox_place_call` (`dedicated_number` / `shared_imessage_number`), or omits it — the plugin then uses whichever line is the only one available, or the line matching the conversation's channel when both are.
+Inbound answering is configured once per identity (`hosted_agent` for Inkbox Voice AI, otherwise `auto_accept` to open the call bridge WebSocket), so a single setting governs both lines. Outbound, the agent sets `origination` on `inkbox_place_call` (`dedicated_number` / `shared_imessage_number`), or omits it — the plugin then uses whichever line is the only one available, or the line matching the conversation's channel when both are.
 
 ## iMessage
 
@@ -302,6 +342,9 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `allowedInboundContactIds` | no | - | Optional local inbound allowlist by Inkbox contact UUID. Empty means Inkbox contact rules decide reachability. |
 | `includeContactMemories` | no | `true` | Include memories from the matched contact as background context for inbound email, messaging, reactions, and calls. Set `false` to disable them. |
 | `sms.batchDelayMs` | no | `0` | Inbound SMS and iMessage fragment batching window. |
+| `voiceStack` | no | legacy-compatible | `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt`. Setup always writes an explicit value. |
+| `voiceAiAuthorityMode` | Voice AI | saved server value | Informational local copy of the selected `contact_scoped` or `yolo` authority. |
+| `voicemailDetection` | no | `enabled` | Outbound-call voicemail detection policy. CI should set `disabled`. |
 | `voiceTranscriptCoalesceMs` | no | plugin default | Non-realtime voice transcript coalescing window. |
 | `voiceAgentPrewarm` | no | plugin default | Prewarm the voice path when the gateway starts. |
 | `voiceRealtime.enabled` | no | auto | Use raw phone media with an OpenClaw realtime voice provider. Set `false` to force Inkbox STT/TTS. |
@@ -326,7 +369,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The plugin requires `@inkbox/sdk` 0.5.8 or newer.
+- The plugin pins `@inkbox/sdk` 0.5.9.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`

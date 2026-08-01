@@ -13,8 +13,11 @@
 //     `message.bounced` / `message.failed` webhooks (the asynchronous surface).
 //
 // Both surfaces feed one loop: the agent is woken in the same conversation
-// session with the exact error plus its own undelivered body, and instructed
-// to fix and resend (or send a compliant alternative, or stop with [SILENT]).
+// session with the exact error plus its own undelivered body. The recovery
+// instruction is derived from both the failure classification and attempt:
+// the first retryable failure requires one safe retry, later retryable
+// failures make retry optional, terminal failures stop immediately, and
+// unknown failures require a safety review before any retry.
 // Total sends per logical reply are hard-capped: after
 // OUTBOUND_FAILURE_MAX_ATTEMPTS failed sends the loop stops waking the agent
 // and the thread goes quiet. The budget is shared across both surfaces (keyed
@@ -67,12 +70,10 @@ const DELIVERY_FAILURE_CHANNEL_GUIDANCE: Record<DeliveryFailureChannel, string> 
     "Rewrite the message so it no longer trips the stated rule and it reads " +
     "like a human text: plain conversational prose, no markdown (**bold**, # " +
     "headers, ``` fences), at most one emoji, no profanity, no test/probe " +
-    "phrasing. Then send the corrected reply now.",
+    "phrasing.",
   imessage:
     "Rewrite the message so it no longer trips the stated rule and it reads " +
-    "like a human text: plain conversational prose, no markdown. If the " +
-    "recipient has opted out of messages, respect that and stop. Then send " +
-    "the corrected reply now if one is still appropriate.",
+    "like a human text: plain conversational prose, no markdown.",
   email:
     "The receiving mail server did not accept this message — the address may " +
     "be wrong or the mailbox unreachable. A plain reply here retries the SAME " +
@@ -80,6 +81,113 @@ const DELIVERY_FAILURE_CHANNEL_GUIDANCE: Record<DeliveryFailureChannel, string> 
     "the person on another channel with your tools; only resend here if you " +
     "have reason to think it will now deliver.",
 };
+
+export type DeliveryFailureClassification = "retryable" | "terminal" | "unknown";
+
+const DELIVERY_FAILURE_TERMINAL_CODES = new Set([
+  "recipient_not_opted_in",
+  "recipient_opted_out",
+  "recipient_blocked",
+  "invalid_phone_number",
+  "carrier_rejected",
+  "sender_sms_pending",
+  "sender_sms_assignment_failed",
+  "sender_not_registered",
+  "sender_registration_required",
+  "messaging_profile_disabled",
+  "toll_free_sms_unsupported",
+]);
+
+const DELIVERY_FAILURE_TERMINAL_MARKERS = [
+  "opted out",
+  "opt-out",
+  "not opted in",
+  "invalid number",
+  "invalid phone",
+  "unreachable",
+  "unknown subscriber",
+  "cannot receive",
+  "unsafe",
+  "harmful",
+  "abusive",
+  "harassment",
+  "threatening",
+  "illegal content",
+];
+
+const DELIVERY_FAILURE_RETRYABLE_MARKERS = [
+  "40002",
+  "spam",
+  "content",
+  "too_long",
+  "too long",
+  "markdown",
+  "emoji",
+  "profanity",
+  "temporar",
+  "carrier_unavailable",
+];
+
+/**
+ * Classify the agent's recovery policy for a failed outbound delivery.
+ *
+ * This is intentionally distinct from `classifySendRejection.retryable`,
+ * which answers whether the OpenClaw host should retry the same transport
+ * request. Here, `retryable` means the agent can safely make one materially
+ * corrected send. Terminal signals win over broad retryable markers such as
+ * "content" so unsafe content can never be forced through the retry path.
+ */
+export function classifyDeliveryFailure(
+  errorCode?: string | null,
+  errorDetail?: string | null,
+): DeliveryFailureClassification {
+  const code = normalizeKeyPart(errorCode);
+  const combined = `${code} ${normalizeKeyPart(errorDetail)}`;
+  if (
+    DELIVERY_FAILURE_TERMINAL_CODES.has(code) ||
+    DELIVERY_FAILURE_TERMINAL_MARKERS.some((marker) => combined.includes(marker))
+  ) {
+    return "terminal";
+  }
+  if (DELIVERY_FAILURE_RETRYABLE_MARKERS.some((marker) => combined.includes(marker))) {
+    return "retryable";
+  }
+  return "unknown";
+}
+
+function deliveryFailureReplyInstruction(
+  channel: DeliveryFailureChannel,
+  classification: DeliveryFailureClassification,
+  attempts: number,
+): string {
+  const label = channel === "sms" ? "SMS" : channel === "imessage" ? "iMessage" : "Email";
+  if (classification === "retryable") {
+    if (attempts === 1) {
+      return (
+        `${label} failure classification: FIRST SAFE RETRY REQUIRED. This is the first ` +
+        `failure and it is retryable. You MUST now send exactly one safe, materially ` +
+        `corrected ${label} message; do not reuse the failed wording.`
+      );
+    }
+    return (
+      `${label} failure classification: RETRY OPTIONAL. A safe, materially corrected ` +
+      `${label} message may use the remaining retry budget, but the first retry has ` +
+      `already failed. You may instead reply exactly [SILENT].`
+    );
+  }
+  if (classification === "terminal") {
+    return (
+      `${label} failure classification: DO NOT RETRY. The recipient has not consented, ` +
+      `the destination is invalid or unreachable, or the content is unsafe or harmful. ` +
+      `Do not resend this message; reply exactly [SILENT].`
+    );
+  }
+  return (
+    `${label} failure classification: REVIEW BEFORE RETRY. Send one corrected message ` +
+    `only if it is safe, permitted, and likely to deliver. Otherwise reply exactly ` +
+    `[SILENT].`
+  );
+}
 
 // ── Failure-counter store (the shared budget) ───────────────────────────────
 //
@@ -456,8 +564,8 @@ export type DeliveryFailureNote =
  * exhausted, build the wake-up turn body. Both surfaces funnel here — the
  * caller (session bridge) dispatches the returned body as an inbound turn. The
  * body carries the failure marker, the failure line, the undelivered-body
- * snippet, the per-channel guidance, the attempt accounting, and the [SILENT]
- * escape hatch.
+ * snippet, the per-channel guidance, the attempt accounting, and one
+ * classification-specific recovery instruction.
  */
 export function noteOutboundDeliveryFailure(
   input: DeliveryFailureNoteInput,
@@ -485,6 +593,8 @@ export function noteOutboundDeliveryFailure(
     .filter(Boolean)
     .join(" ");
   const guidance = DELIVERY_FAILURE_CHANNEL_GUIDANCE[channel];
+  const classification = classifyDeliveryFailure(errorCode, errorDetail);
+  const recoveryInstruction = deliveryFailureReplyInstruction(channel, classification, attempts);
   const target = nonEmpty(input.target);
   const conversationId = nonEmpty(input.conversationId);
   const targetPart = target ? ` to=${target}` : "";
@@ -499,9 +609,9 @@ export function noteOutboundDeliveryFailure(
     `«${snippet}»\n` +
     `${guidance}\n` +
     `This reply has now failed ${attempts} of ${OUTBOUND_FAILURE_MAX_ATTEMPTS} allowed sends; ` +
-    `${remaining} left before the thread goes quiet. Send the corrected message as a normal ` +
-    `reply in this conversation. Do not mention this delivery problem to the recipient. ` +
-    `If there is nothing sensible to send, reply exactly [SILENT].`;
+    `${remaining} left before the thread goes quiet. Any permitted recovery must be sent as ` +
+    `a normal reply in this conversation. Do not mention this delivery problem to the recipient. ` +
+    recoveryInstruction;
   return { woke: true, attempts, remaining, body };
 }
 

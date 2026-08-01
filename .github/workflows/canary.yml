@@ -21,12 +21,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: a4dd76b534e33c0a8352148d8f0e9ab25199f05b
-          path: .ci/inkbox
-
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -34,10 +28,8 @@ jobs:
 
       - name: Install deps + latest OpenClaw host
         run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
-          npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript openclaw@latest
+          npm ci
+          npm install --no-save --package-lock=false openclaw@latest
           npm ls openclaw || true
 
       - name: Typecheck vs latest OpenClaw

@@ -135,16 +135,17 @@ export async function handleInkboxWebhook(
     return { status: 403, body: "invalid signature" };
   }
 
-  if (opts.dedup && !opts.dedup.begin(requestId)) {
-    return { status: 200, body: "dup" };
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bodyText);
-  } catch {
-    opts.dedup?.rollback(requestId);
+  const parsed = parseJsonObject(bodyText);
+  if (!parsed) {
     return { status: 400, body: "invalid json" };
+  }
+  const eventId =
+    parsed.event_type === "call.ended" && typeof parsed.id === "string"
+      ? parsed.id.trim()
+      : "";
+  const dedupId = eventId || requestId;
+  if (opts.dedup && !opts.dedup.begin(dedupId)) {
+    return { status: 200, body: "dup" };
   }
 
   // Inkbox-signed payloads with no known event shape are external — gated on
@@ -158,10 +159,10 @@ export async function handleInkboxWebhook(
       requestId,
     });
   } catch (error) {
-    opts.dedup?.rollback(requestId);
+    opts.dedup?.rollback(dedupId);
     throw error;
   }
-  opts.dedup?.commit(requestId);
+  opts.dedup?.commit(dedupId);
 
   // For inbound calls, the response body IS the routing decision.
   if (result.kind === "call") {

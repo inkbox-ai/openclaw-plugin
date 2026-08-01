@@ -27,6 +27,12 @@ import { registerPlaceCall } from "./src/tools/place-call.js";
 import { createVaultRuntime } from "./src/vault.js";
 import { deriveConfiguredCallWebsocketUrl } from "./src/call-websocket.js";
 import { registerInkboxHealthChecks } from "./src/health.js";
+import {
+  bindHostedSmsCaptureToRun,
+  recordHostedModelCallEnded,
+  recordHostedSmsAfterToolCall,
+  recordHostedSmsBeforeToolCall,
+} from "./src/hosted-call-tool-settlement.js";
 
 type OpenClawChannelEntry = {
   id: string;
@@ -106,6 +112,21 @@ function registerInkboxTools(api: any): void {
       capability: "call-websocket",
     }) as { url?: string } | undefined;
     return context?.url ?? deriveConfiguredCallWebsocketUrl(account);
+  }, () => {
+    let currentCfg: unknown;
+    try {
+      currentCfg = api.runtime?.config?.current?.();
+    } catch {
+      currentCfg = undefined;
+    }
+    const account = resolveInkboxAccount({
+      cfg: currentCfg,
+      pluginConfig: api.pluginConfig,
+    });
+    return {
+      voiceStack: account.config.voiceStack,
+      voicemailDetection: account.config.voicemailDetection,
+    };
   });
 
   // Read/lifecycle tools for email, SMS, and calls. Required tools light up
@@ -134,6 +155,13 @@ function registerInkboxTools(api: any): void {
   registerWhoami(api, runtime);
 }
 
+function registerHostedCallSettlementHooks(api: any): void {
+  api.on("before_agent_run", bindHostedSmsCaptureToRun);
+  api.on("before_tool_call", recordHostedSmsBeforeToolCall);
+  api.on("after_tool_call", recordHostedSmsAfterToolCall);
+  api.on("model_call_ended", recordHostedModelCallEnded);
+}
+
 const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   id: "inkbox",
   name: "Inkbox",
@@ -142,6 +170,7 @@ const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   plugin: inkboxPlugin,
   registerCliMetadata: registerInkboxCli,
   registerFull(api: any) {
+    registerHostedCallSettlementHooks(api);
     registerInkboxTools(api);
     registerInkboxPublicUrlInboundRoutes(api);
   },

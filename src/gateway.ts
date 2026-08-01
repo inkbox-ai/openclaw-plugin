@@ -6,6 +6,7 @@ import {
   type ResolvedInkboxAccount,
 } from "./accounts.js";
 import {
+  deriveConfiguredCallWebsocketUrl,
   inkboxCallWebsocketPath,
   inkboxWebhookPath,
   publicUrl,
@@ -13,6 +14,7 @@ import {
 } from "./call-websocket.js";
 import { openInkboxTunnel } from "./inbound/tunnel.js";
 import { registerInboundHttpRoute } from "./inbound/http-route.js";
+import { createInkboxWebSocketUpgradeHandler } from "./inbound/websocket-upgrade.js";
 import { wrapInboundHandlersWithBatching } from "./inbound/batch.js";
 import {
   configureInkboxIdentityDelivery,
@@ -86,10 +88,18 @@ export function registerInkboxPublicUrlInboundRoutes(api: any): void {
     }
     const path = inkboxWebhookPath(account.accountId);
     const key = routeKey(account.accountId, path);
-    if (registeredPublicRoutes.has(key)) {
+    const usesLocalVoiceStack =
+      account.config.voiceStack === "openai_realtime" ||
+      account.config.voiceStack === "inkbox_tts_stt";
+    const callPath = inkboxCallWebsocketPath(account.accountId);
+    const callKey = routeKey(account.accountId, callPath);
+    const ownsCallRoute = usesLocalVoiceStack && !account.callWebsocketUrl;
+    if (
+      registeredPublicRoutes.has(key) &&
+      (!ownsCallRoute || registeredPublicRoutes.has(callKey))
+    ) {
       continue;
     }
-    registeredPublicRoutes.add(key);
     const runtime = createInkboxRuntime(account.config, api.logger);
     const bridge = createInkboxSessionBridge({
       cfg,
@@ -103,15 +113,42 @@ export function registerInkboxPublicUrlInboundRoutes(api: any): void {
       account.config,
       api.logger,
     );
-    registerInboundHttpRoute({
-      api,
-      path,
-      signingKey: account.config.signingKey,
-      handlers,
-      allowedContactIds: account.config.allowedInboundContactIds,
-      externalEvents: account.config.externalEvents,
-      logger: api.logger,
-    });
+    if (!registeredPublicRoutes.has(key)) {
+      registerInboundHttpRoute({
+        api,
+        path,
+        signingKey: account.config.signingKey,
+        handlers,
+        allowedContactIds: account.config.allowedInboundContactIds,
+        externalEvents: account.config.externalEvents,
+        logger: api.logger,
+      });
+      registeredPublicRoutes.add(key);
+    }
+
+    if (ownsCallRoute) {
+      if (!registeredPublicRoutes.has(callKey)) {
+        const publicWebsocketUrl = websocketUrl(account.publicUrl!, callPath);
+        api.registerHttpRoute({
+          path: callPath,
+          auth: "plugin",
+          match: "exact",
+          handler: (_req: unknown, res: any) => {
+            res.statusCode = 426;
+            res.setHeader("connection", "Upgrade");
+            res.setHeader("upgrade", "websocket");
+            res.end("WebSocket upgrade required");
+            return true;
+          },
+          handleUpgrade: createInkboxWebSocketUpgradeHandler({
+            handler: bridge.wsHandler,
+            publicWebsocketUrl,
+            logger: api.logger,
+          }),
+        });
+        registeredPublicRoutes.add(callKey);
+      }
+    }
   }
 }
 
@@ -149,27 +186,52 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
 
   if (account.publicUrl) {
     const webhookUrl = publicUrl(account.publicUrl, inkboxWebhookPath(account.accountId));
-    await configureInkboxIdentityDelivery({
-      runtime,
-      webhookUrl,
-      callWebhookUrl: webhookUrl,
-      logger: ctx.log,
-    });
-    await bridge.catchUpA2A();
-    ctx.setStatus({
-      accountId: account.accountId,
-      running: true,
-      connected: true,
-      webhookUrl,
-      mode: "public-url",
-    });
-    scheduleInkboxAgentPrewarm(ctx, runtime, "public-url-gateway-start");
-    await waitForAbort(ctx.abortSignal);
-    ctx.setStatus({
-      accountId: account.accountId,
-      running: false,
-      connected: false,
-    });
+    const usesLocalVoiceStack =
+      account.config.voiceStack === "openai_realtime" ||
+      account.config.voiceStack === "inkbox_tts_stt";
+    if (usesLocalVoiceStack) {
+      callWebsocketUrl = deriveConfiguredCallWebsocketUrl(account);
+    }
+    const callWsContext = callWebsocketUrl
+      ? ctx.channelRuntime?.runtimeContexts?.register?.({
+          channelId: INKBOX_CHANNEL_ID,
+          accountId: account.accountId,
+          capability: "call-websocket",
+          context: { url: callWebsocketUrl },
+          abortSignal: ctx.abortSignal,
+        })
+      : undefined;
+    try {
+      await configureInkboxIdentityDelivery({
+        runtime,
+        webhookUrl,
+        ...(callWebsocketUrl
+          ? { callWebsocketUrl }
+          : account.config.voiceStack === "inkbox_voice_ai"
+            ? {}
+            : { callWebhookUrl: webhookUrl }),
+        voiceStack: account.config.voiceStack,
+        logger: ctx.log,
+      });
+      await bridge.catchUpA2A();
+      await bridge.catchUpHostedCalls();
+      ctx.setStatus({
+        accountId: account.accountId,
+        running: true,
+        connected: true,
+        webhookUrl,
+        mode: "public-url",
+      });
+      scheduleInkboxAgentPrewarm(ctx, runtime, "public-url-gateway-start");
+      await waitForAbort(ctx.abortSignal);
+    } finally {
+      callWsContext?.dispose?.();
+      ctx.setStatus({
+        accountId: account.accountId,
+        running: false,
+        connected: false,
+      });
+    }
     return;
   }
 
@@ -200,10 +262,14 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
   await configureInkboxIdentityDelivery({
     runtime,
     webhookUrl,
-    callWebsocketUrl,
+    ...(account.config.voiceStack === "inkbox_voice_ai"
+      ? {}
+      : { callWebsocketUrl }),
+    voiceStack: account.config.voiceStack,
     logger: ctx.log,
   });
   await bridge.catchUpA2A();
+  await bridge.catchUpHostedCalls();
   ctx.setStatus({
     accountId: account.accountId,
     running: true,

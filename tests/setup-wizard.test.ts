@@ -120,14 +120,29 @@ function enabledOpenAiRealtime(apiKey: string) {
 function createPrompter(params: {
   asks?: string[];
   confirms?: boolean[];
-} = {}): Prompter & { ask: ReturnType<typeof vi.fn>; confirm: ReturnType<typeof vi.fn> } {
+  selections?: string[];
+} = {}): Prompter & {
+  ask: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+  confirm: ReturnType<typeof vi.fn>;
+} {
   const asks = [...(params.asks ?? [])];
   const confirms = [...(params.confirms ?? [])];
+  const selections = [...(params.selections ?? [])];
+  const confirm = vi.fn(async (_question: string, defaultYes?: boolean) =>
+    confirms.length ? confirms.shift()! : Boolean(defaultYes),
+  );
   return {
     ask: vi.fn(async () => asks.shift() ?? ""),
-    confirm: vi.fn(async (_question: string, defaultYes?: boolean) =>
-      confirms.length ? confirms.shift()! : Boolean(defaultYes),
-    ),
+    pause: vi.fn(async () => undefined),
+    confirm,
+    select: vi.fn(async (_question: string, _options: any[], defaultValue?: string) => {
+      if (selections.length) return selections.shift() as any;
+      // Preserve the legacy tests' yes/no realtime answer while exercising
+      // the new native three-option selector.
+      const realtime = await confirm("Use OpenAI Realtime API for phone calls?", false);
+      return (realtime ? "openai_realtime" : defaultValue ?? "inkbox_tts_stt") as any;
+    }) as any,
     close: vi.fn(),
   };
 }
@@ -146,6 +161,12 @@ function createIdentity(overrides: Record<string, unknown> = {}) {
       smsStatus: "ready",
     },
     tunnel: { publicHost: "smoke-agent.inkboxwire.com" },
+    getIncomingCallAction: vi.fn(async () => ({
+      agentIdentityId: "identity-1",
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/calls",
+      incomingCallWebhookUrl: null,
+    })),
     refresh: vi.fn(async () => identity),
     provisionPhoneNumber: vi.fn(),
     listTexts: vi.fn(),
@@ -316,6 +337,10 @@ describe("runSetupWizard", () => {
       { path: "channels.inkbox.enabled", value: true },
       { path: "channels.inkbox.apiKey", value: "ApiKey_test" },
       { path: "channels.inkbox.identity", value: "smoke-agent" },
+      {
+        path: "plugins.entries.inkbox.hooks.allowConversationAccess",
+        value: true,
+      },
       { path: "channels.inkbox.signingKey", value: "whsec_test" },
       { path: "tools.alsoAllow", value: ["inkbox"] },
     ]);
@@ -401,6 +426,9 @@ describe("runSetupWizard", () => {
       identity: "smoke-agent",
       signingKey: "whsec_test",
     });
+    expect(saved.plugins.entries.inkbox.hooks).toEqual({
+      allowConversationAccess: true,
+    });
     expect(saved.tools).toEqual({
       profile: "coding",
       alsoAllow: ["inkbox"],
@@ -437,6 +465,8 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceStack: "inkbox_tts_stt",
+        voicemailDetection: "enabled",
         voiceRealtime: disabledOpenAiRealtime,
       },
       {
@@ -444,6 +474,85 @@ describe("runSetupWizard", () => {
         env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" },
       },
     );
+  });
+
+  it("uses a previously saved valid voice stack as the rerun default", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ confirms: [false] });
+
+    const result = await runSetupWizard({
+      prompter,
+      currentConfig: {
+        channels: { inkbox: { voiceStack: "inkbox_tts_stt" } },
+      },
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect((prompter.select as any).mock.calls[0][2]).toBe("inkbox_tts_stt");
+  });
+
+  it("falls back to the saved default for an invalid readline selection", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({ asks: ["99"] });
+    prompter.select = undefined;
+
+    const result = await runSetupWizard({
+      prompter,
+      currentConfig: {
+        channels: { inkbox: { voiceStack: "inkbox_tts_stt" } },
+      },
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect(prompter.ask).toHaveBeenCalledWith("Select", "3");
+  });
+
+  it("propagates selector cancellation before changing call delivery", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter();
+    (prompter.select as any).mockRejectedValueOnce(new Error("selection cancelled"));
+
+    await expect(
+      runSetupWizard({
+        prompter,
+        env: {
+          INKBOX_API_KEY: "ApiKey_test",
+          INKBOX_SIGNING_KEY: "whsec_test",
+        } as any,
+      }),
+    ).rejects.toThrow("selection cancelled");
+
+    expect(sdk.phoneNumbersUpdate).not.toHaveBeenCalled();
+    expect(sdk.subscriptionsCreate).not.toHaveBeenCalled();
   });
 
   it("lets an admin-scoped API key select an existing identity and mints an agent key", async () => {
@@ -642,6 +751,357 @@ describe("runSetupWizard", () => {
     );
   });
 
+  it("preserves validated realtime credentials when switching away and back", async () => {
+    const identity = createIdentity();
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const existingRealtime = {
+      ...enabledOpenAiRealtime("sk-saved"),
+      instructions: "Keep this realtime prompt",
+      providers: {
+        openai: {
+          apiKey: "sk-saved",
+          model: "gpt-realtime-2",
+          voice: "cedar",
+          organization: "org-openai",
+        },
+        custom: { apiKey: "custom-secret" },
+      },
+    };
+
+    const disabled = await runSetupWizard({
+      prompter: createPrompter({
+        selections: ["inkbox_tts_stt"],
+        confirms: [true],
+      }),
+      currentConfig: {
+        channels: { inkbox: { voiceRealtime: existingRealtime } },
+      },
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(disabled.ok).toBe(true);
+    expect(disabled.config?.voiceRealtime).toEqual({
+      ...disabledOpenAiRealtime,
+      instructions: "Keep this realtime prompt",
+      providers: existingRealtime.providers,
+    });
+
+    const validateOpenAiRealtimeApiKey = vi.fn(async () => ({ ok: true as const }));
+    const enabledPrompter = createPrompter({
+      selections: ["openai_realtime"],
+      confirms: [true],
+    });
+    const enabled = await runSetupWizard({
+      prompter: enabledPrompter,
+      currentConfig: {
+        channels: {
+          inkbox: { voiceRealtime: disabled.config?.voiceRealtime },
+        },
+      },
+      validateOpenAiRealtimeApiKey,
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(enabled.ok).toBe(true);
+    expect(validateOpenAiRealtimeApiKey).toHaveBeenCalledWith(
+      "sk-saved",
+      "gpt-realtime-2",
+    );
+    expect(enabledPrompter.ask.mock.calls.map(([question]) => question)).not.toContain(
+      "Paste your OpenAI API key for Realtime calls",
+    );
+    expect(enabled.config?.voiceRealtime).toEqual({
+      ...enabledOpenAiRealtime("sk-saved"),
+      instructions: "Keep this realtime prompt",
+      providers: existingRealtime.providers,
+    });
+  });
+
+  it("configures Inkbox Voice AI contact-scoped without requesting an admin credential", async () => {
+    const setHostedAgentConfig = vi.fn(async () => ({}));
+    const setIncomingCallAction = vi.fn(async () => ({}));
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => ({ authorityMode: "contact_scoped" })),
+      setHostedAgentConfig,
+      setIncomingCallAction,
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "agent_claimed",
+      organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      selections: ["inkbox_voice_ai", "contact_scoped"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: {
+        INKBOX_API_KEY: "ApiKey_test",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(prompter.pause).toHaveBeenCalledWith(
+      "Press Enter to continue and set up phone call handling",
+    );
+    expect(prompter.pause.mock.invocationCallOrder[0]).toBeLessThan(
+      (prompter.select as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0],
+    );
+    expect(result.config).toMatchObject({
+      voiceStack: "inkbox_voice_ai",
+      voiceAiAuthorityMode: "contact_scoped",
+      voicemailDetection: "enabled",
+    });
+    expect(setHostedAgentConfig).toHaveBeenCalledWith({});
+    expect(setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
+    });
+    expect(prompter.ask.mock.calls.map(([question]) => question)).not.toContain(
+      "Paste an admin-scoped Inkbox API key for this authority change",
+    );
+  });
+
+  it("uses an admin key to elevate Voice AI to YOLO without persisting that key", async () => {
+    const setHostedAgentAuthorityMode = vi.fn(async () => ({}));
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => ({ authorityMode: "contact_scoped" })),
+      setHostedAgentConfig: vi.fn(async () => ({})),
+      setHostedAgentAuthorityMode,
+      setIncomingCallAction: vi.fn(async () => ({})),
+    });
+    sdk.whoami
+      .mockResolvedValueOnce({
+        authType: "api_key",
+        authSubtype: "agent_claimed",
+        organizationId: "org-1",
+      })
+      .mockResolvedValueOnce({
+        authType: "api_key",
+        authSubtype: "admin",
+        organizationId: "org-1",
+      });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      asks: ["ApiKey_admin_ephemeral"],
+      selections: ["inkbox_voice_ai", "yolo"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: {
+        INKBOX_API_KEY: "ApiKey_agent",
+        INKBOX_SIGNING_KEY: "whsec_test",
+      } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(setHostedAgentAuthorityMode).toHaveBeenCalledWith({ authorityMode: "yolo" });
+    expect(result.config).toMatchObject({
+      apiKey: "ApiKey_agent",
+      voiceStack: "inkbox_voice_ai",
+      voiceAiAuthorityMode: "yolo",
+    });
+    expect(JSON.stringify(result.config)).not.toContain("ApiKey_admin_ephemeral");
+  });
+
+  it("restores the hosted config and keeps the local stack when Voice AI setup fails", async () => {
+    const previous = {
+      authorityMode: "contact_scoped",
+      voice: "alloy",
+      model: "voice-model",
+      instructions: "Previous instructions",
+    };
+    const setHostedAgentConfig = vi.fn()
+      .mockRejectedValueOnce(new Error("hosted config write failed"))
+      .mockResolvedValueOnce(previous);
+    const setIncomingCallAction = vi.fn(async () => ({}));
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => previous),
+      setHostedAgentConfig,
+      setIncomingCallAction,
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key", authSubtype: "agent_claimed", organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      selections: ["inkbox_voice_ai", "contact_scoped", "inkbox_tts_stt"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect(setHostedAgentConfig.mock.calls).toEqual([
+      [{}],
+      [{ voice: "alloy", model: "voice-model", instructions: "Previous instructions" }],
+    ]);
+    expect(setIncomingCallAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ incomingCallAction: "hosted_agent" }),
+    );
+  });
+
+  it("restores authority, hosted config, and incoming routing after a later Voice AI failure", async () => {
+    const previousHosted = {
+      authorityMode: "contact_scoped", voice: null, model: null, instructions: null,
+    };
+    const previousIncoming = {
+      agentIdentityId: "identity-1",
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/calls",
+      incomingCallWebhookUrl: null,
+    };
+    const setHostedAgentConfig = vi.fn(async () => previousHosted);
+    const setHostedAgentAuthorityMode = vi.fn(async () => previousHosted);
+    const setIncomingCallAction = vi.fn()
+      .mockRejectedValueOnce(new Error("incoming route failed"))
+      .mockResolvedValue({});
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => previousHosted),
+      getIncomingCallAction: vi.fn(async () => previousIncoming),
+      setHostedAgentConfig,
+      setHostedAgentAuthorityMode,
+      setIncomingCallAction,
+    });
+    sdk.whoami
+      .mockResolvedValueOnce({
+        authType: "api_key", authSubtype: "agent_claimed", organizationId: "org-1",
+      })
+      .mockResolvedValueOnce({
+        authType: "api_key", authSubtype: "admin", organizationId: "org-1",
+      });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      asks: ["ApiKey_admin_ephemeral"],
+      selections: ["inkbox_voice_ai", "yolo", "inkbox_tts_stt"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_agent", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect(setHostedAgentAuthorityMode.mock.calls).toEqual([
+      [{ authorityMode: "yolo" }],
+      [{ authorityMode: "contact_scoped" }],
+    ]);
+    expect(setHostedAgentConfig.mock.calls).toEqual([[{}], [{}]]);
+    expect(setIncomingCallAction).toHaveBeenNthCalledWith(1, {
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
+    });
+    expect(setIncomingCallAction).toHaveBeenNthCalledWith(2, {
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/calls",
+    });
+  });
+
+  it("continues to the stack selector when rollback itself is incomplete", async () => {
+    const setHostedAgentConfig = vi.fn(async () => {
+      throw new Error("hosted config unavailable");
+    });
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => ({ authorityMode: "contact_scoped" })),
+      setHostedAgentConfig,
+      setIncomingCallAction: vi.fn(async () => ({})),
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key", authSubtype: "agent_claimed", organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      selections: ["inkbox_voice_ai", "contact_scoped", "inkbox_tts_stt"],
+      confirms: [true],
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const result = await runSetupWizard({
+      prompter,
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.config?.voiceStack).toBe("inkbox_tts_stt");
+    expect(setHostedAgentConfig).toHaveBeenCalledTimes(2);
+    expect(log.mock.calls.flat().join("\n")).toContain(
+      "Could not fully restore the prior phone-call configuration",
+    );
+  });
+
+  it("rolls Voice AI remote state back when the local config write fails later", async () => {
+    const previousHosted = {
+      authorityMode: "contact_scoped", voice: "sage", model: null, instructions: null,
+    };
+    const previousIncoming = {
+      agentIdentityId: "identity-1",
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/calls",
+      incomingCallWebhookUrl: null,
+    };
+    const setHostedAgentConfig = vi.fn(async () => previousHosted);
+    const setIncomingCallAction = vi.fn(async () => previousIncoming);
+    const identity = createIdentity({
+      getHostedAgentConfig: vi.fn(async () => previousHosted),
+      getIncomingCallAction: vi.fn(async () => previousIncoming),
+      setHostedAgentConfig,
+      setIncomingCallAction,
+    });
+    sdk.whoami.mockResolvedValue({
+      authType: "api_key", authSubtype: "agent_claimed", organizationId: "org-1",
+    });
+    sdk.listIdentities.mockResolvedValue([{ agentHandle: "smoke-agent" }]);
+    sdk.getIdentity.mockResolvedValue(identity);
+    const prompter = createPrompter({
+      selections: ["inkbox_voice_ai", "contact_scoped"],
+      confirms: [true],
+    });
+
+    const result = await runSetupWizard({
+      prompter,
+      persistConfig: vi.fn(async () => ({ ok: false, message: "disk full" })),
+      env: { INKBOX_API_KEY: "ApiKey_test", INKBOX_SIGNING_KEY: "whsec_test" } as any,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(setIncomingCallAction.mock.calls).toEqual([
+      [{ incomingCallAction: "hosted_agent", clientWebsocketUrl: null, incomingCallWebhookUrl: null }],
+      [{ incomingCallAction: "auto_accept", clientWebsocketUrl: "wss://old.example/calls" }],
+    ]);
+    expect(setHostedAgentConfig.mock.calls).toEqual([[{}], [{ voice: "sage" }]]);
+  });
+
   it("re-asks the realtime opt-in question after a failed OpenAI key validation", async () => {
     const identity = createIdentity();
     sdk.whoami.mockResolvedValue({
@@ -685,7 +1145,7 @@ describe("runSetupWizard", () => {
       ([question]) => question === "Use OpenAI Realtime API for phone calls?",
     );
     expect(realtimeConfirms).toHaveLength(2);
-    expect(realtimeConfirms.map(([, defaultYes]) => defaultYes)).toEqual([false, true]);
+    expect(realtimeConfirms.map(([, defaultYes]) => defaultYes)).toEqual([false, false]);
   });
 
   it("validates OpenAI realtime access with the GA client-secret payload shape", async () => {
@@ -759,6 +1219,8 @@ describe("runSetupWizard", () => {
         apiKey: "ApiKey_new",
         identity: "smoke-agent",
         signingKey: "whsec_test",
+        voiceStack: "inkbox_tts_stt",
+        voicemailDetection: "enabled",
         voiceRealtime: disabledOpenAiRealtime,
       },
       {
@@ -994,12 +1456,15 @@ describe("runSetupWizard", () => {
     const url = "https://smoke-agent.inkboxwire.com/inkbox/webhook";
     sdk.subscriptionsList.mockImplementation(async (filter: any) => [
       {
-        id: filter.mailboxId ? "sub-mail" : "sub-text",
+        id: filter.mailboxId ? "sub-mail" : filter.phoneNumberId ? "sub-text" : "sub-call",
         organizationId: "org-1",
         mailboxId: filter.mailboxId ?? null,
         phoneNumberId: filter.phoneNumberId ?? null,
+        agentIdentityId: filter.agentIdentityId ?? null,
         url,
-        eventTypes: filter.mailboxId
+        eventTypes: filter.agentIdentityId
+          ? ["call.ended"]
+          : filter.mailboxId
           ? [
               "message.received",
               "message.sent",
@@ -1150,7 +1615,10 @@ describe("runSetupWizard", () => {
     expect(result.ok).toBe(true);
     expect(identity.update).not.toHaveBeenCalled();
     expect(sdk.subscriptionsCreate).not.toHaveBeenCalledWith(
-      expect.objectContaining({ agentIdentityId: "identity-1" }),
+      expect.objectContaining({
+        agentIdentityId: "identity-1",
+        eventTypes: expect.arrayContaining(["imessage.received"]),
+      }),
     );
   });
 
@@ -1327,8 +1795,8 @@ describe("runSetupWizard", () => {
     expect(result.ok).toBe(true);
     // No dedicated number, but the shared iMessage line can take calls — the
     // realtime opt-in must still be offered.
-    expect(prompter.confirm.mock.calls.map(([question]) => question)).toContain(
-      "Use OpenAI Realtime API for phone calls?",
+    expect((prompter.select as any).mock.calls.map(([question]: [string]) => question)).toContain(
+      "Choose how this agent should handle phone calls",
     );
     expect(result.config?.voiceRealtime).toEqual(
       expect.objectContaining({ enabled: false }),

@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { InkboxAPIError } from "@inkbox/sdk";
 import {
+  classifyDeliveryFailure,
   classifySendRejection,
   clearOutboundFailures,
   DELIVERY_FAILURE_EVENT_TYPES,
@@ -120,10 +121,26 @@ describe("classifySendRejection", () => {
   });
 });
 
+describe("classifyDeliveryFailure", () => {
+  it.each([
+    ["40002", "Flagged by a SPAM filter; temporary condition", "retryable"],
+    ["message_blocked_spam_filter", "Markdown content rejected", "retryable"],
+    ["message_too_long", "Message content is too long", "retryable"],
+    ["carrier_unavailable", "Service temporarily unavailable", "retryable"],
+    ["recipient_opted_out", "Recipient opted out", "terminal"],
+    ["invalid_phone_number", "Invalid destination", "terminal"],
+    ["unknown", "Destination is unreachable", "terminal"],
+    ["content_rejected", "Unsafe or harmful content", "terminal"],
+    ["unknown", "Provider rejected the message", "unknown"],
+  ] as const)("classifies %s / %s as %s", (errorCode, errorDetail, expected) => {
+    expect(classifyDeliveryFailure(errorCode, errorDetail)).toBe(expected);
+  });
+});
+
 // ── The wake-up decision + prompt ───────────────────────────────────────────
 
 describe("noteOutboundDeliveryFailure", () => {
-  it("wakes with the rule, the undelivered body, and the [SILENT] escape", () => {
+  it("wakes a first retryable failure without offering [SILENT]", () => {
     const rej = classifySendRejection("sms", spamBlockError());
     const note = noteSms({ errorCode: rej.errorCode, errorDetail: rej.errorDetail });
 
@@ -135,8 +152,78 @@ describe("noteOutboundDeliveryFailure", () => {
     expect(note.body).toContain("message_blocked_spam_filter rule=markdown_artifacts");
     expect(note.body).toContain("reads as bot traffic in SMS");
     expect(note.body).toContain("«**Jane Doe** is on file.»");
-    expect(note.body).toContain("[SILENT]");
+    expect(note.body).toContain("SMS failure classification: FIRST SAFE RETRY REQUIRED");
+    expect(note.body).not.toContain("[SILENT]");
   });
+
+  it.each([
+    {
+      classification: "retryable",
+      attempt: 1,
+      errorCode: "40002",
+      errorDetail: "Temporary spam filter rejection",
+      required: "FIRST SAFE RETRY REQUIRED",
+      forbidden: "[SILENT]",
+    },
+    {
+      classification: "retryable",
+      attempt: 2,
+      errorCode: "40002",
+      errorDetail: "Temporary spam filter rejection",
+      required: "RETRY OPTIONAL",
+      forbidden: "FIRST SAFE RETRY REQUIRED",
+    },
+    {
+      classification: "terminal",
+      attempt: 1,
+      errorCode: "recipient_opted_out",
+      errorDetail: "Recipient opted out",
+      required: "DO NOT RETRY",
+      forbidden: "FIRST SAFE RETRY REQUIRED",
+    },
+    {
+      classification: "terminal",
+      attempt: 2,
+      errorCode: "invalid_phone_number",
+      errorDetail: "Destination unreachable",
+      required: "DO NOT RETRY",
+      forbidden: "RETRY OPTIONAL",
+    },
+    {
+      classification: "unknown",
+      attempt: 1,
+      errorCode: "unknown",
+      errorDetail: "Provider rejected the message",
+      required: "REVIEW BEFORE RETRY",
+      forbidden: "FIRST SAFE RETRY REQUIRED",
+    },
+    {
+      classification: "unknown",
+      attempt: 2,
+      errorCode: "unknown",
+      errorDetail: "Provider rejected the message",
+      required: "REVIEW BEFORE RETRY",
+      forbidden: "RETRY OPTIONAL",
+    },
+  ] as const)(
+    "$classification failure at attempt $attempt uses $required",
+    ({ classification, attempt, errorCode, errorDetail, required, forbidden }) => {
+      if (attempt === 2) {
+        noteSms({ errorCode, errorDetail });
+      }
+      const note = noteSms({ errorCode, errorDetail });
+      expect(note.woke).toBe(true);
+      if (!note.woke) throw new Error("unreachable");
+      expect(note.attempts).toBe(attempt);
+      expect(note.body).toContain(required);
+      expect(note.body).not.toContain(forbidden);
+      if (classification === "retryable" && attempt === 1) {
+        expect(note.body).not.toContain("[SILENT]");
+      } else {
+        expect(note.body).toContain("[SILENT]");
+      }
+    },
+  );
 
   it("caps total sends: failures 1 and 2 wake, failure 3+ goes quiet", () => {
     const results = Array.from({ length: MAX + 1 }, () => noteSms());

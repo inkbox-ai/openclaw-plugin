@@ -40,6 +40,7 @@ export const A2A_EVENT_TYPES: readonly string[] = [
   "a2a.task.canceled",
   "a2a.sent_task.updated",
 ];
+export const CALL_EVENT_TYPES: readonly string[] = ["call.ended"];
 
 export interface DesiredSubscriptionSet {
   mailboxId?: string;
