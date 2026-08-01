@@ -175,20 +175,12 @@ jobs:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
         run: |
           if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
-            # Long digit strings do not survive TTS/PSTN/STT reliably. Derive
-            # a current-run marker from ordinary radio-alphabet words.
-            RADIO_WORDS=(
-              alpha bravo charlie delta echo foxtrot golf hotel india juliet
-              kilo lima mike november oscar papa quebec romeo sierra tango
-              uniform victor whiskey xray yankee zulu
-            )
-            marker_value=$((GITHUB_RUN_ID * 10 + GITHUB_RUN_ATTEMPT))
-            HOSTED_MARKER=""
-            for _ in 1 2 3 4 5; do
-              marker_index=$((marker_value % ${#RADIO_WORDS[@]}))
-              HOSTED_MARKER="${HOSTED_MARKER:+$HOSTED_MARKER }${RADIO_WORDS[$marker_index]}"
-              marker_value=$((marker_value / ${#RADIO_WORDS[@]}))
-            done
+            # This value crosses TTS -> PSTN -> STT before Voice AI records the
+            # follow-up. Encode the run as five distinct everyday words;
+            # conventional phonetic-alphabet terms were normalized into
+            # alternate words or familiar phrases.
+            DIGITS="${GITHUB_RUN_ID: -4}${GITHUB_RUN_ATTEMPT: -1}"
+            HOSTED_MARKER="$(python3 "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$DIGITS")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
             # State the action lifecycle and exact body separately. Hosted
             # agents sometimes preserved the SMS intent while omitting the

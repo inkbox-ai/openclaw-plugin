@@ -119,24 +119,29 @@ def _matching_open_post_call_actions(call, marker: str) -> list:
     return matches
 
 
-def _safe_action_diagnostic(value) -> str:
-    """Bound and redact action text before it reaches public failure logs."""
-    text = str(value or "")
-    text = re.sub(r"\b[^\s@]+@[^\s@]+\b", "[email]", text)
-    text = re.sub(r"(?<!\w)\+?\d[\d(). -]{6,}\d(?!\w)", "[phone]", text)
-    return _normalized_spoken_text(text)[:160]
-
-
-def _post_call_action_diagnostics(call) -> list[dict[str, str]]:
-    """Expose only bounded normalized fields needed to classify a mismatch."""
+def _post_call_action_diagnostics(
+    call,
+    marker: str,
+) -> list[dict[str, bool | int]]:
+    """Expose only non-content metadata needed to classify a mismatch."""
+    expected_words = _normalized_spoken_text(marker).split()
     diagnostics = []
     for item in (getattr(call, "post_call_action_items", None) or []):
         raw_status = _action_item_field(item, "status") or ""
         status = getattr(raw_status, "value", raw_status)
+        action = str(_action_item_field(item, "action") or "")
+        details = str(_action_item_field(item, "details") or "")
+        action_text = f"{action} {details}"
+        action_words = set(_normalized_spoken_text(action_text).split())
         diagnostics.append({
-            "status": _safe_action_diagnostic(status),
-            "action": _safe_action_diagnostic(_action_item_field(item, "action")),
-            "details": _safe_action_diagnostic(_action_item_field(item, "details")),
+            "open": str(status).casefold() == "open",
+            "sms_intent": _has_sms_send_intent(action_text),
+            "marker_words_present": sum(
+                word in action_words for word in expected_words
+            ),
+            "marker_words_expected": len(expected_words),
+            "action_length": len(action),
+            "details_length": len(details),
         })
     return diagnostics
 
@@ -380,7 +385,7 @@ def _wait_for_open_post_call_action(aut, call_id, marker, deadline, progress):
             matches = _matching_open_post_call_actions(call, marker)
             progress["last"] = (
                 f"open_action_items={len(items)} matching_sms_actions={len(matches)} "
-                f"actions={_post_call_action_diagnostics(call)!r}"
+                f"actions={_post_call_action_diagnostics(call, marker)!r}"
             )
             if matches:
                 return

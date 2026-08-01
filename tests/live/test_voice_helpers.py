@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import test_voice as voice
+import voice_marker
 
 
 def _call_with(*items):
@@ -90,23 +91,53 @@ def test_hosted_marker_normalizes_asr_separators_without_unsafe_prefix():
     assert "openclaw" not in marker
 
 
-def test_post_call_action_diagnostics_are_normalized_bounded_and_redacted():
+def test_post_call_action_diagnostics_are_content_free_and_redacted():
+    sentinel_name = "PRIVATE-NAME-SENTINEL"
+    sentinel_body = "PRIVATE-BODY-SENTINEL"
     call = _call_with(
         {
             "status": "OPEN",
-            "action": "Send an SMS to +1 (555) 123-4567!!!",
-            "details": "Email person@example.com; " + "word " * 80,
+            "action": f"Send an SMS to {sentinel_name}",
+            "details": f"Exact body: apple basket {sentinel_body}",
         },
     )
 
-    diagnostic = voice._post_call_action_diagnostics(call)[0]
+    diagnostic = voice._post_call_action_diagnostics(
+        call,
+        "apple basket candle dragon engine",
+    )[0]
 
-    assert diagnostic["status"] == "open"
-    assert diagnostic["action"] == "send an sms to phone"
-    assert diagnostic["details"].startswith("email email word")
-    assert len(diagnostic["details"]) <= 160
-    assert "555" not in repr(diagnostic)
-    assert "example.com" not in repr(diagnostic)
+    assert diagnostic == {
+        "open": True,
+        "sms_intent": True,
+        "marker_words_present": 2,
+        "marker_words_expected": 5,
+        "action_length": len(f"Send an SMS to {sentinel_name}"),
+        "details_length": len(f"Exact body: apple basket {sentinel_body}"),
+    }
+    assert sentinel_name not in repr(diagnostic)
+    assert sentinel_body not in repr(diagnostic)
+
+
+def test_live_voice_marker_is_deterministic_distinct_and_speech_safe():
+    for digit in range(10):
+        token = str(digit) * 5
+        marker = voice_marker.marker_from_token(token).split()
+
+        assert marker == voice_marker.marker_from_token(token).split()
+        assert len(marker) == 5
+        assert len(set(marker)) == len(marker)
+        assert set(marker) <= set(voice_marker.SPEECH_WORDS)
+
+
+def test_live_voice_marker_mapping_is_stable():
+    assert voice_marker.marker_from_token("55071").split() == [
+        "forest",
+        "pencil",
+        "velvet",
+        "lemon",
+        "rabbit",
+    ]
 
 
 def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hangup():
@@ -114,8 +145,13 @@ def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hang
         Path(__file__).parents[2] / ".github" / "workflows" / "live-voice.yml"
     ).read_text(encoding="utf-8")
 
-    assert 'HOSTED_MARKER=""' in workflow
     assert 'HOSTED_MARKER="openclaw"' not in workflow
+    assert "RADIO_WORDS" not in workflow
+    assert 'DIGITS="${GITHUB_RUN_ID: -4}${GITHUB_RUN_ATTEMPT: -1}"' in workflow
+    assert (
+        'HOSTED_MARKER="$(python3 '
+        '"$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$DIGITS")"'
+    ) in workflow
     assert (
         'export VOICE_DRIVER_LINE="After we hang up, send me one SMS. '
         'Create the post-call action now with this exact SMS body: '
