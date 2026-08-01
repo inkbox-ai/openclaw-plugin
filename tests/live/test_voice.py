@@ -75,6 +75,44 @@ def _voice_marker_key(value: str | None) -> str:
     return re.sub(r"\W+", "", value or "").casefold()
 
 
+def _has_sms_send_intent(value: str | None) -> bool:
+    """Recognize an SMS-send request after speech/API normalization."""
+    normalized = _normalized_spoken_text(value)
+    words = set(normalized.split())
+    return "send" in words and (
+        "sms" in words or "text message" in normalized
+    )
+
+
+def _action_item_field(item, name: str):
+    """Read an action-item field from either SDK models or wire dictionaries."""
+    if isinstance(item, dict):
+        return item.get(name)
+    return getattr(item, name, None)
+
+
+def _matching_open_post_call_actions(call, marker: str) -> list:
+    """Return open actions that carry this run's marker and SMS intent."""
+    expected_marker = _voice_marker_key(marker)
+    assert expected_marker
+    matches = []
+    for item in (getattr(call, "post_call_action_items", None) or []):
+        raw_status = _action_item_field(item, "status") or ""
+        status = getattr(raw_status, "value", raw_status)
+        if str(status).casefold() != "open":
+            continue
+        action_text = " ".join(
+            str(_action_item_field(item, field) or "")
+            for field in ("action", "details")
+        )
+        if (
+            expected_marker in _voice_marker_key(action_text)
+            and _has_sms_send_intent(action_text)
+        ):
+            matches.append(item)
+    return matches
+
+
 def _message_created_at(message) -> datetime | None:
     """Return an aware server timestamp from an SDK SMS row."""
     value = getattr(message, "created_at", None)
@@ -246,8 +284,8 @@ def _wait_for_hosted_transcript_ready(
                 "after we hang up" in caller_text
                 or "after we hangup" in caller_text
             )
-            has_sms_intent = "send me" in caller_text and (
-                "sms" in caller_text or "text message" in caller_text
+            has_sms_intent = "me" in caller_text.split() and _has_sms_send_intent(
+                caller_text
             )
             if (
                 agent_segments
@@ -261,6 +299,29 @@ def _wait_for_hosted_transcript_ready(
         time.sleep(POLL_EVERY_S)
     pytest.fail(
         "hosted voice test exhausted its budget before caller intent was persisted; "
+        f"phase={progress['phase']} last={progress['last']}"
+    )
+
+
+def _wait_for_open_post_call_action(aut, call_id, marker, deadline, progress):
+    """Gate hangup on the authoritative persisted open action item."""
+    while time.monotonic() < deadline:
+        progress["phase"] = "open post-call action persistence"
+        try:
+            call = aut.calls.get(call_id)
+            items = getattr(call, "post_call_action_items", None) or []
+            matches = _matching_open_post_call_actions(call, marker)
+            progress["last"] = (
+                f"open_action_items={len(items)} matching_sms_actions={len(matches)}"
+            )
+            if matches:
+                return
+        except Exception as exc:
+            progress["last"] = f"post-call actions not ready: {exc!r}"
+        time.sleep(POLL_EVERY_S)
+    pytest.fail(
+        "hosted voice test exhausted its budget before the current-run open "
+        "post-call SMS action was persisted; "
         f"phase={progress['phase']} last={progress['last']}"
     )
 
@@ -516,6 +577,13 @@ def test_outbound_call_hosted_and_settles_sms_once():
             remote,
             st["number_id"],
             remote_call_id,
+            HOSTED_POST_CALL_MARKER,
+            deadline,
+            progress,
+        )
+        _wait_for_open_post_call_action(
+            aut,
+            aut_call_id,
             HOSTED_POST_CALL_MARKER,
             deadline,
             progress,
