@@ -232,6 +232,8 @@ openclaw config set tools.allow '[
 
 Plain-text output from a Voice AI post-call turn is suppressed because the call has ended; requested side effects run through normal tools. Completion receipts are durable and unfinished calls are replayed after gateway restart.
 
+Setup also enables OpenClaw's `plugins.entries.inkbox.hooks.allowConversationAccess` permission. The plugin needs this host permission to bind each Voice AI completion to the exact generated post-call run before accepting side-effecting tool evidence. Conversation bodies are not stored in the completion registry or replay journal.
+
 ### OpenAI Realtime
 
 Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. Environment keys are setup-time discovery inputs unless the wizard validates and persists them into `channels.inkbox.voiceRealtime.providers.openai.apiKey`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.

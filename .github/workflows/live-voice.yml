@@ -126,6 +126,9 @@ jobs:
           # only validates once the plugin is registered.
           openclaw plugins install -l --dangerously-force-unsafe-install "$GITHUB_WORKSPACE"
           openclaw plugins enable inkbox || true
+          # Hosted completion settlement uses before_agent_run to bind the
+          # exact generated run before accepting any SMS tool evidence.
+          openclaw config set plugins.entries.inkbox.hooks.allowConversationAccess true --strict-json
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"

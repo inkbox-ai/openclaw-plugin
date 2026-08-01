@@ -332,6 +332,10 @@ describe("runSetupWizard", () => {
       { path: "channels.inkbox.enabled", value: true },
       { path: "channels.inkbox.apiKey", value: "ApiKey_test" },
       { path: "channels.inkbox.identity", value: "smoke-agent" },
+      {
+        path: "plugins.entries.inkbox.hooks.allowConversationAccess",
+        value: true,
+      },
       { path: "channels.inkbox.signingKey", value: "whsec_test" },
       { path: "tools.alsoAllow", value: ["inkbox"] },
     ]);
@@ -416,6 +420,9 @@ describe("runSetupWizard", () => {
       apiKey: "ApiKey_test",
       identity: "smoke-agent",
       signingKey: "whsec_test",
+    });
+    expect(saved.plugins.entries.inkbox.hooks).toEqual({
+      allowConversationAccess: true,
     });
     expect(saved.tools).toEqual({
       profile: "coding",

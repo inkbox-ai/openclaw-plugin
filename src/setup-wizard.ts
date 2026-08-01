@@ -231,6 +231,14 @@ export function buildOpenClawConfigBatch(
     { path: "channels.inkbox.enabled", value: true },
     { path: "channels.inkbox.apiKey", value: config.apiKey },
     { path: "channels.inkbox.identity", value: config.identity },
+    // Hosted post-call settlement binds the exact generated run before any
+    // side-effecting tool executes. OpenClaw gates before_agent_run for every
+    // non-bundled plugin, so setup must explicitly trust this first-party
+    // hook or Voice AI follow-ups cannot be proven and safely settled.
+    {
+      path: "plugins.entries.inkbox.hooks.allowConversationAccess",
+      value: true,
+    },
   ];
   if (config.signingKey) {
     batch.push({ path: "channels.inkbox.signingKey", value: config.signingKey });
