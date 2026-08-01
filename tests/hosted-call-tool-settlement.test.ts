@@ -1,4 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const journalMock = vi.hoisted(() => ({
+  pending: vi.fn(async () => undefined),
+  settle: vi.fn(async () => undefined),
+}));
+
+vi.mock("../src/hosted-call-registry.js", () => ({
+  recordHostedSmsAttemptPending: journalMock.pending,
+  settleHostedSmsAttempt: journalMock.settle,
+}));
 import {
   beginHostedSmsToolCapture,
   bindHostedSmsCaptureToRun,
@@ -16,7 +26,14 @@ const promptMarker = "call-hosted-1";
 const context = { sessionKey, runId: "run-1", toolCallId: "tool-1" };
 
 function beginCapture() {
-  return beginHostedSmsToolCapture({ sessionKey, expectedTarget, promptMarker });
+  return beginHostedSmsToolCapture({
+    accountId: "default",
+    callId: promptMarker,
+    phase: "initial",
+    sessionKey,
+    expectedTarget,
+    promptMarker,
+  });
 }
 
 function bindCapture(ctx = context) {
@@ -34,11 +51,11 @@ function errorResult(message: string) {
   return { isError: true, content: [{ type: "text", text: message }] };
 }
 
-function captureAttempt(params: {
+async function captureAttempt(params: {
   to?: unknown;
   result?: unknown;
   error?: string;
-}): HostedSmsToolReport {
+}): Promise<HostedSmsToolReport> {
   const capture = beginCapture();
   bindCapture();
   const event = {
@@ -47,16 +64,27 @@ function captureAttempt(params: {
     runId: "run-1",
     toolCallId: "tool-1",
   };
-  recordHostedSmsBeforeToolCall(event, context);
-  recordHostedSmsAfterToolCall({ ...event, result: params.result, error: params.error }, context);
+  const gate = await recordHostedSmsBeforeToolCall(event, context);
+  if (!gate?.block) {
+    await recordHostedSmsAfterToolCall(
+      { ...event, result: params.result, error: params.error },
+      context,
+    );
+  }
   return capture.finish();
 }
 
 describe("hosted-call SMS tool settlement", () => {
-  beforeEach(() => resetHostedSmsToolCapturesForTest());
+  beforeEach(() => {
+    resetHostedSmsToolCapturesForTest();
+    journalMock.pending.mockClear();
+    journalMock.pending.mockResolvedValue(undefined);
+    journalMock.settle.mockClear();
+    journalMock.settle.mockResolvedValue(undefined);
+  });
 
-  it("accepts exactly one successful send to the authoritative target", () => {
-    const report = captureAttempt({ to: expectedTarget, result: successResult() });
+  it("accepts exactly one successful send to the authoritative target", async () => {
+    const report = await captureAttempt({ to: expectedTarget, result: successResult() });
     expect(evaluateHostedSmsSettlement(report, "initial")).toEqual({
       outcome: "success",
       reason: "one exact-target inkbox_send_sms call succeeded",
@@ -68,6 +96,125 @@ describe("hosted-call SMS tool settlement", () => {
     expect(evaluateHostedSmsSettlement(capture.finish(), "initial").outcome).toBe(
       "correction",
     );
+  });
+
+  it("blocks the provider when the durable pre-send journal fails", async () => {
+    journalMock.pending.mockRejectedValueOnce(new Error("disk unavailable"));
+    const capture = beginCapture();
+    bindCapture();
+    const gate = await recordHostedSmsBeforeToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "Release update" },
+        runId: "run-1",
+        toolCallId: "tool-1",
+      },
+      context,
+    );
+    const report = capture.finish();
+    expect(gate?.block).toBe(true);
+    expect(report.attempts).toMatchObject([
+      { outcome: "failed", errorKind: "ambiguous_provider_failure" },
+    ]);
+    expect(evaluateHostedSmsSettlement(report, "initial").outcome).toBe("terminal");
+    expect(journalMock.settle).not.toHaveBeenCalled();
+  });
+
+  it("durably journals pending before allowing provider execution", async () => {
+    const capture = beginCapture();
+    bindCapture();
+    const gate = await recordHostedSmsBeforeToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "Release update" },
+        runId: "run-1",
+        toolCallId: "tool-1",
+      },
+      context,
+    );
+    expect(gate).toBeUndefined();
+    expect(journalMock.pending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: promptMarker,
+        phase: "initial",
+        toolCallId: "tool-1",
+        targetMatches: true,
+      }),
+    );
+    capture.finish();
+  });
+
+  it("still blocks a wrong target when its terminal journal update fails", async () => {
+    journalMock.settle.mockRejectedValueOnce(new Error("disk unavailable"));
+    const capture = beginCapture();
+    bindCapture();
+    const gate = await recordHostedSmsBeforeToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: "+15559999999", text: "Release update" },
+        runId: "run-1",
+        toolCallId: "tool-wrong-target",
+      },
+      { sessionKey, runId: "run-1", toolCallId: "tool-wrong-target" },
+    );
+    expect(gate?.block).toBe(true);
+    expect(capture.finish().attempts).toMatchObject([
+      { target: "+15559999999", outcome: "failed" },
+    ]);
+  });
+
+  it("treats after_tool_call without a pre-send journal as terminal", async () => {
+    const capture = beginCapture();
+    bindCapture();
+    await recordHostedSmsAfterToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "Release update" },
+        runId: "run-1",
+        toolCallId: "tool-without-before",
+        result: successResult(),
+      },
+      { sessionKey, runId: "run-1", toolCallId: "tool-without-before" },
+    );
+    const report = capture.finish();
+    expect(report.attempts).toMatchObject([
+      { outcome: "failed", errorKind: "ambiguous_provider_failure" },
+    ]);
+    expect(evaluateHostedSmsSettlement(report, "initial").outcome).toBe("terminal");
+    expect(journalMock.pending).toHaveBeenCalledOnce();
+    expect(journalMock.settle).toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: "after_hook_without_before_hook" }),
+    );
+  });
+
+  it("does not settle a pending attempt from a mismatched after-hook tool ID", async () => {
+    const capture = beginCapture();
+    bindCapture();
+    await recordHostedSmsBeforeToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "Release update" },
+        runId: "run-1",
+        toolCallId: "tool-before",
+      },
+      { sessionKey, runId: "run-1", toolCallId: "tool-before" },
+    );
+    await recordHostedSmsAfterToolCall(
+      {
+        toolName: "inkbox_send_sms",
+        params: { to: expectedTarget, text: "Release update" },
+        runId: "run-1",
+        toolCallId: "tool-after",
+        result: successResult(),
+      },
+      { sessionKey, runId: "run-1", toolCallId: "tool-after" },
+    );
+    const report = capture.finish();
+    expect(report.attempts).toMatchObject([
+      { toolCallId: "tool-before", outcome: "pending" },
+      { toolCallId: "tool-after", outcome: "failed" },
+    ]);
+    expect(evaluateHostedSmsSettlement(report, "initial").outcome).toBe("terminal");
   });
 
   it("fails closed until before_agent_run binds the exact run", () => {
@@ -122,10 +269,10 @@ describe("hosted-call SMS tool settlement", () => {
     expect(capture.finish().attempts).toHaveLength(0);
   });
 
-  it("requests one correction for a recoverable content rejection", () => {
+  it("requests one correction for a recoverable content rejection", async () => {
     const rawProviderError =
       "Validation error (422): content rule markdown rejected secret-provider-payload";
-    const report = captureAttempt({
+    const report = await captureAttempt({
       to: expectedTarget,
       result: errorResult(rawProviderError),
     });
@@ -134,8 +281,8 @@ describe("hosted-call SMS tool settlement", () => {
     expect(JSON.stringify(report)).not.toContain("secret-provider-payload");
   });
 
-  it("stops on terminal failures and never asks for correction", () => {
-    const report = captureAttempt({
+  it("stops on terminal failures and never asks for correction", async () => {
+    const report = await captureAttempt({
       to: expectedTarget,
       result: errorResult("Recipient has opted out of SMS"),
     });
@@ -143,8 +290,8 @@ describe("hosted-call SMS tool settlement", () => {
     expect(evaluateHostedSmsSettlement(report, "initial").outcome).toBe("terminal");
   });
 
-  it("stops after any correction failure, including another recoverable failure", () => {
-    const report = captureAttempt({
+  it("stops after any correction failure, including another recoverable failure", async () => {
+    const report = await captureAttempt({
       to: expectedTarget,
       result: errorResult("Validation error (422): content rule markdown rejected"),
     });
@@ -158,14 +305,14 @@ describe("hosted-call SMS tool settlement", () => {
     "Inkbox API error (503): unavailable",
     "duplicate request with unknown commit status",
     "carrier unavailable",
-  ])("treats commit-ambiguous failure as terminal: %s", (message) => {
-    const report = captureAttempt({ to: expectedTarget, result: errorResult(message) });
+  ])("treats commit-ambiguous failure as terminal: %s", async (message) => {
+    const report = await captureAttempt({ to: expectedTarget, result: errorResult(message) });
     expect(report.attempts[0].errorKind).toBe("ambiguous_provider_failure");
     expect(evaluateHostedSmsSettlement(report, "initial").outcome).toBe("terminal");
   });
 
-  it("does not accept a non-error result without positive send evidence", () => {
-    const report = captureAttempt({
+  it("does not accept a non-error result without positive send evidence", async () => {
+    const report = await captureAttempt({
       to: expectedTarget,
       result: { content: [{ type: "text", text: "Tool finished" }] },
     });
@@ -176,8 +323,8 @@ describe("hosted-call SMS tool settlement", () => {
     expect(evaluateHostedSmsSettlement(report, "initial").outcome).toBe("terminal");
   });
 
-  it("accepts the structured positive send contract", () => {
-    const report = captureAttempt({
+  it("accepts the structured positive send contract", async () => {
+    const report = await captureAttempt({
       to: expectedTarget,
       result: {
         content: [{ type: "text", text: "redacted" }],
@@ -187,26 +334,27 @@ describe("hosted-call SMS tool settlement", () => {
     expect(evaluateHostedSmsSettlement(report, "initial").outcome).toBe("success");
   });
 
-  it("stops on a wrong target even when the tool reports success", () => {
-    const report = captureAttempt({ to: "+15559999999", result: successResult() });
+  it("stops on a wrong target even when the tool reports success", async () => {
+    const report = await captureAttempt({ to: "+15559999999", result: successResult() });
     expect(evaluateHostedSmsSettlement(report, "initial").outcome).toBe("terminal");
   });
 
-  it("accepts a one-element recipient array but rejects multi-target sends", () => {
-    const one = captureAttempt({ to: [expectedTarget], result: successResult() });
+  it("accepts a one-element recipient array but rejects multi-target sends", async () => {
+    const one = await captureAttempt({ to: [expectedTarget], result: successResult() });
     expect(evaluateHostedSmsSettlement(one, "initial").outcome).toBe("success");
 
     resetHostedSmsToolCapturesForTest();
-    const many = captureAttempt({
+    const many = await captureAttempt({
       to: [expectedTarget, "+15559999999"],
       result: successResult(),
     });
     expect(evaluateHostedSmsSettlement(many, "initial").outcome).toBe("terminal");
   });
 
-  it("stops when one turn makes more than one SMS attempt", () => {
+  it("blocks a second SMS before provider execution and settles the turn terminal", async () => {
     const capture = beginCapture();
     bindCapture();
+    const gates: Array<{ block?: boolean } | void> = [];
     for (const id of ["tool-1", "tool-2"]) {
       const ctx = { sessionKey, runId: "run-1", toolCallId: id };
       const event = {
@@ -215,18 +363,23 @@ describe("hosted-call SMS tool settlement", () => {
         runId: "run-1",
         toolCallId: id,
       };
-      recordHostedSmsBeforeToolCall(event, ctx);
-      recordHostedSmsAfterToolCall({ ...event, result: successResult() }, ctx);
+      const gate = await recordHostedSmsBeforeToolCall(event, ctx);
+      gates.push(gate);
+      if (!gate?.block) {
+        await recordHostedSmsAfterToolCall({ ...event, result: successResult() }, ctx);
+      }
     }
+    expect(gates).toEqual([undefined, expect.objectContaining({ block: true })]);
+    expect(journalMock.pending).toHaveBeenCalledOnce();
     expect(evaluateHostedSmsSettlement(capture.finish(), "initial").outcome).toBe(
       "terminal",
     );
   });
 
-  it("records an in-flight attempt as unknown if the agent ends before after_tool_call", () => {
+  it("records an in-flight attempt as unknown if the agent ends before after_tool_call", async () => {
     const capture = beginCapture();
     bindCapture();
-    recordHostedSmsBeforeToolCall(
+    await recordHostedSmsBeforeToolCall(
       {
         toolName: "inkbox_send_sms",
         params: { to: expectedTarget, text: "Release update" },
@@ -254,10 +407,10 @@ describe("hosted-call SMS tool settlement", () => {
     }
   });
 
-  it("ignores tools from other sessions and runs", () => {
+  it("ignores tools from other sessions and blocks uncorrelated same-session runs", async () => {
     const capture = beginCapture();
     bindCapture();
-    recordHostedSmsBeforeToolCall(
+    await recordHostedSmsBeforeToolCall(
       {
         toolName: "inkbox_send_sms",
         params: { to: expectedTarget, text: "wrong session" },
@@ -266,7 +419,7 @@ describe("hosted-call SMS tool settlement", () => {
       },
       { sessionKey: "agent:main:other", runId: "run-other" },
     );
-    recordHostedSmsBeforeToolCall(
+    await recordHostedSmsBeforeToolCall(
       {
         toolName: "inkbox_send_sms",
         params: { to: expectedTarget, text: "right run" },
@@ -275,7 +428,7 @@ describe("hosted-call SMS tool settlement", () => {
       },
       context,
     );
-    recordHostedSmsBeforeToolCall(
+    const blocked = await recordHostedSmsBeforeToolCall(
       {
         toolName: "inkbox_send_sms",
         params: { to: expectedTarget, text: "wrong run" },
@@ -284,6 +437,7 @@ describe("hosted-call SMS tool settlement", () => {
       },
       { sessionKey, runId: "run-2", toolCallId: "tool-2" },
     );
+    expect(blocked?.block).toBe(true);
     expect(capture.finish().attempts).toHaveLength(1);
   });
 });

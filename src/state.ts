@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdir, readFile, writeFile, chmod, rename } from "node:fs/promises";
@@ -32,6 +33,9 @@ export function statePaths(): StatePaths {
 
 export async function ensureStateDir(paths: StatePaths = statePaths()): Promise<void> {
   await mkdir(paths.dir, { recursive: true, mode: 0o700 });
+  // mkdir's mode is affected by pre-existing directories. Reassert the
+  // boundary because hosted replay state can contain phone/transcript data.
+  await chmod(paths.dir, 0o700);
 }
 
 export async function readIdentityState(): Promise<InkboxIdentityState | null> {
@@ -48,10 +52,11 @@ export async function readIdentityState(): Promise<InkboxIdentityState | null> {
 export async function writeIdentityState(state: InkboxIdentityState): Promise<void> {
   const paths = statePaths();
   await ensureStateDir(paths);
-  const tmp = `${paths.identityState}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${paths.identityState}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(state, null, 2), {
     encoding: "utf8",
     mode: 0o600,
+    flag: "wx",
   });
   // 0600 because the file path itself can leak the identity handle (e.g.
   // shoulder-surfing of `ls ~/.openclaw/inkbox/`). State contents aren't

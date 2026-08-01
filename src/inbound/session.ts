@@ -41,6 +41,7 @@ import {
   hostedCallRegistryKey,
   readHostedCallRegistry,
   writeHostedCallRegistryEntry,
+  type HostedCallRegistryEntry,
 } from "../hosted-call-registry.js";
 import {
   beginHostedSmsToolCapture,
@@ -252,6 +253,79 @@ const REALTIME_CONTACT_READ_MAX_VALUES = 3;
 const REALTIME_HANGUP_CONFIRM_WINDOW_MS = 60 * 1000;
 const hostedCallRuns = new Set<string>();
 let hostedCallCompletionChain: Promise<void> = Promise.resolve();
+
+const HOSTED_POST_CALL_TIMING =
+  String.raw`(?:after|when|once)\s+(?:(?:i|we|you)\s+hang\s*up|(?:this|the)\s+call\s+(?:ends?|is\s+over))`;
+const HOSTED_TEXT_VERB =
+  String.raw`text\s+(?!(?:conversation|exchange|messages?|history|thread|yesterday|earlier|from)\b)[\w@][\w@.'’+-]*\b`;
+const HOSTED_TEXT_CLAUSE_PREFIX =
+  String.raw`(?:please\s+|then\s+|(?:(?:can|could|would|will)\s+you|(?:i|we)\s*(?:will|'ll|’ll|am\s+going\s+to|are\s+going\s+to))\s+)`;
+const HOSTED_SEND_SMS = String.raw`send\b.{0,80}\b(?:an?\s+)?(?:sms|text\s+message)\b`;
+const HOSTED_NEGATED_SMS_ACTION = new RegExp(
+  String.raw`\b(?:do\s+not|don['’]?t|never|must\s+not|should\s+not|will\s+not|won['’]?t|can(?:not|['’]?t))\s+(?:(?:ever|again)\s+)?(?:text\b|send\b.{0,80}\b(?:sms|text\s+message)\b)`,
+  "i",
+);
+const HOSTED_TRANSCRIPT_SMS_COMMITMENTS = [
+  new RegExp(
+    String.raw`\b${HOSTED_POST_CALL_TIMING}\b[\s,;:!—-]*(?:${HOSTED_TEXT_CLAUSE_PREFIX})?${HOSTED_TEXT_VERB}`,
+    "i",
+  ),
+  new RegExp(
+    String.raw`(?:^|[.!?]\s+|\b${HOSTED_TEXT_CLAUSE_PREFIX})${HOSTED_TEXT_VERB}.{0,160}\b${HOSTED_POST_CALL_TIMING}\b`,
+    "i",
+  ),
+  new RegExp(String.raw`\b${HOSTED_POST_CALL_TIMING}\b.{0,160}${HOSTED_SEND_SMS}`, "i"),
+  new RegExp(String.raw`\b${HOSTED_SEND_SMS}.{0,160}\b${HOSTED_POST_CALL_TIMING}\b`, "i"),
+];
+const HOSTED_OPEN_ACTION_SMS_COMMITMENTS = [
+  new RegExp(String.raw`\b${HOSTED_TEXT_VERB}`, "i"),
+  new RegExp(String.raw`\b${HOSTED_SEND_SMS}`, "i"),
+];
+
+function hasHostedSmsCommitment(value: string, source: "action" | "transcript"): boolean {
+  const patterns = source === "action"
+    ? HOSTED_OPEN_ACTION_SMS_COMMITMENTS
+    : HOSTED_TRANSCRIPT_SMS_COMMITMENTS;
+  const clauses = value
+    .split(/(?:[.!?;:\n]+|\s+[—–]\s+|\s+--\s+)/)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  const candidates = source === "transcript"
+    ? clauses.flatMap((clause, index) => [
+        clause,
+        ...(index + 1 < clauses.length ? [`${clause}. ${clauses[index + 1]}`] : []),
+      ])
+    : clauses;
+  return candidates.some(
+    (candidate) =>
+      !HOSTED_NEGATED_SMS_ACTION.test(candidate) &&
+      patterns.some((pattern) => pattern.test(candidate)),
+  );
+}
+
+function hostedSmsRecoveryPhase(
+  entry: HostedCallRegistryEntry,
+):
+  | { phase: "initial" }
+  | { phase: "correction"; reason: "pre_send_validation" | "content_rejected" }
+  | { phase: "terminal" } {
+  const attempts = entry.smsAttempts ?? [];
+  if (attempts.length === 0) return { phase: "initial" };
+  if (
+    attempts.length === 1 &&
+    attempts[0].phase === "initial" &&
+    attempts[0].targetMatches &&
+    attempts[0].state === "failed" &&
+    (attempts[0].errorKind === "pre_send_validation" ||
+      attempts[0].errorKind === "content_rejected")
+  ) {
+    return {
+      phase: "correction",
+      reason: attempts[0].errorKind as "pre_send_validation" | "content_rejected",
+    };
+  }
+  return { phase: "terminal" };
+}
 
 // What the main OpenClaw agent can do on behalf of a live call, grouped for
 // speech. Single source of truth rendered into the session instructions, so the
@@ -2085,6 +2159,9 @@ async function dispatchInboundTurn(
     replyOptionsOverride?: Record<string, unknown>;
     a2aContext?: ActiveA2ATurn;
     hostedSmsSettlement?: {
+      accountId: string;
+      callId: string;
+      phase: "initial" | "correction";
       expectedTarget: string;
       promptMarker: string;
       onSettled: (report: HostedSmsToolReport) => void;
@@ -2288,6 +2365,9 @@ async function dispatchInboundTurn(
   }
   const hostedSmsCapture = opts.hostedSmsSettlement
     ? beginHostedSmsToolCapture({
+        accountId: opts.hostedSmsSettlement.accountId,
+        callId: opts.hostedSmsSettlement.callId,
+        phase: opts.hostedSmsSettlement.phase,
         sessionKey: effectiveSessionKey,
         expectedTarget: opts.hostedSmsSettlement.expectedTarget,
         promptMarker: opts.hostedSmsSettlement.promptMarker,
@@ -4310,7 +4390,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   }
 
-  async function runHostedCallCompletion(event: CallEndedWebhookPayload): Promise<void> {
+  async function runHostedCallCompletion(
+    event: CallEndedWebhookPayload,
+    resumeCorrectionReason?: "pre_send_validation" | "content_rejected",
+  ): Promise<void> {
     const call = event.data.call;
     const key = hostedCallRegistryKey(opts.account.accountId, call.id);
     try {
@@ -4375,27 +4458,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         )
         .join("\n");
       const remotePhoneNumber = call.remote_phone_number.trim();
-      const negatesSms = (value: string) =>
-        /\b(?:do not|dont|don['’]t|never|must not|should not)\s+(?:ever\s+)?(?:send\b.{0,60}\b(?:sms|text\s+message)\b|text\b)/i.test(
-          value,
-        );
       const explicitSmsAction = openActionItems.find((action) => {
         const value = `${action.action ?? ""} ${action.details ?? ""}`;
-        return (
-          /\b(?:sms|text\s+message|text\s+(?:me|you|them|him|her))\b/i.test(value) &&
-          !negatesSms(value)
-        );
+        return hasHostedSmsCommitment(value, "action");
       });
       const explicitTranscriptSmsCommitment = transcriptEntries.find((entry) => {
-        const value = entry.text;
-        const postCallTiming =
-          /\b(?:after (?:we hang up|the call|this call)|when we hang up|once (?:we hang up|the call ends|this call ends))\b/i.test(
-            value,
-          );
-        const smsVerb = /\bsend\b.{0,80}\b(?:sms|text\s+message)\b|\btext\s+(?:you|me|them|him|her)\b/i.test(
-          value,
-        );
-        return postCallTiming && smsVerb && !negatesSms(value);
+        return hasHostedSmsCommitment(entry.text, "transcript");
       });
       const smsCommitment = explicitSmsAction
         ? [explicitSmsAction.action, explicitSmsAction.details].filter(Boolean).join("\n")
@@ -4443,6 +4511,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       };
       const dispatchHostedTurn = async (
         hostedTurn: InkboxInboundTurn,
+        phase: "initial" | "correction",
       ): Promise<{ report?: HostedSmsToolReport; error?: unknown }> => {
         let report: HostedSmsToolReport | undefined;
         try {
@@ -4466,8 +4535,14 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
             ...(smsSettlementRequired
               ? {
                   hostedSmsSettlement: {
+                    accountId: opts.account.accountId,
+                    callId: call.id,
+                    phase,
                     expectedTarget: remotePhoneNumber,
-                    promptMarker: call.id,
+                    promptMarker:
+                      phase === "initial"
+                        ? `[inkbox:voice_call call_id=${call.id}`
+                        : `[inkbox:voice_call_correction call_id=${call.id}`,
                     onSettled: (settled: HostedSmsToolReport) => {
                       report = settled;
                     },
@@ -4481,73 +4556,96 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         }
       };
 
-      const initial = await dispatchHostedTurn(turn);
-      if (smsSettlementRequired) {
-        const initialDecision = initial.report
-          ? evaluateHostedSmsSettlement(initial.report, "initial")
+      const dispatchCorrection = async (
+        reason: "missing_attempt" | "pre_send_validation" | "content_rejected",
+      ): Promise<boolean> => {
+        const correctionInstruction =
+          reason === "content_rejected"
+            ? "The first send was explicitly rejected by content policy. Preserve every required fact, literal code, and marker in the commitment, but safely rephrase only the surrounding prose."
+            : "The first turn made no send. Fulfill the commitment exactly as written; preserve every required fact, literal code, marker, and wording constraint.";
+        const correctionTurn: InkboxInboundTurn = {
+          ...turn,
+          body: [
+            `[inkbox:voice_call_correction call_id=${call.id}${renderIdentityMarker(opts.account)} | ${renderContactMarker(contact)}]`,
+            "The previous hosted-call reconciliation did not complete its required SMS follow-up.",
+            "This is the only mandatory correction attempt. Do not return [SILENT], skip the tool, or defer the send.",
+            correctionInstruction,
+            `Exact open SMS commitment:\n${escapeContactMemoryTokens(smsCommitment ?? "")}`,
+            `Call inkbox_send_sms exactly once with to="${escapeContactMemoryTokens(remotePhoneNumber)}". Do not use conversationId, do not send to any other number, and do not make a second attempt in this turn. Plain-text replies are suppressed.`,
+          ].join("\n\n"),
+          messageId: `call:${call.id}:ended:sms-correction`,
+        };
+        const correction = await dispatchHostedTurn(correctionTurn, "correction");
+        const decision = correction.report
+          ? evaluateHostedSmsSettlement(correction.report, "correction")
           : undefined;
-        if (initialDecision?.outcome === "correction" && !initial.error) {
-          const correctionInstruction =
-            initialDecision.reason === "content_rejected"
-              ? "The first send was explicitly rejected by content policy. Preserve every required fact, literal code, and marker in the commitment, but safely rephrase only the surrounding prose."
-              : "The first turn made no send. Fulfill the commitment exactly as written; preserve every required fact, literal code, marker, and wording constraint.";
-          const correctionTurn: InkboxInboundTurn = {
-            ...turn,
-            body: [
-              `[inkbox:voice_call_correction call_id=${call.id}${renderIdentityMarker(opts.account)} | ${renderContactMarker(contact)}]`,
-              "The previous hosted-call reconciliation did not complete its required SMS follow-up.",
-              correctionInstruction,
-              `Exact open SMS commitment:\n${escapeContactMemoryTokens(smsCommitment ?? "")}`,
-              `Call inkbox_send_sms exactly once with to="${escapeContactMemoryTokens(remotePhoneNumber)}". Do not use conversationId, do not send to any other number, and do not make a second attempt in this turn. Plain-text replies are suppressed.`,
-            ].join("\n\n"),
-            messageId: `call:${call.id}:ended:sms-correction`,
-          };
-          const correction = await dispatchHostedTurn(correctionTurn);
-          const correctionDecision = correction.report
-            ? evaluateHostedSmsSettlement(correction.report, "correction")
+        if (!correction.error && decision?.outcome === "success") return true;
+        const outcome = correction.error
+          ? "correction_dispatch_failed"
+          : decision?.reason ?? "correction_missing_tool_report";
+        await writeHostedCallRegistryEntry({
+          accountId: opts.account.accountId,
+          callId: call.id,
+          eventId: event.id,
+          state: "failed",
+          outcome,
+          retryable: false,
+          event,
+        });
+        opts.logger?.warn?.(
+          `Inkbox Voice AI post-call SMS settlement stopped: call_id=${call.id} ${outcome}`,
+        );
+        return false;
+      };
+
+      if (resumeCorrectionReason) {
+        if (!smsSettlementRequired) {
+          await writeHostedCallRegistryEntry({
+            accountId: opts.account.accountId,
+            callId: call.id,
+            eventId: event.id,
+            state: "failed",
+            outcome: "correction_context_unavailable",
+            retryable: false,
+            event,
+          });
+          return;
+        }
+        if (!(await dispatchCorrection(resumeCorrectionReason))) return;
+      } else {
+        const initial = await dispatchHostedTurn(turn, "initial");
+        if (smsSettlementRequired) {
+          const initialDecision = initial.report
+            ? evaluateHostedSmsSettlement(initial.report, "initial")
             : undefined;
-          if (!correction.error && correctionDecision?.outcome === "success") {
-            // Fall through to the durable completed write below.
-          } else {
-            const reason = correction.error
-              ? "correction_dispatch_failed"
-              : correctionDecision?.reason ?? "correction_missing_tool_report";
+          if (initialDecision?.outcome === "correction" && !initial.error) {
+            if (!(await dispatchCorrection(initialDecision.reason as
+              | "missing_attempt"
+              | "pre_send_validation"
+              | "content_rejected"))) return;
+          } else if (initialDecision?.outcome !== "success") {
+            const noAttempt = (initial.report?.attempts.length ?? 0) === 0;
+            const retryable = Boolean(initial.error && noAttempt && !initial.report?.aborted);
+            const reason = initial.error
+              ? "initial_dispatch_failed_before_settlement"
+              : initialDecision?.reason ?? "initial_missing_tool_report";
             await writeHostedCallRegistryEntry({
               accountId: opts.account.accountId,
               callId: call.id,
               eventId: event.id,
               state: "failed",
               outcome: reason,
-              retryable: false,
+              retryable,
               event,
             });
             opts.logger?.warn?.(
-              `Inkbox Voice AI post-call SMS settlement stopped: call_id=${call.id} ${reason}`,
+              `Inkbox Voice AI post-call SMS settlement ${retryable ? "will retry" : "stopped"}: call_id=${call.id} ${reason}`,
             );
             return;
           }
-        } else if (initialDecision?.outcome !== "success") {
-          const noAttempt = (initial.report?.attempts.length ?? 0) === 0;
-          const retryable = Boolean(initial.error && noAttempt && !initial.report?.aborted);
-          const reason = initial.error
-            ? "initial_dispatch_failed_before_settlement"
-            : initialDecision?.reason ?? "initial_missing_tool_report";
-          await writeHostedCallRegistryEntry({
-            accountId: opts.account.accountId,
-            callId: call.id,
-            eventId: event.id,
-            state: "failed",
-            outcome: reason,
-            retryable,
-            event,
-          });
-          opts.logger?.warn?.(
-            `Inkbox Voice AI post-call SMS settlement ${retryable ? "will retry" : "stopped"}: call_id=${call.id} ${reason}`,
-          );
-          return;
+        } else if (initial.error) {
+          throw initial.error;
         }
-      } else if (initial.error) {
-        throw initial.error;
       }
       await writeHostedCallRegistryEntry({
         accountId: opts.account.accountId,
@@ -4579,14 +4677,31 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     if (existing?.state === "completed" || (existing?.state === "failed" && !existing.retryable)) {
       return;
     }
+    const recovery = existing
+      ? hostedSmsRecoveryPhase(existing)
+      : { phase: "initial" as const };
+    if (existing && recovery.phase === "terminal") {
+      await writeHostedCallRegistryEntry({
+        accountId: existing.accountId,
+        callId: existing.callId,
+        eventId: existing.eventId,
+        state: "failed",
+        outcome: "durable_sms_attempt_is_ambiguous",
+        retryable: false,
+        event: existing.event,
+        smsAttempts: existing.smsAttempts,
+      });
+      return;
+    }
+    const replayEvent = recovery.phase === "correction" ? existing!.event : event;
     hostedCallRuns.add(key);
     try {
       await writeHostedCallRegistryEntry({
         accountId: opts.account.accountId,
         callId,
-        eventId: event.id,
+        eventId: replayEvent.id,
         state: "queued",
-        event,
+        event: replayEvent,
       });
     } catch (error) {
       hostedCallRuns.delete(key);
@@ -4598,7 +4713,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           `Inkbox Voice AI completion queue recovered from a prior failure: ${errorMessage(error)}`,
         );
       })
-      .then(() => runHostedCallCompletion(event));
+      .then(() =>
+        runHostedCallCompletion(
+          replayEvent,
+          recovery.phase === "correction" ? recovery.reason : undefined,
+        ),
+      );
   }
 
   async function catchUpHostedCalls(): Promise<void> {
@@ -4610,6 +4730,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       ) {
         continue;
       }
+      const recovery = hostedSmsRecoveryPhase(entry);
+      if (recovery.phase === "terminal") {
+        await writeHostedCallRegistryEntry({
+          accountId: entry.accountId,
+          callId: entry.callId,
+          eventId: entry.eventId,
+          state: "failed",
+          outcome: "durable_sms_attempt_is_ambiguous",
+          retryable: false,
+          event: entry.event,
+          smsAttempts: entry.smsAttempts,
+        });
+        continue;
+      }
       const key = hostedCallRegistryKey(entry.accountId, entry.callId);
       if (hostedCallRuns.has(key)) continue;
       hostedCallRuns.add(key);
@@ -4619,7 +4753,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
             `Inkbox Voice AI completion queue recovered from a prior failure: ${errorMessage(error)}`,
           );
         })
-        .then(() => runHostedCallCompletion(entry.event));
+        .then(() =>
+          runHostedCallCompletion(
+            entry.event,
+            recovery.phase === "correction" ? recovery.reason : undefined,
+          ),
+        );
     }
   }
 

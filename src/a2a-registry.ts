@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { chmod, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ensureStateDir, statePaths } from "./state.js";
@@ -65,10 +66,11 @@ export async function writeA2ARegistry(
     const paths = statePaths();
     await ensureStateDir(paths);
     const target = a2aRegistryPath();
-    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(tmp, `${JSON.stringify(registry, null, 2)}\n`, {
       encoding: "utf8",
       mode: 0o600,
+      flag: "wx",
     });
     await rename(tmp, target);
     await chmod(target, 0o600);

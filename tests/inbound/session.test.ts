@@ -50,6 +50,8 @@ vi.mock("../../src/hosted-call-registry.js", () => ({
     hostedRegistryMock.entries[`${entry.accountId}:${entry.callId}`] = entry;
     hostedRegistryMock.writes.push(entry);
   }),
+  recordHostedSmsAttemptPending: vi.fn(async () => undefined),
+  settleHostedSmsAttempt: vi.fn(async () => undefined),
 }));
 
 vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
@@ -536,7 +538,7 @@ function hostedCallEndedEvent(params: {
   };
 }
 
-function emitHostedSmsTool(params: any, result: any, id = "tool-1"): void {
+async function emitHostedSmsTool(params: any, result: any, id = "tool-1"): Promise<void> {
   const context = {
     sessionKey: params.routeSessionKey,
     runId: `run-${params.ctxPayload.message.messageIdFull}`,
@@ -549,8 +551,10 @@ function emitHostedSmsTool(params: any, result: any, id = "tool-1"): void {
     toolCallId: id,
   };
   bindHostedSmsCaptureToRun({ prompt: params.ctxPayload.message.bodyForAgent }, context);
-  recordHostedSmsBeforeToolCall(event, context);
-  recordHostedSmsAfterToolCall({ ...event, result }, context);
+  const gate = await recordHostedSmsBeforeToolCall(event, context);
+  if (!gate?.block) {
+    await recordHostedSmsAfterToolCall({ ...event, result }, context);
+  }
 }
 
 describe("createInkboxSessionBridge", () => {
@@ -643,8 +647,8 @@ describe("createInkboxSessionBridge", () => {
 
   it("completes an explicit hosted SMS action only after the native tool hook reports success", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
-      emitHostedSmsTool(params, {
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+      await emitHostedSmsTool(params, {
         content: [{ type: "text", text: "Sent text id=text-1 status=queued" }],
       });
     });
@@ -672,10 +676,10 @@ describe("createInkboxSessionBridge", () => {
   it("issues one correction turn when an explicit hosted SMS action made no attempt", async () => {
     const { runtime } = createRuntime();
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
-        emitHostedSmsTool(params, {
+        await emitHostedSmsTool(params, {
           content: [{ type: "text", text: "Sent text id=text-2 status=queued" }],
         });
       }
@@ -704,6 +708,12 @@ describe("createInkboxSessionBridge", () => {
     expect(correction.ctxPayload.message.bodyForAgent).toContain(
       "Fulfill the commitment exactly as written",
     );
+    expect(correction.ctxPayload.message.bodyForAgent).toContain(
+      "This is the only mandatory correction attempt",
+    );
+    expect(correction.ctxPayload.message.bodyForAgent).toContain(
+      "Do not return [SILENT], skip the tool, or defer the send",
+    );
     expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
       state: "completed",
       outcome: "success",
@@ -713,9 +723,9 @@ describe("createInkboxSessionBridge", () => {
   it("makes one correction after a recoverable hosted SMS failure", async () => {
     const { runtime } = createRuntime();
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
       dispatches += 1;
-      emitHostedSmsTool(
+      await emitHostedSmsTool(
         params,
         dispatches === 1
           ? {
@@ -762,10 +772,10 @@ describe("createInkboxSessionBridge", () => {
     ]);
     runtime.getIdentity = vi.fn(async () => identity) as any;
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
-        emitHostedSmsTool(params, {
+        await emitHostedSmsTool(params, {
           details: { inkboxSendSms: { sent: true } },
           content: [{ type: "text", text: "Sent text id=text-transcript status=queued" }],
         });
@@ -805,10 +815,10 @@ describe("createInkboxSessionBridge", () => {
     ]);
     runtime.getIdentity = vi.fn(async () => identity) as any;
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
-        emitHostedSmsTool(params, {
+        await emitHostedSmsTool(params, {
           details: { inkboxSendSms: { sent: true } },
           content: [{ type: "text", text: "Sent text id=text-remote status=queued" }],
         });
@@ -834,6 +844,83 @@ describe("createInkboxSessionBridge", () => {
       channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent,
     ).toContain("REMOTE-MARKER-7");
     expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
+  });
+
+  it.each([
+    "After this call ends, text Alex release-ready.",
+    "Text Alex release-ready after we hang up.",
+    "I will text you once this call is over.",
+    "Don't text me now; after this call ends, text me RELEASE-CODE-7.",
+  ])("detects a clause-aware transcript SMS commitment: %s", async (text) => {
+    const { runtime } = createRuntime();
+    const identity = await runtime.getIdentity();
+    (identity as any).listTranscripts = vi.fn(async () => [{ party: "remote", text }]);
+    runtime.getIdentity = vi.fn(async () => identity) as any;
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({ id: `call-clause-${text.length}` });
+    event.data.post_call_action_items = [];
+
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+  });
+
+  it("detects imperative named-recipient text open actions", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onCallEnded?.(
+      hostedCallEndedEvent({ id: "call-text-alex", action: "Text Alex: release-ready" }),
+    );
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a positive open-action clause after an earlier negated clause", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onCallEnded?.(
+      hostedCallEndedEvent({
+        id: "call-mixed-action",
+        action: "Don't text me now; text me RELEASE-CODE-8 after the call.",
+      }),
+    );
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(
+      channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent,
+    ).toContain("RELEASE-CODE-8");
   });
 
   it.each([
@@ -907,6 +994,27 @@ describe("createInkboxSessionBridge", () => {
         { party: "local", text: "Understood." },
       ],
     ],
+    [
+      "never-again negated text request",
+      [
+        { party: "remote", text: "After the call ends, never again text me." },
+        { party: "local", text: "Understood." },
+      ],
+    ],
+    [
+      "must-not text request",
+      [
+        { party: "remote", text: "After the call ends, you must not text me." },
+        { party: "local", text: "Understood." },
+      ],
+    ],
+    [
+      "will-not SMS statement",
+      [
+        { party: "local", text: "I will not send an SMS after the call ends." },
+        { party: "remote", text: "Understood." },
+      ],
+    ],
   ])("does not invent an SMS obligation from a %s", async (_label, transcriptRows) => {
     const { runtime } = createRuntime();
     const identity = await runtime.getIdentity();
@@ -956,10 +1064,207 @@ describe("createInkboxSessionBridge", () => {
     expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
   });
 
+  it("does not treat a bare SMS noun in an open action as a send commitment", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onCallEnded?.(
+      hostedCallEndedEvent({ id: "call-review-sms", action: "Review the SMS history" }),
+    );
+    await flushMicrotasks(40);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
+  });
+
+  it("terminalizes a durable hosted SMS attempt on catch-up without replay", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const event = hostedCallEndedEvent({ id: "call-durable-pending" });
+    hostedRegistryMock.entries["default:call-durable-pending"] = {
+      accountId: "default",
+      callId: "call-durable-pending",
+      eventId: event.id,
+      state: "running",
+      event,
+      smsAttempts: [
+        {
+          phase: "initial",
+          toolCallIdHash: "hash",
+          targetMatches: true,
+          state: "pending",
+        },
+      ],
+      updatedAt: Date.now(),
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpHostedCalls();
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
+      state: "failed",
+      retryable: false,
+      outcome: "durable_sms_attempt_is_ambiguous",
+    });
+  });
+
+  it("resumes one SMS-only correction after a recoverable initial attempt", async () => {
+    const { runtime } = createRuntime();
+    const event = hostedCallEndedEvent({
+      id: "call-recoverable-initial",
+      action: "Text me RECOVERY-CODE-9 after the call.",
+    });
+    hostedRegistryMock.entries["default:call-recoverable-initial"] = {
+      accountId: "default",
+      callId: "call-recoverable-initial",
+      eventId: event.id,
+      state: "running",
+      event,
+      smsAttempts: [
+        {
+          phase: "initial",
+          toolCallIdHash: "hash",
+          targetMatches: true,
+          state: "failed",
+          errorKind: "content_rejected",
+        },
+      ],
+      updatedAt: Date.now(),
+    };
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+      await emitHostedSmsTool(params, {
+        details: { inkboxSendSms: { sent: true } },
+        content: [{ type: "text", text: "Sent text id=text-recovery status=queued" }],
+      });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpHostedCalls();
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const correction = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(correction.ctxPayload.message.bodyForAgent).toContain(
+      "This is the only mandatory correction attempt",
+    );
+    expect(correction.ctxPayload.message.bodyForAgent).toContain("RECOVERY-CODE-9");
+    expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
+      state: "completed",
+      outcome: "success",
+    });
+  });
+
+  it("terminalizes a failed correction journal without another replay", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const event = hostedCallEndedEvent({ id: "call-failed-correction" });
+    hostedRegistryMock.entries["default:call-failed-correction"] = {
+      accountId: "default",
+      callId: "call-failed-correction",
+      eventId: event.id,
+      state: "running",
+      event,
+      smsAttempts: [
+        {
+          phase: "initial",
+          toolCallIdHash: "initial-hash",
+          targetMatches: true,
+          state: "failed",
+          errorKind: "content_rejected",
+        },
+        {
+          phase: "correction",
+          toolCallIdHash: "correction-hash",
+          targetMatches: true,
+          state: "failed",
+          errorKind: "content_rejected",
+        },
+      ],
+      updatedAt: Date.now(),
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpHostedCalls();
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
+      state: "failed",
+      retryable: false,
+      outcome: "durable_sms_attempt_is_ambiguous",
+    });
+  });
+
+  it("replays a clean hosted completion with no durable SMS attempt", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]");
+    const event = hostedCallEndedEvent({
+      id: "call-clean-replay",
+      action: "Review the release notes",
+    });
+    hostedRegistryMock.entries["default:call-clean-replay"] = {
+      accountId: "default",
+      callId: "call-clean-replay",
+      eventId: event.id,
+      state: "running",
+      event,
+      smsAttempts: [],
+      updatedAt: Date.now(),
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpHostedCalls();
+    await flushMicrotasks(50);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(hostedRegistryMock.writes.at(-1)?.state).toBe("completed");
+  });
+
   it("persists terminal hosted SMS failure and does not replay the webhook", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
-      emitHostedSmsTool(params, {
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+      await emitHostedSmsTool(params, {
         isError: true,
         content: [{ type: "text", text: "Recipient has opted out of SMS" }],
       });

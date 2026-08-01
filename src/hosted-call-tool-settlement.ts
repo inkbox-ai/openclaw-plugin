@@ -1,3 +1,8 @@
+import {
+  recordHostedSmsAttemptPending,
+  settleHostedSmsAttempt,
+} from "./hosted-call-registry.js";
+
 const HOSTED_SMS_TOOL = "inkbox_send_sms";
 
 interface ToolHookContext {
@@ -36,6 +41,9 @@ export interface HostedSmsToolReport {
 }
 
 interface ActiveCapture extends HostedSmsToolReport {
+  accountId: string;
+  callId: string;
+  phase: "initial" | "correction";
   sessionKey: string;
   promptMarker: string;
   runId?: string;
@@ -166,18 +174,15 @@ function findAttempt(
   ctx: ToolHookContext,
 ): HostedSmsToolAttempt | undefined {
   const id = toolCallId(event, ctx);
-  if (id) {
-    const exact = capture.attempts.find((attempt) => attempt.toolCallId === id);
-    if (exact) return exact;
-  }
-  const runId = eventRunId(event, ctx);
-  return capture.attempts.find(
-    (attempt) => attempt.outcome === "pending" && (!runId || attempt.runId === runId),
-  );
+  if (!id) return undefined;
+  return capture.attempts.find((attempt) => attempt.toolCallId === id);
 }
 
 /** Begin observing one hosted post-call agent turn in its resolved OpenClaw session. */
 export function beginHostedSmsToolCapture(params: {
+  accountId: string;
+  callId: string;
+  phase: "initial" | "correction";
   sessionKey: string;
   expectedTarget: string;
   promptMarker: string;
@@ -190,6 +195,9 @@ export function beginHostedSmsToolCapture(params: {
     throw new Error(`Hosted SMS settlement is already active for session ${sessionKey}.`);
   }
   const capture: ActiveCapture = {
+    accountId: params.accountId,
+    callId: params.callId,
+    phase: params.phase,
     sessionKey,
     promptMarker,
     expectedTarget: params.expectedTarget.trim(),
@@ -228,53 +236,178 @@ export function bindHostedSmsCaptureToRun(
 }
 
 /** OpenClaw `before_tool_call` hook. Records an attempt before side effects begin. */
-export function recordHostedSmsBeforeToolCall(
+export async function recordHostedSmsBeforeToolCall(
   event: ToolHookEvent,
   ctx: ToolHookContext,
-): void {
+): Promise<{ block: true; blockReason: string } | void> {
   if (event.toolName !== HOSTED_SMS_TOOL) return;
+  const sessionKey = ctx.sessionKey?.trim();
+  const active = sessionKey ? captures.get(sessionKey) : undefined;
+  if (!active || active.closed) return;
   const capture = matchingCapture(event, ctx);
-  if (!capture) return;
+  if (!capture) {
+    return {
+      block: true,
+      blockReason: "Blocked an uncorrelated SMS call during hosted-call settlement.",
+    };
+  }
   const id = toolCallId(event, ctx);
-  if (id && capture.attempts.some((attempt) => attempt.toolCallId === id)) return;
-  capture.attempts.push({
-    target: toolTarget(event.params),
+  if (!id) {
+    return {
+      block: true,
+      blockReason: "Blocked an SMS call without an authoritative tool-call ID.",
+    };
+  }
+  if (capture.attempts.some((attempt) => attempt.toolCallId === id)) {
+    return {
+      block: true,
+      blockReason: "Blocked a duplicate hosted SMS tool-call ID.",
+    };
+  }
+  if (capture.attempts.length > 0) {
+    // The model may try to recover inside the same turn after a tool error.
+    // Settlement owns that decision: no second provider call is allowed.
+    capture.attempts.push({
+      target: toolTarget(event.params),
+      outcome: "failed",
+      errorKind: "recipient_terminal",
+      runId: eventRunId(event, ctx),
+      toolCallId: id,
+    });
+    return {
+      block: true,
+      blockReason: "Blocked a second SMS attempt during hosted-call settlement.",
+    };
+  }
+  const target = toolTarget(event.params);
+  const attempt: HostedSmsToolAttempt = {
+    target,
     outcome: "pending",
     runId: eventRunId(event, ctx),
     toolCallId: id,
-  });
+  };
+  capture.attempts.push(attempt);
+  try {
+    await recordHostedSmsAttemptPending({
+      accountId: capture.accountId,
+      callId: capture.callId,
+      phase: capture.phase,
+      toolCallId: id,
+      targetMatches: target === capture.expectedTarget,
+    });
+  } catch {
+    attempt.outcome = "failed";
+    attempt.errorKind = "ambiguous_provider_failure";
+    return {
+      block: true,
+      blockReason: "Blocked SMS because the durable pre-send journal could not be written.",
+    };
+  }
+  if (target !== capture.expectedTarget) {
+    attempt.outcome = "failed";
+    attempt.errorKind = "recipient_terminal";
+    try {
+      await settleHostedSmsAttempt({
+        accountId: capture.accountId,
+        callId: capture.callId,
+        phase: capture.phase,
+        toolCallId: id,
+        state: "failed",
+        errorKind: "wrong_target",
+      });
+    } catch {
+      // The pending record still prevents replay. Never let a failed journal
+      // update turn this policy block into a provider call.
+    }
+    return {
+      block: true,
+      blockReason: "Blocked hosted SMS to a non-authoritative call target.",
+    };
+  }
 }
 
 /** OpenClaw `after_tool_call` hook. Settles the exact tool result returned to the model. */
-export function recordHostedSmsAfterToolCall(
+export async function recordHostedSmsAfterToolCall(
   event: ToolHookEvent,
   ctx: ToolHookContext,
-): void {
+): Promise<void> {
   if (event.toolName !== HOSTED_SMS_TOOL) return;
   const capture = matchingCapture(event, ctx);
   if (!capture) return;
   let attempt = findAttempt(capture, event, ctx);
   if (!attempt) {
+    const id = toolCallId(event, ctx) ?? "missing";
     attempt = {
       target: toolTarget(event.params),
-      outcome: "pending",
+      outcome: "failed",
+      errorKind: "ambiguous_provider_failure",
       runId: eventRunId(event, ctx),
-      toolCallId: toolCallId(event, ctx),
+      toolCallId: id,
     };
     capture.attempts.push(attempt);
+    // The provider may already have committed. Record that ambiguity after
+    // the fact if possible, but never accept success without the pre-send
+    // durable journal written by before_tool_call.
+    try {
+      await recordHostedSmsAttemptPending({
+        accountId: capture.accountId,
+        callId: capture.callId,
+        phase: capture.phase,
+        toolCallId: id,
+        targetMatches: attempt.target === capture.expectedTarget,
+      });
+      await settleHostedSmsAttempt({
+        accountId: capture.accountId,
+        callId: capture.callId,
+        phase: capture.phase,
+        toolCallId: id,
+        state: "failed",
+        errorKind: "after_hook_without_before_hook",
+      });
+    } catch {
+      // In-memory settlement is already terminal. If pending persisted before
+      // the second write failed, restart handling also treats it as terminal.
+    }
+    return;
   }
+  // A blocked tool may still produce a lifecycle callback in some host
+  // versions. Its journal is already settled (or intentionally absent).
+  if (attempt.outcome !== "pending") return;
   const error = event.error?.trim() || resultText(event.result);
   if (event.error || resultIsError(event.result)) {
     attempt.outcome = "failed";
     attempt.errorKind = classifyHostedSmsError(error || "unknown tool failure");
+    await settleHostedSmsAttempt({
+      accountId: capture.accountId,
+      callId: capture.callId,
+      phase: capture.phase,
+      toolCallId: attempt.toolCallId ?? "missing",
+      state: "failed",
+      errorKind: attempt.errorKind,
+    });
     return;
   }
   if (positiveSendResult(event.result)) {
     attempt.outcome = "success";
+    await settleHostedSmsAttempt({
+      accountId: capture.accountId,
+      callId: capture.callId,
+      phase: capture.phase,
+      toolCallId: attempt.toolCallId ?? "missing",
+      state: "success",
+    });
     return;
   }
   attempt.outcome = "failed";
   attempt.errorKind = "ambiguous_provider_failure";
+  await settleHostedSmsAttempt({
+    accountId: capture.accountId,
+    callId: capture.callId,
+    phase: capture.phase,
+    toolCallId: attempt.toolCallId ?? "missing",
+    state: "failed",
+    errorKind: attempt.errorKind,
+  });
 }
 
 /** OpenClaw `model_call_ended` hook. Abort/termination is terminal and never replayed. */

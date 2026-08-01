@@ -6,6 +6,7 @@ import {
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED,
   AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED,
 } from "@inkbox/sdk";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -302,8 +303,11 @@ export async function persistOpenClawConfigFile(
       setConfigPath(next, entry.path, entry.value);
     }
     await mkdir(dirname(configPath), { recursive: true });
-    const tempPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    const tempPath = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(next, null, 2)}\n`, {
+      mode: 0o600,
+      flag: "wx",
+    });
     await chmod(tempPath, 0o600).catch(() => {});
     await rename(tempPath, configPath);
     await chmod(configPath, 0o600).catch(() => {});
