@@ -121,7 +121,11 @@ function createPrompter(params: {
   asks?: string[];
   confirms?: boolean[];
   selections?: string[];
-} = {}): Prompter & { ask: ReturnType<typeof vi.fn>; confirm: ReturnType<typeof vi.fn> } {
+} = {}): Prompter & {
+  ask: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+  confirm: ReturnType<typeof vi.fn>;
+} {
   const asks = [...(params.asks ?? [])];
   const confirms = [...(params.confirms ?? [])];
   const selections = [...(params.selections ?? [])];
@@ -130,6 +134,7 @@ function createPrompter(params: {
   );
   return {
     ask: vi.fn(async () => asks.shift() ?? ""),
+    pause: vi.fn(async () => undefined),
     confirm,
     select: vi.fn(async (_question: string, _options: any[], defaultValue?: string) => {
       if (selections.length) return selections.shift() as any;
@@ -696,6 +701,12 @@ describe("runSetupWizard", () => {
     });
 
     expect(result.ok).toBe(true);
+    expect(prompter.pause).toHaveBeenCalledWith(
+      "Press Enter to continue and set up phone call handling",
+    );
+    expect(prompter.pause.mock.invocationCallOrder[0]).toBeLessThan(
+      (prompter.select as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0],
+    );
     expect(result.config).toMatchObject({
       voiceStack: "inkbox_voice_ai",
       voiceAiAuthorityMode: "contact_scoped",

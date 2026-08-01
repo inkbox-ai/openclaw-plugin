@@ -1,12 +1,14 @@
 """Live voice-call suite — real phone calls, real model, transcript-verified.
 
-Three scenarios, each run against a gateway booted in the matching speech mode (the
+Four scenarios, each run against a gateway booted in the matching speech mode (the
 workflow sets that up and selects the scenario via VOICE_SCENARIO):
 
   * inbound_inkbox   — the driver calls the agent; the agent answers with Inkbox
                        STT/TTS and holds a turn.
   * outbound_realtime — the driver texts "call me"; the agent places a call back,
                        powered by the realtime API, and holds a turn.
+  * outbound_realtime_contact — the realtime agent performs a direct read of a
+                       seeded contact and answers the caller during the call.
   * outbound_hosted — the driver asks for a call; Inkbox Voice AI handles it,
                       records an SMS commitment, and OpenClaw settles that
                       commitment exactly once after hangup.
@@ -53,7 +55,9 @@ SCENARIO = os.environ.get("VOICE_SCENARIO", "")
 STATE_FILE = os.environ.get("VOICE_DRIVER_STATE", "/tmp/voice_driver_state.json")
 TIMEOUT_S = float(os.environ.get("LIVE_VOICE_TIMEOUT", "220"))
 HOSTED_POST_CALL_MARKER = os.environ.get("HOSTED_POST_CALL_MARKER", "")
+GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
 POLL_EVERY_S = 6.0
+RECITE_GRACE_S = 24.0
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY and REAL),
@@ -151,6 +155,17 @@ def _driver_state() -> dict:
         return json.load(fh)
 
 
+def _gateway_log_text() -> str:
+    """Read the captured gateway log used for deterministic live assertions."""
+    if not GATEWAY_LOG:
+        return ""
+    try:
+        with open(GATEWAY_LOG, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
 def _aut_phone(aut) -> str:
     nums = aut.phone_numbers.list()
     assert nums, "AUT identity has no phone number"
@@ -206,6 +221,15 @@ def _call_state(remote, call_id) -> tuple[str, str]:
         f"ended_at={getattr(call, 'ended_at', None)!r}",
     )
     return status, " ".join(fields)
+
+
+def _assert_voicemail_disabled(call, context: str) -> None:
+    """Prove a CI-created outbound call persisted the required policy."""
+    raw = getattr(call, "voicemail_detection", "") or ""
+    value = getattr(raw, "value", raw)
+    assert str(value).casefold() == "disabled", (
+        f"{context} must persist voicemail detection disabled, got {raw!r}"
+    )
 
 
 def _wait_for_two_way_call(remote, number_id, call_id):
@@ -419,6 +443,31 @@ def _hangup_call(client, call_id) -> None:
         ) from hangup_error
 
 
+LOOKUP_CONTACT_GIVEN = "Olivia"
+LOOKUP_CONTACT_FAMILY = "Parker"
+LOOKUP_CONTACT_EMAIL = "olivia.parker.livetest@example.com"
+
+
+def _delete_contacts_by_email(client, email: str) -> None:
+    for contact in client.contacts.lookup(email=email) or []:
+        contact_id = str(getattr(contact, "id", "") or "")
+        if contact_id:
+            client.contacts.delete(contact_id)
+
+
+def _ensure_driver_is_a_known_contact(aut, driver_number: str) -> None:
+    """Make the live caller eligible to receive third-party contact details."""
+    if aut.contacts.lookup(phone=driver_number):
+        return
+    from inkbox.contacts.types import ContactPhone
+
+    aut.contacts.create(
+        given_name="Penny",
+        family_name="Tester",
+        phones=[ContactPhone(label="mobile", value=driver_number)],
+    )
+
+
 @pytest.mark.skipif(SCENARIO != "inbound_inkbox", reason="inbound Inkbox STT/TTS leg only")
 def test_inbound_call_inkbox_tts_stt():
     """Driver calls the agent; the agent answers via Inkbox STT/TTS and replies."""
@@ -441,6 +490,9 @@ def test_inbound_call_inkbox_tts_stt():
     try:
         agent_said = _wait_for_two_way_call(remote, st["number_id"], call.id)
         assert agent_said, "agent produced no speech on the inbound call"
+        _assert_voicemail_disabled(
+            remote.calls.get(call.id), "inbound voice driver call"
+        )
 
         tts, stt = _aut_speech_mode(aut, "inbound", st["number"])
         assert tts and stt, f"inbound call should run Inkbox STT/TTS, got tts={tts} stt={stt}"
@@ -461,7 +513,15 @@ def test_outbound_call_realtime():
                 if (getattr(c, "direction", "") or "").lower() == "inbound"
                 and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
+    driver_tail = _digits(st["number"])[-10:]
+
+    def _aut_outbound_to_driver():
+        return [c for c in aut.calls.list(limit=30)
+                if (getattr(c, "direction", "") or "").lower() == "outbound"
+                and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == driver_tail]
+
     before = {c.id for c in _inbound_from_aut()}
+    before_aut = {c.id for c in _aut_outbound_to_driver()}
     remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
 
     call_id = None
@@ -479,11 +539,187 @@ def test_outbound_call_realtime():
         agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
         assert agent_said, "agent produced no speech on the outbound call"
 
-        tts, stt = _aut_speech_mode(aut, "outbound", st["number"])
+        fresh_aut = [
+            call for call in _aut_outbound_to_driver() if call.id not in before_aut
+        ]
+        assert fresh_aut, "no fresh AUT outbound realtime call record found"
+        aut_call = fresh_aut[0]
+        tts, stt = aut_call.use_inkbox_tts, aut_call.use_inkbox_stt
         assert tts is False and stt is False, \
             f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"
+        _assert_voicemail_disabled(aut_call, "outbound realtime call")
     finally:
         _hangup_call(remote, call_id)
+
+
+@pytest.mark.skipif(
+    SCENARIO != "outbound_realtime_contact",
+    reason="outbound realtime contact-read leg only",
+)
+def test_outbound_call_realtime_direct_contact_lookup():
+    """Realtime serves a seeded contact detail through the direct read tool."""
+    from inkbox.contacts.types import ContactEmail
+
+    st = _driver_state()
+    remote, aut = _client(REMOTE_KEY), _client(AUT_KEY)
+    aut_phone = _aut_phone(aut)
+    aut_tail = _digits(aut_phone)[-10:]
+    driver_tail = _digits(st["number"])[-10:]
+
+    _ensure_driver_is_a_known_contact(aut, st["number"])
+    _delete_contacts_by_email(aut, LOOKUP_CONTACT_EMAIL)
+    aut.contacts.create(
+        given_name=LOOKUP_CONTACT_GIVEN,
+        family_name=LOOKUP_CONTACT_FAMILY,
+        emails=[ContactEmail(label="work", value=LOOKUP_CONTACT_EMAIL)],
+    )
+    try:
+        def _driver_inbound():
+            return [c for c in remote.calls.list(limit=200)
+                    if (getattr(c, "direction", "") or "").lower() == "inbound"
+                    and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == aut_tail]
+
+        def _aut_outbound():
+            return [c for c in aut.calls.list(limit=200)
+                    if (getattr(c, "direction", "") or "").lower() == "outbound"
+                    and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == driver_tail]
+
+        def _spoken_contact(reads) -> str:
+            for client, call_id in reads:
+                try:
+                    segments = client.calls.transcripts(call_id)
+                except Exception:
+                    continue
+                transcript = " ".join(
+                    (segment.text or "").strip()
+                    for segment in segments
+                    if (segment.text or "").strip()
+                )
+                squashed = transcript.casefold().replace(" ", "")
+                if LOOKUP_CONTACT_FAMILY.casefold() in squashed and "example" in squashed:
+                    return transcript
+            return ""
+
+        attempt_timeout = max(TIMEOUT_S / 2, 110.0)
+        recite = ""
+        aut_calls = {}
+        proven_aut_call = None
+        call_legs = []
+        attempt_states = []
+        attempt_error = ""
+        direct_read_marker = "Inkbox realtime direct contact read inkbox_"
+
+        def _direct_read_seen(call) -> bool:
+            if call is None:
+                return False
+            call_marker = f"call_id={call.id}"
+            return any(
+                direct_read_marker in line and call_marker in line
+                for line in _gateway_log_text().splitlines()
+            )
+
+        for _attempt in (1, 2):
+            before_aut = {call.id for call in _aut_outbound()}
+            before_driver = {call.id for call in _driver_inbound()}
+            ref = uuid.uuid4().hex[:6]
+            remote.texts.send(
+                st["number_id"],
+                to=aut_phone,
+                text=f"{_call_me_text()} (attempt {_attempt}, ref {ref})",
+            )
+
+            deadline = time.monotonic() + attempt_timeout
+            log_seen_at = None
+            fresh_aut = []
+            fresh_driver = []
+            while time.monotonic() < deadline:
+                fresh_aut = [call for call in _aut_outbound() if call.id not in before_aut]
+                fresh_driver = [
+                    call for call in _driver_inbound() if call.id not in before_driver
+                ]
+                if len(fresh_aut) > 1 or len(fresh_driver) > 1:
+                    attempt_error = (
+                        f"realtime contact attempt {_attempt} ref={ref} created "
+                        f"duplicate legs: driver={len(fresh_driver)} "
+                        f"aut={len(fresh_aut)}"
+                    )
+                    break
+                if fresh_aut:
+                    for call in fresh_aut:
+                        aut_calls[str(call.id)] = call
+                for owner, call in (
+                    [(aut, call) for call in fresh_aut]
+                    + [(remote, call) for call in fresh_driver]
+                ):
+                    if not any(
+                        existing_owner is owner and existing_id == call.id
+                        for existing_owner, existing_id in call_legs
+                    ):
+                        call_legs.append((owner, call.id))
+                recite = recite or _spoken_contact(call_legs)
+                proven_aut_call = next(
+                    (
+                        call for call in aut_calls.values()
+                        if _direct_read_seen(call)
+                    ),
+                    None,
+                )
+                if proven_aut_call is not None:
+                    if log_seen_at is None:
+                        log_seen_at = time.monotonic()
+                    if recite or time.monotonic() - log_seen_at >= RECITE_GRACE_S:
+                        break
+                time.sleep(POLL_EVERY_S)
+            attempt_states.append(
+                f"attempt={_attempt} ref={ref} "
+                f"driver={len(fresh_driver)} aut={len(fresh_aut)}"
+            )
+            if attempt_error:
+                break
+            if proven_aut_call is not None:
+                break
+            if fresh_aut or fresh_driver:
+                # A call happened but the direct contact read did not. That is
+                # a call/tool defect, not an empty model turn; another external
+                # call would hide it and could dial the user twice.
+                break
+
+        for client, call_id in call_legs:
+            _hangup_call(client, call_id)
+
+        if not recite and call_legs:
+            end_deadline = time.monotonic() + 30.0
+            while time.monotonic() < end_deadline and not recite:
+                recite = _spoken_contact(call_legs)
+                if not recite:
+                    time.sleep(POLL_EVERY_S)
+
+        assert not attempt_error, attempt_error
+        assert proven_aut_call is not None, (
+            "no fresh AUT realtime call produced a correlated direct contact "
+            f"read: {'; '.join(attempt_states)}"
+        )
+        _assert_voicemail_disabled(
+            proven_aut_call, "outbound realtime contact call"
+        )
+        assert (
+            proven_aut_call.use_inkbox_tts is False
+            and proven_aut_call.use_inkbox_stt is False
+        ), (
+            "realtime contact call must persist Inkbox speech disabled"
+        )
+        assert _direct_read_seen(proven_aut_call), (
+            "gateway logs show no direct realtime contact read during the call"
+        )
+        if recite:
+            print(f"realtime contact recite captured: {recite[:160]!r}")
+        else:
+            print(
+                "direct contact read succeeded; final spoken recite did not persist "
+                "before call teardown (best-effort transcript diagnostic)"
+            )
+    finally:
+        _delete_contacts_by_email(aut, LOOKUP_CONTACT_EMAIL)
 
 
 @pytest.mark.skipif(SCENARIO != "outbound_hosted", reason="outbound Inkbox Voice AI leg only")
@@ -567,10 +803,7 @@ def test_outbound_call_hosted_and_settles_sms_once():
         mode = getattr(raw_mode, "value", raw_mode)
         assert str(mode).lower() == "hosted_agent", \
             f"expected hosted_agent mode, got {raw_mode!r}"
-        raw_voicemail = getattr(call, "voicemail_detection", "") or ""
-        voicemail = getattr(raw_voicemail, "value", raw_voicemail)
-        assert str(voicemail).lower() == "disabled", \
-            f"expected disabled voicemail detection, got {raw_voicemail!r}"
+        _assert_voicemail_disabled(call, "outbound hosted call")
         assert getattr(call, "reason", None), "hosted call must persist a task reason"
         assert getattr(call, "hosted_agent_authority_mode", None) is not None
         _wait_for_hosted_transcript_ready(

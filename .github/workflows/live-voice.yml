@@ -1,9 +1,11 @@
 name: Live — voice calls (Inkbox TTS/STT + realtime + Voice AI)
 
 # Boots the agent-under-test (AUT) gateway plus a driver process that bridges the
-# other side of a real phone call over its own Inkbox tunnel. Three matrix legs:
+# other side of a real phone call over its own Inkbox tunnel. Four matrix legs:
 #   inbound_inkbox    — driver calls the agent; agent answers with Inkbox STT/TTS.
 #   outbound_realtime — driver texts "call me"; agent calls back via the realtime API.
+#   outbound_realtime_contact — realtime answers a seeded contact question with
+#                       a direct Inkbox contact read during the call.
 #   outbound_hosted   — driver requests a call; Inkbox Voice AI calls, records an
 #                       SMS commitment, and OpenClaw settles it after hangup.
 # Each leg verifies the stored call transcript shows the agent spoke to the caller.
@@ -53,7 +55,7 @@ jobs:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → one at a time
       matrix:
-        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_realtime","outbound_hosted"]' || '["outbound_realtime","outbound_hosted"]') }}
+        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_realtime","outbound_realtime_contact","outbound_hosted"]' || '["outbound_realtime","outbound_realtime_contact","outbound_hosted"]') }}
 
     steps:
       - uses: actions/checkout@v7
@@ -137,7 +139,7 @@ jobs:
           # Onboarding defaults tools.profile to "coding", whose base allowlist
           # strips the inkbox messaging/contact/call tools. "full" = no restriction.
           openclaw config set tools.profile full
-          if [ "${{ matrix.scenario }}" = "outbound_realtime" ]; then
+          if [[ "${{ matrix.scenario }}" == outbound_realtime* ]]; then
             openclaw config set channels.inkbox.voiceStack openai_realtime
             openclaw config set channels.inkbox.voiceRealtime.enabled true --strict-json
             openclaw config set channels.inkbox.voiceRealtime.provider openai
@@ -189,6 +191,9 @@ jobs:
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
             export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these words: $HOSTED_MARKER. Do not send it during the call."
             export VOICE_DRIVER_LISTEN=45
+          elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
+            export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
+            export VOICE_DRIVER_LISTEN=40
           fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             python3 "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &

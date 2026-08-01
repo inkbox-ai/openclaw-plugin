@@ -1852,6 +1852,14 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   }
 
   // One explicit selection controls every inbound and outbound call path.
+  if (identity.phoneNumber || imessageEnabled) {
+    const pauseMessage = "Press Enter to continue and set up phone call handling";
+    if (prompter.pause) {
+      await prompter.pause(pauseMessage);
+    } else {
+      await prompter.ask(pauseMessage);
+    }
+  }
   const phoneVoice =
     identity.phoneNumber || imessageEnabled
       ? await configurePhoneVoiceStack({

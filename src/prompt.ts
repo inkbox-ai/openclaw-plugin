@@ -16,6 +16,7 @@ export interface SelectOption<T extends string = string> {
 export interface Prompter {
   ask(question: string, defaultValue?: string): Promise<string>;
   askSecret?(question: string): Promise<string>;
+  pause?(message: string): Promise<void>;
   confirm(question: string, defaultYes?: boolean): Promise<boolean>;
   select?<T extends string>(
     question: string,
@@ -33,6 +34,9 @@ export function adaptOpenClawPrompter(native: WizardPrompter): Prompter {
         ...(defaultValue !== undefined ? { initialValue: defaultValue } : {}),
       }),
     askSecret: (question) => native.text({ message: question, sensitive: true }),
+    pause: async (message) => {
+      await native.text({ message, placeholder: "Press Enter to continue" });
+    },
     confirm: (question, defaultYes = true) =>
       native.confirm({ message: question, initialValue: defaultYes }),
     select: (question, options, defaultValue) =>
@@ -70,6 +74,9 @@ export function createReadlinePrompter(): Prompter {
 
   return {
     ask,
+    pause: async (message) => {
+      await rl.question(`${message} `);
+    },
     confirm,
     close: () => rl.close(),
   };

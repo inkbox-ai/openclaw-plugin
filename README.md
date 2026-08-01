@@ -68,7 +68,9 @@ The setup wizard writes `channels.inkbox` into the active OpenClaw profile and a
 
 ### Docker test shell
 
-The included image preinstalls OpenClaw and builds this checkout. It contains no credentials:
+This is a **manual testing-only** playground; it is not published and is not an
+automated CI or release artifact. The included image preinstalls OpenClaw and
+builds this checkout. It contains no credentials:
 
 ```bash
 docker build -t inkbox-openclaw-plugin .

@@ -33,6 +33,7 @@ AUT_KEY = os.environ.get("OPENCLAW_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 REAL = os.environ.get("LIVE_REAL_MODEL") == "1"
 TIMEOUT_S = float(os.environ.get("LIVE_XCHANNEL_TIMEOUT", "200"))
+CALL_ATTEMPTS = 2
 POLL_EVERY_S = 6.0
 # A cross-channel assertion observes the tool side effect before OpenClaw has
 # necessarily finished the agent turn that produced it.  Starting the next test
@@ -104,6 +105,7 @@ def xc():
     return {
         "remote": remote, "aut": aut,
         "remote_email": remote_email, "remote_pid": remote_pid,
+        "remote_phone": remote_phone,
         "aut_email": aut_email, "aut_phone": aut_phone,
     }
 
@@ -185,52 +187,172 @@ def _inbound_calls_from_aut(remote, remote_pid: str, aut_phone: str):
             and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
 
-def _wait_for_new_call(remote, remote_pid: str, aut_phone: str, before: set):
+def _outbound_calls_to_driver(aut, remote_phone: str):
+    """The AUT-owned outbound records targeting the exact driver."""
+    tail = _digits(remote_phone)[-10:]
+    return [c for c in aut.calls.list(limit=30)
+            if (getattr(c, "direction", "") or "").lower() == "outbound"
+            and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
+
+
+def _wait_for_new_call(
+    remote,
+    remote_pid: str,
+    aut_phone: str,
+    before: set,
+    aut,
+    remote_phone: str,
+    before_aut: set,
+    timeout_s: float,
+    attempt: int,
+    ref: str,
+):
     """Block until an inbound call from the AUT with an id not in ``before`` appears.
 
-    ``before`` is the pre-request snapshot, so a stale call can't satisfy the
-    assertion — same new-id correlation the SMS/email legs use. Fails on timeout.
+    ``before`` and ``before_aut`` are the two owners' pre-request snapshots, so
+    stale or mismatched call legs cannot satisfy the assertion. Returns both
+    fresh-leg counts on timeout so the caller retries only a truly empty model
+    turn, never a partial plugin/API result.
     """
-    deadline = time.monotonic() + TIMEOUT_S
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone):
-            if c.id not in before:
-                _settle_after_tool_side_effect()
-                return  # a fresh call from the AUT landed on the driver's number
+        fresh_driver = [
+            call for call in _inbound_calls_from_aut(remote, remote_pid, aut_phone)
+            if call.id not in before
+        ]
+        fresh_aut = [
+            call for call in _outbound_calls_to_driver(aut, remote_phone)
+            if call.id not in before_aut
+        ]
+        if len(fresh_driver) > 1 or len(fresh_aut) > 1:
+            pytest.fail(
+                f"call request attempt {attempt} ref={ref} created duplicate "
+                f"legs: driver={len(fresh_driver)} aut={len(fresh_aut)}"
+            )
+        if fresh_driver and fresh_aut:
+            raw = getattr(fresh_aut[0], "voicemail_detection", "") or ""
+            value = getattr(raw, "value", raw)
+            assert str(value).casefold() == "disabled", (
+                "cross-channel outbound call must persist voicemail detection "
+                f"disabled, got {raw!r}"
+            )
+            _settle_after_tool_side_effect()
+            return True, len(fresh_driver), len(fresh_aut)
         time.sleep(POLL_EVERY_S)
-    pytest.fail(f"agent did not place a call to the driver within {TIMEOUT_S:.0f}s")
+    fresh_driver = [
+        call for call in _inbound_calls_from_aut(remote, remote_pid, aut_phone)
+        if call.id not in before
+    ]
+    fresh_aut = [
+        call for call in _outbound_calls_to_driver(aut, remote_phone)
+        if call.id not in before_aut
+    ]
+    if len(fresh_driver) > 1 or len(fresh_aut) > 1:
+        pytest.fail(
+            f"call request attempt {attempt} ref={ref} created duplicate legs: "
+            f"driver={len(fresh_driver)} aut={len(fresh_aut)}"
+        )
+    return False, len(fresh_driver), len(fresh_aut)
 
 
 def test_email_request_gets_call(xc):
     """Email asks the agent to CALL; a new inbound call must land on the driver."""
-    remote, remote_pid, aut_phone = xc["remote"], xc["remote_pid"], xc["aut_phone"]
-    # Snapshot BEFORE sending so a pre-existing call can't be mistaken for the reply.
-    before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
-    remote.messages.send(
-        xc["remote_email"], to=[xc["aut_email"]], subject="please call me",
-        body_text=(
-            "Use inkbox_place_call to call my phone number from my contact "
-            "details now. Do not reply by "
-            "email; this is complete only after the call is placed."
-        ),
+    remote, aut = xc["remote"], xc["aut"]
+    remote_pid, remote_phone, aut_phone = (
+        xc["remote_pid"], xc["remote_phone"], xc["aut_phone"]
     )
-    _wait_for_new_call(remote, remote_pid, aut_phone, before)
+    attempt_states = []
+    for attempt in range(CALL_ATTEMPTS):
+        # Re-snapshot before every request. Attempt two can therefore prove its
+        # own side effect instead of accidentally claiming a late attempt-one call.
+        before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
+        before_aut = {c.id for c in _outbound_calls_to_driver(aut, remote_phone)}
+        ref = _token()
+        remote.messages.send(
+            xc["remote_email"],
+            to=[xc["aut_email"]],
+            subject=f"please call me [{ref}]",
+            body_text=(
+                "Use inkbox_place_call to call my phone number from my contact "
+                "details now. Do not reply by email; this is complete only after "
+                f"the call is placed. (attempt {attempt + 1}, ref {ref})"
+            ),
+        )
+        matched, driver_count, aut_count = _wait_for_new_call(
+            remote,
+            remote_pid,
+            aut_phone,
+            before,
+            aut,
+            remote_phone,
+            before_aut,
+            TIMEOUT_S / CALL_ATTEMPTS,
+            attempt + 1,
+            ref,
+        )
+        attempt_states.append(
+            f"attempt={attempt + 1} ref={ref} driver={driver_count} aut={aut_count}"
+        )
+        if matched:
+            return
+        if driver_count or aut_count:
+            pytest.fail(
+                "call request produced an incomplete two-owner result; refusing "
+                f"to retry: {'; '.join(attempt_states)}"
+            )
+    pytest.fail(
+        f"agent did not place a call to the driver after {CALL_ATTEMPTS} "
+        f"fresh requests within {TIMEOUT_S:.0f}s: {'; '.join(attempt_states)}"
+    )
 
 
 def test_sms_request_gets_call(xc):
     """SMS asks the agent to CALL; a new inbound call must land on the driver."""
-    remote, remote_pid, aut_phone = xc["remote"], xc["remote_pid"], xc["aut_phone"]
-    before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
-    # Fresh body each send: the agent replies by calling, not texting, so this
-    # SMS never gets an SMS reply to reset the conversation cadence — two
-    # identical no-reply sends would trip the duplicate_body rule (422).
-    remote.texts.send(
-        remote_pid,
-        to=aut_phone,
-        text=(
-            "Use inkbox_place_call to call my phone number from my contact "
-            "details now. Do not reply by "
-            f"SMS; this is complete only after the call is placed. (ref {_token()})"
-        ),
+    remote, aut = xc["remote"], xc["aut"]
+    remote_pid, remote_phone, aut_phone = (
+        xc["remote_pid"], xc["remote_phone"], xc["aut_phone"]
     )
-    _wait_for_new_call(remote, remote_pid, aut_phone, before)
+    # Fresh body each send: the agent replies by calling, not texting, so this
+    # SMS never gets an SMS reply to reset the conversation cadence. A unique
+    # token avoids the duplicate_body guard and permits one bounded recovery
+    # request when the real model returns an empty/incomplete turn with no tool.
+    attempt_states = []
+    for attempt in range(CALL_ATTEMPTS):
+        before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
+        before_aut = {c.id for c in _outbound_calls_to_driver(aut, remote_phone)}
+        ref = _token()
+        remote.texts.send(
+            remote_pid,
+            to=aut_phone,
+            text=(
+                "Use inkbox_place_call to call my phone number from my contact "
+                "details now. Do not reply by SMS; this is complete only after "
+                f"the call is placed. (attempt {attempt + 1}, ref {ref})"
+            ),
+        )
+        matched, driver_count, aut_count = _wait_for_new_call(
+            remote,
+            remote_pid,
+            aut_phone,
+            before,
+            aut,
+            remote_phone,
+            before_aut,
+            TIMEOUT_S / CALL_ATTEMPTS,
+            attempt + 1,
+            ref,
+        )
+        attempt_states.append(
+            f"attempt={attempt + 1} ref={ref} driver={driver_count} aut={aut_count}"
+        )
+        if matched:
+            return
+        if driver_count or aut_count:
+            pytest.fail(
+                "call request produced an incomplete two-owner result; refusing "
+                f"to retry: {'; '.join(attempt_states)}"
+            )
+    pytest.fail(
+        f"agent did not place a call to the driver after {CALL_ATTEMPTS} "
+        f"fresh requests within {TIMEOUT_S:.0f}s: {'; '.join(attempt_states)}"
+    )
