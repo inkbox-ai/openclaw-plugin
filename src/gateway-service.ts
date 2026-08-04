@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { Prompter } from "./prompt.js";
 
 // Liveness of the host gateway service, as reported by the host CLI.
@@ -16,7 +16,7 @@ export interface GatewayCommandResult {
 
 export type GatewayCommandRunner = (
   args: string[],
-  opts: { timeoutMs?: number; capture?: boolean },
+  opts: { timeoutMs?: number; capture?: boolean; detached?: boolean },
 ) => GatewayCommandResult;
 
 const STATUS_TIMEOUT_MS = 20_000;
@@ -37,6 +37,23 @@ export function hostCommandPrefix(argv = process.argv, execPath = process.execPa
 
 export const defaultGatewayCommandRunner: GatewayCommandRunner = (args, opts) => {
   const [command, ...prefix] = hostCommandPrefix();
+  if (opts.detached) {
+    try {
+      const child = spawn(command, [...prefix, ...args], {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      });
+      // ENOENT and other launch errors arrive asynchronously.  The readiness
+      // poll below remains the source of truth, but an error listener keeps a
+      // failed detached launch from becoming an uncaught process error.
+      child.once("error", () => undefined);
+      child.unref();
+      return { code: 0, stdout: "", stderr: "" };
+    } catch (error) {
+      return { code: 1, stdout: "", stderr: String(error) };
+    }
+  }
   const capture = opts.capture ?? false;
   const res = spawnSync(command, [...prefix, ...args], {
     encoding: "utf8",
@@ -64,6 +81,12 @@ export function parseGatewayStatus(stdout: string): GatewayServiceState | null {
     running: runtime?.status === "running" || pid > 0,
     serviceInstalled: Boolean((service as { loaded?: boolean }).loaded),
   };
+}
+
+export function parseGatewayProbe(stdout: string): boolean {
+  const doc = parseJsonDocument(stdout) as { rpc?: { ok?: boolean } } | null;
+  if (doc?.rpc?.ok === true) return true;
+  return parseGatewayStatus(stdout)?.running === true;
 }
 
 // `--json` output can be preceded by warnings, so retry from the first brace.
@@ -99,6 +122,18 @@ export function detectGatewayState(run: GatewayCommandRunner): GatewayServiceSta
   return parseGatewayStatus(res.stdout) ?? { running: null, serviceInstalled: false };
 }
 
+function detectGatewayProbe(run: GatewayCommandRunner): boolean {
+  try {
+    const res = run(["gateway", "status", "--json"], {
+      timeoutMs: STATUS_TIMEOUT_MS,
+      capture: true,
+    });
+    return parseGatewayProbe(res.stdout);
+  } catch {
+    return false;
+  }
+}
+
 function runLifecycle(run: GatewayCommandRunner, action: string): boolean {
   let res: GatewayCommandResult;
   try {
@@ -112,6 +147,53 @@ function runLifecycle(run: GatewayCommandRunner, action: string): boolean {
   console.log(`  \`openclaw gateway ${action}\` exited ${res.code}.`);
   if (detail) console.log(`    ${detail}`);
   return false;
+}
+
+function runDetached(run: GatewayCommandRunner): boolean {
+  let res: GatewayCommandResult;
+  try {
+    res = run(["gateway", "run", "--force", "--compact"], { detached: true });
+  } catch (error) {
+    console.log(`  Detached OpenClaw gateway launch failed: ${String(error)}`);
+    return false;
+  }
+  if (res.code === 0) return true;
+  const detail = (res.stderr || res.stdout).trim().split("\n").filter(Boolean).pop();
+  console.log("  Detached OpenClaw gateway launch failed.");
+  if (detail) console.log(`    ${detail}`);
+  return false;
+}
+
+/** Start, restart, or install the OpenClaw gateway without prompting. */
+export async function ensureGatewayRunning(
+  run: GatewayCommandRunner = defaultGatewayCommandRunner,
+  opts: { sleep?: (ms: number) => Promise<void>; confirmTimeoutMs?: number } = {},
+): Promise<{ running: boolean; action: "restart" | "start" | "install" }> {
+  const state = detectGatewayState(run);
+  const requestedAction: "restart" | "start" | "install" = state.running
+    ? "restart"
+    : state.serviceInstalled
+      ? "start"
+      : "install";
+  let action: "restart" | "start" | "install" = requestedAction;
+  if (!runLifecycle(run, requestedAction)) {
+    // Minimal containers and remote shells often have no launchd/systemd user
+    // service.  Keep non-interactive bootstrap useful there by starting the
+    // same gateway as a detached child and confirming it through the normal
+    // status poll.  Service-backed hosts retain the durable install path.
+    if (requestedAction !== "install" || !runDetached(run)) {
+      return { running: false, action };
+    }
+    action = "start";
+  }
+  return {
+    running: await waitForGatewayRunning(
+      run,
+      opts.confirmTimeoutMs ?? START_CONFIRM_TIMEOUT_MS,
+      opts.sleep,
+    ),
+    action,
+  };
 }
 
 /**
@@ -131,6 +213,10 @@ export async function waitForGatewayRunning(
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (detectGatewayState(run).running) return true;
+    // Service-manager state remains "unknown" in minimal containers even
+    // while a detached gateway is healthy.  Confirm those environments with
+    // OpenClaw's own local RPC probe.
+    if (detectGatewayProbe(run)) return true;
     if (Date.now() >= deadline) return false;
     await sleep(START_CONFIRM_POLL_MS);
   }

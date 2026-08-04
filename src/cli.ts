@@ -2,6 +2,7 @@ import { Inkbox } from "@inkbox/sdk";
 import { resolveInkboxAccount } from "./accounts.js";
 import { inkboxClientOptions } from "./sdk-options.js";
 import { readIdentityState } from "./state.js";
+import { bootstrap } from "./bootstrap.js";
 
 // CLI registrar — called by OpenClaw with a commander-style `program` so we
 // can attach the `inkbox` subcommand group.
@@ -15,6 +16,43 @@ export function registerInkboxCli(program: any, options: InkboxCliOptions = {}):
   const inkbox = program
     .command("inkbox")
     .description("Inkbox plugin commands (setup, doctor, whoami)");
+
+  inkbox
+    .command("bootstrap")
+    .description("Configure an existing identity without interactive prompts")
+    .requiredOption("--identity <handle>", "Existing Inkbox identity handle")
+    .option("--api-key-stdin", "Read the API key from standard input instead of INKBOX_API_KEY")
+    .option("--base-url <url>", "Inkbox API base URL")
+    .option("--voice-ai", "Use Inkbox Voice AI for incoming calls")
+    .option("--voice-ai-instructions-file <path>", "UTF-8 Voice AI instructions file")
+    .option("--rotate-signing-key", "Replace a remote signing key unavailable locally")
+    .option("--start-gateway", "Start or restart the OpenClaw gateway")
+    .action(async (command: any) => {
+      const fs = await import("node:fs/promises");
+      const instructions = command.voiceAiInstructionsFile
+        ? await fs.readFile(command.voiceAiInstructionsFile, "utf8")
+        : undefined;
+      const env = options.env ?? process.env;
+      let apiKey = env.INKBOX_API_KEY?.trim() ?? "";
+      if (command.apiKeyStdin) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+        apiKey = Buffer.concat(chunks).toString("utf8").trim();
+      }
+      const result = await bootstrap({
+        identity: command.identity,
+        apiKey,
+        baseUrl: command.baseUrl,
+        voiceAi: Boolean(command.voiceAi),
+        voiceAiInstructions: instructions,
+        rotateSigningKey: Boolean(command.rotateSigningKey),
+        startGateway: Boolean(command.startGateway),
+        currentConfig: options.readCurrentConfig?.(),
+        env,
+      });
+      console.log(JSON.stringify(result, null, 2));
+      if (result.status !== "configured") process.exitCode = 2;
+    });
 
   inkbox
     .command("doctor")

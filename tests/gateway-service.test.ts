@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   detectGatewayState,
+  ensureGatewayRunning,
   hostCommandPrefix,
   offerGatewayRestart,
+  parseGatewayProbe,
   parseGatewayStatus,
   printReadyBanner,
   waitForGatewayRunning,
@@ -82,6 +84,23 @@ describe("parseGatewayStatus", () => {
   });
 });
 
+describe("parseGatewayProbe", () => {
+  it("recognizes a healthy RPC probe when systemd state is unavailable", () => {
+    expect(parseGatewayProbe(JSON.stringify({
+      service: { loaded: false, runtime: { status: "unknown" } },
+      rpc: { ok: true },
+    }))).toBe(true);
+  });
+
+  it("does not mistake a busy port for a healthy OpenClaw gateway", () => {
+    expect(parseGatewayProbe(JSON.stringify({
+      service: { loaded: false, runtime: { status: "unknown" } },
+      port: { status: "busy" },
+      rpc: { ok: false },
+    }))).toBe(false);
+  });
+});
+
 describe("detectGatewayState", () => {
   it("reports unknown when the host CLI cannot be run", () => {
     const run: GatewayCommandRunner = vi.fn(() => {
@@ -102,6 +121,51 @@ describe("detectGatewayState", () => {
       ["gateway", "status", "--json", "--no-probe"],
       expect.objectContaining({ capture: true }),
     );
+  });
+});
+
+describe("ensureGatewayRunning", () => {
+  it("falls back to a detached gateway when service installation is unavailable", async () => {
+    const calls: Array<{ args: string[]; detached: boolean }> = [];
+    let statusCount = 0;
+    const run: GatewayCommandRunner = vi.fn((args, opts) => {
+      if (args[1] === "status") {
+        statusCount += 1;
+        return {
+          code: 0,
+          stdout: args.includes("--no-probe")
+            ? statusJson({ running: false, loaded: false })
+            : JSON.stringify({ rpc: { ok: statusCount >= 2 } }),
+          stderr: "",
+        };
+      }
+      calls.push({ args, detached: opts.detached === true });
+      if (args[1] === "install") return { code: 1, stdout: "", stderr: "systemd unavailable" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await expect(ensureGatewayRunning(run, fastConfirm)).resolves.toEqual({
+      running: true,
+      action: "start",
+    });
+    expect(calls).toEqual([
+      { args: ["gateway", "install"], detached: false },
+      { args: ["gateway", "run", "--force", "--compact"], detached: true },
+    ]);
+  });
+
+  it("reports failure when neither service nor detached launch becomes ready", async () => {
+    const run: GatewayCommandRunner = vi.fn((args) => {
+      if (args[1] === "status") {
+        return { code: 0, stdout: statusJson({ running: false, loaded: false }), stderr: "" };
+      }
+      return { code: args[1] === "install" ? 1 : 0, stdout: "", stderr: "" };
+    });
+
+    await expect(ensureGatewayRunning(run, fastConfirm)).resolves.toEqual({
+      running: false,
+      action: "start",
+    });
   });
 });
 
@@ -239,8 +303,8 @@ describe("waitForGatewayRunning", () => {
     const { run } = createRunner([statusJson({ running: false, loaded: true })]);
 
     await expect(waitForGatewayRunning(run, 0, noSleep)).resolves.toBe(false);
-    // Timeout 0 still probes once before giving up.
-    expect(run).toHaveBeenCalledTimes(1);
+    // Timeout 0 still checks service state and the RPC probe once.
+    expect(run).toHaveBeenCalledTimes(2);
   });
 });
 
