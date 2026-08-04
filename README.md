@@ -77,7 +77,7 @@ openclaw inkbox bootstrap --identity my-agent \
 unset INKBOX_API_KEY
 ```
 
-`bootstrap` validates the exact identity, scopes down an admin key before saving it, preserves existing Voice AI settings, updates the active OpenClaw profile, and starts, restarts, or installs the gateway service. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
+`bootstrap` validates the exact identity, scopes down an admin key before saving it, preserves existing Voice AI settings, updates the active OpenClaw profile, and starts, restarts, or installs the gateway service. When it starts the gateway, it disables the optional startup agent prewarm so bootstrap can finish safely from inside a live OpenClaw session; the first real inbound turn may pay the one-time cold-start cost. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
 
 ### Docker test shell
 

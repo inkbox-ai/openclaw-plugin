@@ -67,6 +67,7 @@ describe("bootstrap", () => {
         identity: "helper",
         signingKey: "signing-secret",
         voiceStack: "inkbox_voice_ai",
+        voiceAgentPrewarm: false,
       }),
       expect.any(Object),
     );

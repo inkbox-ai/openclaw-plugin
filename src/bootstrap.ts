@@ -207,6 +207,11 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
       tunnelName: identityHandle,
       voiceStack: options.voiceAi ? "inkbox_voice_ai" : undefined,
       voiceAiAuthorityMode: options.voiceAi ? authorityMode : undefined,
+      // Starting a gateway from inside a live OpenClaw agent turn must not
+      // launch the optional warmup agent concurrently: OpenClaw protects the
+      // active session from that takeover. The first real inbound turn still
+      // works normally; it may only pay the one-time cold-start cost.
+      voiceAgentPrewarm: options.startGateway ? false : undefined,
     };
     const persisted = await persistOpenClawConfigFile(config, {
       currentConfig: options.currentConfig,

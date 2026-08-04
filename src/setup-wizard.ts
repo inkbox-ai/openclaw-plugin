@@ -51,6 +51,7 @@ export interface WizardConfig {
   voiceStack?: PhoneVoiceStack;
   voiceAiAuthorityMode?: VoiceAiAuthorityMode;
   voicemailDetection?: "enabled" | "disabled";
+  voiceAgentPrewarm?: boolean;
   voiceRealtime?: WizardVoiceRealtimeConfig;
 }
 
@@ -265,6 +266,12 @@ export function buildOpenClawConfigBatch(
     batch.push({
       path: "channels.inkbox.voicemailDetection",
       value: config.voicemailDetection,
+    });
+  }
+  if (typeof config.voiceAgentPrewarm === "boolean") {
+    batch.push({
+      path: "channels.inkbox.voiceAgentPrewarm",
+      value: config.voiceAgentPrewarm,
     });
   }
   batch.push(toolAllowOperation(currentConfig));
