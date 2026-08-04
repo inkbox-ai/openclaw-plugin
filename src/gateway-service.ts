@@ -114,6 +114,24 @@ function runLifecycle(run: GatewayCommandRunner, action: string): boolean {
   return false;
 }
 
+/** Start, restart, or install the OpenClaw gateway without prompting. */
+export async function ensureGatewayRunning(
+  run: GatewayCommandRunner = defaultGatewayCommandRunner,
+  opts: { sleep?: (ms: number) => Promise<void>; confirmTimeoutMs?: number } = {},
+): Promise<{ running: boolean; action: "restart" | "start" | "install" }> {
+  const state = detectGatewayState(run);
+  const action = state.running ? "restart" : state.serviceInstalled ? "start" : "install";
+  if (!runLifecycle(run, action)) return { running: false, action };
+  return {
+    running: await waitForGatewayRunning(
+      run,
+      opts.confirmTimeoutMs ?? START_CONFIRM_TIMEOUT_MS,
+      opts.sleep,
+    ),
+    action,
+  };
+}
+
 /**
  * Poll for gateway liveness after a start or install.
  *

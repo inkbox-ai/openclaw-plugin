@@ -66,6 +66,19 @@ openclaw inkbox doctor
 
 The setup wizard writes `channels.inkbox` into the active OpenClaw profile and adds the Inkbox tool group to the profile's tool policy.
 
+### Bootstrap an existing identity without prompts
+
+For unattended agent setup, install the plugin first, then pass the API key through the environment:
+
+```bash
+export INKBOX_API_KEY="ApiKey_..."
+openclaw inkbox bootstrap --identity my-agent \
+  --voice-ai --rotate-signing-key --start-gateway
+unset INKBOX_API_KEY
+```
+
+`bootstrap` validates the exact identity, scopes down an admin key before saving it, preserves existing Voice AI settings, updates the active OpenClaw profile, and starts, restarts, or installs the gateway service. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
+
 ### Docker test shell
 
 This is a **manual testing-only** playground; it is not published and is not an

@@ -6,6 +6,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Added
 
+- A resumable, non-interactive `openclaw inkbox bootstrap` command for existing identities, hosted Voice AI, explicit signing-key rotation, and gateway service startup.
 - A native three-option phone call voice-stack setup flow for Inkbox Voice AI, OpenAI Realtime API, and Inkbox TTS/STT.
 - Durable `call.ended` processing for hosted calls, including full transcript retrieval, post-call action reconciliation, replay after restart, and suppression of obsolete text replies.
 
