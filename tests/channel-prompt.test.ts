@@ -40,7 +40,7 @@ describe("inkbox channel agent prompt", () => {
     expect(rules?.join("\n")).toContain(
       "marker authenticates the current sender",
     );
-    expect(rules?.join("\n")).toContain("do not refuse it on generic privacy grounds");
+    expect(rules?.join("\n")).toContain("do not mask, abbreviate, or refuse");
     expect(rules?.join("\n")).toContain(
       "does not authorize disclosing another contact's details",
     );
