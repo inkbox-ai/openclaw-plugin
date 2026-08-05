@@ -14,8 +14,8 @@ workflow sets that up and selects the scenario via VOICE_SCENARIO):
                       commitment exactly once after hangup.
 
 A companion driver process (voice_driver.py) bridges the driver's side of the call
-over an Inkbox tunnel and speaks one line. We then read the stored call transcript
-and assert both parties spoke — proving the agent reached the caller out loud.
+over an Inkbox tunnel and speaks one line. The driver-owned leg must preserve that
+local line; the paired agent-owned leg must preserve both parties.
 """
 
 from __future__ import annotations
@@ -271,6 +271,58 @@ def _call_state(remote, call_id) -> tuple[str, str]:
     return status, " ".join(fields)
 
 
+def _pair_filter_unavailable(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return isinstance(exc, TypeError) or status == 422
+
+
+def _wait_for_agent_leg(
+    driver, aut, driver_call_id, fallback_candidates, *, direction, deadline
+):
+    """Fetch the paired leg through the AUT identity, with a strict old-API fallback."""
+    while time.monotonic() < deadline:
+        driver_call = driver.calls.get(driver_call_id)
+        pair_id = getattr(driver_call, "paired_call_id", None)
+        if pair_id:
+            try:
+                paired = aut.calls.list(limit=2, paired_call_id=pair_id)
+            except Exception as exc:
+                if not _pair_filter_unavailable(exc):
+                    raise
+                paired = None
+            if paired is not None:
+                assert len(paired) <= 1, (
+                    f"paired_call_id={pair_id} returned duplicate AUT legs: "
+                    f"{[str(call.id) for call in paired]}"
+                )
+                if paired:
+                    candidate = paired[0]
+                    assert (getattr(candidate, "direction", "") or "").lower() == direction
+                    return candidate
+                time.sleep(POLL_EVERY_S)
+                continue
+        candidates = fallback_candidates()
+        assert len(candidates) <= 1, (
+            "fallback call correlation found ambiguous AUT legs: "
+            f"{[str(call.id) for call in candidates]}"
+        )
+        if candidates:
+            candidate = candidates[0]
+            assert (getattr(candidate, "direction", "") or "").lower() == direction
+            candidate_pair_id = getattr(candidate, "paired_call_id", None)
+            if pair_id and candidate_pair_id:
+                assert str(candidate_pair_id) == str(pair_id)
+            driver_created = _message_created_at(driver_call)
+            candidate_created = _message_created_at(candidate)
+            assert driver_created is not None and candidate_created is not None
+            assert abs((driver_created - candidate_created).total_seconds()) <= 60
+            return candidate
+        time.sleep(POLL_EVERY_S)
+    pytest.fail("paired AUT call leg was not visible before the shared deadline")
+
+
 def _assert_voicemail_disabled(call, context: str) -> None:
     """Prove a CI-created outbound call persisted the required policy."""
     raw = getattr(call, "voicemail_detection", "") or ""
@@ -280,9 +332,9 @@ def _assert_voicemail_disabled(call, context: str) -> None:
     )
 
 
-def _wait_for_two_way_call(remote, number_id, call_id):
+def _wait_for_two_way_call(remote, number_id, call_id, *, deadline=None):
     """Block until the call transcript shows BOTH the agent and the driver spoke."""
-    deadline = time.monotonic() + TIMEOUT_S
+    deadline = deadline or (time.monotonic() + TIMEOUT_S)
     last = ""
     ended_at = None
     while time.monotonic() < deadline:
@@ -293,7 +345,7 @@ def _wait_for_two_way_call(remote, number_id, call_id):
             rem, loc = [], []
             transcript_state = f"transcripts not ready: {exc!r}"
         if not transcript_state and rem and loc:
-            agent_said = " | ".join(s.text.strip() for s in rem)
+            agent_said = " | ".join(s.text.strip() for s in loc)
             return agent_said  # the agent reached the caller out loud, in a two-way call
         try:
             status, state = _call_state(remote, call_id)
@@ -313,17 +365,29 @@ def _wait_for_two_way_call(remote, number_id, call_id):
     pytest.fail(f"agent never held a two-way call within {TIMEOUT_S:.0f}s ({last})")
 
 
-def _aut_speech_mode(aut, direction, driver_number):
-    """(use_inkbox_tts, use_inkbox_stt) of the agent's most recent answered call
-    in `direction` with the driver. Tells Inkbox STT/TTS (True/True) from realtime
-    (False/False), so each leg can prove it ran the speech path it claims."""
-    tail = _digits(driver_number)[-10:]
-    answered = [c for c in aut.calls.list(limit=10)
-                if (getattr(c, "direction", "") or "").lower() == direction
-                and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
-                and c.use_inkbox_tts is not None]
-    assert answered, f"no answered {direction} agent call with the driver found"
-    c = answered[0]  # newest first
+def _wait_for_driver_local_speech(remote, number_id, call_id, *, deadline):
+    """Require only the scripted driver's own speech on the driver leg."""
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            _all, _rem, local = _segments(remote, number_id, call_id)
+        except Exception as exc:
+            local = []
+            last = f"transcripts not ready: {exc!r}"
+        if local:
+            return " | ".join(segment.text.strip() for segment in local)
+        status, state = _call_state(remote, call_id)
+        last = f"driver local segments={len(local)}; {state}"
+        if status in TERMINAL_FAILURE_STATUSES:
+            pytest.fail(f"driver leg ended before local speech persisted ({last})")
+        time.sleep(POLL_EVERY_S)
+    pytest.fail(f"driver speech never persisted before the shared deadline ({last})")
+
+
+def _aut_speech_mode(aut, call_id):
+    """Speech flags from the exact call leg fetched with the AUT identity."""
+    c = aut.calls.get(call_id)
+    assert c.use_inkbox_tts is not None
     return c.use_inkbox_tts, c.use_inkbox_stt
 
 
@@ -337,7 +401,7 @@ def _outbound_texts_to(aut, aut_number_id, recipient_number):
 def _wait_for_hosted_transcript_ready(
     remote, remote_number_id, call_id, marker, deadline, progress,
 ):
-    """Require agent speech plus the persisted caller's post-call SMS intent."""
+    """Require the persisted caller's post-call SMS intent on the driver leg."""
     expected_marker = _voice_marker_key(marker)
     assert expected_marker
     while time.monotonic() < deadline:
@@ -360,8 +424,7 @@ def _wait_for_hosted_transcript_ready(
                 caller_text
             )
             if (
-                agent_segments
-                and has_after_call
+                has_after_call
                 and has_sms_intent
                 and expected_marker in _voice_marker_key(caller_text)
             ):
@@ -523,6 +586,14 @@ def test_inbound_call_inkbox_tts_stt():
     st = _driver_state()
     remote, aut = _client(REMOTE_KEY), _client(AUT_KEY)
     aut_phone = _aut_phone(aut)
+    driver_tail = _digits(st["number"])[-10:]
+    baseline_aut = {
+        candidate.id
+        for candidate in aut.calls.list(limit=200)
+        if (getattr(candidate, "direction", "") or "").lower() == "inbound"
+        and _digits(getattr(candidate, "remote_phone_number", "") or "")[-10:]
+        == driver_tail
+    }
 
     # Server-side contact rules run before the plugin or its local allow-all
     # setting. Whitelisted smoke identities therefore need the driver allowed
@@ -537,13 +608,35 @@ def test_inbound_call_inkbox_tts_stt():
         voicemail_detection="disabled",
     )
     try:
-        agent_said = _wait_for_two_way_call(remote, st["number_id"], call.id)
+        deadline = time.monotonic() + TIMEOUT_S
+        aut_call = _wait_for_agent_leg(
+            remote,
+            aut,
+            call.id,
+            lambda: [
+                candidate
+                for candidate in aut.calls.list(limit=200)
+                if candidate.id not in baseline_aut
+                and (getattr(candidate, "direction", "") or "").lower()
+                == "inbound"
+                and _digits(getattr(candidate, "remote_phone_number", "") or "")[-10:]
+                == driver_tail
+            ],
+            direction="inbound",
+            deadline=deadline,
+        )
+        _wait_for_driver_local_speech(
+            remote, st["number_id"], call.id, deadline=deadline
+        )
+        agent_said = _wait_for_two_way_call(
+            aut, "unused-number-id", aut_call.id, deadline=deadline
+        )
         assert agent_said, "agent produced no speech on the inbound call"
         _assert_voicemail_disabled(
             remote.calls.get(call.id), "inbound voice driver call"
         )
 
-        tts, stt = _aut_speech_mode(aut, "inbound", st["number"])
+        tts, stt = _aut_speech_mode(aut, aut_call.id)
         assert tts and stt, f"inbound call should run Inkbox STT/TTS, got tts={tts} stt={stt}"
     finally:
         _hangup_call(remote, call.id)
@@ -584,15 +677,25 @@ def test_outbound_call_realtime():
                 break
             time.sleep(POLL_EVERY_S)
         assert call_id, f"agent never placed a call back within {TIMEOUT_S:.0f}s"
-
-        agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
+        aut_call = _wait_for_agent_leg(
+            remote,
+            aut,
+            call_id,
+            lambda: [
+                call
+                for call in _aut_outbound_to_driver()
+                if call.id not in before_aut
+            ],
+            direction="outbound",
+            deadline=deadline,
+        )
+        _wait_for_driver_local_speech(
+            remote, st["number_id"], call_id, deadline=deadline
+        )
+        agent_said = _wait_for_two_way_call(
+            aut, "unused-number-id", aut_call.id, deadline=deadline
+        )
         assert agent_said, "agent produced no speech on the outbound call"
-
-        fresh_aut = [
-            call for call in _aut_outbound_to_driver() if call.id not in before_aut
-        ]
-        assert fresh_aut, "no fresh AUT outbound realtime call record found"
-        aut_call = fresh_aut[0]
         tts, stt = aut_call.use_inkbox_tts, aut_call.use_inkbox_stt
         assert tts is False and stt is False, \
             f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"
@@ -728,6 +831,31 @@ def test_outbound_call_realtime_direct_contact_lookup():
                 # a call/tool defect, not an empty model turn; another external
                 # call would hide it and could dial the user twice.
                 break
+
+        assert fresh_driver, "driver call leg was not visible"
+        correlated_aut_call = _wait_for_agent_leg(
+            remote,
+            aut,
+            fresh_driver[0].id,
+            lambda: fresh_aut,
+            direction="outbound",
+            deadline=time.monotonic() + 30.0,
+        )
+        assert proven_aut_call is not None
+        assert correlated_aut_call.id == proven_aut_call.id
+        proof_deadline = time.monotonic() + 30.0
+        _wait_for_driver_local_speech(
+            remote,
+            st["number_id"],
+            fresh_driver[0].id,
+            deadline=proof_deadline,
+        )
+        _wait_for_two_way_call(
+            aut,
+            "unused-number-id",
+            correlated_aut_call.id,
+            deadline=proof_deadline,
+        )
 
         for client, call_id in call_legs:
             _hangup_call(client, call_id)
@@ -885,7 +1013,19 @@ def test_outbound_call_hosted_and_settles_sms_once():
         # the AUT's outbound record captures who drove the call, while the
         # driver's inbound record captures its own client WebSocket answer
         # path. Assert the mode and reconcile completion against the AUT record.
-        call = aut.calls.get(aut_call_id)
+        call = _wait_for_agent_leg(
+            remote,
+            aut,
+            remote_call_id,
+            lambda: [
+                candidate
+                for candidate in _outbound_calls_to_driver()
+                if candidate.id not in before_aut_calls
+            ],
+            direction="outbound",
+            deadline=action_gate_deadline,
+        )
+        aut_call_id = call.id
         raw_mode = getattr(call, "mode", "") or ""
         mode = getattr(raw_mode, "value", raw_mode)
         assert str(mode).lower() == "hosted_agent", \
@@ -905,6 +1045,18 @@ def test_outbound_call_hosted_and_settles_sms_once():
             HOSTED_POST_CALL_MARKER,
             action_gate_deadline,
             progress,
+        )
+        _wait_for_driver_local_speech(
+            remote,
+            st["number_id"],
+            remote_call_id,
+            deadline=action_gate_deadline,
+        )
+        _wait_for_two_way_call(
+            aut,
+            "unused-number-id",
+            aut_call_id,
+            deadline=action_gate_deadline,
         )
         _wait_for_open_post_call_action(
             aut,

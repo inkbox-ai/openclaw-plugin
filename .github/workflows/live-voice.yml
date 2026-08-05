@@ -8,7 +8,7 @@ name: Live — voice calls (Inkbox TTS/STT + realtime + Voice AI)
 #                       a direct Inkbox contact read during the call.
 #   outbound_hosted   — driver requests a call; Inkbox Voice AI calls, records an
 #                       SMS commitment, and OpenClaw settles it after hangup.
-# Each leg verifies the stored call transcript shows the agent spoke to the caller.
+# Each leg verifies driver-local speech and a two-way paired agent transcript.
 # Real model + real calls, so this runs only on ready (non-draft) PRs + dispatch, and
 # shares the AUT tunnel lock with the other live suites.
 on:
