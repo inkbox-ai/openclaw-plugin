@@ -10,6 +10,11 @@ import test_voice as voice
 import voice_marker
 
 
+def test_voice_driver_allows_realtime_response_latency():
+    driver = (Path(__file__).parent / "voice_driver.py").read_text()
+    assert 'VOICE_DRIVER_LISTEN", "30"' in driver
+
+
 def _call_with(*items):
     return SimpleNamespace(post_call_action_items=list(items))
 
