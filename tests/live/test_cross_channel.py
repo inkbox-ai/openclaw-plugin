@@ -203,9 +203,11 @@ def test_email_request_gets_sms_response(xc):
     remote.messages.send(
         xc["remote_email"], to=[xc["aut_email"]], subject=f"[{token}] text me please",
         body_text=(
-            "Use inkbox_send_sms to send my phone number from my contact "
-            f"details an SMS that says: lalala {token}. Do not reply by email; "
-            "this is complete only after the SMS is sent."
+            "Cross-channel action required. FIRST use inkbox_send_sms. Resolve "
+            "the recipient as my phone number from my authenticated Inkbox "
+            f"contact details. Send exactly: lalala {token}. Do not substitute "
+            "a reply email or an empty response. This is complete only after "
+            "the SMS tool succeeds."
         ),
     )
 
@@ -413,9 +415,11 @@ def test_sms_request_gets_email_response(xc):
             xc["remote_pid"],
             to=xc["aut_phone"],
             text=(
-                "Use inkbox_send_email to send my email address from my contact "
-                f"details an email containing the code {token}. Do not send the "
-                "code back by SMS; this is complete only after the email is sent. "
+                "Cross-channel action required. FIRST use inkbox_send_email. "
+                "Resolve the recipient as my email address from my authenticated "
+                f"Inkbox contact details. The email must contain code {token}. "
+                "Do not substitute an SMS reply or an empty response. This is "
+                "complete only after the email tool succeeds. "
                 f"(attempt {attempt + 1}, ref {token})"
             ),
         )

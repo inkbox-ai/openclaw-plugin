@@ -30,11 +30,17 @@ describe("inkbox channel agent prompt", () => {
     expect(rules?.join("\n")).toContain(
       "NEVER call inkbox_send_email, inkbox_send_sms, or inkbox_send_imessage",
     );
+    expect(rules?.join("\n")).toContain(
+      "MUST use the matching Inkbox send tool before finishing the turn",
+    );
+    expect(rules?.join("\n")).toContain(
+      "A normal reply on the inbound channel does not satisfy that request",
+    );
     expect(rules?.join("\n")).toContain("include the literal requested values");
     expect(rules?.join("\n")).toContain(
-      "authenticated current sender asks for their own Inkbox contact-card details",
+      "marker authenticates the current sender",
     );
-    expect(rules?.join("\n")).toContain("do not mask, abbreviate, or refuse");
+    expect(rules?.join("\n")).toContain("do not refuse it on generic privacy grounds");
     expect(rules?.join("\n")).toContain(
       "does not authorize disclosing another contact's details",
     );
