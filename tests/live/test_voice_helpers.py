@@ -232,7 +232,7 @@ def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hang
         'export VOICE_DRIVER_LINE="Create one post-call action now with both its title '
         'and details exactly: Send SMS $HOSTED_MARKER. Then list the actions. If either '
         'field lacks that exact phrase, edit that same action until both match. Only '
-        'then read the five-word body back. After we hang up, send one SMS containing '
+        'then read the five-word body back. After we hang up, send me one SMS containing '
         'exactly $HOSTED_MARKER. Do not send it during the call."'
     ) in workflow
     assert "send me one SMS containing exactly these words" not in workflow
