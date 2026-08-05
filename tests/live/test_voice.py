@@ -696,7 +696,7 @@ def test_outbound_call_realtime():
             aut, "unused-number-id", aut_call.id, deadline=deadline
         )
         assert agent_said, "agent produced no speech on the outbound call"
-        tts, stt = aut_call.use_inkbox_tts, aut_call.use_inkbox_stt
+        tts, stt = _aut_speech_mode(aut, aut_call.id)
         assert tts is False and stt is False, \
             f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"
         _assert_voicemail_disabled(aut_call, "outbound realtime call")
@@ -875,10 +875,8 @@ def test_outbound_call_realtime_direct_contact_lookup():
         _assert_voicemail_disabled(
             proven_aut_call, "outbound realtime contact call"
         )
-        assert (
-            proven_aut_call.use_inkbox_tts is False
-            and proven_aut_call.use_inkbox_stt is False
-        ), (
+        tts, stt = _aut_speech_mode(aut, proven_aut_call.id)
+        assert tts is False and stt is False, (
             "realtime contact call must persist Inkbox speech disabled"
         )
         assert _direct_read_seen(proven_aut_call), (

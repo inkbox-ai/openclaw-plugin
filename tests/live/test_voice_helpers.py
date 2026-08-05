@@ -74,6 +74,19 @@ def test_owned_leg_transcript_proof_uses_local_speech_correctly():
     ) == "agent reply"
 
 
+def test_aut_speech_mode_refreshes_the_exact_owned_leg():
+    requested = []
+
+    def get(call_id):
+        requested.append(call_id)
+        return SimpleNamespace(use_inkbox_tts=False, use_inkbox_stt=False)
+
+    assert voice._aut_speech_mode(
+        SimpleNamespace(calls=SimpleNamespace(get=get)), "aut-call-id"
+    ) == (False, False)
+    assert requested == ["aut-call-id"]
+
+
 def test_open_post_call_action_matches_marker_and_sms_intent_across_shapes():
     call = _call_with(
         {
