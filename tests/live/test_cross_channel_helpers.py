@@ -1,7 +1,9 @@
-"""Focused contracts for bounded cross-channel email recovery."""
+"""Focused contracts for bounded cross-channel recovery and read resilience."""
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+
+import pytest
 
 import test_cross_channel as cross
 
@@ -120,3 +122,33 @@ def test_fresh_rows_require_new_owner_id_at_or_after_server_watermark():
     assert cross._fresh(
         [stale_id, stale_time, fresh], {"stale-id"}, watermark
     ) == [fresh]
+
+
+def test_idempotent_read_returns_after_transient_exceptions(monkeypatch):
+    attempts = []
+    outcomes = iter([ConnectionError("private endpoint"), ["ok"]])
+    monkeypatch.setattr(cross.time, "sleep", lambda delay: attempts.append(delay))
+
+    def read():
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    assert cross._read_with_retry(read, "call history") == ["ok"]
+    assert attempts == [cross.READ_BACKOFF_S]
+
+
+def test_idempotent_read_exhaustion_is_sanitized(monkeypatch):
+    monkeypatch.setattr(cross, "READ_ATTEMPTS", 2)
+    monkeypatch.setattr(cross.time, "sleep", lambda _delay: None)
+
+    def read():
+        raise ConnectionError("https://private.invalid/resource?id=secret")
+
+    with pytest.raises(AssertionError) as failure:
+        cross._read_with_retry(read, "call history")
+
+    message = str(failure.value)
+    assert "ConnectionError" in message
+    assert "private.invalid" not in message

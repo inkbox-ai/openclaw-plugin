@@ -207,7 +207,7 @@ jobs:
         run: |
           LIVE_REAL_MODEL=1 VOICE_DRIVER_STATE="$DRIVER_STATE" \
             python3 -m pytest \
-              tests/live/test_voice_helpers.py tests/live/test_voice.py -v
+              tests/live/test_voice_helpers.py tests/live/test_voice.py -v --tb=short
 
       - name: Report content-free failure state
         if: failure() || cancelled()

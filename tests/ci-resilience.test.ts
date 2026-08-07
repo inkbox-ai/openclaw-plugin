@@ -33,6 +33,9 @@ describe("CI resilience contracts", () => {
       expect(workflow).not.toMatch(/cat \"\$(?:GATEWAY_LOG|DRIVER_LOG|DRIVER_STATE)/);
       expect(workflow).not.toContain("openclaw-*.log");
       expect(workflow).not.toContain("AUT handle:");
+      if (name !== "live-a2a.yml") {
+        expect(workflow).toContain("--tb=short");
+      }
     }
   });
 
