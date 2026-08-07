@@ -178,6 +178,11 @@ export const inkboxAccountConfigJsonSchema = {
     voiceAiAuthorityMode: voiceAiAuthorityModeSchema,
     voicemailDetection: voicemailDetectionSchema,
     vault: vaultSchema,
+    skipWebhookReconcile: {
+      type: "boolean",
+      description:
+        "Leave webhook subscriptions untouched at startup. For deployments that provision them ahead of time, where the destination is fixed or this API key may not change it. They must already point at this gateway's webhook URL.",
+    },
     allowedRecipients: {
       type: "array",
       items: { type: "string" },

@@ -215,6 +215,12 @@ export interface ConfigureIdentityDeliveryOptions {
   callWebsocketUrl?: string;
   voiceStack?: PhoneVoiceStack;
   logger?: PluginLogger;
+  /**
+   * Leave webhook subscriptions untouched. For deployments that provision them
+   * ahead of time, where the destination is fixed or this API key may not
+   * change it; they must already point at `webhookUrl`.
+   */
+  skipWebhookReconcile?: boolean;
 }
 
 const DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS = 1200;
@@ -5173,6 +5179,13 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
 export async function configureInkboxIdentityDelivery(
   opts: ConfigureIdentityDeliveryOptions,
 ): Promise<void> {
+  if (opts.skipWebhookReconcile) {
+    opts.logger?.info?.(
+      `Leaving Inkbox webhook subscriptions alone; expecting them to already deliver to ${opts.webhookUrl}`,
+    );
+    return;
+  }
+
   const [identity, inkbox] = await Promise.all([
     opts.runtime.getIdentity(),
     opts.runtime.getClient(),
