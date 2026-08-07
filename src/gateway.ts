@@ -63,6 +63,21 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
   });
 }
 
+/**
+ * Whether this account leaves webhook subscriptions alone at startup.
+ *
+ * Account config wins over the environment so a deployment can opt in per
+ * account; both default to reconciling, which is what an agent that owns its
+ * own ingress wants.
+ */
+function skipWebhookReconcile(account: ResolvedInkboxAccount): boolean {
+  const configured = (account.config as { skipWebhookReconcile?: boolean })
+    .skipWebhookReconcile;
+  if (typeof configured === "boolean") return configured;
+  const raw = (process.env.INKBOX_SKIP_WEBHOOK_RECONCILE ?? "").trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(raw);
+}
+
 function routeKey(accountId: string, path: string): string {
   return `${accountId}:${path}`;
 }
@@ -212,6 +227,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
             : { callWebhookUrl: webhookUrl }),
         voiceStack: account.config.voiceStack,
         logger: ctx.log,
+        skipWebhookReconcile: skipWebhookReconcile(account),
       });
       await bridge.catchUpA2A();
       await bridge.catchUpHostedCalls();
@@ -267,6 +283,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
       : { callWebsocketUrl }),
     voiceStack: account.config.voiceStack,
     logger: ctx.log,
+    skipWebhookReconcile: skipWebhookReconcile(account),
   });
   await bridge.catchUpA2A();
   await bridge.catchUpHostedCalls();
