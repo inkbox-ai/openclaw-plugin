@@ -66,18 +66,54 @@ openclaw inkbox doctor
 
 The setup wizard writes `channels.inkbox` into the active OpenClaw profile and adds the Inkbox tool group to the profile's tool policy.
 
-### Bootstrap an existing identity without prompts
+### Bootstrap an assigned identity without prompts
 
-For unattended agent setup, install the plugin first, then pass the API key through the environment:
+When a human gives an agent an existing identity handle, API base URL, and API key, preserve that assignment: do not choose another identity or run the interactive setup flow. Before installing this local checkout, inspect what will run and stop if anything is unexpected:
 
 ```bash
-export INKBOX_API_KEY="ApiKey_..."
-openclaw inkbox bootstrap --identity my-agent \
+git status --short --branch
+sed -n '1,220p' package.json
+```
+
+Review the clone status and package manifest before resolving dependencies. If they are expected, continue:
+
+```bash
+npm ci --ignore-scripts
+npm ls --depth=0
+npm run build
+git status --short
+```
+
+Review the resolved dependency tree, build output, and post-build Git status. If they are expected, install the built local plugin:
+
+```bash
+openclaw --version
+openclaw plugins install -l --dangerously-force-unsafe-install ./
+```
+
+The local-install acknowledgment is required because the plugin can manage the OpenClaw gateway service.
+
+Have the human provide `INKBOX_API_KEY` privately in the current shell, without pasting it into chat, source control, a project instruction file, or a command-line argument. Then run the assigned values with the credential in the environment:
+
+```bash
+openclaw inkbox bootstrap --identity "<assigned-handle>" --base-url "<base-url>" \
   --voice-ai --rotate-signing-key --start-gateway
 unset INKBOX_API_KEY
 ```
 
-`bootstrap` validates the exact identity, scopes down an admin key before saving it, preserves existing Voice AI settings, updates the active OpenClaw profile, and starts, restarts, or installs the gateway service. When it starts the gateway, it disables the optional startup agent prewarm so bootstrap can finish safely from inside a live OpenClaw session; the first real inbound turn may pay the one-time cold-start cost. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
+`bootstrap` is non-interactive and resumable. It validates the exact assigned identity, scopes down an admin key before saving it, preserves existing Voice AI settings, updates the active OpenClaw profile, and starts, restarts, or installs the gateway service. When it starts the gateway, it disables the optional startup agent prewarm so bootstrap can finish safely from inside a live OpenClaw session; the first real inbound turn may pay the one-time cold-start cost. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key.
+
+The command prints a secret-redacted JSON result. Handle it by `status`:
+
+- `configured`: unset `INKBOX_API_KEY`, then verify with `openclaw inkbox doctor`.
+- `requires_human`: show every entry in `humanActions` to the human. After the requested action is complete, privately restore `INKBOX_API_KEY` and rerun the same bootstrap command with the same assigned identity and base URL.
+- `error`: use the returned `error` and completed `actions` to diagnose the cause, correct it, privately restore `INKBOX_API_KEY`, and retry the same command. Do not switch identities or start a separate setup flow.
+
+The saved runtime credential and signing key belong in the local OpenClaw profile, never in the repository or project instructions. After a successful retry, unset the environment credential and run:
+
+```bash
+openclaw inkbox doctor
+```
 
 ### Docker test shell
 
