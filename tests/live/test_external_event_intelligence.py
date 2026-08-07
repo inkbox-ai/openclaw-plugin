@@ -82,5 +82,5 @@ def test_signed_external_event_reaches_openclaw_dispatcher():
     }
     marker = f"Inkbox external event dispatched: thread=external:live-e2e:{event_id} verified=true"
     status, body = _post(envelope)
-    assert status == 200 and body == "ok", f"webhook not accepted: {status} {body!r}"
+    assert status == 200 and body == "ok", f"webhook not accepted: status={status}"
     assert _wait(marker), f"signed event never reached OpenClaw: {marker}"

@@ -92,6 +92,6 @@ def test_email_reachability():
     detail = remote.messages.get(remote_email, reply.id)
     body = ((getattr(detail, "body_text", "") or "") + " " + (getattr(reply, "subject", "") or "")).lower()
     bad = [m for m in ERROR_MARKERS if m in body]
-    assert not bad, f"reply delivered but the body is an error, not a real answer: {bad}\n{body[:300]}"
-    assert "reply_ok" in body, f"reply delivered but missing the mock marker REPLY_OK:\n{body[:300]}"
-    assert nonce in body, f"reply did not echo the request nonce {nonce} — agent may not have read the inbound"
+    assert not bad, f"reply delivered but the body is an error, not a real answer: {bad}"
+    assert "reply_ok" in body, "reply delivered but missing the mock marker REPLY_OK"
+    assert nonce in body, "reply did not echo the current request nonce"

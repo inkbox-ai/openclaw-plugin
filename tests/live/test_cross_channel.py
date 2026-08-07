@@ -35,8 +35,8 @@ AUT_KEY = os.environ.get("OPENCLAW_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 REAL = os.environ.get("LIVE_REAL_MODEL") == "1"
 TIMEOUT_S = float(os.environ.get("LIVE_XCHANNEL_TIMEOUT", "200"))
-CALL_ATTEMPTS = 2
-EMAIL_ATTEMPTS = 2
+CALL_ATTEMPTS = 1
+EMAIL_ATTEMPTS = 1
 POLL_EVERY_S = 6.0
 # A cross-channel assertion observes the tool side effect before OpenClaw has
 # necessarily finished the agent turn that produced it.  Starting the next test
@@ -216,7 +216,9 @@ def test_email_request_gets_sms_response(xc):
                 _settle_after_tool_side_effect()
                 return  # cross-channel confirmed: email request -> SMS response with the token
         time.sleep(POLL_EVERY_S)
-    pytest.fail(f"agent did not send an SMS containing {token!r} within {TIMEOUT_S:.0f}s")
+    pytest.fail(
+        f"agent did not send the current marker by SMS within {TIMEOUT_S:.0f}s"
+    )
 
 
 def _inbound_emails_from_aut(remote, remote_email: str, aut_email: str):
@@ -335,9 +337,8 @@ def _observe_email_run(
 def test_sms_request_gets_email_response(xc):
     """SMS asks the agent to EMAIL a code; the code must arrive over email.
 
-    The real model may rarely return an empty turn without invoking a correctly
-    exposed tool. One fresh retry is safe only when both resource owners prove
-    that the prior request created no email and no wrong-channel SMS.
+    The request is single-attempt. Both resource owners must prove one exact
+    current email and no wrong-channel SMS.
     """
     remote = xc["remote"]
     initial_rows = {
@@ -429,7 +430,7 @@ def test_sms_request_gets_email_response(xc):
             )
             if state == "terminal":
                 pytest.fail(
-                    f"email attempt {attempt + 1} ref={token} produced an "
+                    f"email attempt {attempt + 1} produced an "
                     f"unsafe external effect: {detail} counts={counts}"
                 )
             if state == "success":
@@ -439,7 +440,7 @@ def test_sms_request_gets_email_response(xc):
                 )
                 assert state == "success", (
                     "email duplicate grace found a late/duplicate/wrong-channel "
-                    f"effect across refs={attempt_tokens}: {detail} counts={counts}"
+                    f"effect: {detail} counts={counts}"
                 )
                 _settle_after_tool_side_effect()
                 return
@@ -470,7 +471,7 @@ def test_sms_request_gets_email_response(xc):
             }.items()
         }
         attempt_states.append(
-            f"attempt={attempt + 1} ref={token} state={state} "
+            f"attempt={attempt + 1} state={state} "
             f"run_counts={counts} attempt_counts={attempt_fresh} detail={detail}"
         )
         if state != "empty" or any(attempt_fresh.values()):
@@ -533,7 +534,7 @@ def _wait_for_new_call(
         ]
         if len(fresh_driver) > 1 or len(fresh_aut) > 1:
             pytest.fail(
-                f"call request attempt {attempt} ref={ref} created duplicate "
+                f"call request attempt {attempt} created duplicate "
                 f"legs: driver={len(fresh_driver)} aut={len(fresh_aut)}"
             )
         if fresh_driver and fresh_aut:
@@ -556,7 +557,7 @@ def _wait_for_new_call(
     ]
     if len(fresh_driver) > 1 or len(fresh_aut) > 1:
         pytest.fail(
-            f"call request attempt {attempt} ref={ref} created duplicate legs: "
+            f"call request attempt {attempt} created duplicate legs: "
             f"driver={len(fresh_driver)} aut={len(fresh_aut)}"
         )
     return False, len(fresh_driver), len(fresh_aut)
@@ -598,7 +599,7 @@ def test_email_request_gets_call(xc):
             ref,
         )
         attempt_states.append(
-            f"attempt={attempt + 1} ref={ref} driver={driver_count} aut={aut_count}"
+            f"attempt={attempt + 1} driver={driver_count} aut={aut_count}"
         )
         if matched:
             return
@@ -650,7 +651,7 @@ def test_sms_request_gets_call(xc):
             ref,
         )
         attempt_states.append(
-            f"attempt={attempt + 1} ref={ref} driver={driver_count} aut={aut_count}"
+            f"attempt={attempt + 1} driver={driver_count} aut={aut_count}"
         )
         if matched:
             return

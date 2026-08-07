@@ -91,7 +91,7 @@ def _wait(marker: str) -> bool:
 def test_forged_github_signature_is_rejected_before_dispatch():
     envelope = _envelope()
     status, body = _post(envelope, "sha256=deadbeef")
-    assert status == 401, f"forged signature should be rejected, got {status} {body!r}"
+    assert status == 401, f"forged signature should be rejected, got status={status}"
     time.sleep(2)
     assert _marker(envelope) not in _log()
 
@@ -101,5 +101,5 @@ def test_valid_github_signature_reaches_openclaw_dispatcher():
     payload = json.dumps(envelope).encode()
     signature = "sha256=" + hmac.new(GITHUB_SECRET.encode(), payload, hashlib.sha256).hexdigest()
     status, body = _post(envelope, signature)
-    assert status == 200 and body == "ok", f"valid webhook not accepted: {status} {body!r}"
+    assert status == 200 and body == "ok", f"valid webhook not accepted: status={status}"
     assert _wait(_marker(envelope)), "valid GitHub event never reached OpenClaw"

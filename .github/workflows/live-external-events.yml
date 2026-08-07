@@ -63,13 +63,13 @@ jobs:
 
       - name: Build the plugin
         run: |
-          npm ci
-          npm install --no-save --package-lock=false openclaw@2026.5.27
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@2026.5.27
           npm run build
 
       - name: Install OpenClaw host
         run: |
-          npm install -g openclaw@latest
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g openclaw@latest
           openclaw --version
 
       - name: Onboard model provider (real OpenAI)
@@ -102,7 +102,6 @@ jobs:
           print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
           PYEOF
           )"
-          echo "AUT handle: $HANDLE"
           # Install the plugin BEFORE writing channels.inkbox.* — the channel id
           # only validates once the plugin is registered.
           openclaw plugins install -l --dangerously-force-unsafe-install "$GITHUB_WORKSPACE"
@@ -145,7 +144,7 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
+          echo "::error::gateway did not become ready"; exit 1
 
       - name: Run external-event tests
         env:
@@ -160,12 +159,10 @@ jobs:
               tests/live/test_external_event_intelligence.py \
               tests/live/test_external_event_github.py -v
 
-      # Failure-only: these logs carry live agent content and this repo is public.
-      - name: Dump logs (on failure only)
+      - name: Report content-free failure state
         if: failure()
         run: |
-          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
-          echo "=== openclaw logs ==="; tail -n 200 /tmp/openclaw/openclaw-*.log 2>/dev/null || true
+          test -s "$GATEWAY_LOG" && echo "gateway_log=present" || echo "gateway_log=empty"
 
       - name: Tear down (always)
         if: always()
