@@ -181,7 +181,7 @@ jobs:
             RUN_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             HOSTED_MARKER="$(python3 "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $HOSTED_MARKER. Record one post-call action now, then read those same three words back. Do not send the SMS during the call."
+            export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $HOSTED_MARKER. Create one post-call action now. Set both the action title and the action details to this exact five-word phrase: Send SMS $HOSTED_MARKER. Wait for the action tool to succeed, then read the exact three-word SMS body back to me. Do not paraphrase, omit a word, or send the SMS during the call."
             # The pytest gate, not the driver timer, owns the intentional hangup.
             export VOICE_DRIVER_LISTEN=180
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
