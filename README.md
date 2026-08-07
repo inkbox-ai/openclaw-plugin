@@ -66,18 +66,58 @@ openclaw inkbox doctor
 
 The setup wizard writes `channels.inkbox` into the active OpenClaw profile and adds the Inkbox tool group to the profile's tool policy.
 
-### Bootstrap an existing identity without prompts
+### Set up an assigned identity without prompts
 
-For unattended agent setup, install the plugin first, then pass the API key through the environment:
+An agent can complete setup after a human assigns an existing identity handle, API base URL, and credential. Use the local plugin installation flow above, but inspect the checkout before installing it into OpenClaw:
+
+1. Confirm the clone's remote, current revision, and clean working tree.
+2. Review `package.json`, its scripts, and the declared and locked dependencies before running `npm install`.
+3. Run `npm install` and `npm run build`, review the installed dependency summary and build output, and check the working tree for unexpected changes.
+4. Only then run the local `openclaw plugins install -l --dangerously-force-unsafe-install ./` command.
+
+First inspect the checkout and manifest. Also review `package-lock.json` before continuing:
 
 ```bash
-export INKBOX_API_KEY="ApiKey_..."
-openclaw inkbox bootstrap --identity my-agent \
+git remote get-url origin
+git log -1 --oneline
+git status --short --branch
+npm pkg get scripts dependencies devDependencies peerDependencies
+```
+
+After that review, install the dependencies and build. Inspect the dependency summary, build output, and working tree before continuing:
+
+```bash
+npm install
+npm ls --depth=0
+npm run build
+git status --short
+```
+
+Only install the reviewed local build into OpenClaw when those checks have the expected results:
+
+```bash
+openclaw plugins install -l --dangerously-force-unsafe-install ./
+```
+
+Keep the credential out of source control, project instructions, command arguments, and transcripts. Place it in the private process environment as `INKBOX_API_KEY`; if entering it in a terminal, read it without echoing:
+
+```bash
+read -rsp 'Inkbox API key: ' INKBOX_API_KEY && printf '\n'
+export INKBOX_API_KEY
+openclaw inkbox bootstrap --identity '<handle>' --base-url '<url>' \
   --voice-ai --rotate-signing-key --start-gateway
 unset INKBOX_API_KEY
 ```
 
-`bootstrap` validates the exact identity, scopes down an admin key before saving it, preserves existing Voice AI settings, updates the active OpenClaw profile, and starts, restarts, or installs the gateway service. When it starts the gateway, it disables the optional startup agent prewarm so bootstrap can finish safely from inside a live OpenClaw session; the first real inbound turn may pay the one-time cold-start cost. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
+`bootstrap` is non-interactive. It validates and preserves the exact assigned identity, scopes down an admin key before saving it, preserves existing Voice AI settings, updates the active OpenClaw profile, and starts, restarts, or installs the gateway service. When it starts the gateway, it disables the optional startup agent prewarm so bootstrap can finish safely from inside a live OpenClaw session; the first real inbound turn may pay the one-time cold-start cost. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key.
+
+The command prints secret-redacted JSON and is safe to resume:
+
+- For `"status": "configured"`, run `openclaw inkbox doctor` and confirm the configured identity and live connection are healthy.
+- For `"status": "requires_human"`, show the human each requested entry in `humanActions`. After the human completes those actions, restore `INKBOX_API_KEY` privately and rerun the same bootstrap command with the same assigned handle; do not create or select a different identity.
+- For `"status": "error"`, inspect the redacted `error` and completed `actions`, diagnose the credential, assigned handle, base URL, local config, or gateway state as indicated, and correct that cause. Then restore `INKBOX_API_KEY` privately and rerun the same bootstrap command with the same assigned handle. `openclaw inkbox doctor` and, for gateway errors, `openclaw gateway status` provide focused diagnostics.
+
+Always unset the transient `INKBOX_API_KEY` after each attempt. Bootstrap saves the resulting agent-scoped credential in the active OpenClaw profile; never copy credentials into this checkout or any other project file.
 
 ### Docker test shell
 
