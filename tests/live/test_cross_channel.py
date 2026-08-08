@@ -43,7 +43,7 @@ POLL_EVERY_S = 6.0
 # against the same contact/session at that boundary can race the still-active
 # turn and lose the new inbound webhook.  Give delivery of the source-channel
 # final reply (and session teardown) a short bounded window to finish.
-POST_TOOL_TURN_SETTLE_S = 5.0
+POST_TOOL_TURN_SETTLE_S = 20.0
 EMAIL_DUPLICATE_GRACE_S = 2 * POLL_EVERY_S
 READ_ATTEMPTS = 4
 READ_BACKOFF_S = 1.0
