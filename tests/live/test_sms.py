@@ -152,12 +152,11 @@ def _wait_new_inbound(
                 unmatched += 1
                 continue
             bad = [x for x in ERROR_MARKERS if x in body_lower]
-            assert not bad, f"SMS reply is an error, not a real answer: {bad}\n{body[:200]}"
+            assert not bad, f"SMS reply is an error, not a real answer: {bad}"
             return body_lower
         time.sleep(POLL_EVERY_S)
-    correlation = f" containing {required_text!r}" if required_text else ""
     pytest.fail(
-        f"no SMS reply{correlation} within {timeout_s:.0f}s to: {context}; "
+        f"no correlated SMS reply within {timeout_s:.0f}s; "
         f"ignored {unmatched} uncorrelated reply/replies"
     )
 
@@ -184,7 +183,7 @@ def _ask_sms(sms, text: str, timeout_s: float = TIMEOUT_S) -> str:
     if reply_tag:
         question = f"{text} End your reply with {reply_tag}."
     remote.texts.send(pid, to=aut_phone, text=_diversify(question))
-    return _wait_new_inbound(sms, before, timeout_s, repr(text), reply_tag)
+    return _wait_new_inbound(sms, before, timeout_s, "request", reply_tag)
 
 
 def _ask_sms_besteffort(sms, text: str, timeout_s: float) -> str | None:
@@ -238,7 +237,7 @@ def _gateway_log_size() -> int:
 @mock_only
 def test_sms_reachability(sms):
     body = _ask_sms(sms, "ping")
-    assert "reply_ok" in body, f"mock reachability: missing REPLY_OK marker\n{body[:200]}"
+    assert "reply_ok" in body, "mock reachability: missing REPLY_OK marker"
 
 
 @real_only
@@ -251,7 +250,7 @@ def test_sms_basic_reply(sms):
 def test_sms_reports_own_identity(sms):
     aut_email = sms["aut"].mailboxes.list()[0].email_address
     body = _ask_sms(sms, "Reply with just your Inkbox email address and phone number — short.")
-    assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:200]}"
+    assert aut_email in body, "reply missing the expected email"
 
 
 @real_only
@@ -264,7 +263,7 @@ def test_sms_reports_sender_details(sms):
     name = (getattr(matches[0], "preferred_name", None) or getattr(matches[0], "given_name", None) or "")
     body = _ask_sms(sms, "Who am I to you? Tell me what you have on file about me.")
     if name:
-        assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:200]}"
+        assert name.lower() in body, "reply missing the expected sender name"
 
 
 @real_only
@@ -300,8 +299,7 @@ def test_sms_aware_of_inkbox_tools(sms):
             "Use your Inkbox contact tools to look up the contact whose email "
             f"is {probe_email}, then reply with that contact's full name.",
         )
-        assert surname in body, \
-            f"agent did not report the looked-up contact surname {surname!r}\n{body[:300]}"
+        assert surname in body, "agent did not report the looked-up contact surname"
     finally:
         for contact in aut.contacts.lookup(email=probe_email) or []:
             contact_id = str(getattr(contact, "id", "") or "")
@@ -439,7 +437,7 @@ def test_sms_retry_after_carrier_delivery_failure(sms):
                 if conversation_id:
                     break
     except Exception as exc:
-        print(f"note: conversation-id lookup failed ({exc!r}); injecting without one")
+        print(f"note: conversation-id lookup failed ({type(exc).__name__}); injecting without one")
 
     spy_before = len(_spy_text_sends())
     log_offset = _gateway_log_size()

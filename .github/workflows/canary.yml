@@ -28,8 +28,8 @@ jobs:
 
       - name: Install deps + latest OpenClaw host
         run: |
-          npm ci
-          npm install --no-save --package-lock=false openclaw@latest
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@latest
           npm ls openclaw || true
 
       - name: Typecheck vs latest OpenClaw

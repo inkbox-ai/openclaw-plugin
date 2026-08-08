@@ -35,8 +35,8 @@ AUT_KEY = os.environ.get("OPENCLAW_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 REAL = os.environ.get("LIVE_REAL_MODEL") == "1"
 TIMEOUT_S = float(os.environ.get("LIVE_XCHANNEL_TIMEOUT", "200"))
-CALL_ATTEMPTS = 2
-EMAIL_ATTEMPTS = 2
+CALL_ATTEMPTS = 1
+EMAIL_ATTEMPTS = 1
 POLL_EVERY_S = 6.0
 # A cross-channel assertion observes the tool side effect before OpenClaw has
 # necessarily finished the agent turn that produced it.  Starting the next test
@@ -45,6 +45,8 @@ POLL_EVERY_S = 6.0
 # final reply (and session teardown) a short bounded window to finish.
 POST_TOOL_TURN_SETTLE_S = 5.0
 EMAIL_DUPLICATE_GRACE_S = 2 * POLL_EVERY_S
+READ_ATTEMPTS = 4
+READ_BACKOFF_S = 1.0
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY and REAL),
@@ -68,6 +70,22 @@ def _token() -> str:
 
 def _settle_after_tool_side_effect() -> None:
     time.sleep(POST_TOOL_TURN_SETTLE_S)
+
+
+def _read_with_retry(read, label: str):
+    """Retry only an idempotent API read and keep failures content-free."""
+    last_error = "unknown"
+    for attempt in range(1, READ_ATTEMPTS + 1):
+        try:
+            return read()
+        except Exception as exc:
+            last_error = type(exc).__name__
+            if attempt < READ_ATTEMPTS:
+                time.sleep(READ_BACKOFF_S * attempt)
+    raise AssertionError(
+        f"{label} remained unavailable after {READ_ATTEMPTS} read attempts "
+        f"(error_type={last_error})"
+    ) from None
 
 
 def _created_at(value) -> datetime | None:
@@ -216,7 +234,9 @@ def test_email_request_gets_sms_response(xc):
                 _settle_after_tool_side_effect()
                 return  # cross-channel confirmed: email request -> SMS response with the token
         time.sleep(POLL_EVERY_S)
-    pytest.fail(f"agent did not send an SMS containing {token!r} within {TIMEOUT_S:.0f}s")
+    pytest.fail(
+        f"agent did not send the current marker by SMS within {TIMEOUT_S:.0f}s"
+    )
 
 
 def _inbound_emails_from_aut(remote, remote_email: str, aut_email: str):
@@ -335,9 +355,8 @@ def _observe_email_run(
 def test_sms_request_gets_email_response(xc):
     """SMS asks the agent to EMAIL a code; the code must arrive over email.
 
-    The real model may rarely return an empty turn without invoking a correctly
-    exposed tool. One fresh retry is safe only when both resource owners prove
-    that the prior request created no email and no wrong-channel SMS.
+    The request is single-attempt. Both resource owners must prove one exact
+    current email and no wrong-channel SMS.
     """
     remote = xc["remote"]
     initial_rows = {
@@ -429,7 +448,7 @@ def test_sms_request_gets_email_response(xc):
             )
             if state == "terminal":
                 pytest.fail(
-                    f"email attempt {attempt + 1} ref={token} produced an "
+                    f"email attempt {attempt + 1} produced an "
                     f"unsafe external effect: {detail} counts={counts}"
                 )
             if state == "success":
@@ -439,7 +458,7 @@ def test_sms_request_gets_email_response(xc):
                 )
                 assert state == "success", (
                     "email duplicate grace found a late/duplicate/wrong-channel "
-                    f"effect across refs={attempt_tokens}: {detail} counts={counts}"
+                    f"effect: {detail} counts={counts}"
                 )
                 _settle_after_tool_side_effect()
                 return
@@ -470,7 +489,7 @@ def test_sms_request_gets_email_response(xc):
             }.items()
         }
         attempt_states.append(
-            f"attempt={attempt + 1} ref={token} state={state} "
+            f"attempt={attempt + 1} state={state} "
             f"run_counts={counts} attempt_counts={attempt_fresh} detail={detail}"
         )
         if state != "empty" or any(attempt_fresh.values()):
@@ -489,7 +508,11 @@ def test_sms_request_gets_email_response(xc):
 def _inbound_calls_from_aut(remote, remote_pid: str, aut_phone: str):
     """The driver's inbound calls originating from the AUT's number."""
     tail = _digits(aut_phone)[-10:]
-    return [c for c in remote.calls.list(limit=30)
+    calls = _read_with_retry(
+        lambda: remote.calls.list(limit=30),
+        "driver call history",
+    )
+    return [c for c in calls
             if (getattr(c, "direction", "") or "").lower() == "inbound"
             and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
@@ -497,7 +520,11 @@ def _inbound_calls_from_aut(remote, remote_pid: str, aut_phone: str):
 def _outbound_calls_to_driver(aut, remote_phone: str):
     """The AUT-owned outbound records targeting the exact driver."""
     tail = _digits(remote_phone)[-10:]
-    return [c for c in aut.calls.list(limit=30)
+    calls = _read_with_retry(
+        lambda: aut.calls.list(limit=30),
+        "AUT call history",
+    )
+    return [c for c in calls
             if (getattr(c, "direction", "") or "").lower() == "outbound"
             and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
@@ -533,7 +560,7 @@ def _wait_for_new_call(
         ]
         if len(fresh_driver) > 1 or len(fresh_aut) > 1:
             pytest.fail(
-                f"call request attempt {attempt} ref={ref} created duplicate "
+                f"call request attempt {attempt} created duplicate "
                 f"legs: driver={len(fresh_driver)} aut={len(fresh_aut)}"
             )
         if fresh_driver and fresh_aut:
@@ -556,7 +583,7 @@ def _wait_for_new_call(
     ]
     if len(fresh_driver) > 1 or len(fresh_aut) > 1:
         pytest.fail(
-            f"call request attempt {attempt} ref={ref} created duplicate legs: "
+            f"call request attempt {attempt} created duplicate legs: "
             f"driver={len(fresh_driver)} aut={len(fresh_aut)}"
         )
     return False, len(fresh_driver), len(fresh_aut)
@@ -598,7 +625,7 @@ def test_email_request_gets_call(xc):
             ref,
         )
         attempt_states.append(
-            f"attempt={attempt + 1} ref={ref} driver={driver_count} aut={aut_count}"
+            f"attempt={attempt + 1} driver={driver_count} aut={aut_count}"
         )
         if matched:
             return
@@ -621,8 +648,8 @@ def test_sms_request_gets_call(xc):
     )
     # Fresh body each send: the agent replies by calling, not texting, so this
     # SMS never gets an SMS reply to reset the conversation cadence. A unique
-    # token avoids the duplicate_body guard and permits one bounded recovery
-    # request when the real model returns an empty/incomplete turn with no tool.
+    # token avoids the duplicate_body guard while the live side effect remains
+    # single-attempt.
     attempt_states = []
     for attempt in range(CALL_ATTEMPTS):
         before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
@@ -650,7 +677,7 @@ def test_sms_request_gets_call(xc):
             ref,
         )
         attempt_states.append(
-            f"attempt={attempt + 1} ref={ref} driver={driver_count} aut={aut_count}"
+            f"attempt={attempt + 1} driver={driver_count} aut={aut_count}"
         )
         if matched:
             return

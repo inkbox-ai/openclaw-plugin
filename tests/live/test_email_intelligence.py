@@ -132,15 +132,15 @@ def _ask(
             body = getattr(remote.messages.get(remote_email, msg.id), "body_text", "") or ""
             lowered = body.lower()
             bad = [m for m in ERROR_MARKERS if m in lowered]
-            assert not bad, f"reply is an error, not a real answer: {bad}\n{body[:300]}"
+            assert not bad, f"reply is an error, not a real answer: {bad}"
             candidates.append(body)
             if (accept is None and _is_reply(msg)) or (accept is not None and accept(lowered)):
                 return lowered
         time.sleep(POLL_EVERY_S)
-    previews = "\n---\n".join(body[:500] for body in candidates) or "(none)"
     pytest.fail(
-        f"no acceptable reply within {TIMEOUT_S:.0f}s to: {question!r}\n"
-        f"new emails from AUT:\n{previews}"
+        f"no acceptable reply within {TIMEOUT_S:.0f}s "
+        f"(candidate_count={len(candidates)} "
+        f"candidate_lengths={[len(body) for body in candidates]})"
     )
 
 
@@ -178,54 +178,61 @@ def test_reports_own_identity(ctx):
             handle in candidate and aut_email in candidate and _phone_present(aut_phone, candidate)
         ),
     )
-    assert handle in body, f"reply missing handle {handle!r}\n{body[:400]}"
-    assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:400]}"
+    assert handle in body, "reply missing the expected handle"
+    assert aut_email in body, "reply missing the expected email"
     # Accept a privacy-masked phone (the model self-redacts the middle digits
     # in formal listings) as well as full.
-    assert _phone_present(aut_phone, body), f"reply missing phone {aut_phone!r}\n{body[:400]}"
+    assert _phone_present(aut_phone, body), "reply missing the expected phone"
 
 
-def test_reports_sender_details(ctx):
-    """The agent must report who the sender is, from the contact card it can see."""
+def test_reports_sender_name(ctx):
+    """The agent reports the sender name and stored contact-method kinds."""
     aut, remote = ctx["aut"], ctx["remote"]
     remote_email = ctx["remote_email"]
 
-    # Look up (or seed) the sender's contact in the AUT org — the card the agent sees.
     matches = aut.contacts.lookup(email=remote_email)
-    if not matches:
-        from inkbox.contacts.types import ContactEmail, ContactPhone
-        rphone = _first_phone(remote)
-        aut.contacts.create(
-            given_name="Penny",
-            family_name="Tester",
-            emails=[ContactEmail(label="work", value=remote_email)],
-            phones=[ContactPhone(label="mobile", value=rphone)] if rphone else None,
-        )
-        matches = aut.contacts.lookup(email=remote_email)
-    assert matches, "could not establish a contact card for the sender"
+    assert matches, "the synthetic sender contact fixture is missing"
     contact = matches[0]
-    name = (getattr(contact, "preferred_name", None) or getattr(contact, "given_name", None) or "")
-    emails = [e.value for e in getattr(contact, "emails", [])]
-    phones = [p.value for p in getattr(contact, "phones", [])]
+    preferred_name = (getattr(contact, "preferred_name", None) or "").strip()
+    given_name = (getattr(contact, "given_name", None) or "").strip()
+    family_name = (getattr(contact, "family_name", None) or "").strip()
+    contact_name = preferred_name or " ".join(
+        part for part in (given_name, family_name) if part
+    )
+    assert contact_name, "the synthetic sender contact has no name"
+    contact_emails = [
+        email.value.lower() for email in getattr(contact, "emails", [])
+    ]
+    assert remote_email.lower() in contact_emails, (
+        "sender contact lost its email address"
+    )
+    remote_phone = _first_phone(remote)
+    assert remote_phone, "the synthetic sender fixture has no phone number"
+    contact_phones = [phone.value for phone in getattr(contact, "phones", [])]
+    assert any(
+        _digits(phone)[-10:] == _digits(remote_phone)[-10:]
+        for phone in contact_phones
+    ), "sender contact lost its phone number"
 
+    reference = f"sender-check-{uuid.uuid4().hex[:8]}"
     body = _ask(
         ctx["remote"], ctx["aut_email"], remote_email,
-        "Who am I to you? Tell me everything you have on file about me. "
-        "Include my email address and phone number in full — every character "
-        "and digit, with no masking, asterisks, or abbreviation.",
+        "What contact name is associated with this sender? Reply with the exact "
+        "contact name shown to you, list every kind of contact method stored on "
+        "that card without revealing any address or number, and include the "
+        f"reference {reference} verbatim.",
         accept=lambda candidate: (
-            (not name or name.lower() in candidate)
-            and any(e.lower() in candidate for e in emails)
-            and (not phones or any(_phone_present(p, candidate) for p in phones))
+            contact_name.lower() in candidate
+            and reference in candidate
+            and "email" in candidate
+            and "phone" in candidate
         ),
     )
-    if name:
-        assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:400]}"
-    assert any(e.lower() in body for e in emails), f"reply missing sender email {emails}\n{body[:400]}"
-    if phones:
-        # Accept full or privacy-masked (see _phone_present).
-        assert any(_phone_present(p, body) for p in phones), \
-            f"reply missing sender phone {phones}\n{body[:400]}"
+    assert contact_name.lower() in body, "reply missing the expected sender name"
+    assert reference in body, "reply missing the current-run reference"
+    assert "email" in body and "phone" in body, (
+        "reply did not prove the sender contact carries both contact methods"
+    )
 
 
 def test_aware_of_inkbox_tools(ctx):
@@ -269,8 +276,7 @@ def test_aware_of_inkbox_tools(ctx):
             f"email address is {probe_email}, then reply with that contact's full name.",
             accept=lambda candidate: surname in candidate,
         )
-        assert surname in body, \
-            f"agent did not report the looked-up contact surname {surname!r}\n{body[:500]}"
+        assert surname in body, "agent did not report the looked-up contact surname"
     finally:
         _delete_contacts_by_email(aut, probe_email)
 
@@ -309,11 +315,11 @@ def test_contact_crud_tool_use(ctx):
             f"After the tool succeeds, reply exactly: CREATED {nonce}",
             accept=lambda candidate: "created" in candidate and nonce in candidate,
         )
-        assert "created" in created and nonce in created, created[:500]
+        assert "created" in created and nonce in created, "contact create reply mismatch"
         matches = _contacts_by_email(aut, contact_email)
-        assert matches, f"agent said it created {contact_email}, but lookup found nothing"
+        assert matches, "agent reported contact creation but lookup found nothing"
         contact_id = str(getattr(matches[0], "id", "") or "")
-        assert contact_id, f"created contact has no id: {matches[0]!r}"
+        assert contact_id, "created contact has no id"
 
         updated = _ask(
             ctx["remote"],
@@ -324,7 +330,7 @@ def test_contact_crud_tool_use(ctx):
             f"After the tool succeeds, reply exactly: UPDATED {nonce}",
             accept=lambda candidate: "updated" in candidate and nonce in candidate,
         )
-        assert "updated" in updated and nonce in updated, updated[:500]
+        assert "updated" in updated and nonce in updated, "contact update reply mismatch"
         fetched = aut.contacts.get(contact_id)
         assert updated_notes.lower() in str(getattr(fetched, "notes", "") or "").lower()
 
@@ -336,7 +342,7 @@ def test_contact_crud_tool_use(ctx):
             f"to delete contactId {contact_id}. After the tool succeeds, reply exactly: DELETED {nonce}",
             accept=lambda candidate: "deleted" in candidate and nonce in candidate,
         )
-        assert "deleted" in deleted and nonce in deleted, deleted[:500]
+        assert "deleted" in deleted and nonce in deleted, "contact delete reply mismatch"
         assert not _contacts_by_email(aut, contact_email)
     finally:
         _delete_contacts_by_email(aut, contact_email)

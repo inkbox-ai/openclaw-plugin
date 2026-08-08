@@ -92,10 +92,10 @@ def _hang_up_owned_call(client, call) -> str | None:
         try:
             current = client.calls.get(call_id)
         except Exception as get_exc:
-            return f"hangup={exc!r}; get={get_exc!r}"
+            return f"hangup={type(exc).__name__}; get={type(get_exc).__name__}"
         if _call_status(current) in _ENDED_CALL_STATUSES:
             return None
-        return f"hangup={exc!r}; status={_call_status(current)!r}"
+        return f"hangup={type(exc).__name__}; status={_call_status(current)!r}"
 
 
 def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
@@ -116,10 +116,10 @@ def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
             if error:
                 last_errors[call_id] = error
         if time.monotonic() >= deadline:
-            states = {call_id: _call_status(call) for call_id, call in live.items()}
+            states = sorted(_call_status(call) for call in live.values())
             raise RuntimeError(
-                f"live-test calls remained active after API cleanup: "
-                f"states={states!r} errors={last_errors!r}"
+                "live-test calls remained active after API cleanup: "
+                f"count={len(live)} states={states!r} error_count={len(last_errors)}"
             )
         time.sleep(0.5)
 

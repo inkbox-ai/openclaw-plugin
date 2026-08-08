@@ -18,6 +18,7 @@ Env:
   VOICE_DRIVER_PORT       local port the tunnel forwards to (default 8090)
   VOICE_DRIVER_STATE      path to write the JSON state file
   VOICE_DRIVER_LINE       the one line the driver speaks (default below)
+  VOICE_DRIVER_ANSWER_SETTLE  seconds to keep media open after hearing the answer
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "5"))
 # Then give the agent a turn and hang up — a dropped WS does NOT end the call, so we
 # must send an explicit stop or the leg lingers until the server max-duration cap.
 LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
+ANSWER_SETTLE_S = float(os.environ.get("VOICE_DRIVER_ANSWER_SETTLE", "0"))
 
 app = FastAPI()
 
@@ -77,12 +79,13 @@ async def phone_media_ws(ws: WebSocket) -> None:
     ])
     log.info("call WS accepted")
     spoke = asyncio.Event()
+    answered = asyncio.Event()
     convo: asyncio.Task | None = None
 
     async def _say(text: str) -> None:
         await ws.send_text(json.dumps({"event": "text", "delta": text}))
         await ws.send_text(json.dumps({"event": "text", "done": True}))
-        log.info("spoke: %s", text)
+        log.info("spoke scripted line")
 
     async def _speak(text: str) -> None:
         if spoke.is_set():
@@ -95,7 +98,12 @@ async def phone_media_ws(ws: WebSocket) -> None:
         await _say(GREETING)
         await asyncio.sleep(SPEAK_AFTER_S)
         await _speak(LINE)
-        await asyncio.sleep(LISTEN_S)
+        try:
+            await asyncio.wait_for(answered.wait(), timeout=LISTEN_S)
+        except asyncio.TimeoutError:
+            pass
+        if answered.is_set() and ANSWER_SETTLE_S > 0:
+            await asyncio.sleep(ANSWER_SETTLE_S)
         try:
             await ws.send_text(json.dumps({"event": "stop"}))
             log.info("sent stop (hangup)")
@@ -108,16 +116,19 @@ async def phone_media_ws(ws: WebSocket) -> None:
             ev = json.loads(raw)
             kind = ev.get("event")
             if kind == "start":
-                log.info("call start: %s", ev.get("stream_id"))
+                log.info("call started")
                 convo = asyncio.create_task(_run_turn())
             elif kind == "transcript" and ev.get("is_final"):
-                log.info("heard (final): %s", ev.get("text"))
+                text = ev.get("text") or ""
+                log.info("heard final agent transcript")
+                if "@" in text or "example" in text.lower().replace(" ", ""):
+                    answered.set()
                 await _speak(LINE)  # speak now if the greeting beat our timer
             elif kind == "stop":
-                log.info("call stop: %s", ev.get("reason"))
+                log.info("call stopped")
                 break
     except Exception as exc:  # noqa: BLE001 — never let the bridge crash the process
-        log.info("WS loop ended: %r", exc)
+        log.info("WS loop ended: %s", type(exc).__name__)
     finally:
         if convo:
             convo.cancel()
@@ -143,7 +154,7 @@ def main() -> None:
     client = Inkbox(api_key=API_KEY, base_url=BASE_URL)
     handle = client.mailboxes.list()[0].email_address.split("@", 1)[0]   # tunnel name = handle
     num = client.phone_numbers.list()[0]
-    log.info("driver identity %s number %s", handle, num.number)
+    log.info("driver identity configured")
 
     server = _run_uvicorn()
 
@@ -153,7 +164,7 @@ def main() -> None:
     )
     public_host = listener.tunnel.public_host
     ws_url = f"wss://{public_host}/phone/media/ws"
-    log.info("tunnel ready: %s", ws_url)
+    log.info("tunnel ready")
 
     # Auto-accept inbound calls (agent → driver) straight onto this WS.
     prev_action = getattr(num, "incoming_call_action", None)
@@ -162,7 +173,7 @@ def main() -> None:
     Path(STATE_FILE).write_text(json.dumps({
         "ws_url": ws_url, "number": num.number, "number_id": str(num.id), "handle": handle,
     }))
-    log.info("state written to %s", STATE_FILE)
+    log.info("driver state written")
 
     try:
         listener.wait()
@@ -171,7 +182,7 @@ def main() -> None:
         try:
             client.phone_numbers.update(num.id, incoming_call_action=prev_action or "auto_reject")
         except Exception as exc:  # noqa: BLE001
-            log.info("number revert failed: %r", exc)
+            log.info("number revert failed: %s", type(exc).__name__)
         listener.close()
         server.should_exit = True
 
