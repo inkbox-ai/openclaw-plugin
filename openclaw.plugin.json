@@ -200,6 +200,10 @@
               "keyEnvVar": { "type": "string" }
             }
           },
+          "skipWebhookReconcile": {
+            "type": "boolean",
+            "description": "Leave webhook subscriptions untouched at startup. They must already point at this gateway's webhook URL."
+          },
           "accounts": {
             "type": "object",
             "additionalProperties": {
@@ -288,6 +292,10 @@
                   "properties": {
                     "keyEnvVar": { "type": "string" }
                   }
+                },
+                "skipWebhookReconcile": {
+                  "type": "boolean",
+                  "description": "Leave webhook subscriptions untouched at startup. They must already point at this gateway's webhook URL."
                 }
               }
             }
@@ -419,6 +427,10 @@
             "description": "Env var the vault unlock key is read from. Defaults to INKBOX_VAULT_KEY."
           }
         }
+      },
+      "skipWebhookReconcile": {
+        "type": "boolean",
+        "description": "Leave webhook subscriptions untouched at startup. They must already point at this gateway's webhook URL."
       },
       "allowedRecipients": {
         "type": "array",
