@@ -163,7 +163,7 @@ def _classify_email_effects(
 
 
 @pytest.fixture(scope="module")
-def xc():
+def xc(live_call_cleanup):
     remote = _client(REMOTE_KEY)
     aut = _client(AUT_KEY)
     remote_email = remote.mailboxes.list()[0].email_address
@@ -203,6 +203,7 @@ def xc():
         "remote_email": remote_email, "remote_pid": remote_pid,
         "remote_phone": remote_phone,
         "aut_email": aut_email, "aut_phone": aut_phone, "aut_pid": aut_pid,
+        "own_call": live_call_cleanup,
     }
 
 
@@ -540,6 +541,7 @@ def _wait_for_new_call(
     timeout_s: float,
     attempt: int,
     ref: str,
+    own_call,
 ):
     """Block until an inbound call from the AUT with an id not in ``before`` appears.
 
@@ -558,6 +560,8 @@ def _wait_for_new_call(
             call for call in _outbound_calls_to_driver(aut, remote_phone)
             if call.id not in before_aut
         ]
+        for call in fresh_aut:
+            own_call(call.id)
         if len(fresh_driver) > 1 or len(fresh_aut) > 1:
             pytest.fail(
                 f"call request attempt {attempt} created duplicate "
@@ -581,6 +585,8 @@ def _wait_for_new_call(
         call for call in _outbound_calls_to_driver(aut, remote_phone)
         if call.id not in before_aut
     ]
+    for call in fresh_aut:
+        own_call(call.id)
     if len(fresh_driver) > 1 or len(fresh_aut) > 1:
         pytest.fail(
             f"call request attempt {attempt} created duplicate legs: "
@@ -623,6 +629,7 @@ def test_email_request_gets_call(xc):
             TIMEOUT_S / CALL_ATTEMPTS,
             attempt + 1,
             ref,
+            xc["own_call"],
         )
         attempt_states.append(
             f"attempt={attempt + 1} driver={driver_count} aut={aut_count}"
@@ -675,6 +682,7 @@ def test_sms_request_gets_call(xc):
             TIMEOUT_S / CALL_ATTEMPTS,
             attempt + 1,
             ref,
+            xc["own_call"],
         )
         attempt_states.append(
             f"attempt={attempt + 1} driver={driver_count} aut={aut_count}"

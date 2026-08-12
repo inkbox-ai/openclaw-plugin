@@ -33,9 +33,9 @@ from __future__ import annotations
 
 import os
 import re
-import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -48,6 +48,7 @@ UNANSWERED_LIMIT = 10
 # Reset once the opener's window leaves fewer than this many free sends —
 # comfortably more than any single test's opener-send count.
 MIN_FREE_SLOTS = 4
+STALE_CALL_AGE_S = 15 * 60
 
 
 def pytest_configure(config):
@@ -98,8 +99,23 @@ def _hang_up_owned_call(client, call) -> str | None:
         return f"hangup={type(exc).__name__}; status={_call_status(current)!r}"
 
 
-def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
-    """Hang up and verify every call created by this pytest session."""
+def _call_timestamp(call) -> float | None:
+    for name in ("created_at", "started_at"):
+        value = getattr(call, name, None)
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.timestamp()
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def _finish_calls(client, local_phone: str, call_ids: set[str]) -> None:
+    """Hang up and verify the exact calls owned by this pytest session."""
     deadline = time.monotonic() + 12
     last_errors: dict[str, str] = {}
     while True:
@@ -107,7 +123,7 @@ def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
         live = {
             call_id: call
             for call_id, call in current.items()
-            if call_id not in baseline and _call_status(call) not in _ENDED_CALL_STATUSES
+            if call_id in call_ids and _call_status(call) not in _ENDED_CALL_STATUSES
         }
         if not live:
             return
@@ -124,16 +140,17 @@ def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
         time.sleep(0.5)
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _clean_up_calls_created_by_live_session():
-    """Own all calls created by this live process and never leak a carrier leg.
+def _cleanup_targets(
+    baseline: set[str], current: set[str], explicitly_owned: set[str]
+) -> set[str]:
+    return explicitly_owned | (current - baseline)
 
-    Non-voice suites run a watchdog because a model can unexpectedly choose the
-    phone tool while answering an SMS/email test. Voice tests own their expected
-    call ids directly and use this fixture as a final safety net.
-    """
+
+@pytest.fixture(scope="session", autouse=True)
+def live_call_cleanup():
+    """Clean stale calls, then tear down only calls explicitly owned by this run."""
     if not AUT_KEY:
-        yield
+        yield lambda _call_id: None
         return
 
     client = _client(AUT_KEY)
@@ -142,40 +159,30 @@ def _clean_up_calls_created_by_live_session():
         raise RuntimeError("live-test identity has no phone number for call cleanup")
     local_phone = numbers[0].number
     baseline = set(_owned_calls(client, local_phone))
-    watch_client = _client(AUT_KEY)
-    voice_session = bool(os.environ.get("VOICE_SCENARIO"))
-    stop = threading.Event()
+    now = time.time()
+    for call in _owned_calls(client, local_phone).values():
+        created_at = _call_timestamp(call)
+        if (
+            _call_status(call) not in _ENDED_CALL_STATUSES
+            and created_at is not None
+            and now - created_at >= STALE_CALL_AGE_S
+        ):
+            _hang_up_owned_call(client, call)
 
-    def watchdog() -> None:
-        attempted: set[str] = set()
-        while not stop.wait(1):
-            try:
-                current = _owned_calls(watch_client, local_phone)
-            except Exception:
-                continue
-            for call_id, call in current.items():
-                if (
-                    call_id in baseline
-                    or call_id in attempted
-                    or _call_status(call) in _ENDED_CALL_STATUSES
-                ):
-                    continue
-                attempted.add(call_id)
-                _hang_up_owned_call(watch_client, call)
+    owned: set[str] = set()
 
-    watcher = None
-    if not voice_session:
-        watcher = threading.Thread(target=watchdog, name="live-call-cleanup", daemon=True)
-        watcher.start()
+    def own(call_id) -> None:
+        if call_id:
+            owned.add(str(call_id))
+
     try:
-        yield
+        yield own
     finally:
-        stop.set()
-        if watcher is not None:
-            watcher.join(timeout=3)
-        # Catch a call created during the last model turn / watcher shutdown.
-        time.sleep(1)
-        _finish_new_calls(client, local_phone, baseline)
+        # Explicitly owned calls are the primary cleanup path. The final
+        # session sweep catches unexpected model-created calls, but unlike the
+        # old watchdog it cannot terminate a call while its test is running.
+        current = set(_owned_calls(client, local_phone))
+        _finish_calls(client, local_phone, _cleanup_targets(baseline, current, owned))
 
 
 def _digits(s: str) -> str:
