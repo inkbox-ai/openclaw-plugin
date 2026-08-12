@@ -256,6 +256,7 @@ const REALTIME_CONTACT_READ_TOOLS: readonly string[] = [
 const REALTIME_CONTACT_READ_MAX_RESULTS = 5;
 const REALTIME_CONTACT_READ_NOTES_MAX_CHARS = 200;
 const REALTIME_CONTACT_READ_MAX_VALUES = 3;
+const REALTIME_CONTACT_READ_TIMEOUT_MS = 30 * 1000;
 const REALTIME_HANGUP_CONFIRM_WINDOW_MS = 60 * 1000;
 const hostedCallRuns = new Set<string>();
 let hostedCallCompletionChain: Promise<void> = Promise.resolve();
@@ -396,9 +397,11 @@ function realtimeCapabilitySummaries(): string[] {
 // caller already hears the "One moment" cue and can keep talking while it runs.
 // But if the agent loop never returns, the tool result is never submitted and
 // the model is left waiting — dead air. Bound it and speak a graceful fallback
-// instead. Mirrors Hermes' consult_timeout_s (see hermes-agent-plugin#4 / #9).
+// instead.
 const REALTIME_CONSULT_TIMEOUT_MS = 300 * 1000;
 const REALTIME_HANGUP_CLOSE_DELAY_MS = 2000;
+const REALTIME_HANGUP_DRAIN_TIMEOUT_MS = 30 * 1000;
+const REALTIME_SILENT_TOOL_RESPONSE_GRACE_MS = 500;
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
 const REALTIME_REQUIRED_QUIET_CHUNKS = 12;
@@ -501,6 +504,7 @@ export class InkboxRealtimeAudioPacer {
   private started = false;
   private bufferingSince = 0;
   private nextSendAt = 0;
+  private idleWaiters = new Set<() => void>();
 
   constructor(
     private readonly send: (payload: Record<string, unknown>) => Promise<void>,
@@ -549,6 +553,7 @@ export class InkboxRealtimeAudioPacer {
     this.bufferingSince = 0;
     this.nextSendAt = 0;
     void this.send({ event: "clear" }).catch(() => {});
+    this.resolveIdleWaiters();
   }
 
   close(): void {
@@ -563,6 +568,40 @@ export class InkboxRealtimeAudioPacer {
     this.started = false;
     this.bufferingSince = 0;
     this.nextSendAt = 0;
+    this.resolveIdleWaiters();
+  }
+
+  async waitForIdle(timeoutMs: number): Promise<void> {
+    if (this.isIdle()) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const idle = () => {
+        if (timer) clearTimeout(timer);
+        this.idleWaiters.delete(idle);
+        resolve();
+      };
+      this.idleWaiters.add(idle);
+      timer = setTimeout(() => {
+        this.idleWaiters.delete(idle);
+        resolve();
+      }, timeoutMs);
+    });
+  }
+
+  private isIdle(): boolean {
+    return this.queue.length === 0 && !this.draining && !this.timer;
+  }
+
+  private resolveIdleWaiters(): void {
+    if (!this.closed && !this.isIdle()) {
+      return;
+    }
+    for (const resolve of this.idleWaiters) {
+      resolve();
+    }
+    this.idleWaiters.clear();
   }
 
   private countQueuedAudioChunks(): number {
@@ -624,6 +663,7 @@ export class InkboxRealtimeAudioPacer {
       .finally(() => {
         this.draining = false;
         this.pump();
+        this.resolveIdleWaiters();
       });
   }
 
@@ -672,7 +712,182 @@ export class InkboxRealtimeAudioPacer {
       this.started = false;
       this.bufferingSince = 0;
       this.nextSendAt = 0;
+      this.resolveIdleWaiters();
     }
+  }
+}
+
+class RealtimeResponseWorkGate {
+  private readonly running = new Set<string>();
+  private readonly awaitingResponse: string[] = [];
+  private activeResponse:
+    | { callIds: string[]; hasFinalAssistantTranscript: boolean; done: boolean }
+    | undefined;
+  private readonly changeWaiters = new Set<() => void>();
+  private readonly recoveredCallIds = new Set<string>();
+  private silentResponseTimer: ReturnType<typeof setTimeout> | undefined;
+
+  start(callId: string): void {
+    this.running.add(callId);
+    this.signalChange();
+  }
+
+  resultSubmitted(callId: string): void {
+    if (this.running.delete(callId)) {
+      this.awaitingResponse.push(callId);
+      this.signalChange();
+    }
+  }
+
+  responseCreated(): void {
+    if (!this.activeResponse && this.awaitingResponse.length > 0) {
+      // The provider serializes responses and may coalesce several queued
+      // response.create requests into one response. That response owns every
+      // result that was waiting when it began.
+      const callIds = this.awaitingResponse.splice(0);
+      this.activeResponse = { callIds, hasFinalAssistantTranscript: false, done: false };
+      this.signalChange();
+    }
+  }
+
+  assistantTranscriptDone(): void {
+    if (this.activeResponse) {
+      this.activeResponse.hasFinalAssistantTranscript = true;
+      this.clearSilentResponseTimer();
+      this.finishActiveResponseIfReady(true);
+    }
+  }
+
+  responseDone(successful: boolean, recoverSilentResponse: () => void): void {
+    if (!this.activeResponse) {
+      return;
+    }
+    this.activeResponse.done = true;
+    if (!successful || this.activeResponse.hasFinalAssistantTranscript) {
+      this.clearSilentResponseTimer();
+      this.finishActiveResponseIfReady(successful);
+      return;
+    }
+    const response = this.activeResponse;
+    const callIdsToRecover = response.callIds.filter(
+      (callId) => !this.recoveredCallIds.has(callId),
+    );
+    if (callIdsToRecover.length === 0) {
+      return;
+    }
+    this.clearSilentResponseTimer();
+    this.silentResponseTimer = setTimeout(() => {
+      this.silentResponseTimer = undefined;
+      if (this.activeResponse !== response || response.hasFinalAssistantTranscript) {
+        return;
+      }
+      for (const callId of callIdsToRecover) {
+        this.recoveredCallIds.add(callId);
+        this.awaitingResponse.push(callId);
+      }
+      this.activeResponse = undefined;
+      this.signalChange();
+      recoverSilentResponse();
+    }, REALTIME_SILENT_TOOL_RESPONSE_GRACE_MS);
+  }
+
+  close(): void {
+    this.clearSilentResponseTimer();
+    this.running.clear();
+    this.awaitingResponse.length = 0;
+    this.activeResponse = undefined;
+    this.signalChange();
+  }
+
+  hasPendingWork(): boolean {
+    return !this.isIdle();
+  }
+
+  async waitForIdle(responseDrainTimeoutMs: number): Promise<number> {
+    let responseDeadline: number | undefined;
+    while (!this.isIdle()) {
+      if (this.running.size > 0) {
+        // Accepted tool execution keeps its own timeout. Do not spend the
+        // response-drain budget until every running tool has submitted either
+        // its result or its bounded fallback.
+        responseDeadline = undefined;
+        await this.waitForChange();
+        continue;
+      }
+      responseDeadline ??= Date.now() + responseDrainTimeoutMs;
+      const remainingMs = responseDeadline - Date.now();
+      if (remainingMs <= 0 || !(await this.waitForChange(remainingMs))) {
+        return responseDeadline;
+      }
+    }
+    return responseDeadline ?? Date.now() + responseDrainTimeoutMs;
+  }
+
+  private finishActiveResponseIfReady(successful: boolean): void {
+    if (
+      !this.activeResponse ||
+      !this.activeResponse.done ||
+      (successful && !this.activeResponse.hasFinalAssistantTranscript)
+    ) {
+      return;
+    }
+    this.activeResponse = undefined;
+    this.signalChange();
+  }
+
+  private clearSilentResponseTimer(): void {
+    if (this.silentResponseTimer) {
+      clearTimeout(this.silentResponseTimer);
+      this.silentResponseTimer = undefined;
+    }
+  }
+
+  private signalChange(): void {
+    for (const resolve of this.changeWaiters) {
+      resolve();
+    }
+    this.changeWaiters.clear();
+  }
+
+  private waitForChange(timeoutMs?: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const changed = () => {
+        if (timer) clearTimeout(timer);
+        this.changeWaiters.delete(changed);
+        resolve(true);
+      };
+      this.changeWaiters.add(changed);
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          this.changeWaiters.delete(changed);
+          resolve(false);
+        }, timeoutMs);
+      }
+    });
+  }
+
+  private isIdle(): boolean {
+    return this.running.size === 0 && this.awaitingResponse.length === 0 && !this.activeResponse;
+  }
+}
+
+async function waitForSettledPromises(
+  promises: Iterable<Promise<unknown>>,
+  timeoutMs: number,
+): Promise<void> {
+  const pending = [...promises];
+  if (pending.length === 0 || timeoutMs <= 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -1796,6 +2011,29 @@ async function runRealtimeContactRead(
   }
 }
 
+async function runRealtimeContactReadWithTimeout(
+  runtime: InkboxRuntime,
+  name: string,
+  args: any,
+): Promise<RealtimeContactReadResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      runRealtimeContactRead(runtime, name, args),
+      new Promise<RealtimeContactReadResult>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ error: "contact read timed out" }),
+          REALTIME_CONTACT_READ_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 function buildRealtimeInstructions(
   account: ResolvedInkboxAccount,
   meta: RealtimeCallMeta,
@@ -2871,6 +3109,7 @@ function handleRealtimeToolCall(
     consultResults: RealtimeConsultResult[];
     pendingConsults: Set<Promise<void>>;
     pendingConsultKeys: Map<string, string>;
+    responseWorkGate: RealtimeResponseWorkGate;
     hangupArmedAt: { value?: number };
     requestHangup: (reason?: string) => Promise<void>;
   },
@@ -2933,18 +3172,27 @@ function handleRealtimeToolCall(
     // when it lands, which prompts the model to speak it. Log the tool name
     // only — args/results carry contact PII and live-suite logs reach CI output.
     const toolName = opts.toolEvent.name;
-    void runRealtimeContactRead(opts.runtime, toolName, opts.toolEvent.args)
+    opts.responseWorkGate.start(callId);
+    const pendingContactRead = runRealtimeContactReadWithTimeout(
+      opts.runtime,
+      toolName,
+      opts.toolEvent.args,
+    )
       .then((result) => {
         opts.logger?.info?.(
           `Inkbox realtime direct contact read ${toolName} for call_id=${opts.meta.callId}`,
         );
+        opts.responseWorkGate.resultSubmitted(callId);
         opts.session.submitToolResult(callId, result);
       })
       .catch((error) => {
+        opts.responseWorkGate.resultSubmitted(callId);
         opts.session.submitToolResult(callId, {
           error: `contact read failed: ${error instanceof Error ? error.message : String(error)}`,
         });
       });
+    opts.pendingConsults.add(pendingContactRead);
+    void pendingContactRead.finally(() => opts.pendingConsults.delete(pendingContactRead));
     return;
   }
   if (
@@ -3000,6 +3248,7 @@ function handleRealtimeToolCall(
     }
   }
 
+  opts.responseWorkGate.start(callId);
   const pendingConsult = runRealtimeAgentConsult(opts)
     .then((result) => {
       opts.consultResults.push({
@@ -3009,6 +3258,7 @@ function handleRealtimeToolCall(
         createdAt: Date.now(),
         dedupeKey: consultKey,
       });
+      opts.responseWorkGate.resultSubmitted(callId);
       opts.session.submitToolResult(callId, result);
     })
     .catch((error) => {
@@ -3019,6 +3269,7 @@ function handleRealtimeToolCall(
         createdAt: Date.now(),
         dedupeKey: consultKey,
       });
+      opts.responseWorkGate.resultSubmitted(callId);
       opts.session.submitToolResult(callId, {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -3779,6 +4030,8 @@ async function runRealtimeCallWebSocket(
   const consultResults: RealtimeConsultResult[] = [];
   const pendingConsults = new Set<Promise<void>>();
   const pendingConsultKeys = new Map<string, string>();
+  const responseWorkGate = new RealtimeResponseWorkGate();
+  const pendingTranscriptSends = new Set<Promise<void>>();
   const sendJson = async (payload: Record<string, unknown>) => {
     if (closed) {
       return;
@@ -3797,6 +4050,27 @@ async function runRealtimeCallWebSocket(
         if (closed) {
           return;
         }
+        while (!closed) {
+          const responseDeadline = await responseWorkGate.waitForIdle(
+            REALTIME_HANGUP_DRAIN_TIMEOUT_MS,
+          );
+          if (closed) return;
+          const remainingMs = Math.max(0, responseDeadline - Date.now());
+          await Promise.all([
+            audioPacer.waitForIdle(remainingMs),
+            waitForSettledPromises(pendingTranscriptSends, remainingMs),
+          ]);
+          if (
+            closed ||
+            !responseWorkGate.hasPendingWork() ||
+            Date.now() >= responseDeadline
+          ) {
+            break;
+          }
+          // Work accepted while audio/transcript delivery was draining gets
+          // its own execution phase and a fresh post-result response deadline.
+        }
+        if (closed) return;
         // Inkbox ends the call on a `stop` event; `hangup` is ignored server-side.
         const stopFrame: Record<string, unknown> = { event: "stop" };
         if (reason) {
@@ -3851,7 +4125,10 @@ async function runRealtimeCallWebSocket(
     onTranscript: (role, text, isFinal) => {
       if (isFinal) {
         appendRealtimeTranscript(transcript, { role, text });
-        void sendJson({
+        if (role === "assistant") {
+          responseWorkGate.assistantTranscriptDone();
+        }
+        const transcriptSend = sendJson({
           event: "transcript",
           party: role === "user" ? "remote" : "local",
           text,
@@ -3861,14 +4138,29 @@ async function runRealtimeCallWebSocket(
             `Inkbox realtime transcript persist event failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         });
+        pendingTranscriptSends.add(transcriptSend);
+        void transcriptSend.finally(() => pendingTranscriptSends.delete(transcriptSend));
       }
     },
     onEvent: (event) => {
+      if (event.type === "response.created") {
+        responseWorkGate.responseCreated();
+      }
       if (event.type === "response.done") {
         if (initialGreetingActive) {
           initialGreetingActive = false;
         }
         audioPacer.sendAudioDone();
+        responseWorkGate.responseDone(
+          !event.detail || event.detail.includes("status=completed"),
+          () => {
+            if (closed) return;
+            session.sendUserMessage(
+              "Answer the caller's pending question now using the tool result already provided. " +
+                "State the result directly and do not call the tool again.",
+            );
+          },
+        );
       }
       if (event.type === "error") {
         opts.logger?.warn?.(
@@ -3886,6 +4178,7 @@ async function runRealtimeCallWebSocket(
         consultResults,
         pendingConsults,
         pendingConsultKeys,
+        responseWorkGate,
         hangupArmedAt,
         requestHangup,
       });
@@ -3987,18 +4280,17 @@ async function runRealtimeCallWebSocket(
       }
     }
   } finally {
-    if (pendingHangupClose) {
-      await pendingHangupClose.catch((error) => {
-        opts.logger?.warn?.(
-          `Inkbox realtime hangup close failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+    if (!closed) {
+      closed = true;
+      audioPacer.close();
+      session.close();
+      await opts.ws.close().catch(() => {});
     }
-    closed = true;
-    audioPacer.close();
-    session.close();
+    // A remote stop or transport close owns teardown immediately. Wake the
+    // detached local-hangup waiter so it observes `closed` and exits without
+    // delaying this WebSocket handler.
+    responseWorkGate.close();
     unregisterActiveCall(opts.activeCalls, opts.active);
-    await opts.ws.close().catch(() => {});
     opts.logger?.info?.(`Inkbox call WebSocket closed: call_id=${opts.meta.callId}`);
     await waitForPendingRealtimeConsults(pendingConsults);
     void runRealtimePostCallActions({

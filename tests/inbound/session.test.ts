@@ -6,6 +6,9 @@ const realtimeMock = vi.hoisted(() => ({
   toolCallOnAudio: false as any,
   resolveCalls: [] as any[],
   connectError: undefined as Error | undefined,
+  onSubmitToolResult: undefined as
+    | ((callId: string, result: unknown, params: any) => void)
+    | undefined,
 }));
 
 const a2aRegistryMock = vi.hoisted(() => ({
@@ -164,7 +167,9 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
         params.onEvent?.({ type: "response.done" });
       }),
       handleBargeIn: vi.fn(),
-      submitToolResult: vi.fn(),
+      submitToolResult: vi.fn((callId: string, result: unknown) => {
+        realtimeMock.onSubmitToolResult?.(callId, result, params);
+      }),
       close: vi.fn(),
     };
     realtimeMock.sessions.push({ params, session });
@@ -204,11 +209,18 @@ class FakeInkboxWebSocket {
   readonly send = vi.fn(async (message: string) => {
     this.sent.push(message);
   });
-  readonly close = vi.fn(async () => undefined);
+  private closed = false;
+  private readonly closeWaiters = new Set<() => void>();
+  readonly close = vi.fn(async () => {
+    this.closed = true;
+    for (const resolve of this.closeWaiters) resolve();
+    this.closeWaiters.clear();
+  });
 
   constructor(
     private readonly messages: FakeInkboxWebSocketMessage[],
     url = "wss://example.com/inkbox/phone/media/ws?call_id=call-1",
+    private readonly holdOpen = false,
   ) {
     this.url = url;
   }
@@ -223,6 +235,9 @@ class FakeInkboxWebSocket {
         vi.advanceTimersByTime(entry.advanceMs);
       }
       yield entry.message;
+    }
+    if (this.holdOpen && !this.closed) {
+      await new Promise<void>((resolve) => this.closeWaiters.add(resolve));
     }
   }
 }
@@ -570,6 +585,7 @@ describe("createInkboxSessionBridge", () => {
     realtimeMock.toolCallOnAudio = false;
     realtimeMock.resolveCalls = [];
     realtimeMock.connectError = undefined;
+    realtimeMock.onSubmitToolResult = undefined;
     a2aRegistryMock.entries = {};
     a2aRegistryMock.writes = [];
     a2aDelegationMock.record = undefined;
@@ -3069,7 +3085,7 @@ describe("createInkboxSessionBridge", () => {
           media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
         }),
       },
-    ]);
+    ], undefined, true);
 
     const run = bridge.wsHandler(ws as any);
     await Promise.resolve();
@@ -3108,6 +3124,362 @@ describe("createInkboxSessionBridge", () => {
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
       "Do not redo work that was already completed on the call.",
     );
+  });
+
+  it("defers realtime hangup until a pending contact result is spoken and flushed", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      {
+        callId: "contact-1",
+        name: "inkbox_list_contacts",
+        args: { q: "alex" },
+      },
+      {
+        callId: "hangup-1",
+        name: "hang_up_call",
+        args: { reason: "caller said goodbye" },
+      },
+      {
+        callId: "hangup-2",
+        name: "hang_up_call",
+        args: { reason: "caller said goodbye" },
+      },
+    ];
+    let releaseContactRead!: () => void;
+    const list = vi.fn(
+      () =>
+        new Promise<any[]>((resolve) => {
+          releaseContactRead = () =>
+            resolve([
+              {
+                id: "contact-alex",
+                preferredName: "Alex",
+                emails: [{ value: "alex@example.com" }],
+              },
+            ]);
+        }),
+    );
+    const runtime = createContactRuntime({ list });
+    const channelRuntime = createChannelRuntime("Should not dispatch.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+    ], undefined, true);
+
+    const run = bridge.wsHandler(ws as any);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(parseSentTextFrames(ws).some((frame) => frame.event === "stop")).toBe(false);
+    expect(ws.close).not.toHaveBeenCalled();
+
+    realtimeMock.onSubmitToolResult = (callId, _result, params) => {
+      if (callId !== "contact-1") return;
+      params.onEvent?.({ type: "response.created" });
+      params.onTranscript?.("assistant", "Alex's email is alex@example.com.", true);
+      params.audioSink.sendAudio(Buffer.alloc(160, 0xff));
+      params.onEvent?.({ type: "response.done" });
+    };
+    releaseContactRead();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_100);
+    await run;
+
+    const frames = parseSentTextFrames(ws);
+    const stopFrames = frames.filter((frame) => frame.event === "stop");
+    expect(frames).toContainEqual({ event: "audio_done", stream_id: "stream-1" });
+    expect(stopFrames).toEqual([
+      {
+        event: "stop",
+        reason: "caller said goodbye",
+        stream_id: "stream-1",
+      },
+    ]);
+    expect(realtimeMock.sessions[0].session.close).toHaveBeenCalledTimes(1);
+    expect(ws.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes immediately on remote stop while local hangup is waiting on tool work", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      { callId: "contact-remote", name: "inkbox_list_contacts", args: { q: "alex" } },
+      { callId: "hangup-remote-1", name: "hang_up_call", args: { reason: "done" } },
+      { callId: "hangup-remote-2", name: "hang_up_call", args: { reason: "done" } },
+    ];
+    const list = vi.fn(() => new Promise<any[]>(() => {}));
+    const runtime = createContactRuntime({ list });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime("Should not dispatch."),
+    });
+    const ws = new FakeInkboxWebSocket(contactMediaMessages());
+
+    const run = bridge.wsHandler(ws as any);
+    await flushMicrotasks(50);
+
+    expect(ws.close).toHaveBeenCalledTimes(1);
+    expect(realtimeMock.sessions[0].session.close).toHaveBeenCalledTimes(1);
+    expect(parseSentTextFrames(ws).some((frame) => frame.event === "stop")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await run;
+  });
+
+  it("starts the 30 second drain deadline only after a fast tool result", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      { callId: "contact-timeout", name: "inkbox_list_contacts", args: { q: "alex" } },
+      { callId: "hangup-timeout-1", name: "hang_up_call", args: { reason: "done" } },
+      { callId: "hangup-timeout-2", name: "hang_up_call", args: { reason: "done" } },
+    ];
+    realtimeMock.onSubmitToolResult = (callId, _result, params) => {
+      if (callId === "contact-timeout") {
+        params.onEvent?.({ type: "response.created" });
+      }
+    };
+    const runtime = createContactRuntime({ list: vi.fn(async () => []) });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime("Should not dispatch."),
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+    ], undefined, true);
+
+    const run = bridge.wsHandler(ws as any);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(31_999);
+    expect(parseSentTextFrames(ws).some((frame) => frame.event === "stop")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await run;
+    expect(parseSentTextFrames(ws).filter((frame) => frame.event === "stop")).toHaveLength(1);
+  });
+
+  it("drains two coalesced tool results through one owned response", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      { callId: "contact-a", name: "inkbox_list_contacts", args: { q: "alex" } },
+      { callId: "contact-b", name: "inkbox_list_contacts", args: { q: "blair" } },
+      { callId: "hangup-coalesced-1", name: "hang_up_call", args: { reason: "done" } },
+      { callId: "hangup-coalesced-2", name: "hang_up_call", args: { reason: "done" } },
+    ];
+    const submitted = new Set<string>();
+    realtimeMock.onSubmitToolResult = (callId, _result, params) => {
+      if (!callId.startsWith("contact-")) return;
+      submitted.add(callId);
+      if (submitted.size === 2) {
+        params.onEvent?.({ type: "response.created" });
+        params.onTranscript?.("assistant", "I found both requested contacts.", true);
+        params.audioSink.sendAudio(Buffer.alloc(160, 0xff));
+        params.onEvent?.({ type: "response.done" });
+      }
+    };
+    const runtime = createContactRuntime({ list: vi.fn(async () => []) });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime("Should not dispatch."),
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+    ], undefined, true);
+
+    const run = bridge.wsHandler(ws as any);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_100);
+    await run;
+
+    expect(submitted).toEqual(new Set(["contact-a", "contact-b"]));
+    expect(parseSentTextFrames(ws).filter((frame) => frame.event === "stop")).toHaveLength(1);
+  });
+
+  it("recovers coalesced silent successful tool results once and keeps the retry owned", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      { callId: "contact-silent-a", name: "inkbox_list_contacts", args: { q: "alex" } },
+      { callId: "contact-silent-b", name: "inkbox_list_contacts", args: { q: "blair" } },
+      { callId: "hangup-silent-1", name: "hang_up_call", args: { reason: "done" } },
+      { callId: "hangup-silent-2", name: "hang_up_call", args: { reason: "done" } },
+    ];
+    const submitted = new Set<string>();
+    realtimeMock.onSubmitToolResult = (callId, _result, params) => {
+      if (callId.startsWith("contact-silent-")) {
+        submitted.add(callId);
+      }
+      if (submitted.size === 2) {
+        params.onEvent?.({ type: "response.created" });
+        params.onEvent?.({ type: "response.done", detail: "status=completed" });
+      }
+    };
+    const runtime = createContactRuntime({ list: vi.fn(async () => []) });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime("Should not dispatch."),
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+    ], undefined, true);
+
+    const run = bridge.wsHandler(ws as any);
+    await flushMicrotasks();
+    const { params, session } = realtimeMock.sessions[0];
+
+    await vi.advanceTimersByTimeAsync(499);
+    expect(session.sendUserMessage).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(session.sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(session.sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("tool result already provided"),
+    );
+    expect(parseSentTextFrames(ws).some((frame) => frame.event === "stop")).toBe(false);
+
+    params.onEvent?.({ type: "response.created" });
+    params.onTranscript?.("assistant", "The requested contact is available.", true);
+    params.audioSink.sendAudio(Buffer.alloc(160, 0xff));
+    params.onEvent?.({ type: "response.done", detail: "status=completed" });
+    await vi.advanceTimersByTimeAsync(2_100);
+    await run;
+
+    expect(submitted).toEqual(new Set(["contact-silent-a", "contact-silent-b"]));
+    expect(session.sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(parseSentTextFrames(ws).filter((frame) => frame.event === "stop")).toHaveLength(1);
+  });
+
+  it("does not recover when the final transcript arrives during the grace window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    realtimeMock.toolCallOnAudio = [
+      { callId: "contact-late", name: "inkbox_list_contacts", args: { q: "alex" } },
+      { callId: "hangup-late-1", name: "hang_up_call", args: { reason: "done" } },
+      { callId: "hangup-late-2", name: "hang_up_call", args: { reason: "done" } },
+    ];
+    realtimeMock.onSubmitToolResult = (callId, _result, params) => {
+      if (callId === "contact-late") {
+        params.onEvent?.({ type: "response.created" });
+        params.onEvent?.({ type: "response.done", detail: "status=completed" });
+      }
+    };
+    const runtime = createContactRuntime({ list: vi.fn(async () => []) });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: {
+          identity: "smoke-agent",
+          voiceRealtime: { enabled: true, provider: "openai", toolPolicy: "owner" },
+        },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime("Should not dispatch."),
+    });
+    const ws = new FakeInkboxWebSocket([
+      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      {
+        advanceMs: 800,
+        message: JSON.stringify({
+          event: "media",
+          stream_id: "stream-1",
+          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+        }),
+      },
+    ], undefined, true);
+
+    const run = bridge.wsHandler(ws as any);
+    await flushMicrotasks();
+    const { params, session } = realtimeMock.sessions[0];
+    await vi.advanceTimersByTimeAsync(400);
+    params.onTranscript?.("assistant", "The requested contact is available.", true);
+    params.audioSink.sendAudio(Buffer.alloc(160, 0xff));
+    await vi.advanceTimersByTimeAsync(2_100);
+    await run;
+
+    expect(session.sendUserMessage).not.toHaveBeenCalled();
+    expect(parseSentTextFrames(ws).filter((frame) => frame.event === "stop")).toHaveLength(1);
   });
 
   it("routes unaddressed group SMS to the agent and honors silent replies", async () => {
