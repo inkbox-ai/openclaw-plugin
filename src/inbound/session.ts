@@ -397,10 +397,11 @@ function realtimeCapabilitySummaries(): string[] {
 // caller already hears the "One moment" cue and can keep talking while it runs.
 // But if the agent loop never returns, the tool result is never submitted and
 // the model is left waiting — dead air. Bound it and speak a graceful fallback
-// instead. Mirrors Hermes' consult_timeout_s (see hermes-agent-plugin#4 / #9).
+// instead.
 const REALTIME_CONSULT_TIMEOUT_MS = 300 * 1000;
 const REALTIME_HANGUP_CLOSE_DELAY_MS = 2000;
 const REALTIME_HANGUP_DRAIN_TIMEOUT_MS = 30 * 1000;
+const REALTIME_SILENT_TOOL_RESPONSE_GRACE_MS = 500;
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
 const REALTIME_REQUIRED_QUIET_CHUNKS = 12;
@@ -723,6 +724,8 @@ class RealtimeResponseWorkGate {
     | { callIds: string[]; hasFinalAssistantTranscript: boolean; done: boolean }
     | undefined;
   private readonly changeWaiters = new Set<() => void>();
+  private readonly recoveredCallIds = new Set<string>();
+  private silentResponseTimer: ReturnType<typeof setTimeout> | undefined;
 
   start(callId: string): void {
     this.running.add(callId);
@@ -750,19 +753,46 @@ class RealtimeResponseWorkGate {
   assistantTranscriptDone(): void {
     if (this.activeResponse) {
       this.activeResponse.hasFinalAssistantTranscript = true;
+      this.clearSilentResponseTimer();
       this.finishActiveResponseIfReady(true);
     }
   }
 
-  responseDone(successful: boolean): void {
+  responseDone(successful: boolean, recoverSilentResponse: () => void): void {
     if (!this.activeResponse) {
       return;
     }
     this.activeResponse.done = true;
-    this.finishActiveResponseIfReady(successful);
+    if (!successful || this.activeResponse.hasFinalAssistantTranscript) {
+      this.clearSilentResponseTimer();
+      this.finishActiveResponseIfReady(successful);
+      return;
+    }
+    const response = this.activeResponse;
+    const callIdsToRecover = response.callIds.filter(
+      (callId) => !this.recoveredCallIds.has(callId),
+    );
+    if (callIdsToRecover.length === 0) {
+      return;
+    }
+    this.clearSilentResponseTimer();
+    this.silentResponseTimer = setTimeout(() => {
+      this.silentResponseTimer = undefined;
+      if (this.activeResponse !== response || response.hasFinalAssistantTranscript) {
+        return;
+      }
+      for (const callId of callIdsToRecover) {
+        this.recoveredCallIds.add(callId);
+        this.awaitingResponse.push(callId);
+      }
+      this.activeResponse = undefined;
+      this.signalChange();
+      recoverSilentResponse();
+    }, REALTIME_SILENT_TOOL_RESPONSE_GRACE_MS);
   }
 
   close(): void {
+    this.clearSilentResponseTimer();
     this.running.clear();
     this.awaitingResponse.length = 0;
     this.activeResponse = undefined;
@@ -803,6 +833,13 @@ class RealtimeResponseWorkGate {
     }
     this.activeResponse = undefined;
     this.signalChange();
+  }
+
+  private clearSilentResponseTimer(): void {
+    if (this.silentResponseTimer) {
+      clearTimeout(this.silentResponseTimer);
+      this.silentResponseTimer = undefined;
+    }
   }
 
   private signalChange(): void {
@@ -4114,7 +4151,16 @@ async function runRealtimeCallWebSocket(
           initialGreetingActive = false;
         }
         audioPacer.sendAudioDone();
-        responseWorkGate.responseDone(!event.detail || event.detail.includes("status=completed"));
+        responseWorkGate.responseDone(
+          !event.detail || event.detail.includes("status=completed"),
+          () => {
+            if (closed) return;
+            session.sendUserMessage(
+              "Answer the caller's pending question now using the tool result already provided. " +
+                "State the result directly and do not call the tool again.",
+            );
+          },
+        );
       }
       if (event.type === "error") {
         opts.logger?.warn?.(
