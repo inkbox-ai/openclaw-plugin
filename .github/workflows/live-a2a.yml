@@ -79,7 +79,7 @@ jobs:
           openclaw onboard --non-interactive \
             --auth-choice custom-api-key \
             --custom-base-url "https://api.openai.com/v1" \
-            --custom-model-id "gpt-5.6-terra" \
+            --custom-model-id "gpt-5.6-sol" \
             --custom-api-key "$OPENAI_API_KEY" \
             --custom-compatibility openai \
             --secret-input-mode plaintext \
