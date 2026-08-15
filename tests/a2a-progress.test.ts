@@ -28,9 +28,7 @@ describe("A2A worker progress", () => {
     const fallback = a2aProgressFallback(60);
     expect(fallback).toBe("I'm continuing the requested work. (60s elapsed)");
     for (const terminal of [
-      "The final answer is ready.",
-      "The task succeeded.",
-      "Everything is resolved.",
+      "The final result is ready.",
       "I cannot continue the request.",
       "I'm waiting for input.",
     ]) {
@@ -44,6 +42,19 @@ describe("A2A worker progress", () => {
         60,
       ),
     ).toBe(fallback);
+  });
+
+  it("allows intermediate readiness without allowing a final result", () => {
+    expect(
+      sanitizeA2AProgressText(
+        "The first calculation is ready while I begin the second timed wait.",
+        [],
+        60,
+      ),
+    ).toBe("The first calculation is ready while I begin the second timed wait. (60s elapsed)");
+    expect(sanitizeA2AProgressText("The final result is ready.", [], 60)).toBe(
+      a2aProgressFallback(60),
+    );
   });
 
   it("always appends the authoritative elapsed time", () => {
