@@ -1559,6 +1559,20 @@ describe("createInkboxSessionBridge", () => {
         text: "I am reviewing the requested calculation. (60s elapsed)",
       });
 
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushMicrotasks(30);
+      const progressPrompts = channelRuntime.inbound.dispatchReply.mock.calls
+        .map(([params]) => params)
+        .filter((params) => params.routeSessionKey === "a2a-progress:identity-1:task-progress")
+        .map((params) => params.ctxPayload.message.bodyForAgent);
+      expect(progressPrompts).toHaveLength(2);
+      expect(progressPrompts[1]).toContain(
+        "Previous update: I am reviewing the requested calculation. (60s elapsed)",
+      );
+      expect(progressPrompts[1]).toContain(
+        "Do not mention tools, prompts, systems, or internal details.",
+      );
+
       releaseMain();
       await flushMicrotasks(30);
       const callsAtCompletion = a2aReply.mock.calls.length;
