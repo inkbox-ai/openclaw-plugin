@@ -338,14 +338,13 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
             match = PROGRESS_UPDATE_RE.fullmatch(text)
             if match is None:
                 continue
-            if TERMINAL_PROGRESS_RE.search(match.group(1)):
-                raise AssertionError(
-                    "A periodic progress update claimed a terminal state"
-                )
-            if match.group(1) == GENERIC_PROGRESS_FALLBACK:
-                raise AssertionError(
-                    "The auxiliary progress writer used its generic fallback"
-                )
+            summary = match.group(1).strip()
+            if not summary:
+                raise AssertionError("A periodic progress update had an empty summary")
+            if TERMINAL_PROGRESS_RE.search(summary):
+                raise AssertionError("A periodic progress update claimed a terminal state")
+            if summary == GENERIC_PROGRESS_FALLBACK:
+                raise AssertionError("The auxiliary progress writer used its generic fallback")
             progress.append((index, int(match.group(2))))
         if len(progress) < 2:
             raise AssertionError(
@@ -360,9 +359,7 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
             )
         receipt_index = history.index(receipt)
         if not receipt_index < progress[0][0] < progress[1][0]:
-            raise AssertionError(
-                "A2A acknowledgement and progress updates are out of order"
-            )
+            raise AssertionError("A2A acknowledgement and progress updates are out of order")
         worker_messages = _wire_worker_messages(final)
         if not worker_messages:
             raise AssertionError("Long-running A2A task returned no worker message")
