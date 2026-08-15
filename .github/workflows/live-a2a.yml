@@ -1,6 +1,6 @@
 name: Live — Agent2Agent
 
-# Four real protocol legs cover both roles and conversation lengths:
+# Real protocol legs cover both roles, conversation lengths, and worker progress:
 # inbound/outbound × single-turn/multi-turn. The plugin and remote identities
 # are preconfigured to allow one another in both directions.
 on:
@@ -42,6 +42,7 @@ jobs:
         scenario:
           - inbound-single
           - inbound-multi
+          - inbound-progress
           - outbound-single
           - outbound-multi
 
@@ -72,15 +73,24 @@ jobs:
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g openclaw@latest
           openclaw --version
 
-      - name: Configure the real model
+      - name: Configure model
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          if [ "${{ matrix.scenario }}" = "inbound-progress" ]; then
+            BASE_URL="http://127.0.0.1:8088/v1"
+            MODEL_ID="mock-model"
+            API_KEY="sk-mock-not-used"
+          else
+            BASE_URL="https://api.openai.com/v1"
+            MODEL_ID="gpt-5.6-sol"
+            API_KEY="$OPENAI_API_KEY"
+          fi
           openclaw onboard --non-interactive \
             --auth-choice custom-api-key \
-            --custom-base-url "https://api.openai.com/v1" \
-            --custom-model-id "gpt-5.6-sol" \
-            --custom-api-key "$OPENAI_API_KEY" \
+            --custom-base-url "$BASE_URL" \
+            --custom-model-id "$MODEL_ID" \
+            --custom-api-key "$API_KEY" \
             --custom-compatibility openai \
             --secret-input-mode plaintext \
             --skip-health \
@@ -104,9 +114,24 @@ jobs:
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"
           openclaw config set channels.inkbox.voicemailDetection disabled
+          openclaw config set channels.inkbox.a2aProgressIntervalSeconds 60 --strict-json
           openclaw config set channels.inkbox.signingKey "$OPENCLAW_INKBOX_SIGNING_KEY"
           openclaw config set tools.allow '["inkbox"]' --strict-json
           openclaw config set tools.profile full
+
+      - name: Start deterministic progress model
+        if: matrix.scenario == 'inbound-progress'
+        env:
+          MOCK_A2A_SCENARIO: inbound-progress
+        run: |
+          nohup python3 "$GITHUB_WORKSPACE/tests/live/mock_openai.py" 8088 > "$RUNNER_TEMP/mock.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/mock.pid"
+          for _ in $(seq 1 10); do
+            curl -sf --connect-timeout 1 --max-time 3 http://127.0.0.1:8088/v1/models >/dev/null && exit 0
+            sleep 1
+          done
+          echo "::error::deterministic progress model did not start"
+          exit 1
 
       - name: Start gateway
         env:
@@ -153,3 +178,4 @@ jobs:
         if: always()
         run: |
           kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true

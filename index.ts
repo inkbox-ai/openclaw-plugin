@@ -33,6 +33,10 @@ import {
   recordHostedSmsAfterToolCall,
   recordHostedSmsBeforeToolCall,
 } from "./src/hosted-call-tool-settlement.js";
+import {
+  bindA2AProgressActivityToRun,
+  recordA2AProgressToolActivity,
+} from "./src/a2a-progress-activity.js";
 
 type OpenClawChannelEntry = {
   id: string;
@@ -156,8 +160,15 @@ function registerInkboxTools(api: any): void {
 }
 
 function registerHostedCallSettlementHooks(api: any): void {
-  api.on("before_agent_run", bindHostedSmsCaptureToRun);
-  api.on("before_tool_call", recordHostedSmsBeforeToolCall);
+  api.on("before_agent_run", (event: any, context: any) => {
+    bindHostedSmsCaptureToRun(event, context);
+    bindA2AProgressActivityToRun(event, context);
+  });
+  api.on("before_tool_call", async (event: any, context: any) => {
+    const decision = await recordHostedSmsBeforeToolCall(event, context);
+    if (!decision?.block) recordA2AProgressToolActivity(event, context);
+    return decision;
+  });
   api.on("after_tool_call", recordHostedSmsAfterToolCall);
   api.on("model_call_ended", recordHostedModelCallEnded);
 }

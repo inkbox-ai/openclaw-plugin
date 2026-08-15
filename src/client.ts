@@ -35,6 +35,8 @@ export interface InkboxPluginConfig {
   voiceAgentPrewarm?: boolean;
   voiceAgentPrewarmTtlMs?: number;
   voiceAgentPrewarmTimeoutMs?: number;
+  // A2A worker: seconds between nonterminal progress updates. Defaults to 180.
+  a2aProgressIntervalSeconds?: number;
   // Voice: one explicit stack controls inbound routing, outbound calls, and
   // post-call handling. Omitted preserves the pre-selection auto-detection
   // behavior for existing installations.

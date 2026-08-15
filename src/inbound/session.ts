@@ -33,9 +33,19 @@ import {
 } from "../a2a-context.js";
 import {
   readA2ARegistry,
+  updateA2AProgressJournal,
   writeA2ARegistry,
   type A2ARegistryData,
 } from "../a2a-registry.js";
+import { beginA2AProgressActivityCapture } from "../a2a-progress-activity.js";
+import {
+  a2aProgressFallback,
+  a2aReceiptText,
+  abortableDelay,
+  resolveA2AProgressIntervalSeconds,
+  sanitizeA2AProgressText,
+  taskAgentHistoryContains,
+} from "../a2a-progress.js";
 import { findDelegationByTask } from "../a2a-delegations.js";
 import {
   hostedCallRegistryKey,
@@ -4460,12 +4470,266 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     string,
     Set<{ contextId: string; controller: AbortController }>
   >();
+  const a2aAcknowledgements = new Map<string, Promise<boolean>>();
+  type A2AProgressSupervisor = {
+    taskId: string;
+    identity: any;
+    identityId: string;
+    key: string;
+    data: A2ARegistryData;
+    body: string;
+    startedAt: number;
+    intervalSeconds: number;
+    activeRuns: number;
+    controller: AbortController;
+    activityCapture: { snapshot(): string[]; finish(): void };
+    progressTask: Promise<void>;
+    stopping?: Promise<void>;
+  };
+  const a2aProgressSupervisors = new Map<string, A2AProgressSupervisor>();
   const a2aTerminalStates = new Set([
     "completed",
     "failed",
     "canceled",
     "rejected",
   ]);
+
+  async function sendA2AProgress(params: {
+    key: string;
+    identity: any;
+    taskId: string;
+    text: string;
+    acknowledgement?: boolean;
+  }): Promise<boolean> {
+    const task = await params.identity.a2aTask(params.taskId);
+    if (a2aTerminalStates.has(String(task.state))) return false;
+    const entry = (await readA2ARegistry())[params.key];
+    const journal = entry?.progress;
+    if (journal?.deliveredTexts.includes(params.text)) return true;
+    if (taskAgentHistoryContains(task, params.text)) {
+      await updateA2AProgressJournal(params.key, (current) => ({
+        ...current,
+        acknowledgement: params.acknowledgement ? "delivered" : current.acknowledgement,
+        pendingText: undefined,
+        deliveredTexts: [...new Set([...current.deliveredTexts, params.text])],
+      }));
+      return true;
+    }
+    await updateA2AProgressJournal(params.key, (current) => ({
+      ...current,
+      acknowledgement: params.acknowledgement ? "pending" : current.acknowledgement,
+      pendingText: params.text,
+    }));
+    await params.identity.a2aReply(params.taskId, {
+      intent: "progress",
+      text: params.text,
+    });
+    await updateA2AProgressJournal(params.key, (current) => ({
+      ...current,
+      acknowledgement: params.acknowledgement ? "delivered" : current.acknowledgement,
+      pendingText: undefined,
+      deliveredTexts: [...new Set([...current.deliveredTexts, params.text])],
+    }));
+    return true;
+  }
+
+  async function ensureA2AAcknowledgement(params: {
+    key: string;
+    identity: any;
+    data: A2ARegistryData;
+    intervalSeconds: number;
+  }): Promise<boolean> {
+    const existing = a2aAcknowledgements.get(params.key);
+    if (existing) return existing;
+    const pending = sendA2AProgress({
+      key: params.key,
+      identity: params.identity,
+      taskId: params.data.task_id,
+      text: a2aReceiptText(params.data.task_id, params.intervalSeconds),
+      acknowledgement: true,
+    });
+    a2aAcknowledgements.set(params.key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (a2aAcknowledgements.get(params.key) === pending) {
+        a2aAcknowledgements.delete(params.key);
+      }
+    }
+  }
+
+  async function generateA2AProgress(params: {
+    identityId: string;
+    data: A2ARegistryData;
+    body: string;
+    elapsedSeconds: number;
+    activities: string[];
+    signal: AbortSignal;
+  }): Promise<string> {
+    const fallback = a2aProgressFallback(params.activities, params.elapsedSeconds);
+    const delivered: string[] = [];
+    try {
+      await dispatchInboundTurn({
+        ...opts,
+        activeCalls,
+        dispatchAbortSignal: params.signal,
+        turn: {
+          mode: "warmup",
+          contactKey: `a2a-progress:${params.data.task_id}`,
+          fromLabel: "A2A progress writer",
+          conversationKind: "direct",
+          sessionKeyOverride: `a2a-progress:${params.identityId}:${params.data.task_id}`,
+          body: [
+            `[inkbox:a2a_progress task_id=${params.data.task_id} elapsed_seconds=${params.elapsedSeconds}]`,
+            "Write one present-tense progress update of at most 16 words.",
+            "Describe ongoing work only. Do not claim completion, failure, or a final result. Do not use tools.",
+            params.activities.length > 0
+              ? `Recent coarse activity: ${params.activities.slice(-2).join("; ")}.`
+              : "No coarse tool activity is available yet.",
+            `Task context: ${params.body.slice(0, 2_000)}`,
+          ].join("\n"),
+          messageId: `a2a-progress:${params.data.task_id}:${params.elapsedSeconds}`,
+          threadId: `a2a:${params.data.context_id}:progress`,
+          raw: {},
+        },
+        replyOptionsOverride: {
+          sourceReplyDeliveryMode: "automatic",
+          bootstrapContextMode: "lightweight",
+          fastModeOverride: true,
+          thinkingLevelOverride: "minimal",
+          suppressDefaultToolProgressMessages: true,
+          disableTools: true,
+          skillFilter: [],
+          abortSignal: params.signal,
+        },
+        deliveryOverride: {
+          deliver: async (payload: unknown) => {
+            const text = payloadText(payload).trim();
+            if (text) delivered.push(text);
+            return { visibleReplySent: false };
+          },
+        },
+      });
+    } catch (error) {
+      if (!params.signal.aborted) {
+        opts.logger?.warn?.(
+          `Inkbox A2A progress writer degraded to fallback: task_id=${params.data.task_id} ${errorMessage(error)}`,
+        );
+      }
+    }
+    return sanitizeA2AProgressText(
+      delivered.at(-1) ?? "",
+      fallback,
+      params.elapsedSeconds,
+    );
+  }
+
+  function acquireA2AProgressSupervisor(params: {
+    identity: any;
+    identityId: string;
+    key: string;
+    data: A2ARegistryData;
+    body: string;
+    marker: string;
+    sessionKey: string;
+    startedAt: number;
+    intervalSeconds: number;
+  }): A2AProgressSupervisor {
+    const existing = a2aProgressSupervisors.get(params.data.task_id);
+    if (existing) {
+      existing.activeRuns += 1;
+      existing.key = params.key;
+      existing.data = params.data;
+      existing.body = params.body;
+      existing.startedAt = Math.min(existing.startedAt, params.startedAt);
+      return existing;
+    }
+
+    const controller = new AbortController();
+    const supervisor: A2AProgressSupervisor = {
+      taskId: params.data.task_id,
+      identity: params.identity,
+      identityId: params.identityId,
+      key: params.key,
+      data: params.data,
+      body: params.body,
+      startedAt: params.startedAt,
+      intervalSeconds: params.intervalSeconds,
+      activeRuns: 1,
+      controller,
+      activityCapture: beginA2AProgressActivityCapture({
+        sessionKey: params.sessionKey,
+        promptMarker: params.marker,
+      }),
+      progressTask: Promise.resolve(),
+    };
+    a2aProgressSupervisors.set(supervisor.taskId, supervisor);
+    supervisor.progressTask = (async () => {
+      const intervalMilliseconds = supervisor.intervalSeconds * 1_000;
+      const elapsedMilliseconds = Math.max(0, Date.now() - supervisor.startedAt);
+      let delayMilliseconds =
+        intervalMilliseconds - (elapsedMilliseconds % intervalMilliseconds);
+      while (!controller.signal.aborted) {
+        await abortableDelay(delayMilliseconds, controller.signal);
+        delayMilliseconds = intervalMilliseconds;
+        if (controller.signal.aborted) break;
+        try {
+          const task = await supervisor.identity.a2aTask(supervisor.taskId);
+          if (a2aTerminalStates.has(String(task.state))) break;
+          const elapsedSeconds = Math.max(
+            1,
+            Math.round((Date.now() - supervisor.startedAt) / 1_000),
+          );
+          const text = await generateA2AProgress({
+            identityId: supervisor.identityId,
+            data: supervisor.data,
+            body: supervisor.body,
+            elapsedSeconds,
+            activities: supervisor.activityCapture.snapshot(),
+            signal: controller.signal,
+          });
+          if (controller.signal.aborted) break;
+          await sendA2AProgress({
+            key: supervisor.key,
+            identity: supervisor.identity,
+            taskId: supervisor.taskId,
+            text,
+          });
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            opts.logger?.warn?.(
+              `Inkbox A2A progress update failed: task_id=${supervisor.taskId} ${errorMessage(error)}`,
+            );
+          }
+        }
+      }
+    })();
+    return supervisor;
+  }
+
+  async function stopA2AProgressSupervisor(
+    supervisor: A2AProgressSupervisor,
+  ): Promise<void> {
+    if (!supervisor.stopping) {
+      supervisor.controller.abort();
+      supervisor.stopping = (async () => {
+        await supervisor.progressTask;
+        supervisor.activityCapture.finish();
+      })();
+    }
+    await supervisor.stopping;
+  }
+
+  async function releaseA2AProgressSupervisor(
+    supervisor: A2AProgressSupervisor,
+  ): Promise<void> {
+    supervisor.activeRuns = Math.max(0, supervisor.activeRuns - 1);
+    if (supervisor.activeRuns > 0) return;
+    await stopA2AProgressSupervisor(supervisor);
+    if (a2aProgressSupervisors.get(supervisor.taskId) === supervisor) {
+      a2aProgressSupervisors.delete(supervisor.taskId);
+    }
+  }
 
   async function runA2ATurn(
     key: string,
@@ -4495,6 +4759,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       `[inkbox:a2a_task caller=@${String(caller.handle ?? "unknown").replace(/^@/, "")} ` +
       `caller_org=${caller.organization_id ?? "unknown"}]`;
     const delivered: string[] = [];
+    const progressIntervalSeconds = resolveA2AProgressIntervalSeconds(
+      opts.account.config.a2aProgressIntervalSeconds,
+    );
     const turn: InkboxInboundTurn = {
       mode: "a2a",
       contactKey: `${identity.id}:${data.context_id}`,
@@ -4510,6 +4777,32 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       raw: data,
     };
     await writeA2ARegistry(key, data, "running");
+    try {
+      await ensureA2AAcknowledgement({
+        key,
+        identity,
+        data,
+        intervalSeconds: progressIntervalSeconds,
+      });
+    } catch (error) {
+      opts.logger?.warn?.(
+        `Inkbox A2A acknowledgement failed: task_id=${data.task_id} ${errorMessage(error)}`,
+      );
+    }
+    const progressJournal = await updateA2AProgressJournal(key, (current) => current);
+    const progressSupervisor = acquireA2AProgressSupervisor({
+      identity,
+      identityId: String(identity.id),
+      key,
+      data,
+      body,
+      marker,
+      sessionKey: turn.sessionKeyOverride!,
+      startedAt: progressJournal.startedAt,
+      intervalSeconds: progressIntervalSeconds,
+    });
+    context.beforeReplyIntent = () =>
+      stopA2AProgressSupervisor(progressSupervisor);
     try {
       await dispatchInboundTurn({
         ...opts,
@@ -4548,6 +4841,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         reply &&
         reply.toUpperCase() !== "[SILENT]"
       ) {
+        await stopA2AProgressSupervisor(progressSupervisor);
         const task = await identity.a2aTask(data.task_id);
         if (!a2aTerminalStates.has(String(task.state))) {
           await identity.a2aReply(data.task_id, {
@@ -4564,6 +4858,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         );
       }
     } finally {
+      await releaseA2AProgressSupervisor(progressSupervisor);
       taskRuns.delete(activeRun);
       if (taskRuns.size === 0) {
         a2aRuns.delete(data.task_id);
@@ -4584,9 +4879,25 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       for (const run of a2aRuns.get(data.task_id) ?? []) {
         if (run.contextId === data.context_id) run.controller.abort();
       }
+      const progressSupervisor = a2aProgressSupervisors.get(data.task_id);
+      if (progressSupervisor) {
+        await stopA2AProgressSupervisor(progressSupervisor);
+      }
       return;
     }
     if (eventType === "a2a.sent_task.updated") {
+      const state = String(data.state ?? "").toLowerCase();
+      if (
+        state === "working" ||
+        state === "submitted" ||
+        state.endsWith("_working") ||
+        state.endsWith("_submitted")
+      ) {
+        opts.logger?.debug?.(
+          `Inkbox outbound A2A progress recorded without waking the requester: task_id=${data.task_id}`,
+        );
+        return;
+      }
       const delegation = await findDelegationByTask(data.task_id);
       if (delegation?.sessionKey) {
         const text = (data.parts ?? [])
@@ -4635,7 +4946,22 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const messageId = data.message_id ?? String(event.id ?? "");
     const normalized = { ...data, message_id: messageId };
     const key = `${data.task_id}:${messageId}`;
-    if ((await readA2ARegistry())[key]) return;
+    const existing = (await readA2ARegistry())[key];
+    if (existing) {
+      if (existing.state === "finalized") return;
+      if (existing.progress?.acknowledgement !== "delivered") {
+        const identity = await opts.runtime.getIdentity() as any;
+        await ensureA2AAcknowledgement({
+          key,
+          identity,
+          data: existing.data,
+          intervalSeconds: resolveA2AProgressIntervalSeconds(
+            opts.account.config.a2aProgressIntervalSeconds,
+          ),
+        });
+      }
+      return;
+    }
     await writeA2ARegistry(key, normalized, "queued");
     void runA2ATurn(key, normalized);
   }

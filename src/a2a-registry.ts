@@ -22,11 +22,47 @@ export interface A2ARegistryEntry {
   messageId: string;
   state: "queued" | "running" | "finalized";
   data: A2ARegistryData;
+  progress?: A2AProgressJournal;
   updatedAt: number;
+}
+
+export interface A2AProgressJournal {
+  startedAt: number;
+  acknowledgement?: "pending" | "delivered";
+  pendingText?: string;
+  deliveredTexts: string[];
 }
 
 export type A2ARegistry = Record<string, A2ARegistryEntry>;
 let writeChain: Promise<void> = Promise.resolve();
+
+async function mutateA2ARegistry(
+  mutate: (registry: A2ARegistry, now: number) => void,
+): Promise<void> {
+  let release!: () => void;
+  const previous = writeChain;
+  writeChain = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    const registry = await readA2ARegistry();
+    mutate(registry, Date.now());
+    const paths = statePaths();
+    await ensureStateDir(paths);
+    const target = a2aRegistryPath();
+    const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(registry, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    await rename(tmp, target);
+    await chmod(target, 0o600);
+  } finally {
+    release();
+  }
+}
 
 export function a2aRegistryPath(): string {
   return join(statePaths().dir, "a2a-tasks.json");
@@ -47,34 +83,44 @@ export async function writeA2ARegistry(
   data: A2ARegistryData,
   state: A2ARegistryEntry["state"],
 ): Promise<void> {
-  let release!: () => void;
-  const previous = writeChain;
-  writeChain = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  await previous;
-  try {
-    const registry = await readA2ARegistry();
+  await mutateA2ARegistry((registry, now) => {
+    const existing = registry[key];
     registry[key] = {
       taskId: data.task_id,
       contextId: data.context_id,
       messageId: data.message_id ?? "",
       state,
       data,
-      updatedAt: Date.now(),
+      progress: existing?.progress,
+      updatedAt: now,
     };
-    const paths = statePaths();
-    await ensureStateDir(paths);
-    const target = a2aRegistryPath();
-    const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(registry, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
+  });
+}
+
+export async function updateA2AProgressJournal(
+  key: string,
+  update: (journal: A2AProgressJournal) => A2AProgressJournal,
+): Promise<A2AProgressJournal> {
+  let result!: A2AProgressJournal;
+  await mutateA2ARegistry((registry, now) => {
+    const entry = registry[key];
+    if (!entry) throw new Error("A2A registry entry is missing.");
+    const taskStartedAt = Object.values(registry)
+      .filter((candidate) => candidate.taskId === entry.taskId)
+      .map((candidate) => candidate.progress?.startedAt)
+      .filter((value): value is number => typeof value === "number")
+      .reduce((earliest, value) => Math.min(earliest, value), now);
+    result = update(entry.progress ?? {
+      startedAt: taskStartedAt,
+      deliveredTexts: [],
     });
-    await rename(tmp, target);
-    await chmod(target, 0o600);
-  } finally {
-    release();
-  }
+    entry.progress = {
+      ...result,
+      pendingText: result.pendingText?.slice(0, 240),
+      deliveredTexts: result.deliveredTexts.slice(-20).map((text) => text.slice(0, 240)),
+    };
+    entry.updatedAt = now;
+    result = entry.progress;
+  });
+  return result;
 }

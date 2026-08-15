@@ -3,6 +3,7 @@ export interface ActiveA2ATurn {
   messageId: string;
   contextId: string;
   replyIntentCommitted: boolean;
+  beforeReplyIntent?: () => Promise<void>;
 }
 
 const active = new Map<string, ActiveA2ATurn>();

@@ -140,6 +140,45 @@ describe("registerA2ATools", () => {
     }
   });
 
+  it("drains worker progress before committing an inbound terminal intent", async () => {
+    const { api, contextualTools } = createApi();
+    const { identity, runtime } = createRuntime();
+    registerA2ATools(api, runtime);
+    let releaseProgress!: () => void;
+    const beforeReplyIntent = vi.fn(() => new Promise<void>((resolve) => {
+      releaseProgress = resolve;
+    }));
+    const context: ActiveA2ATurn = {
+      taskId: "task-1",
+      contextId: "context-1",
+      messageId: "message-1",
+      replyIntentCommitted: false,
+      beforeReplyIntent,
+    };
+    setActiveA2ATurn("a2a:identity-1:context-1", context);
+
+    try {
+      const completion = contextualTools("a2a:identity-1:context-1")
+        .get("inkbox_a2a_complete")!
+        .execute("turn-1", { text: "Done." });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(beforeReplyIntent).toHaveBeenCalledTimes(1);
+      expect(identity.a2aReply).not.toHaveBeenCalled();
+
+      releaseProgress();
+      await completion;
+      expect(identity.a2aReply).toHaveBeenCalledWith("task-1", {
+        intent: "complete",
+        text: "Done.",
+      });
+    } finally {
+      releaseProgress?.();
+      clearActiveA2ATurn("a2a:identity-1:context-1", context);
+    }
+  });
+
   it("waits for a remote task", async () => {
     const { api, contextualTools } = createApi();
     const { a2a, runtime } = createRuntime();
