@@ -334,6 +334,7 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
         )
         history = _wire_history_messages(final)
         progress = []
+        summaries = []
         for index, text in enumerate(history):
             match = PROGRESS_UPDATE_RE.fullmatch(text)
             if match is None:
@@ -343,14 +344,15 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
                 raise AssertionError("A periodic progress update had an empty summary")
             if TERMINAL_PROGRESS_RE.search(summary):
                 raise AssertionError("A periodic progress update claimed a terminal state")
-            progress.append((index, int(match.group(2)), summary))
+            summaries.append(summary)
+            progress.append((index, int(match.group(2))))
         if len(progress) < 2:
             raise AssertionError(
                 f"Expected at least two periodic progress updates, got {len(progress)}"
             )
-        if all(summary == GENERIC_PROGRESS_FALLBACK for _, _, summary in progress):
+        if all(summary == GENERIC_PROGRESS_FALLBACK for summary in summaries):
             raise AssertionError("The auxiliary progress writer only used its generic fallback")
-        elapsed = [seconds for _, seconds, _ in progress]
+        elapsed = [seconds for _, seconds in progress]
         first_interval = elapsed[0]
         second_interval = elapsed[1] - elapsed[0]
         if not (50 <= first_interval <= 90 and 50 <= second_interval <= 90):
