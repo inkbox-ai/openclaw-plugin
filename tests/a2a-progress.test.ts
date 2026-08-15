@@ -27,8 +27,15 @@ describe("A2A worker progress", () => {
   it("uses one generic fallback and rejects terminal or identifier-echoing prose", () => {
     const fallback = a2aProgressFallback(60);
     expect(fallback).toBe("I'm continuing the requested work. (60s elapsed)");
-    expect(sanitizeA2AProgressText("The task is complete.", ["run_tests"], 60)).toBe(fallback);
-    expect(sanitizeA2AProgressText("I'm blocked waiting for input.", ["run_tests"], 60)).toBe(fallback);
+    for (const terminal of [
+      "The final answer is ready.",
+      "The task succeeded.",
+      "Everything is resolved.",
+      "I cannot continue the request.",
+      "I'm waiting for input.",
+    ]) {
+      expect(sanitizeA2AProgressText(terminal, ["run_tests"], 60)).toBe(fallback);
+    }
     expect(sanitizeA2AProgressText("I'm using run tests to verify behavior.", ["run_tests"], 60)).toBe(fallback);
     expect(
       sanitizeA2AProgressText(
