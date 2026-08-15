@@ -1,3 +1,8 @@
+import {
+  normalizeA2AIdentifierText,
+  normalizeA2AToolIdentifier,
+} from "./a2a-progress-activity.js";
+
 export const DEFAULT_A2A_PROGRESS_INTERVAL_SECONDS = 180;
 
 export function resolveA2AProgressIntervalSeconds(value: unknown): number {
@@ -13,23 +18,28 @@ export function a2aReceiptText(taskId: string, intervalSeconds: number): string 
   return `Task ${taskId} received. Work is queued and starting. Expect progress updates ${cadence}.`;
 }
 
-export function a2aProgressFallback(activities: string[], elapsedSeconds: number): string {
-  const recent = [...new Set(activities.slice(-2))];
-  const work = recent.length > 0
-    ? recent.join(" and ")
-    : "working through the requested task";
-  return `I'm ${work}. (${elapsedSeconds}s elapsed)`;
+export function a2aProgressFallback(elapsedSeconds: number): string {
+  return `I'm continuing the requested work. (${elapsedSeconds}s elapsed)`;
 }
 
 export function sanitizeA2AProgressText(
   value: string,
-  fallback: string,
+  toolIdentifiers: string[],
   elapsedSeconds: number,
 ): string {
+  const fallback = a2aProgressFallback(elapsedSeconds);
   const normalized = value.replace(/\s+/g, " ").trim();
   const withoutElapsed = normalized.replace(/\s*\(\d+s elapsed\)\s*$/i, "").trim();
+  const normalizedText = normalizeA2AIdentifierText(withoutElapsed);
+  const repeatsIdentifier = toolIdentifiers.some((identifier) => {
+    const safeIdentifier = normalizeA2AToolIdentifier(identifier);
+    return safeIdentifier.length > 0 && new RegExp(
+      `(?:^|_)${safeIdentifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:_|$)`,
+    ).test(normalizedText);
+  });
   if (
     !withoutElapsed ||
+    repeatsIdentifier ||
     /\b(done|complete[dt]?|finished|final answer|failed|failure|blocked|cannot complete|need(?:ed|s)? (?:your )?input|waiting for (?:you|input))\b/i.test(withoutElapsed)
   ) {
     return fallback;

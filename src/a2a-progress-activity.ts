@@ -11,18 +11,25 @@ interface ToolHookEvent {
 interface ActivityCapture {
   promptMarker: string;
   runId?: string;
-  activities: string[];
+  toolIdentifiers: string[];
 }
 
 const captures = new Map<string, ActivityCapture>();
+const MAX_TOOL_IDENTIFIERS = 8;
+const MAX_TOOL_IDENTIFIER_CHARS = 80;
 
-function category(toolName: string): string {
-  const name = toolName.toLowerCase();
-  if (/search|find|lookup|list|get|read|fetch|browse/.test(name)) return "researching information";
-  if (/test|check|verify|lint|build/.test(name)) return "running verification checks";
-  if (/write|edit|patch|update|create/.test(name)) return "working on the requested changes";
-  if (/shell|exec|command|terminal/.test(name)) return "running implementation checks";
-  return "using the tools needed for the task";
+export function normalizeA2AIdentifierText(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.:-]+/g, "_")
+    .replace(/^[_.:-]+|[_.:-]+$/g, "");
+}
+
+export function normalizeA2AToolIdentifier(value: unknown): string {
+  return normalizeA2AIdentifierText(value)
+    .slice(0, MAX_TOOL_IDENTIFIER_CHARS)
+    .replace(/[_.:-]+$/g, "");
 }
 
 export function beginA2AProgressActivityCapture(params: {
@@ -31,11 +38,11 @@ export function beginA2AProgressActivityCapture(params: {
 }): { snapshot(): string[]; finish(): void } {
   const capture: ActivityCapture = {
     promptMarker: params.promptMarker,
-    activities: [],
+    toolIdentifiers: [],
   };
   captures.set(params.sessionKey, capture);
   return {
-    snapshot: () => [...capture.activities],
+    snapshot: () => [...capture.toolIdentifiers],
     finish: () => {
       if (captures.get(params.sessionKey) === capture) captures.delete(params.sessionKey);
     },
@@ -59,7 +66,10 @@ export function recordA2AProgressToolActivity(
   const capture = context.sessionKey ? captures.get(context.sessionKey) : undefined;
   const runId = event.runId ?? context.runId;
   if (!capture?.runId || capture.runId !== runId || !event.toolName) return;
-  const next = category(event.toolName);
-  if (capture.activities.at(-1) !== next) capture.activities.push(next);
-  if (capture.activities.length > 8) capture.activities.shift();
+  const next = normalizeA2AToolIdentifier(event.toolName);
+  if (!next || capture.toolIdentifiers.at(-1) === next) return;
+  capture.toolIdentifiers.push(next);
+  if (capture.toolIdentifiers.length > MAX_TOOL_IDENTIFIERS) {
+    capture.toolIdentifiers.shift();
+  }
 }
