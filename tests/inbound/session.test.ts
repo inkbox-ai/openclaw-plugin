@@ -1709,6 +1709,114 @@ describe("createInkboxSessionBridge", () => {
     await flushMicrotasks(30);
   });
 
+  it.each(["completed", "canceled", "input_required", "auth_required"])(
+    "does not replay a stale webhook for an already %s task",
+    async (state) => {
+      const { runtime, a2aReply, a2aTask } = createRuntime();
+      a2aTask.mockResolvedValue({ id: "task-stale", state, messages: [] });
+      const channelRuntime = createChannelRuntime("Should not run.");
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: `event-stale-${state}`,
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-stale",
+          context_id: "context-stale",
+          message_id: `message-stale-${state}`,
+          caller: { handle: "caller" },
+          parts: [{ text: "Do not replay this stale task." }],
+        },
+      });
+      await flushMicrotasks(40);
+
+      expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+      expect(a2aReply).not.toHaveBeenCalled();
+      expect(a2aRegistryMock.entries[`task-stale:message-stale-${state}`].state)
+        .toBe("finalized");
+      await bridge.shutdownA2A();
+    },
+  );
+
+  it("serializes cancellation with in-flight task admission", async () => {
+    let releaseRead!: () => void;
+    let confirmRead!: () => void;
+    let releaseIdentity!: (identity: any) => void;
+    let confirmIdentity!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      confirmRead = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const identityStarted = new Promise<void>((resolve) => {
+      confirmIdentity = resolve;
+    });
+    const identityGate = new Promise<any>((resolve) => {
+      releaseIdentity = resolve;
+    });
+    const readRegistry = vi.mocked(readA2ARegistry);
+    readRegistry.mockClear();
+    readRegistry.mockImplementationOnce(async () => {
+      confirmRead();
+      await readGate;
+      return a2aRegistryMock.entries;
+    });
+    const { runtime } = createRuntime();
+    const identity = await runtime.getIdentity();
+    runtime.getIdentity.mockImplementation(async () => {
+      confirmIdentity();
+      return identityGate;
+    });
+    const channelRuntime = createChannelRuntime("Should not run.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const data = {
+      task_id: "task-cancel-admission",
+      context_id: "context-cancel-admission",
+      message_id: "message-cancel-admission",
+      caller: { handle: "caller" },
+      parts: [{ text: "Do not escape cancellation." }],
+    };
+
+    const admitted = bridge.handlers.onA2A?.({
+      id: "event-cancel-admission",
+      event_type: "a2a.task.created",
+      data,
+    });
+    await readStarted;
+    let cancellationSettled = false;
+    const cancellation = Promise.resolve(bridge.handlers.onA2A?.({
+      id: "event-cancel-admission-stop",
+      event_type: "a2a.task.canceled",
+      data,
+    })).then(() => {
+      cancellationSettled = true;
+    });
+    await flushMicrotasks(20);
+    expect(cancellationSettled).toBe(false);
+
+    releaseRead();
+    await admitted;
+    await identityStarted;
+    await flushMicrotasks(20);
+    expect(cancellationSettled).toBe(false);
+
+    releaseIdentity(identity);
+    await cancellation;
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    await bridge.shutdownA2A();
+  });
+
   it("keeps acknowledgement retries active when periodic progress is disabled", async () => {
     vi.useFakeTimers();
     let releaseMain!: () => void;

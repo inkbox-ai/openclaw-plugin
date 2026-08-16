@@ -4474,9 +4474,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     task: Promise<void>;
   };
   const a2aRuns = new Map<string, Set<A2ARun>>();
-  const a2aAcknowledgements = new Map<string, Promise<boolean>>();
+  type A2AAcknowledgementOutcome = "delivered" | "stopped";
+  const a2aAcknowledgements = new Map<string, Promise<A2AAcknowledgementOutcome>>();
   let a2aShuttingDown = false;
   const a2aAdmissionLocks = new Map<string, Promise<void>>();
+  const a2aCanceledTaskContexts = new Set<string>();
   type A2AAcknowledgementRetry = {
     taskId: string;
     controller: AbortController;
@@ -4537,7 +4539,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     taskId: string;
     text: string;
     acknowledgement?: boolean;
-  }): Promise<boolean> {
+  }): Promise<A2AAcknowledgementOutcome> {
     const settleCandidate = (
       current: A2AProgressJournal,
       recordDelivery: boolean,
@@ -4558,18 +4560,18 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         : current.deliveredTexts,
     });
     const task = await params.identity.a2aTask(params.taskId);
-    if (a2aStoppedStates.has(String(task.state))) return false;
+    if (a2aStoppedStates.has(String(task.state))) return "stopped";
     const entry = (await readA2ARegistry())[params.key];
     const journal = entry?.progress;
     if (journal?.deliveredTexts.includes(params.text)) {
       await updateA2AProgressJournal(params.key, (current) =>
         settleCandidate(current, false));
-      return true;
+      return "delivered";
     }
     if (taskAgentHistoryContains(task, params.text)) {
       await updateA2AProgressJournal(params.key, (current) =>
         settleCandidate(current, true));
-      return true;
+      return "delivered";
     }
     await updateA2AProgressJournal(params.key, (current) => ({
       ...current,
@@ -4588,7 +4590,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     });
     await updateA2AProgressJournal(params.key, (current) =>
       settleCandidate(current, true));
-    return true;
+    return "delivered";
   }
 
   async function ensureA2AAcknowledgement(params: {
@@ -4596,7 +4598,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     identity: any;
     data: A2ARegistryData;
     intervalSeconds: number;
-  }): Promise<boolean> {
+  }): Promise<A2AAcknowledgementOutcome> {
     const existing = a2aAcknowledgements.get(params.key);
     if (existing) return existing;
     const pending = sendA2AProgress({
@@ -4643,8 +4645,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           await abortableDelay(delay, controller.signal);
           if (controller.signal.aborted) return;
           try {
-            const delivered = await ensureA2AAcknowledgement(params);
-            if (delivered) return;
+            const outcome = await ensureA2AAcknowledgement(params);
+            if (outcome === "stopped") {
+              await writeA2ARegistry(params.key, params.data, "finalized");
+              return;
+            }
+            if (outcome === "delivered") return;
           } catch (error) {
             if (!controller.signal.aborted) {
               opts.logger?.warn?.(
@@ -4767,7 +4773,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       taskId: supervisor.taskId,
       text,
     });
-    return delivered ? "delivered" : "terminal";
+    return delivered === "delivered" ? "delivered" : "terminal";
   }
 
   function acquireA2AProgressSupervisor(params: {
@@ -4913,6 +4919,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     controller: AbortController,
   ): Promise<void> {
     const identity = await opts.runtime.getIdentity() as any;
+    if (controller.signal.aborted) return;
     const context: ActiveA2ATurn = {
       taskId: data.task_id,
       contextId: data.context_id,
@@ -4946,9 +4953,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       raw: data,
     };
     await writeA2ARegistry(key, data, "running");
-    let acknowledgementDelivered = false;
+    let acknowledgementOutcome: A2AAcknowledgementOutcome | "retry" = "retry";
     try {
-      acknowledgementDelivered = await ensureA2AAcknowledgement({
+      acknowledgementOutcome = await ensureA2AAcknowledgement({
         key,
         identity,
         data,
@@ -4959,6 +4966,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         `Inkbox A2A acknowledgement failed: task_id=${data.task_id} ${errorMessage(error)}`,
       );
     }
+    if (acknowledgementOutcome === "stopped") {
+      await writeA2ARegistry(key, data, "finalized");
+      return;
+    }
+    if (controller.signal.aborted) return;
     const progressJournal = await updateA2AProgressJournal(key, (current) => current);
     const progressSupervisor = progressIntervalSeconds > 0
       ? acquireA2AProgressSupervisor({
@@ -4973,7 +4985,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           intervalSeconds: progressIntervalSeconds,
         })
       : undefined;
-    if (!acknowledgementDelivered) {
+    if (acknowledgementOutcome === "retry") {
       void scheduleA2AAcknowledgementRetry({
         key,
         identity,
@@ -5078,17 +5090,21 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         ? event.data as A2ARegistryData
         : undefined;
     if (!data?.task_id || !data.context_id) return;
+    const taskContextAdmissionKey = `task-context:${data.task_id}:${data.context_id}`;
     if (eventType === "a2a.task.canceled") {
-      const runs = [...(a2aRuns.get(data.task_id) ?? [])].filter(
-        (run) => run.contextId === data.context_id,
-      );
-      for (const run of runs) run.controller.abort();
-      const progressSupervisor = a2aProgressSupervisors.get(data.task_id);
-      if (progressSupervisor) {
-        await stopA2AProgressSupervisor(progressSupervisor);
-      }
-      await stopA2AAcknowledgementRetries(data.task_id);
-      await Promise.allSettled(runs.map((run) => run.task));
+      await serializeA2AAdmission(taskContextAdmissionKey, async () => {
+        a2aCanceledTaskContexts.add(taskContextAdmissionKey);
+        const runs = [...(a2aRuns.get(data.task_id) ?? [])].filter(
+          (run) => run.contextId === data.context_id,
+        );
+        for (const run of runs) run.controller.abort();
+        const progressSupervisor = a2aProgressSupervisors.get(data.task_id);
+        if (progressSupervisor) {
+          await stopA2AProgressSupervisor(progressSupervisor);
+        }
+        await stopA2AAcknowledgementRetries(data.task_id);
+        await Promise.allSettled(runs.map((run) => run.task));
+      });
       return;
     }
     if (eventType === "a2a.sent_task.updated") {
@@ -5152,40 +5168,46 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const messageId = data.message_id ?? String(event.id ?? "");
     const normalized = { ...data, message_id: messageId };
     const key = `${data.task_id}:${messageId}`;
-    await serializeA2AAdmission(key, async () => {
-      if (a2aShuttingDown) return;
-      const existing = (await readA2ARegistry())[key];
-      if (existing) {
-        if (existing.state === "finalized") return;
-        if (existing.progress?.acknowledgement !== "delivered") {
-          const identity = await opts.runtime.getIdentity() as any;
-          const intervalSeconds = resolveA2AProgressIntervalSeconds(
-            opts.account.config.a2aProgressIntervalSeconds,
-          );
-          try {
-            const delivered = await ensureA2AAcknowledgement({
-              key,
-              identity,
-              data: existing.data,
-              intervalSeconds,
-            });
-            if (!delivered) return;
-          } catch (error) {
-            opts.logger?.warn?.(
-              `Inkbox A2A acknowledgement failed: task_id=${data.task_id} ${errorMessage(error)}`,
+    await serializeA2AAdmission(taskContextAdmissionKey, async () => {
+      if (a2aCanceledTaskContexts.has(taskContextAdmissionKey)) return;
+      await serializeA2AAdmission(key, async () => {
+        if (a2aShuttingDown) return;
+        const existing = (await readA2ARegistry())[key];
+        if (existing) {
+          if (existing.state === "finalized") return;
+          if (existing.progress?.acknowledgement !== "delivered") {
+            const identity = await opts.runtime.getIdentity() as any;
+            const intervalSeconds = resolveA2AProgressIntervalSeconds(
+              opts.account.config.a2aProgressIntervalSeconds,
             );
-            void scheduleA2AAcknowledgementRetry({
-              key,
-              identity,
-              data: existing.data,
-              intervalSeconds,
-            });
+            try {
+              const outcome = await ensureA2AAcknowledgement({
+                key,
+                identity,
+                data: existing.data,
+                intervalSeconds,
+              });
+              if (outcome === "stopped") {
+                await writeA2ARegistry(key, existing.data, "finalized");
+                return;
+              }
+            } catch (error) {
+              opts.logger?.warn?.(
+                `Inkbox A2A acknowledgement failed: task_id=${data.task_id} ${errorMessage(error)}`,
+              );
+              void scheduleA2AAcknowledgementRetry({
+                key,
+                identity,
+                data: existing.data,
+                intervalSeconds,
+              });
+            }
           }
+          return;
         }
-        return;
-      }
-      await writeA2ARegistry(key, normalized, "queued");
-      startA2ATurn(key, normalized);
+        await writeA2ARegistry(key, normalized, "queued");
+        startA2ATurn(key, normalized);
+      });
     });
   }
 
