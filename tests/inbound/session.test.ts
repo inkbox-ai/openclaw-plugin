@@ -3414,7 +3414,7 @@ describe("createInkboxSessionBridge", () => {
     },
   );
 
-  it("resumes persisted caller data once when task history ends in progress", async () => {
+  it("resumes authoritative caller data once when task history ends in progress", async () => {
     let releaseMain!: () => void;
     const { runtime, a2aTask, iterA2ATasks } = createRuntime();
     const receipt =
@@ -3489,7 +3489,8 @@ describe("createInkboxSessionBridge", () => {
     await flushMicrotasks(40);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
-    expect(run.ctxPayload.message.bodyForAgent).toContain(
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Remote copy.");
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain(
       "Use the persisted caller request.",
     );
     expect(run.ctxPayload.message.bodyForAgent).not.toContain(
@@ -3498,6 +3499,113 @@ describe("createInkboxSessionBridge", () => {
 
     releaseMain();
     await flushMicrotasks(30);
+  });
+
+  it("rejects stale restart data and resumes the authoritative caller generation once", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aReply, a2aTask, iterA2ATasks } = createRuntime();
+    const taskId = "task-catchup-generation";
+    const contextId = "context-catchup-generation";
+    const staleKey = `${taskId}:message-catchup-generation-a`;
+    const currentKey = `${taskId}:message-catchup-generation-b`;
+    a2aRegistryMock.entries[staleKey] = {
+      taskId,
+      contextId,
+      messageId: "message-catchup-generation-a",
+      state: "running",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: "message-catchup-generation-a",
+        caller: { handle: "stale-caller" },
+        parts: [{ text: "Never resume stale generation A." }],
+      },
+      updatedAt: Date.now(),
+    };
+    a2aRegistryMock.entries[currentKey] = {
+      taskId,
+      contextId,
+      messageId: "message-catchup-generation-b",
+      state: "running",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: "message-catchup-generation-b",
+        caller: { handle: "spoofed-caller" },
+        parts: [{ text: "Never use persisted generation B data." }],
+      },
+      updatedAt: Date.now() - 1,
+    };
+    const authoritativeTask = {
+      id: taskId,
+      contextId,
+      state: "working",
+      caller: {
+        identityId: "caller-authoritative",
+        organizationId: "org-authoritative",
+        handle: "authoritative-caller",
+      },
+      messages: [{
+        role: "ROLE_CALLER",
+        messageId: "message-catchup-generation-b",
+        parts: [{ text: "Resume authoritative generation B." }],
+      }],
+    };
+    a2aTask.mockResolvedValue(authoritativeTask);
+    iterA2ATasks.mockImplementation(() => (async function* () {
+      yield authoritativeTask;
+      yield authoritativeTask;
+    })());
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === `a2a:identity-1:${contextId}`) {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await bridge.handlers.onA2A?.({
+      id: "duplicate-generation-b",
+      event_type: "a2a.task.message",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: "message-catchup-generation-b",
+        caller: { handle: "spoofed-caller" },
+        parts: [{ text: "Spoofed duplicate data." }],
+      },
+    });
+    await flushMicrotasks(40);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Resume authoritative generation B.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain("generation A");
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain("persisted generation B");
+    expect(a2aRegistryMock.writes.some((write) => write.key === staleKey)).toBe(false);
+    expect(a2aRegistryMock.entries[currentKey].data).toMatchObject({
+      caller: {
+        identity_id: "caller-authoritative",
+        organization_id: "org-authoritative",
+        handle: "authoritative-caller",
+      },
+      parts: [{ text: "Resume authoritative generation B." }],
+    });
+    expect(a2aReply.mock.calls.filter(([, reply]) =>
+      reply.intent === "progress" && reply.text.includes(`Task ${taskId} received`)
+    )).toHaveLength(1);
+
+    releaseMain();
+    await bridge.shutdownA2A();
   });
 
   it("uses the latest caller message for a newly discovered submitted task", async () => {

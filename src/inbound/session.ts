@@ -4578,6 +4578,32 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     };
   }
 
+  function authoritativeA2AAdmission(
+    task: any,
+    data: A2ARegistryData,
+    messageId: string,
+  ): A2ARegistryData | undefined {
+    const state = String(task?.state?.value ?? task?.state ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/^task_state_/, "");
+    const caller = authoritativeA2ACaller(task);
+    if (
+      (state !== "submitted" && state !== "working") ||
+      caller?.taskId !== data.task_id ||
+      caller.contextId !== data.context_id ||
+      caller.messageId !== messageId
+    ) return undefined;
+    return {
+      task_id: caller.taskId,
+      context_id: caller.contextId,
+      state,
+      message_id: caller.messageId,
+      caller: caller.caller,
+      parts: caller.parts,
+    };
+  }
+
   async function sendA2AProgress(params: {
     key: string;
     identity: any;
@@ -5252,32 +5278,15 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const identity = await opts.runtime.getIdentity() as any;
       const task = await identity.a2aTask(data.task_id);
       if (a2aShuttingDown) return;
-      const state = String(task?.state?.value ?? task?.state ?? "")
-        .trim()
-        .toLowerCase()
-        .replace(/^task_state_/, "");
-      const caller = authoritativeA2ACaller(task);
       const messageId = data.message_id ?? String(event.id ?? "");
-      if (
-        (state !== "submitted" && state !== "working") ||
-        caller?.taskId !== data.task_id ||
-        caller.contextId !== data.context_id ||
-        caller.messageId !== messageId
-      ) return;
-      const normalized: A2ARegistryData = {
-        task_id: caller.taskId,
-        context_id: caller.contextId,
-        state,
-        message_id: caller.messageId,
-        caller: caller.caller,
-        parts: caller.parts,
-      };
-      const key = `${caller.taskId}:${caller.messageId}`;
+      const normalized = authoritativeA2AAdmission(task, data, messageId);
+      if (!normalized) return;
+      const key = `${normalized.task_id}:${normalized.message_id}`;
       const canceled = a2aCanceledTasks.get(taskAdmissionKey);
       if (canceled) {
         if (
           eventType !== "a2a.task.message" ||
-          caller.contextId !== canceled.contextId ||
+          normalized.context_id !== canceled.contextId ||
           canceled.messageKeys.has(key)
         ) return;
         a2aCanceledTasks.delete(taskAdmissionKey);
@@ -5340,19 +5349,46 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const reconciledTaskIds = new Set<string>();
     for (const [key, entry] of registryEntries) {
       if (reconciledTaskIds.has(entry.taskId)) continue;
-      reconciledTaskIds.add(entry.taskId);
-      if (entry.state === "finalized") continue;
       try {
-        const task = await identity.a2aTask(entry.taskId);
-        if (a2aStoppedStates.has(String(task.state))) {
-          await writeA2ARegistry(key, entry.data, "finalized");
-        } else if (entry.replyIntentFenced) {
-          continue;
-        } else if (
-          !a2aRuns.has(entry.taskId)
-        ) {
-          startA2ATurn(key, entry.data);
-        }
+        const reconciled = await serializeA2AAdmission(
+          `task:${entry.taskId}`,
+          async () => {
+            if (a2aShuttingDown) return true;
+            const task = await identity.a2aTask(entry.taskId);
+            const state = String(task?.state?.value ?? task?.state ?? "")
+              .trim()
+              .toLowerCase()
+              .replace(/^task_state_/, "");
+            if (a2aStoppedStates.has(state)) {
+              if (entry.state !== "finalized") {
+                await writeA2ARegistry(key, entry.data, "finalized");
+              }
+              return true;
+            }
+            const normalized = authoritativeA2AAdmission(
+              task,
+              entry.data,
+              entry.data.message_id ?? entry.messageId,
+            );
+            if (
+              !normalized ||
+              key !== `${normalized.task_id}:${normalized.message_id}`
+            ) return false;
+            await serializeA2AAdmission(key, async () => {
+              if (a2aShuttingDown) return;
+              const current = (await readA2ARegistry())[key];
+              if (
+                !current ||
+                current.state === "finalized" ||
+                current.replyIntentFenced
+              ) return;
+              await writeA2ARegistry(key, normalized, current.state);
+              if (!a2aRuns.has(entry.taskId)) startA2ATurn(key, normalized);
+            });
+            return true;
+          },
+        );
+        if (reconciled) reconciledTaskIds.add(entry.taskId);
       } catch (error) {
         opts.logger?.warn?.(
           `Inkbox A2A registry reconcile failed: task_id=${entry.taskId} ${errorMessage(error)}`,
