@@ -2522,21 +2522,128 @@ describe("createInkboxSessionBridge", () => {
       await flushMicrotasks(30);
       expect(a2aReply).toHaveBeenCalledTimes(1);
 
-      await bridge.handlers.onA2A?.({
+      const cancellation = bridge.handlers.onA2A?.({
         id: "event-cancel-retry-stop",
         event_type: "a2a.task.canceled",
         data,
       });
+      await flushMicrotasks(10);
+      releaseMain();
+      await cancellation;
       await vi.advanceTimersByTimeAsync(60_000);
       await flushMicrotasks(30);
       expect(a2aReply).toHaveBeenCalledTimes(1);
-
-      releaseMain();
-      await flushMicrotasks(30);
     } finally {
       releaseMain?.();
       vi.useRealTimers();
     }
+  });
+
+  it("waits for a blocked terminal reply before cancellation returns", async () => {
+    let releaseTerminal!: () => void;
+    let terminalStarted!: () => void;
+    const terminalGate = new Promise<void>((resolve) => {
+      releaseTerminal = resolve;
+    });
+    const terminalCall = new Promise<void>((resolve) => {
+      terminalStarted = resolve;
+    });
+    const { runtime, a2aReply } = createRuntime();
+    a2aReply.mockImplementation(async (_taskId, reply) => {
+      if (reply.intent === "complete") {
+        terminalStarted();
+        await terminalGate;
+      }
+      return { id: "task-cancel-terminal", state: "working" };
+    });
+    const channelRuntime = createChannelRuntime("Final answer.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const data = {
+      task_id: "task-cancel-terminal",
+      context_id: "context-cancel-terminal",
+      message_id: "message-cancel-terminal",
+      caller: { handle: "caller" },
+      parts: [{ text: "Return a final answer." }],
+    };
+
+    await bridge.handlers.onA2A?.({
+      id: "event-cancel-terminal",
+      event_type: "a2a.task.created",
+      data,
+    });
+    await terminalCall;
+
+    let cancellationSettled = false;
+    const cancellation = Promise.resolve(bridge.handlers.onA2A?.({
+      id: "event-cancel-terminal-stop",
+      event_type: "a2a.task.canceled",
+      data,
+    })).then(() => {
+      cancellationSettled = true;
+    });
+    await flushMicrotasks(20);
+    expect(cancellationSettled).toBe(false);
+
+    releaseTerminal();
+    await cancellation;
+    const writesAfterCancellation = a2aRegistryMock.writes.length;
+    await flushMicrotasks(30);
+    expect(a2aRegistryMock.writes).toHaveLength(writesAfterCancellation);
+  });
+
+  it("waits for an abort-insensitive worker run before shutdown returns", async () => {
+    let releaseDispatch!: () => void;
+    let dispatchStarted!: () => void;
+    const dispatchGate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const dispatchCall = new Promise<void>((resolve) => {
+      dispatchStarted = resolve;
+    });
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Late answer.", async (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-shutdown-run") {
+        dispatchStarted();
+        await dispatchGate;
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: "event-shutdown-run",
+      event_type: "a2a.task.created",
+      data: {
+        task_id: "task-shutdown-run",
+        context_id: "context-shutdown-run",
+        message_id: "message-shutdown-run",
+        caller: { handle: "caller" },
+        parts: [{ text: "Keep running until released." }],
+      },
+    });
+    await dispatchCall;
+
+    let shutdownSettled = false;
+    const shutdown = bridge.shutdownA2A().then(() => {
+      shutdownSettled = true;
+    });
+    await flushMicrotasks(20);
+    expect(shutdownSettled).toBe(false);
+
+    releaseDispatch();
+    await shutdown;
+    const writesAfterShutdown = a2aRegistryMock.writes.length;
+    await flushMicrotasks(30);
+    expect(a2aRegistryMock.writes).toHaveLength(writesAfterShutdown);
   });
 
   it("retries a persisted acknowledgement during restart catch-up", async () => {
@@ -2759,13 +2866,13 @@ describe("createInkboxSessionBridge", () => {
       await flushMicrotasks(30);
       expect(a2aReply).toHaveBeenCalledTimes(1);
 
-      await bridge.shutdownA2A();
+      const shutdown = bridge.shutdownA2A();
+      await flushMicrotasks(10);
+      releaseMain();
+      await shutdown;
       await vi.advanceTimersByTimeAsync(60_000);
       await flushMicrotasks(30);
       expect(a2aReply).toHaveBeenCalledTimes(1);
-
-      releaseMain();
-      await flushMicrotasks(30);
     } finally {
       releaseMain?.();
       vi.useRealTimers();

@@ -4468,10 +4468,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   const activeCalls = new Map<string, ActiveCall>();
   const callMetaById = new Map<string, Partial<InkboxInboundTurn> & { callId: string }>();
   const imessageTyping = createIMessageTypingPulse(opts.runtime, opts.logger);
-  const a2aRuns = new Map<
-    string,
-    Set<{ contextId: string; controller: AbortController }>
-  >();
+  type A2ARun = {
+    contextId: string;
+    controller: AbortController;
+    task: Promise<void>;
+  };
+  const a2aRuns = new Map<string, Set<A2ARun>>();
   const a2aAcknowledgements = new Map<string, Promise<boolean>>();
   let a2aShuttingDown = false;
   const a2aAdmissionLocks = new Map<string, Promise<void>>();
@@ -4908,16 +4910,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   async function runA2ATurn(
     key: string,
     data: A2ARegistryData,
+    controller: AbortController,
   ): Promise<void> {
     const identity = await opts.runtime.getIdentity() as any;
-    const controller = new AbortController();
-    const taskRuns = a2aRuns.get(data.task_id) ?? new Set();
-    const activeRun = {
-      contextId: data.context_id,
-      controller,
-    };
-    taskRuns.add(activeRun);
-    a2aRuns.set(data.task_id, taskRuns);
     const context: ActiveA2ATurn = {
       taskId: data.task_id,
       contextId: data.context_id,
@@ -5048,11 +5043,29 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       if (progressSupervisor) {
         await releaseA2AProgressSupervisor(progressSupervisor);
       }
-      taskRuns.delete(activeRun);
-      if (taskRuns.size === 0) {
-        a2aRuns.delete(data.task_id);
-      }
     }
+  }
+
+  function startA2ATurn(key: string, data: A2ARegistryData): void {
+    if (a2aShuttingDown) return;
+    const controller = new AbortController();
+    const taskRuns = a2aRuns.get(data.task_id) ?? new Set<A2ARun>();
+    let activeRun!: A2ARun;
+    const task = runA2ATurn(key, data, controller)
+      .catch((error) => {
+        opts.logger?.warn?.(
+          `Inkbox A2A turn failed: task_id=${data.task_id} ${errorMessage(error)}`,
+        );
+      })
+      .finally(() => {
+        taskRuns.delete(activeRun);
+        if (taskRuns.size === 0 && a2aRuns.get(data.task_id) === taskRuns) {
+          a2aRuns.delete(data.task_id);
+        }
+      });
+    activeRun = { contextId: data.context_id, controller, task };
+    taskRuns.add(activeRun);
+    a2aRuns.set(data.task_id, taskRuns);
   }
 
   async function ingestA2A(
@@ -5066,14 +5079,16 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         : undefined;
     if (!data?.task_id || !data.context_id) return;
     if (eventType === "a2a.task.canceled") {
-      for (const run of a2aRuns.get(data.task_id) ?? []) {
-        if (run.contextId === data.context_id) run.controller.abort();
-      }
+      const runs = [...(a2aRuns.get(data.task_id) ?? [])].filter(
+        (run) => run.contextId === data.context_id,
+      );
+      for (const run of runs) run.controller.abort();
       const progressSupervisor = a2aProgressSupervisors.get(data.task_id);
       if (progressSupervisor) {
         await stopA2AProgressSupervisor(progressSupervisor);
       }
       await stopA2AAcknowledgementRetries(data.task_id);
+      await Promise.allSettled(runs.map((run) => run.task));
       return;
     }
     if (eventType === "a2a.sent_task.updated") {
@@ -5170,7 +5185,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         return;
       }
       await writeA2ARegistry(key, normalized, "queued");
-      void runA2ATurn(key, normalized);
+      startA2ATurn(key, normalized);
     });
   }
 
@@ -5202,7 +5217,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         } else if (
           !a2aRuns.has(entry.taskId)
         ) {
-          void runA2ATurn(key, entry.data);
+          startA2ATurn(key, entry.data);
         }
       } catch (error) {
         opts.logger?.warn?.(
@@ -5244,9 +5259,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
 
   async function shutdownA2A(): Promise<void> {
     a2aShuttingDown = true;
-    for (const runs of a2aRuns.values()) {
-      for (const run of runs) run.controller.abort();
-    }
+    const runs = [...a2aRuns.values()].flatMap((taskRuns) => [...taskRuns]);
+    for (const run of runs) run.controller.abort();
     await Promise.allSettled([...a2aAdmissionLocks.values()]);
     await Promise.allSettled([...a2aAcknowledgements.values()]);
     await Promise.all([
@@ -5255,6 +5269,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       ),
       stopA2AAcknowledgementRetries(),
     ]);
+    await Promise.allSettled(runs.map((run) => run.task));
   }
 
   async function runHostedCallCompletion(
