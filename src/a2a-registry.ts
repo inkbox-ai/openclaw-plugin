@@ -102,6 +102,26 @@ export async function writeA2ARegistry(
   });
 }
 
+export async function refreshA2ARegistryData(
+  key: string,
+  data: A2ARegistryData,
+): Promise<A2ARegistryEntry | undefined> {
+  let result: A2ARegistryEntry | undefined;
+  await mutateA2ARegistry((registry, now) => {
+    const existing = registry[key];
+    if (!existing) return;
+    result = registry[key] = {
+      ...existing,
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id ?? "",
+      data,
+      updatedAt: now,
+    };
+  });
+  return result;
+}
+
 export async function fenceA2AReplyIntent(key: string): Promise<void> {
   await mutateA2ARegistry((registry, now) => {
     const entry = registry[key];

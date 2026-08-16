@@ -6,6 +6,7 @@ import {
   a2aRegistryPath,
   fenceA2AReplyIntent,
   readA2ARegistry,
+  refreshA2ARegistryData,
   updateA2AProgressJournal,
   writeA2ARegistry,
 } from "../src/a2a-registry.js";
@@ -99,5 +100,32 @@ describe("A2A durable progress journal", () => {
     const followUp = await updateA2AProgressJournal("key-2", (journal) => journal);
 
     expect(followUp.startedAt).toBe(1_000);
+  });
+
+  it("refreshes canonical data without changing durable lifecycle state", async () => {
+    const key = "key-refresh";
+    const stale = {
+      task_id: "task-refresh",
+      context_id: "context-refresh",
+      message_id: "message-refresh",
+      parts: [{ text: "Stale request." }],
+    };
+    await writeA2ARegistry(key, stale, "running");
+    await updateA2AProgressJournal(key, (journal) => ({
+      ...journal,
+      acknowledgement: "pending",
+    }));
+    await writeA2ARegistry(key, stale, "finalized");
+
+    const refreshed = await refreshA2ARegistryData(key, {
+      ...stale,
+      parts: [{ text: "Authoritative request." }],
+    });
+
+    expect(refreshed).toMatchObject({
+      state: "finalized",
+      data: { parts: [{ text: "Authoritative request." }] },
+      progress: { acknowledgement: "pending" },
+    });
   });
 });

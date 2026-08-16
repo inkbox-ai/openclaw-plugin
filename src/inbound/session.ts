@@ -34,6 +34,7 @@ import {
 import {
   fenceA2AReplyIntent,
   readA2ARegistry,
+  refreshA2ARegistryData,
   updateA2AProgressJournal,
   writeA2ARegistry,
   type A2AProgressJournal,
@@ -5296,7 +5297,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         const existing = (await readA2ARegistry())[key];
         if (existing) {
           if (existing.state === "finalized") return;
-          if (existing.progress?.acknowledgement !== "delivered") {
+          const refreshed = await refreshA2ARegistryData(key, normalized);
+          if (!refreshed || refreshed.state === "finalized") return;
+          if (refreshed.progress?.acknowledgement !== "delivered") {
             const identity = await opts.runtime.getIdentity() as any;
             const intervalSeconds = resolveA2AProgressIntervalSeconds(
               opts.account.config.a2aProgressIntervalSeconds,
@@ -5305,11 +5308,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
               const outcome = await ensureA2AAcknowledgement({
                 key,
                 identity,
-                data: existing.data,
+                data: normalized,
                 intervalSeconds,
               });
               if (outcome === "stopped") {
-                await writeA2ARegistry(key, existing.data, "finalized");
+                await writeA2ARegistry(key, normalized, "finalized");
                 return;
               }
             } catch (error) {
@@ -5319,7 +5322,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
               void scheduleA2AAcknowledgementRetry({
                 key,
                 identity,
-                data: existing.data,
+                data: normalized,
                 intervalSeconds,
               });
             }
@@ -5396,28 +5399,34 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
     }
     try {
-      for await (const task of identity.iterA2ATasks({ state: "submitted" })) {
-        const message = [...task.messages].reverse().find((candidate) => {
-          const role = String(candidate?.role ?? "").toLowerCase();
-          return role === "caller" || role === "role_caller";
-        });
-        if (!message) continue;
-        await ingestA2A({
-          id: `catchup:${task.id}:${message?.messageId ?? ""}`,
-          event_type: "a2a.task.created",
-          data: {
-            task_id: String(task.id),
-            context_id: String(task.contextId),
-            state: String(task.state),
-            caller: {
-              identity_id: String(task.caller.identityId),
-              organization_id: task.caller.organizationId,
-              handle: task.caller.handle,
+      const discoveredTaskIds = new Set<string>();
+      for (const state of ["submitted", "working"]) {
+        for await (const task of identity.iterA2ATasks({ state })) {
+          const taskId = String(task.id ?? "");
+          if (!taskId || discoveredTaskIds.has(taskId)) continue;
+          discoveredTaskIds.add(taskId);
+          const message = [...task.messages].reverse().find((candidate) => {
+            const role = String(candidate?.role ?? "").toLowerCase();
+            return role === "caller" || role === "role_caller";
+          });
+          if (!message) continue;
+          await ingestA2A({
+            id: `catchup:${taskId}:${message?.messageId ?? ""}`,
+            event_type: "a2a.task.created",
+            data: {
+              task_id: taskId,
+              context_id: String(task.contextId),
+              state: String(task.state),
+              caller: {
+                identity_id: String(task.caller.identityId),
+                organization_id: task.caller.organizationId,
+                handle: task.caller.handle,
+              },
+              message_id: message?.messageId ?? `task:${taskId}`,
+              parts: message?.parts ?? [],
             },
-            message_id: message?.messageId ?? `task:${task.id}`,
-            parts: message?.parts ?? [],
-          },
-        });
+          });
+        }
       }
     } catch (error) {
       if (!isA2AApiUnavailable(error)) throw error;

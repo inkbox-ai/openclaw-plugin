@@ -29,6 +29,18 @@ vi.mock("@inkbox/sdk", () => ({
 
 vi.mock("../../src/a2a-registry.js", () => ({
   readA2ARegistry: vi.fn(async () => a2aRegistryMock.entries),
+  refreshA2ARegistryData: vi.fn(async (key: string, data: any) => {
+    const existing = a2aRegistryMock.entries[key];
+    if (!existing) return undefined;
+    return a2aRegistryMock.entries[key] = {
+      ...existing,
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id ?? "",
+      data,
+      updatedAt: Date.now(),
+    };
+  }),
   writeA2ARegistry: vi.fn(async (key: string, data: any, state: string) => {
     const existing = a2aRegistryMock.entries[key];
     a2aRegistryMock.entries[key] = {
@@ -1741,6 +1753,80 @@ describe("createInkboxSessionBridge", () => {
 
     releaseMain();
     await flushMicrotasks(30);
+  });
+
+  it("canonicalizes an existing entry before retrying its acknowledgement", async () => {
+    const { runtime, a2aReply, a2aTask } = createRuntime();
+    const taskId = "task-existing-canonical";
+    const contextId = "context-existing-canonical";
+    const messageId = "message-existing-canonical";
+    const key = `${taskId}:${messageId}`;
+    a2aRegistryMock.entries[key] = {
+      taskId,
+      contextId,
+      messageId,
+      state: "running",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: messageId,
+        caller: { handle: "persisted-spoof" },
+        parts: [{ text: "Persisted spoofed request." }],
+      },
+      progress: {
+        startedAt: Date.now(),
+        acknowledgement: "pending",
+        deliveredTexts: [],
+      },
+      updatedAt: Date.now(),
+    };
+    const authoritativeData = {
+      caller: {
+        identity_id: "caller-authoritative",
+        organization_id: "org-authoritative",
+        handle: "authoritative-caller",
+      },
+      parts: [{ text: "Authoritative existing request." }],
+    };
+    a2aTask.mockResolvedValue({
+      id: taskId,
+      contextId,
+      state: "working",
+      caller: {
+        identityId: authoritativeData.caller.identity_id,
+        organizationId: authoritativeData.caller.organization_id,
+        handle: authoritativeData.caller.handle,
+      },
+      messages: [{ role: "ROLE_CALLER", messageId, parts: authoritativeData.parts }],
+    });
+    a2aReply.mockImplementation(async () => {
+      expect(a2aRegistryMock.entries[key].data).toMatchObject(authoritativeData);
+      return { id: taskId, state: "working" };
+    });
+    const channelRuntime = createChannelRuntime("Should not run.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: "duplicate-existing-canonical",
+      event_type: "a2a.task.message",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: messageId,
+        caller: { handle: "webhook-spoof" },
+        parts: [{ text: "Webhook spoofed request." }],
+      },
+    });
+
+    expect(a2aRegistryMock.entries[key].data).toMatchObject(authoritativeData);
+    expect(a2aReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    await bridge.shutdownA2A();
   });
 
   it.each(["completed", "canceled", "input_required", "auth_required"])(
@@ -3522,20 +3608,6 @@ describe("createInkboxSessionBridge", () => {
       },
       updatedAt: Date.now(),
     };
-    a2aRegistryMock.entries[currentKey] = {
-      taskId,
-      contextId,
-      messageId: "message-catchup-generation-b",
-      state: "running",
-      data: {
-        task_id: taskId,
-        context_id: contextId,
-        message_id: "message-catchup-generation-b",
-        caller: { handle: "spoofed-caller" },
-        parts: [{ text: "Never use persisted generation B data." }],
-      },
-      updatedAt: Date.now() - 1,
-    };
     const authoritativeTask = {
       id: taskId,
       contextId,
@@ -3552,9 +3624,8 @@ describe("createInkboxSessionBridge", () => {
       }],
     };
     a2aTask.mockResolvedValue(authoritativeTask);
-    iterA2ATasks.mockImplementation(() => (async function* () {
-      yield authoritativeTask;
-      yield authoritativeTask;
+    iterA2ATasks.mockImplementation((params: any) => (async function* () {
+      if (params.state === "working") yield authoritativeTask;
     })());
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
       if (params.routeSessionKey === `a2a:identity-1:${contextId}`) {
@@ -3590,7 +3661,6 @@ describe("createInkboxSessionBridge", () => {
       "Resume authoritative generation B.",
     );
     expect(run.ctxPayload.message.bodyForAgent).not.toContain("generation A");
-    expect(run.ctxPayload.message.bodyForAgent).not.toContain("persisted generation B");
     expect(a2aRegistryMock.writes.some((write) => write.key === staleKey)).toBe(false);
     expect(a2aRegistryMock.entries[currentKey].data).toMatchObject({
       caller: {
@@ -3603,6 +3673,8 @@ describe("createInkboxSessionBridge", () => {
     expect(a2aReply.mock.calls.filter(([, reply]) =>
       reply.intent === "progress" && reply.text.includes(`Task ${taskId} received`)
     )).toHaveLength(1);
+    expect(iterA2ATasks).toHaveBeenNthCalledWith(1, { state: "submitted" });
+    expect(iterA2ATasks).toHaveBeenNthCalledWith(2, { state: "working" });
 
     releaseMain();
     await bridge.shutdownA2A();
@@ -3672,6 +3744,7 @@ describe("createInkboxSessionBridge", () => {
     expect(a2aRegistryMock.writes.filter((write) =>
       write.key === "task-catchup-new:message-catchup-new"
     ).map((write) => write.state)).toEqual(["queued", "running"]);
+    expect(a2aTask).toHaveBeenCalledTimes(2);
 
     releaseMain();
     await flushMicrotasks(30);
