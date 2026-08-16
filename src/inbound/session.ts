@@ -215,6 +215,7 @@ export interface InkboxSessionBridge {
   activeCalls: Map<string, ActiveCall>;
   catchUpA2A(): Promise<void>;
   catchUpHostedCalls(): Promise<void>;
+  shutdownA2A(): Promise<void>;
 }
 
 export interface ConfigureIdentityDeliveryOptions {
@@ -4470,6 +4471,13 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     Set<{ contextId: string; controller: AbortController }>
   >();
   const a2aAcknowledgements = new Map<string, Promise<boolean>>();
+  let a2aShuttingDown = false;
+  type A2AAcknowledgementRetry = {
+    taskId: string;
+    controller: AbortController;
+    task: Promise<void>;
+  };
+  const a2aAcknowledgementRetries = new Map<string, A2AAcknowledgementRetry>();
   type A2AProgressSupervisor = {
     taskId: string;
     identity: any;
@@ -4492,6 +4500,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     "canceled",
     "rejected",
   ]);
+  const a2aAcknowledgementRetryDelays = [1_000, 2_000, 5_000, 10_000, 30_000];
 
   async function sendA2AProgress(params: {
     key: string;
@@ -4555,6 +4564,60 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         a2aAcknowledgements.delete(params.key);
       }
     }
+  }
+
+  function scheduleA2AAcknowledgementRetry(params: {
+    key: string;
+    identity: any;
+    data: A2ARegistryData;
+    intervalSeconds: number;
+  }): Promise<void> {
+    if (a2aShuttingDown) return Promise.resolve();
+    const existing = a2aAcknowledgementRetries.get(params.key);
+    if (existing) return existing.task;
+
+    const controller = new AbortController();
+    const retry: A2AAcknowledgementRetry = {
+      taskId: params.data.task_id,
+      controller,
+      task: Promise.resolve(),
+    };
+    a2aAcknowledgementRetries.set(params.key, retry);
+    retry.task = (async () => {
+      let attempt = 0;
+      try {
+        while (!controller.signal.aborted) {
+          const delay = a2aAcknowledgementRetryDelays[
+            Math.min(attempt, a2aAcknowledgementRetryDelays.length - 1)
+          ];
+          await abortableDelay(delay, controller.signal);
+          if (controller.signal.aborted) return;
+          try {
+            const delivered = await ensureA2AAcknowledgement(params);
+            if (delivered) return;
+          } catch (error) {
+            if (!controller.signal.aborted) {
+              opts.logger?.warn?.(
+                `Inkbox A2A acknowledgement retry failed: task_id=${params.data.task_id} ${errorMessage(error)}`,
+              );
+            }
+          }
+          attempt += 1;
+        }
+      } finally {
+        if (a2aAcknowledgementRetries.get(params.key) === retry) {
+          a2aAcknowledgementRetries.delete(params.key);
+        }
+      }
+    })();
+    return retry.task;
+  }
+
+  async function stopA2AAcknowledgementRetries(taskId?: string): Promise<void> {
+    const retries = [...a2aAcknowledgementRetries.values()]
+      .filter((retry) => !taskId || retry.taskId === taskId);
+    for (const retry of retries) retry.controller.abort();
+    await Promise.all(retries.map((retry) => retry.task));
   }
 
   async function generateA2AProgress(params: {
@@ -4640,7 +4703,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     intervalSeconds: number;
   }): A2AProgressSupervisor {
     const existing = a2aProgressSupervisors.get(params.data.task_id);
-    if (existing) {
+    if (existing && !existing.controller.signal.aborted && !existing.stopping) {
       existing.activeRuns += 1;
       existing.key = params.key;
       existing.data = params.data;
@@ -4657,7 +4720,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       key: params.key,
       data: params.data,
       body: params.body,
-      startedAt: params.startedAt,
+      startedAt: Math.min(existing?.startedAt ?? params.startedAt, params.startedAt),
       intervalSeconds: params.intervalSeconds,
       activeRuns: 1,
       controller,
@@ -4742,6 +4805,15 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   }
 
+  async function stopA2AWorkerActivity(
+    supervisor: A2AProgressSupervisor,
+  ): Promise<void> {
+    await Promise.all([
+      stopA2AProgressSupervisor(supervisor),
+      stopA2AAcknowledgementRetries(supervisor.taskId),
+    ]);
+  }
+
   async function runA2ATurn(
     key: string,
     data: A2ARegistryData,
@@ -4788,8 +4860,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       raw: data,
     };
     await writeA2ARegistry(key, data, "running");
+    let acknowledgementDelivered = false;
     try {
-      await ensureA2AAcknowledgement({
+      acknowledgementDelivered = await ensureA2AAcknowledgement({
         key,
         identity,
         data,
@@ -4812,8 +4885,16 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       startedAt: progressJournal.startedAt,
       intervalSeconds: progressIntervalSeconds,
     });
+    if (!acknowledgementDelivered) {
+      void scheduleA2AAcknowledgementRetry({
+        key,
+        identity,
+        data,
+        intervalSeconds: progressIntervalSeconds,
+      });
+    }
     context.beforeReplyIntent = () =>
-      stopA2AProgressSupervisor(progressSupervisor);
+      stopA2AWorkerActivity(progressSupervisor);
     try {
       await dispatchInboundTurn({
         ...opts,
@@ -4852,7 +4933,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         reply &&
         reply.toUpperCase() !== "[SILENT]"
       ) {
-        await stopA2AProgressSupervisor(progressSupervisor);
+        await stopA2AWorkerActivity(progressSupervisor);
         const task = await identity.a2aTask(data.task_id);
         if (!a2aTerminalStates.has(String(task.state))) {
           await identity.a2aReply(data.task_id, {
@@ -4880,6 +4961,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   async function ingestA2A(
     event: Record<string, unknown>,
   ): Promise<void> {
+    if (a2aShuttingDown) return;
     const eventType = String(event.event_type ?? "");
     const data =
       event.data && typeof event.data === "object" && !Array.isArray(event.data)
@@ -4894,6 +4976,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       if (progressSupervisor) {
         await stopA2AProgressSupervisor(progressSupervisor);
       }
+      await stopA2AAcknowledgementRetries(data.task_id);
       return;
     }
     if (eventType === "a2a.sent_task.updated") {
@@ -4962,14 +5045,28 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       if (existing.state === "finalized") return;
       if (existing.progress?.acknowledgement !== "delivered") {
         const identity = await opts.runtime.getIdentity() as any;
-        await ensureA2AAcknowledgement({
-          key,
-          identity,
-          data: existing.data,
-          intervalSeconds: resolveA2AProgressIntervalSeconds(
-            opts.account.config.a2aProgressIntervalSeconds,
-          ),
-        });
+        const intervalSeconds = resolveA2AProgressIntervalSeconds(
+          opts.account.config.a2aProgressIntervalSeconds,
+        );
+        try {
+          const delivered = await ensureA2AAcknowledgement({
+            key,
+            identity,
+            data: existing.data,
+            intervalSeconds,
+          });
+          if (!delivered) return;
+        } catch (error) {
+          opts.logger?.warn?.(
+            `Inkbox A2A acknowledgement failed: task_id=${data.task_id} ${errorMessage(error)}`,
+          );
+          void scheduleA2AAcknowledgementRetry({
+            key,
+            identity,
+            data: existing.data,
+            intervalSeconds,
+          });
+        }
       }
       return;
     }
@@ -5030,6 +5127,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         `Inkbox A2A API is not deployed at this origin yet; skipping catch-up: ${errorMessage(error)}`,
       );
     }
+  }
+
+  async function shutdownA2A(): Promise<void> {
+    a2aShuttingDown = true;
+    for (const runs of a2aRuns.values()) {
+      for (const run of runs) run.controller.abort();
+    }
+    await Promise.allSettled([...a2aAcknowledgements.values()]);
+    await Promise.all([
+      ...[...a2aProgressSupervisors.values()].map((supervisor) =>
+        stopA2AProgressSupervisor(supervisor)
+      ),
+      stopA2AAcknowledgementRetries(),
+    ]);
   }
 
   async function runHostedCallCompletion(
@@ -5802,7 +5913,14 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   };
 
-  return { handlers, wsHandler, activeCalls, catchUpA2A, catchUpHostedCalls };
+  return {
+    handlers,
+    wsHandler,
+    activeCalls,
+    catchUpA2A,
+    catchUpHostedCalls,
+    shutdownA2A,
+  };
 }
 
 export async function configureInkboxIdentityDelivery(
