@@ -2413,6 +2413,147 @@ describe("createInkboxSessionBridge", () => {
     }
   });
 
+  it("resumes persisted caller data once when task history ends in progress", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aTask, iterA2ATasks } = createRuntime();
+    const receipt =
+      "Task task-catchup-existing received. Work is queued and starting. Expect progress updates about every 3 minutes.";
+    const data = {
+      task_id: "task-catchup-existing",
+      context_id: "context-catchup-existing",
+      message_id: "message-catchup-existing",
+      caller: { handle: "caller" },
+      parts: [{ text: "Use the persisted caller request." }],
+    };
+    a2aRegistryMock.entries["task-catchup-existing:message-catchup-existing"] = {
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id,
+      state: "running",
+      data,
+      progress: {
+        startedAt: Date.now(),
+        acknowledgement: "delivered",
+        deliveredTexts: [receipt, "I am reviewing the request. (180s elapsed)"],
+      },
+      updatedAt: Date.now(),
+    };
+    const remoteTask = {
+      id: data.task_id,
+      contextId: data.context_id,
+      state: "submitted",
+      caller: { identityId: "caller-1", handle: "caller" },
+      messages: [
+        { role: "caller", messageId: data.message_id, parts: [{ text: "Remote copy." }] },
+        { role: "agent", messageId: "receipt-1", parts: [{ text: receipt }] },
+        {
+          role: "role_agent",
+          messageId: "progress-1",
+          parts: [{ text: "I am reviewing the request. (180s elapsed)" }],
+        },
+      ],
+    };
+    a2aTask.mockResolvedValue(remoteTask);
+    iterA2ATasks.mockImplementation(() => (async function* () {
+      yield remoteTask;
+    })());
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-catchup-existing") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await flushMicrotasks(40);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Use the persisted caller request.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain(
+      "I am reviewing the request.",
+    );
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("uses the latest caller message for a newly discovered submitted task", async () => {
+    let releaseMain!: () => void;
+    const { runtime, iterA2ATasks } = createRuntime();
+    const remoteTask = {
+      id: "task-catchup-new",
+      contextId: "context-catchup-new",
+      state: "submitted",
+      caller: { identityId: "caller-1", handle: "caller" },
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-catchup-old",
+          parts: [{ text: "Use the old request." }],
+        },
+        {
+          role: "role_caller",
+          messageId: "message-catchup-new",
+          parts: [{ text: "Use the latest caller request." }],
+        },
+        {
+          role: "agent",
+          messageId: "receipt-1",
+          parts: [{ text: "Task task-catchup-new received." }],
+        },
+        {
+          role: "role_agent",
+          messageId: "progress-1",
+          parts: [{ text: "I am reviewing the request. (180s elapsed)" }],
+        },
+      ],
+    };
+    iterA2ATasks.mockImplementation(() => (async function* () {
+      yield remoteTask;
+    })());
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-catchup-new") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await flushMicrotasks(40);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.messageIdFull).toBe("message-catchup-new");
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Use the latest caller request.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain("Use the old request.");
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain(
+      "I am reviewing the request.",
+    );
+    expect(a2aRegistryMock.writes.filter((write) =>
+      write.key === "task-catchup-new:message-catchup-new"
+    ).map((write) => write.state)).toEqual(["queued", "running"]);
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
   it("reconciles a failed acknowledgement on duplicate webhook delivery", async () => {
     const { runtime, a2aReply } = createRuntime();
     a2aReply.mockRejectedValueOnce(new Error("response lost"));

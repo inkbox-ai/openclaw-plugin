@@ -5127,13 +5127,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       );
       return;
     }
-    for (const [key, entry] of Object.entries(await readA2ARegistry())) {
+    const registryEntries = Object.entries(await readA2ARegistry())
+      .sort(([, left], [, right]) => right.updatedAt - left.updatedAt);
+    const resumedTaskIds = new Set<string>();
+    for (const [key, entry] of registryEntries) {
       if (entry.state === "finalized") continue;
       try {
         const task = await identity.a2aTask(entry.taskId);
         if (a2aTerminalStates.has(String(task.state))) {
           await writeA2ARegistry(key, entry.data, "finalized");
-        } else if (!a2aRuns.has(entry.taskId)) {
+        } else if (
+          !resumedTaskIds.has(entry.taskId) &&
+          !a2aRuns.has(entry.taskId)
+        ) {
+          resumedTaskIds.add(entry.taskId);
           void runA2ATurn(key, entry.data);
         }
       } catch (error) {
@@ -5144,7 +5151,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
     try {
       for await (const task of identity.iterA2ATasks({ state: "submitted" })) {
-        const message = task.messages.at(-1);
+        const message = [...task.messages].reverse().find((candidate) => {
+          const role = String(candidate?.role ?? "").toLowerCase();
+          return role === "caller" || role === "role_caller";
+        });
+        if (!message) continue;
         await ingestA2A({
           id: `catchup:${task.id}:${message?.messageId ?? ""}`,
           event_type: "a2a.task.created",
