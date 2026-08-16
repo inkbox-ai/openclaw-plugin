@@ -1819,7 +1819,18 @@ describe("createInkboxSessionBridge", () => {
 
   it("admits one distinct active caller message after pre-admission cancellation", async () => {
     const { runtime, a2aTask } = createRuntime();
-    a2aTask.mockResolvedValue({ id: "task-cancel-generation", state: "working" });
+    a2aTask.mockResolvedValueOnce({
+      id: "task-cancel-generation",
+      contextId: "context-cancel-generation",
+      state: "canceled",
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-canceled-generation",
+          parts: [{ text: "This canceled generation must not run." }],
+        },
+      ],
+    });
     const channelRuntime = createChannelRuntime("Handled the genuine follow-up.");
     const bridge = createInkboxSessionBridge({
       cfg: {},
@@ -1830,7 +1841,6 @@ describe("createInkboxSessionBridge", () => {
     const canceledData = {
       task_id: "task-cancel-generation",
       context_id: "context-cancel-generation",
-      message_id: "message-canceled-generation",
       caller: { handle: "caller" },
       parts: [{ text: "This canceled generation must not run." }],
     };
@@ -1843,7 +1853,74 @@ describe("createInkboxSessionBridge", () => {
     await bridge.handlers.onA2A?.({
       id: "event-canceled-generation-replay",
       event_type: "a2a.task.message",
-      data: canceledData,
+      data: {
+        ...canceledData,
+        message_id: "message-canceled-generation",
+      },
+    });
+    await flushMicrotasks(20);
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+
+    const authoritativeActiveTask = {
+      id: "task-cancel-generation",
+      contextId: "context-cancel-generation",
+      state: "working",
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-active-follow-up",
+          parts: [{ text: "Handle this genuine active follow-up." }],
+        },
+      ],
+    };
+    a2aTask.mockResolvedValue(authoritativeActiveTask);
+    await bridge.handlers.onA2A?.({
+      id: "event-spoofed-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-spoofed-follow-up",
+        parts: [{ text: "This is not the authoritative caller message." }],
+      },
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-wrong-context-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        context_id: "context-wrong",
+        message_id: "message-active-follow-up",
+      },
+    });
+    a2aTask.mockResolvedValueOnce({
+      ...authoritativeActiveTask,
+      messages: [
+        {
+          role: "agent",
+          messageId: "message-active-follow-up",
+          parts: [{ text: "Not caller-authored." }],
+        },
+      ],
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-non-caller-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-active-follow-up",
+      },
+    });
+    a2aTask.mockResolvedValueOnce({
+      ...authoritativeActiveTask,
+      state: "canceled",
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-stopped-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-active-follow-up",
+      },
     });
     await flushMicrotasks(20);
     expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
