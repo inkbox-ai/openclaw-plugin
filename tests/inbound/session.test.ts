@@ -215,6 +215,7 @@ import {
   resetHostedSmsToolCapturesForTest,
 } from "../../src/hosted-call-tool-settlement.js";
 import { activeA2ATurn } from "../../src/a2a-context.js";
+import { readA2ARegistry } from "../../src/a2a-registry.js";
 
 type FakeInkboxWebSocketMessage = string | { message: string; advanceMs?: number };
 
@@ -1507,6 +1508,69 @@ describe("createInkboxSessionBridge", () => {
     });
   });
 
+  it("serializes simultaneous duplicate A2A webhook admission", async () => {
+    let releaseRead!: () => void;
+    let confirmRead!: () => void;
+    let releaseMain!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      confirmRead = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const readRegistry = vi.mocked(readA2ARegistry);
+    readRegistry.mockClear();
+    readRegistry.mockImplementationOnce(async () => {
+      confirmRead();
+      await readGate;
+      return a2aRegistryMock.entries;
+    });
+    const { runtime, a2aReply } = createRuntime();
+    const channelRuntime = createChannelRuntime("Completed.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-admission") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const duplicateEvent = {
+      id: "event-admission",
+      event_type: "a2a.task.created",
+      data: {
+        task_id: "task-admission",
+        context_id: "context-admission",
+        message_id: "message-admission",
+        caller: { handle: "caller" },
+        parts: [{ text: "Run once." }],
+      },
+    };
+
+    const first = bridge.handlers.onA2A?.(duplicateEvent);
+    const second = bridge.handlers.onA2A?.(duplicateEvent);
+    await readStarted;
+    await flushMicrotasks(20);
+    expect(readRegistry).toHaveBeenCalledTimes(1);
+
+    releaseRead();
+    await Promise.all([first, second]);
+    await flushMicrotasks(40);
+    expect(a2aRegistryMock.writes.filter((write) => write.state === "queued"))
+      .toHaveLength(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(a2aReply.mock.calls.filter(([, reply]) =>
+      reply.intent === "progress" && reply.text.includes("Task task-admission received")
+    )).toHaveLength(1);
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
   it("sends periodic worker progress and stops the timer when the task completes", async () => {
     vi.useFakeTimers();
     let releaseMain!: () => void;
@@ -2425,6 +2489,19 @@ describe("createInkboxSessionBridge", () => {
       caller: { handle: "caller" },
       parts: [{ text: "Use the persisted caller request." }],
     };
+    const oldData = {
+      ...data,
+      message_id: "message-catchup-old",
+      parts: [{ text: "Do not resume this older request." }],
+    };
+    a2aRegistryMock.entries["task-catchup-existing:message-catchup-old"] = {
+      taskId: oldData.task_id,
+      contextId: oldData.context_id,
+      messageId: oldData.message_id,
+      state: "running",
+      data: oldData,
+      updatedAt: Date.now() - 1,
+    };
     a2aRegistryMock.entries["task-catchup-existing:message-catchup-existing"] = {
       taskId: data.task_id,
       contextId: data.context_id,
@@ -2481,6 +2558,10 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).not.toContain(
       "I am reviewing the request.",
     );
+    expect(a2aRegistryMock.writes).toContainEqual(expect.objectContaining({
+      key: "task-catchup-existing:message-catchup-old",
+      state: "finalized",
+    }));
 
     releaseMain();
     await flushMicrotasks(30);

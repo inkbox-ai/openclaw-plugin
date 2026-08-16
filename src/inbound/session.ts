@@ -4472,6 +4472,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   >();
   const a2aAcknowledgements = new Map<string, Promise<boolean>>();
   let a2aShuttingDown = false;
+  const a2aAdmissionLocks = new Map<string, Promise<void>>();
   type A2AAcknowledgementRetry = {
     taskId: string;
     controller: AbortController;
@@ -4501,6 +4502,28 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     "rejected",
   ]);
   const a2aAcknowledgementRetryDelays = [1_000, 2_000, 5_000, 10_000, 30_000];
+
+  async function serializeA2AAdmission<T>(
+    key: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = a2aAdmissionLocks.get(key) ?? Promise.resolve();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.then(() => gate);
+    a2aAdmissionLocks.set(key, queued);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (a2aAdmissionLocks.get(key) === queued) {
+        a2aAdmissionLocks.delete(key);
+      }
+    }
+  }
 
   async function sendA2AProgress(params: {
     key: string;
@@ -5081,38 +5104,41 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const messageId = data.message_id ?? String(event.id ?? "");
     const normalized = { ...data, message_id: messageId };
     const key = `${data.task_id}:${messageId}`;
-    const existing = (await readA2ARegistry())[key];
-    if (existing) {
-      if (existing.state === "finalized") return;
-      if (existing.progress?.acknowledgement !== "delivered") {
-        const identity = await opts.runtime.getIdentity() as any;
-        const intervalSeconds = resolveA2AProgressIntervalSeconds(
-          opts.account.config.a2aProgressIntervalSeconds,
-        );
-        try {
-          const delivered = await ensureA2AAcknowledgement({
-            key,
-            identity,
-            data: existing.data,
-            intervalSeconds,
-          });
-          if (!delivered) return;
-        } catch (error) {
-          opts.logger?.warn?.(
-            `Inkbox A2A acknowledgement failed: task_id=${data.task_id} ${errorMessage(error)}`,
+    await serializeA2AAdmission(key, async () => {
+      if (a2aShuttingDown) return;
+      const existing = (await readA2ARegistry())[key];
+      if (existing) {
+        if (existing.state === "finalized") return;
+        if (existing.progress?.acknowledgement !== "delivered") {
+          const identity = await opts.runtime.getIdentity() as any;
+          const intervalSeconds = resolveA2AProgressIntervalSeconds(
+            opts.account.config.a2aProgressIntervalSeconds,
           );
-          void scheduleA2AAcknowledgementRetry({
-            key,
-            identity,
-            data: existing.data,
-            intervalSeconds,
-          });
+          try {
+            const delivered = await ensureA2AAcknowledgement({
+              key,
+              identity,
+              data: existing.data,
+              intervalSeconds,
+            });
+            if (!delivered) return;
+          } catch (error) {
+            opts.logger?.warn?.(
+              `Inkbox A2A acknowledgement failed: task_id=${data.task_id} ${errorMessage(error)}`,
+            );
+            void scheduleA2AAcknowledgementRetry({
+              key,
+              identity,
+              data: existing.data,
+              intervalSeconds,
+            });
+          }
         }
+        return;
       }
-      return;
-    }
-    await writeA2ARegistry(key, normalized, "queued");
-    void runA2ATurn(key, normalized);
+      await writeA2ARegistry(key, normalized, "queued");
+      void runA2ATurn(key, normalized);
+    });
   }
 
   async function catchUpA2A(): Promise<void> {
@@ -5142,6 +5168,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         ) {
           resumedTaskIds.add(entry.taskId);
           void runA2ATurn(key, entry.data);
+        } else if (resumedTaskIds.has(entry.taskId)) {
+          await writeA2ARegistry(key, entry.data, "finalized");
         }
       } catch (error) {
         opts.logger?.warn?.(
@@ -5186,6 +5214,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     for (const runs of a2aRuns.values()) {
       for (const run of runs) run.controller.abort();
     }
+    await Promise.allSettled([...a2aAdmissionLocks.values()]);
     await Promise.allSettled([...a2aAcknowledgements.values()]);
     await Promise.all([
       ...[...a2aProgressSupervisors.values()].map((supervisor) =>
