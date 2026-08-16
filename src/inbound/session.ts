@@ -4691,6 +4691,34 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     );
   }
 
+  async function retryPendingA2AProgress(
+    supervisor: A2AProgressSupervisor,
+  ): Promise<"none" | "delivered" | "terminal"> {
+    const registry = await readA2ARegistry();
+    const pending = Object.entries(registry)
+      .filter(([, entry]) => entry.taskId === supervisor.taskId)
+      .filter(([, entry]) => {
+        const text = entry.progress?.pendingText;
+        const isAcknowledgement =
+          entry.progress?.acknowledgement === "pending" &&
+          text?.startsWith(
+            `Task ${supervisor.taskId} received. Work is queued and starting. Expect progress updates `,
+          );
+        return Boolean(text) && !isAcknowledgement;
+      })
+      .sort(([, left], [, right]) => right.updatedAt - left.updatedAt)
+      .at(0);
+    const text = pending?.[1].progress?.pendingText;
+    if (!pending || !text) return "none";
+    const delivered = await sendA2AProgress({
+      key: pending[0],
+      identity: supervisor.identity,
+      taskId: supervisor.taskId,
+      text,
+    });
+    return delivered ? "delivered" : "terminal";
+  }
+
   function acquireA2AProgressSupervisor(params: {
     identity: any;
     identityId: string;
@@ -4733,14 +4761,27 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     a2aProgressSupervisors.set(supervisor.taskId, supervisor);
     supervisor.progressTask = (async () => {
       const intervalMilliseconds = supervisor.intervalSeconds * 1_000;
-      const elapsedMilliseconds = Math.max(0, Date.now() - supervisor.startedAt);
-      let delayMilliseconds =
-        intervalMilliseconds - (elapsedMilliseconds % intervalMilliseconds);
       while (!controller.signal.aborted) {
+        try {
+          const pending = await retryPendingA2AProgress(supervisor);
+          if (pending === "terminal") break;
+        } catch (error) {
+          if (controller.signal.aborted) break;
+          opts.logger?.warn?.(
+            `Inkbox A2A pending progress retry failed: task_id=${supervisor.taskId} ${errorMessage(error)}`,
+          );
+          await abortableDelay(1_000, controller.signal);
+          continue;
+        }
+        const elapsedMilliseconds = Math.max(0, Date.now() - supervisor.startedAt);
+        const delayMilliseconds =
+          intervalMilliseconds - (elapsedMilliseconds % intervalMilliseconds);
         await abortableDelay(delayMilliseconds, controller.signal);
-        delayMilliseconds = intervalMilliseconds;
         if (controller.signal.aborted) break;
         try {
+          const pending = await retryPendingA2AProgress(supervisor);
+          if (pending === "terminal") break;
+          if (pending === "delivered") continue;
           const task = await supervisor.identity.a2aTask(supervisor.taskId);
           if (a2aTerminalStates.has(String(task.state))) break;
           const elapsedSeconds = Math.max(

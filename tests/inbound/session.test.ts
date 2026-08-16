@@ -2231,6 +2231,140 @@ describe("createInkboxSessionBridge", () => {
     await flushMicrotasks(30);
   });
 
+  it("retries persisted periodic progress immediately during restart catch-up", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aReply } = createRuntime();
+    const receipt =
+      "Task task-progress-restart received. Work is queued and starting. Expect progress updates about every 1 minute.";
+    const pending = "I am reviewing the requested work. (60s elapsed)";
+    const data = {
+      task_id: "task-progress-restart",
+      context_id: "context-progress-restart",
+      message_id: "message-progress-restart",
+      caller: { handle: "caller" },
+      parts: [{ text: "Resume the work." }],
+    };
+    a2aRegistryMock.entries["task-progress-restart:message-progress-restart"] = {
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id,
+      state: "running",
+      data,
+      progress: {
+        startedAt: Date.now() - 70_000,
+        acknowledgement: "delivered",
+        pendingText: pending,
+        deliveredTexts: [receipt],
+      },
+      updatedAt: Date.now(),
+    };
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-progress-restart") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 60 },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await flushMicrotasks(40);
+    expect(a2aReply).toHaveBeenCalledTimes(1);
+    expect(a2aReply).toHaveBeenCalledWith("task-progress-restart", {
+      intent: "progress",
+      text: pending,
+    });
+    expect(a2aRegistryMock.entries["task-progress-restart:message-progress-restart"].progress)
+      .toMatchObject({ pendingText: undefined });
+    expect(a2aRegistryMock.entries["task-progress-restart:message-progress-restart"]
+      .progress.deliveredTexts).toContain(pending);
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("reconciles lost periodic progress before a follow-up generates more", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aReply, a2aTask } = createRuntime();
+    const receipt =
+      "Task task-progress-follow-up received. Work is queued and starting. Expect progress updates about every 1 minute.";
+    const pending = "I am reviewing the requested work. (60s elapsed)";
+    const firstData = {
+      task_id: "task-progress-follow-up",
+      context_id: "context-progress-follow-up",
+      message_id: "message-progress-follow-up-1",
+      caller: { handle: "caller" },
+      parts: [{ text: "Start the work." }],
+    };
+    a2aRegistryMock.entries["task-progress-follow-up:message-progress-follow-up-1"] = {
+      taskId: firstData.task_id,
+      contextId: firstData.context_id,
+      messageId: firstData.message_id,
+      state: "finalized",
+      data: firstData,
+      progress: {
+        startedAt: Date.now() - 70_000,
+        acknowledgement: "delivered",
+        pendingText: pending,
+        deliveredTexts: [receipt],
+      },
+      updatedAt: Date.now(),
+    };
+    a2aTask.mockResolvedValue({
+      id: firstData.task_id,
+      state: "working",
+      messages: [{ role: "agent", parts: [{ text: pending }] }],
+    });
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-progress-follow-up") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 60 },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: "event-progress-follow-up-2",
+      event_type: "a2a.task.created",
+      data: {
+        ...firstData,
+        message_id: "message-progress-follow-up-2",
+        parts: [{ text: "Continue the work." }],
+      },
+    });
+    await flushMicrotasks(40);
+
+    expect(a2aReply).toHaveBeenCalledTimes(1);
+    expect(a2aReply).toHaveBeenCalledWith("task-progress-follow-up", {
+      intent: "progress",
+      text: expect.stringContaining("Task task-progress-follow-up received"),
+    });
+    expect(a2aRegistryMock.entries["task-progress-follow-up:message-progress-follow-up-1"]
+      .progress.pendingText).toBeUndefined();
+    expect(a2aRegistryMock.entries["task-progress-follow-up:message-progress-follow-up-1"]
+      .progress.deliveredTexts).toContain(pending);
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
   it("stops acknowledgement retries during gateway shutdown", async () => {
     vi.useFakeTimers();
     let releaseMain!: () => void;
