@@ -18,10 +18,14 @@ describe("A2A worker progress", () => {
   it("defaults to three minutes and renders the configured cadence", () => {
     expect(DEFAULT_A2A_PROGRESS_INTERVAL_SECONDS).toBe(180);
     expect(resolveA2AProgressIntervalSeconds(undefined)).toBe(180);
+    expect(resolveA2AProgressIntervalSeconds(0)).toBe(0);
     expect(a2aReceiptText("task-1", 180)).toBe(
       "Task task-1 received. Work is queued and starting. Expect progress updates about every 3 minutes.",
     );
     expect(a2aReceiptText("task-1", 60)).toContain("about every 1 minute.");
+    expect(a2aReceiptText("task-1", 0)).toBe(
+      "Task task-1 received. Work is queued and starting. Periodic progress updates are disabled.",
+    );
   });
 
   it("uses one generic fallback and rejects terminal or identifier-echoing prose", () => {

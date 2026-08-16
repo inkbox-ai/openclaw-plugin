@@ -32,9 +32,11 @@ import {
   type ActiveA2ATurn,
 } from "../a2a-context.js";
 import {
+  fenceA2AReplyIntent,
   readA2ARegistry,
   updateA2AProgressJournal,
   writeA2ARegistry,
+  type A2AProgressJournal,
   type A2ARegistryData,
 } from "../a2a-registry.js";
 import { beginA2AProgressActivityCapture } from "../a2a-progress-activity.js";
@@ -4495,7 +4497,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     stopping?: Promise<void>;
   };
   const a2aProgressSupervisors = new Map<string, A2AProgressSupervisor>();
-  const a2aTerminalStates = new Set([
+  const a2aStoppedStates = new Set([
+    "input_required",
+    "auth_required",
     "completed",
     "failed",
     "canceled",
@@ -4532,35 +4536,56 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     text: string;
     acknowledgement?: boolean;
   }): Promise<boolean> {
+    const settleCandidate = (
+      current: A2AProgressJournal,
+      recordDelivery: boolean,
+    ): A2AProgressJournal => ({
+      ...current,
+      acknowledgement: params.acknowledgement ? "delivered" : current.acknowledgement,
+      pendingAcknowledgementText: params.acknowledgement &&
+        current.pendingAcknowledgementText === params.text
+        ? undefined
+        : current.pendingAcknowledgementText,
+      pendingProgressText: !params.acknowledgement &&
+        current.pendingProgressText === params.text
+        ? undefined
+        : current.pendingProgressText,
+      pendingText: undefined,
+      deliveredTexts: recordDelivery
+        ? [...new Set([...current.deliveredTexts, params.text])]
+        : current.deliveredTexts,
+    });
     const task = await params.identity.a2aTask(params.taskId);
-    if (a2aTerminalStates.has(String(task.state))) return false;
+    if (a2aStoppedStates.has(String(task.state))) return false;
     const entry = (await readA2ARegistry())[params.key];
     const journal = entry?.progress;
-    if (journal?.deliveredTexts.includes(params.text)) return true;
+    if (journal?.deliveredTexts.includes(params.text)) {
+      await updateA2AProgressJournal(params.key, (current) =>
+        settleCandidate(current, false));
+      return true;
+    }
     if (taskAgentHistoryContains(task, params.text)) {
-      await updateA2AProgressJournal(params.key, (current) => ({
-        ...current,
-        acknowledgement: params.acknowledgement ? "delivered" : current.acknowledgement,
-        pendingText: undefined,
-        deliveredTexts: [...new Set([...current.deliveredTexts, params.text])],
-      }));
+      await updateA2AProgressJournal(params.key, (current) =>
+        settleCandidate(current, true));
       return true;
     }
     await updateA2AProgressJournal(params.key, (current) => ({
       ...current,
       acknowledgement: params.acknowledgement ? "pending" : current.acknowledgement,
-      pendingText: params.text,
+      pendingAcknowledgementText: params.acknowledgement
+        ? params.text
+        : current.pendingAcknowledgementText,
+      pendingProgressText: params.acknowledgement
+        ? current.pendingProgressText
+        : params.text,
+      pendingText: undefined,
     }));
     await params.identity.a2aReply(params.taskId, {
       intent: "progress",
       text: params.text,
     });
-    await updateA2AProgressJournal(params.key, (current) => ({
-      ...current,
-      acknowledgement: params.acknowledgement ? "delivered" : current.acknowledgement,
-      pendingText: undefined,
-      deliveredTexts: [...new Set([...current.deliveredTexts, params.text])],
-    }));
+    await updateA2AProgressJournal(params.key, (current) =>
+      settleCandidate(current, true));
     return true;
   }
 
@@ -4720,18 +4745,19 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const registry = await readA2ARegistry();
     const pending = Object.entries(registry)
       .filter(([, entry]) => entry.taskId === supervisor.taskId)
-      .filter(([, entry]) => {
-        const text = entry.progress?.pendingText;
-        const isAcknowledgement =
-          entry.progress?.acknowledgement === "pending" &&
-          text?.startsWith(
-            `Task ${supervisor.taskId} received. Work is queued and starting. Expect progress updates `,
-          );
-        return Boolean(text) && !isAcknowledgement;
-      })
+      .filter(([, entry]) => Boolean(
+        entry.progress?.pendingProgressText ??
+        (entry.progress?.pendingText && !(
+          entry.progress.acknowledgement === "pending" &&
+          entry.progress.pendingText.startsWith(`Task ${supervisor.taskId} received`)
+        )
+          ? entry.progress.pendingText
+          : undefined),
+      ))
       .sort(([, left], [, right]) => right.updatedAt - left.updatedAt)
       .at(0);
-    const text = pending?.[1].progress?.pendingText;
+    const progress = pending?.[1].progress;
+    const text = progress?.pendingProgressText ?? progress?.pendingText;
     if (!pending || !text) return "none";
     const delivered = await sendA2AProgress({
       key: pending[0],
@@ -4806,7 +4832,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           if (pending === "terminal") break;
           if (pending === "delivered") continue;
           const task = await supervisor.identity.a2aTask(supervisor.taskId);
-          if (a2aTerminalStates.has(String(task.state))) break;
+          if (a2aStoppedStates.has(String(task.state))) break;
           const elapsedSeconds = Math.max(
             1,
             Math.round((Date.now() - supervisor.startedAt) / 1_000),
@@ -4870,11 +4896,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
 
   async function stopA2AWorkerActivity(
-    supervisor: A2AProgressSupervisor,
+    supervisor: A2AProgressSupervisor | undefined,
+    taskId: string,
   ): Promise<void> {
     await Promise.all([
-      stopA2AProgressSupervisor(supervisor),
-      stopA2AAcknowledgementRetries(supervisor.taskId),
+      supervisor ? stopA2AProgressSupervisor(supervisor) : Promise.resolve(),
+      stopA2AAcknowledgementRetries(taskId),
     ]);
   }
 
@@ -4938,17 +4965,19 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       );
     }
     const progressJournal = await updateA2AProgressJournal(key, (current) => current);
-    const progressSupervisor = acquireA2AProgressSupervisor({
-      identity,
-      identityId: String(identity.id),
-      key,
-      data,
-      body,
-      marker,
-      sessionKey: turn.sessionKeyOverride!,
-      startedAt: progressJournal.startedAt,
-      intervalSeconds: progressIntervalSeconds,
-    });
+    const progressSupervisor = progressIntervalSeconds > 0
+      ? acquireA2AProgressSupervisor({
+          identity,
+          identityId: String(identity.id),
+          key,
+          data,
+          body,
+          marker,
+          sessionKey: turn.sessionKeyOverride!,
+          startedAt: progressJournal.startedAt,
+          intervalSeconds: progressIntervalSeconds,
+        })
+      : undefined;
     if (!acknowledgementDelivered) {
       void scheduleA2AAcknowledgementRetry({
         key,
@@ -4957,8 +4986,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         intervalSeconds: progressIntervalSeconds,
       });
     }
-    context.beforeReplyIntent = () =>
-      stopA2AWorkerActivity(progressSupervisor);
+    context.beforeReplyIntent = async () => {
+      await fenceA2AReplyIntent(key);
+      await stopA2AWorkerActivity(progressSupervisor, data.task_id);
+    };
     try {
       await dispatchInboundTurn({
         ...opts,
@@ -4986,7 +5017,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       });
       if (controller.signal.aborted) {
         const task = await identity.a2aTask(data.task_id);
-        if (a2aTerminalStates.has(String(task.state))) {
+        if (a2aStoppedStates.has(String(task.state))) {
           await writeA2ARegistry(key, data, "finalized");
         }
         return;
@@ -4997,9 +5028,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         reply &&
         reply.toUpperCase() !== "[SILENT]"
       ) {
-        await stopA2AWorkerActivity(progressSupervisor);
+        await context.beforeReplyIntent();
         const task = await identity.a2aTask(data.task_id);
-        if (!a2aTerminalStates.has(String(task.state))) {
+        if (!a2aStoppedStates.has(String(task.state))) {
           await identity.a2aReply(data.task_id, {
             intent: "complete",
             text: reply,
@@ -5014,7 +5045,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         );
       }
     } finally {
-      await releaseA2AProgressSupervisor(progressSupervisor);
+      if (progressSupervisor) {
+        await releaseA2AProgressSupervisor(progressSupervisor);
+      }
       taskRuns.delete(activeRun);
       if (taskRuns.size === 0) {
         a2aRuns.delete(data.task_id);
@@ -5155,21 +5188,21 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
     const registryEntries = Object.entries(await readA2ARegistry())
       .sort(([, left], [, right]) => right.updatedAt - left.updatedAt);
-    const resumedTaskIds = new Set<string>();
+    const reconciledTaskIds = new Set<string>();
     for (const [key, entry] of registryEntries) {
+      if (reconciledTaskIds.has(entry.taskId)) continue;
+      reconciledTaskIds.add(entry.taskId);
       if (entry.state === "finalized") continue;
       try {
         const task = await identity.a2aTask(entry.taskId);
-        if (a2aTerminalStates.has(String(task.state))) {
+        if (a2aStoppedStates.has(String(task.state))) {
           await writeA2ARegistry(key, entry.data, "finalized");
+        } else if (entry.replyIntentFenced) {
+          continue;
         } else if (
-          !resumedTaskIds.has(entry.taskId) &&
           !a2aRuns.has(entry.taskId)
         ) {
-          resumedTaskIds.add(entry.taskId);
           void runA2ATurn(key, entry.data);
-        } else if (resumedTaskIds.has(entry.taskId)) {
-          await writeA2ARegistry(key, entry.data, "finalized");
         }
       } catch (error) {
         opts.logger?.warn?.(

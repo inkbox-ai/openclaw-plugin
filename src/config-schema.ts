@@ -175,9 +175,9 @@ export const inkboxAccountConfigJsonSchema = {
     },
     a2aProgressIntervalSeconds: {
       type: "integer",
-      minimum: 1,
+      minimum: 0,
       description:
-        "Seconds between short progress updates while serving an A2A task. Defaults to 180.",
+        "Seconds between short progress updates while serving an A2A task. Set to 0 to disable periodic updates. Defaults to 180.",
     },
     voiceRealtime: voiceRealtimeSchema,
     voiceStack: voiceStackSchema,

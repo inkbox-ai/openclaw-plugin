@@ -224,8 +224,7 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
     "a2aProgressIntervalSeconds",
   ] as const) {
     const raw = value[field];
-    const minimum = field === "a2aProgressIntervalSeconds" ? 1 : 0;
-    if (typeof raw === "number" && Number.isFinite(raw) && raw >= minimum) {
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
       out[field] = raw;
     }
   }

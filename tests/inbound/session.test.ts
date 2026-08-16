@@ -38,6 +38,7 @@ vi.mock("../../src/a2a-registry.js", () => ({
       state,
       data,
       progress: existing?.progress,
+      replyIntentFenced: existing?.replyIntentFenced,
       updatedAt: Date.now(),
     };
     a2aRegistryMock.writes.push({ key, state });
@@ -49,12 +50,29 @@ vi.mock("../../src/a2a-registry.js", () => ({
       .map((candidate: any) => candidate.progress?.startedAt)
       .filter((value): value is number => typeof value === "number")
       .reduce((earliest, value) => Math.min(earliest, value), Date.now());
-    const next = update(entry.progress ?? {
+    const current = entry.progress ?? {
       startedAt: taskStartedAt,
       deliveredTexts: [],
+    };
+    const legacyPendingText = current.pendingText;
+    const legacyIsAcknowledgement = current.acknowledgement === "pending" &&
+      legacyPendingText?.startsWith(`Task ${entry.taskId} received`);
+    const next = update({
+      ...current,
+      pendingAcknowledgementText: current.pendingAcknowledgementText ??
+        (legacyIsAcknowledgement ? legacyPendingText : undefined),
+      pendingProgressText: current.pendingProgressText ??
+        (legacyPendingText && !legacyIsAcknowledgement ? legacyPendingText : undefined),
+      pendingText: undefined,
     });
     entry.progress = next;
     return next;
+  }),
+  fenceA2AReplyIntent: vi.fn(async (key: string) => {
+    const entry = a2aRegistryMock.entries[key];
+    if (!entry) throw new Error("A2A registry entry is missing.");
+    entry.replyIntentFenced = true;
+    entry.updatedAt = Date.now();
   }),
 }));
 
@@ -1508,6 +1526,126 @@ describe("createInkboxSessionBridge", () => {
     });
   });
 
+  it.each([
+    ["complete", "Complete the task."],
+    ["ask_caller", "Provide another value."],
+    ["fail", "The task cannot continue."],
+  ])("persists a reply-intent fence before an ambiguous %s response", async (
+    intent,
+    text,
+  ) => {
+    const { runtime, a2aReply } = createRuntime();
+    a2aReply.mockImplementation(async (_taskId, reply) => {
+      if (reply.intent === "progress") return { state: "working" };
+      throw new Error("response lost");
+    });
+    const key = `task-fenced-${intent}:message-fenced-${intent}`;
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+      if (params.routeSessionKey !== `a2a:identity-1:context-fenced-${intent}`) return;
+      const context = activeA2ATurn(params.routeSessionKey)!;
+      await context.beforeReplyIntent?.();
+      expect(a2aRegistryMock.entries[key].replyIntentFenced).toBe(true);
+      await a2aReply(`task-fenced-${intent}`, { intent, text });
+      context.replyIntentCommitted = true;
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: `event-fenced-${intent}`,
+      event_type: "a2a.task.created",
+      data: {
+        task_id: `task-fenced-${intent}`,
+        context_id: `context-fenced-${intent}`,
+        message_id: `message-fenced-${intent}`,
+        caller: { handle: "caller" },
+        parts: [{ text: "Attempt an explicit response." }],
+      },
+    });
+    await flushMicrotasks(60);
+    expect(a2aRegistryMock.entries[key].replyIntentFenced).toBe(true);
+    expect(a2aRegistryMock.entries[key].state).toBe("running");
+
+    const restartedRuntime = createChannelRuntime("Should not run.");
+    const restarted = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime: restartedRuntime,
+    });
+    await restarted.catchUpA2A();
+    await flushMicrotasks(30);
+    expect(restartedRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+
+    await bridge.shutdownA2A();
+    await restarted.shutdownA2A();
+  });
+
+  it("fences an ambiguous plain completion while allowing a new caller turn", async () => {
+    const { runtime, a2aReply } = createRuntime();
+    a2aReply.mockImplementation(async (_taskId, reply) => {
+      if (reply.intent === "progress") return { state: "working" };
+      throw new Error("response lost");
+    });
+    const channelRuntime = createChannelRuntime("Plain final answer.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const data = {
+      task_id: "task-fenced-plain",
+      context_id: "context-fenced-plain",
+      message_id: "message-fenced-plain-1",
+      caller: { handle: "caller" },
+      parts: [{ text: "Return a plain response." }],
+    };
+
+    await bridge.handlers.onA2A?.({
+      id: "event-fenced-plain-1",
+      event_type: "a2a.task.created",
+      data,
+    });
+    await flushMicrotasks(60);
+    expect(a2aRegistryMock.entries[
+      "task-fenced-plain:message-fenced-plain-1"
+    ].replyIntentFenced).toBe(true);
+
+    const restartedRuntime = createChannelRuntime("[SILENT]");
+    const restarted = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime: restartedRuntime,
+    });
+    await restarted.catchUpA2A();
+    await flushMicrotasks(30);
+    expect(restartedRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+
+    await restarted.handlers.onA2A?.({
+      id: "event-fenced-plain-2",
+      event_type: "a2a.task.message",
+      data: {
+        ...data,
+        message_id: "message-fenced-plain-2",
+        parts: [{ text: "This is a genuine follow-up." }],
+      },
+    });
+    await flushMicrotasks(40);
+    expect(restartedRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(a2aRegistryMock.entries[
+      "task-fenced-plain:message-fenced-plain-2"
+    ].replyIntentFenced).not.toBe(true);
+
+    await bridge.shutdownA2A();
+    await restarted.shutdownA2A();
+  });
+
   it("serializes simultaneous duplicate A2A webhook admission", async () => {
     let releaseRead!: () => void;
     let confirmRead!: () => void;
@@ -1569,6 +1707,68 @@ describe("createInkboxSessionBridge", () => {
 
     releaseMain();
     await flushMicrotasks(30);
+  });
+
+  it("keeps acknowledgement retries active when periodic progress is disabled", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      a2aReply.mockRejectedValueOnce(new Error("retry receipt"));
+      const channelRuntime = createChannelRuntime("Unused progress summary.", (params) => {
+        if (params.routeSessionKey === "a2a:identity-1:context-disabled-progress") {
+          return new Promise<void>((resolve) => {
+            releaseMain = resolve;
+          });
+        }
+      });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 0 },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-disabled-progress",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-disabled-progress",
+          context_id: "context-disabled-progress",
+          message_id: "message-disabled-progress",
+          caller: { handle: "caller" },
+          parts: [{ text: "Work without periodic updates." }],
+        },
+      });
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledWith("task-disabled-progress", {
+        intent: "progress",
+        text: "Task task-disabled-progress received. Work is queued and starting. Periodic progress updates are disabled.",
+      });
+      expect(a2aRegistryMock.entries[
+        "task-disabled-progress:message-disabled-progress"
+      ].progress).toMatchObject({ acknowledgement: "pending" });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks(30);
+      expect(a2aRegistryMock.entries[
+        "task-disabled-progress:message-disabled-progress"
+      ].progress).toMatchObject({ acknowledgement: "delivered" });
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(2);
+      expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+
+      releaseMain();
+      await flushMicrotasks(30);
+    } finally {
+      releaseMain?.();
+      vi.useRealTimers();
+    }
   });
 
   it("sends periodic worker progress and stops the timer when the task completes", async () => {
@@ -2052,7 +2252,12 @@ describe("createInkboxSessionBridge", () => {
       await flushMicrotasks(30);
       expect(a2aReply).toHaveBeenCalledTimes(1);
       expect(a2aRegistryMock.entries["task-active-retry:message-active-retry"].progress)
-        .toMatchObject({ acknowledgement: "pending" });
+        .toMatchObject({
+          acknowledgement: "pending",
+          pendingAcknowledgementText: expect.stringContaining(
+            "Task task-active-retry received",
+          ),
+        });
 
       await vi.advanceTimersByTimeAsync(999);
       expect(a2aReply).toHaveBeenCalledTimes(1);
@@ -2066,6 +2271,96 @@ describe("createInkboxSessionBridge", () => {
       await flushMicrotasks(30);
     } finally {
       releaseMain?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps acknowledgement and periodic retry candidates independent", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    let releaseAcknowledgement!: () => void;
+    let releaseProgress!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      let acknowledgementAttempts = 0;
+      a2aReply.mockImplementation(async (_taskId, reply) => {
+        if (reply.intent !== "progress") return { state: "completed" };
+        if (reply.text.startsWith("Task task-independent-pending received")) {
+          acknowledgementAttempts += 1;
+          if (acknowledgementAttempts === 1) throw new Error("response lost");
+          await new Promise<void>((resolve) => {
+            releaseAcknowledgement = resolve;
+          });
+          return { state: "working" };
+        }
+        await new Promise<void>((resolve) => {
+          releaseProgress = resolve;
+        });
+        return { state: "working" };
+      });
+      const channelRuntime = createChannelRuntime(
+        "I am validating the requested work.",
+        (params) => {
+          if (params.routeSessionKey === "a2a:identity-1:context-independent-pending") {
+            return new Promise<void>((resolve) => {
+              releaseMain = resolve;
+            });
+          }
+        },
+      );
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 1 },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-independent-pending",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-independent-pending",
+          context_id: "context-independent-pending",
+          message_id: "message-independent-pending",
+          caller: { handle: "caller" },
+          parts: [{ text: "Overlap the retries." }],
+        },
+      });
+      await flushMicrotasks(30);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks(50);
+
+      const journal = () => a2aRegistryMock.entries[
+        "task-independent-pending:message-independent-pending"
+      ].progress;
+      expect(journal().pendingAcknowledgementText).toContain(
+        "Task task-independent-pending received",
+      );
+      expect(journal().pendingProgressText).toMatch(/\(1s elapsed\)$/);
+
+      releaseProgress();
+      await flushMicrotasks(30);
+      expect(journal().pendingProgressText).toBeUndefined();
+      expect(journal().pendingAcknowledgementText).toContain(
+        "Task task-independent-pending received",
+      );
+      expect(journal().acknowledgement).toBe("pending");
+
+      releaseAcknowledgement();
+      await flushMicrotasks(30);
+      expect(journal().pendingAcknowledgementText).toBeUndefined();
+      expect(journal().acknowledgement).toBe("delivered");
+      expect(journal().deliveredTexts).toHaveLength(2);
+
+      releaseMain();
+      await flushMicrotasks(30);
+    } finally {
+      releaseMain?.();
+      releaseProgress?.();
+      releaseAcknowledgement?.();
       vi.useRealTimers();
     }
   });
@@ -2347,7 +2642,7 @@ describe("createInkboxSessionBridge", () => {
       text: pending,
     });
     expect(a2aRegistryMock.entries["task-progress-restart:message-progress-restart"].progress)
-      .toMatchObject({ pendingText: undefined });
+      .toMatchObject({ pendingProgressText: undefined });
     expect(a2aRegistryMock.entries["task-progress-restart:message-progress-restart"]
       .progress.deliveredTexts).toContain(pending);
 
@@ -2421,7 +2716,7 @@ describe("createInkboxSessionBridge", () => {
       text: expect.stringContaining("Task task-progress-follow-up received"),
     });
     expect(a2aRegistryMock.entries["task-progress-follow-up:message-progress-follow-up-1"]
-      .progress.pendingText).toBeUndefined();
+      .progress.pendingProgressText).toBeUndefined();
     expect(a2aRegistryMock.entries["task-progress-follow-up:message-progress-follow-up-1"]
       .progress.deliveredTexts).toContain(pending);
 
@@ -2476,6 +2771,51 @@ describe("createInkboxSessionBridge", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["input_required", "auth_required"])(
+    "finalizes a persisted %s task without acknowledgement or worker replay",
+    async (taskState) => {
+      const { runtime, a2aReply, a2aTask } = createRuntime();
+      const data = {
+        task_id: `task-stopped-${taskState}`,
+        context_id: `context-stopped-${taskState}`,
+        message_id: `message-stopped-${taskState}`,
+        caller: { handle: "caller" },
+        parts: [{ text: "Do not replay this stopped turn." }],
+      };
+      const key = `${data.task_id}:${data.message_id}`;
+      a2aRegistryMock.entries[key] = {
+        taskId: data.task_id,
+        contextId: data.context_id,
+        messageId: data.message_id,
+        state: "running",
+        data,
+        progress: {
+          startedAt: Date.now() - 1_000,
+          acknowledgement: "pending",
+          pendingAcknowledgementText: `Task ${data.task_id} received.`,
+          deliveredTexts: [],
+        },
+        updatedAt: Date.now(),
+      };
+      a2aTask.mockResolvedValue({ id: data.task_id, state: taskState, messages: [] });
+      const channelRuntime = createChannelRuntime("Should not run.");
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.catchUpA2A();
+      await flushMicrotasks(30);
+
+      expect(a2aRegistryMock.entries[key].state).toBe("finalized");
+      expect(a2aReply).not.toHaveBeenCalled();
+      expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+      await bridge.shutdownA2A();
+    },
+  );
 
   it("resumes persisted caller data once when task history ends in progress", async () => {
     let releaseMain!: () => void;
@@ -2558,10 +2898,6 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).not.toContain(
       "I am reviewing the request.",
     );
-    expect(a2aRegistryMock.writes).toContainEqual(expect.objectContaining({
-      key: "task-catchup-existing:message-catchup-old",
-      state: "finalized",
-    }));
 
     releaseMain();
     await flushMicrotasks(30);

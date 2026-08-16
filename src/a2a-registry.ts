@@ -23,12 +23,16 @@ export interface A2ARegistryEntry {
   state: "queued" | "running" | "finalized";
   data: A2ARegistryData;
   progress?: A2AProgressJournal;
+  replyIntentFenced?: boolean;
   updatedAt: number;
 }
 
 export interface A2AProgressJournal {
   startedAt: number;
   acknowledgement?: "pending" | "delivered";
+  pendingAcknowledgementText?: string;
+  pendingProgressText?: string;
+  /** Legacy single-slot delivery state, migrated on the next journal update. */
   pendingText?: string;
   deliveredTexts: string[];
 }
@@ -92,8 +96,18 @@ export async function writeA2ARegistry(
       state,
       data,
       progress: existing?.progress,
+      replyIntentFenced: existing?.replyIntentFenced,
       updatedAt: now,
     };
+  });
+}
+
+export async function fenceA2AReplyIntent(key: string): Promise<void> {
+  await mutateA2ARegistry((registry, now) => {
+    const entry = registry[key];
+    if (!entry) throw new Error("A2A registry entry is missing.");
+    entry.replyIntentFenced = true;
+    entry.updatedAt = now;
   });
 }
 
@@ -110,13 +124,29 @@ export async function updateA2AProgressJournal(
       .map((candidate) => candidate.progress?.startedAt)
       .filter((value): value is number => typeof value === "number")
       .reduce((earliest, value) => Math.min(earliest, value), now);
-    result = update(entry.progress ?? {
+    const current = entry.progress ?? {
       startedAt: taskStartedAt,
       deliveredTexts: [],
+    };
+    const legacyPendingText = current.pendingText;
+    const legacyIsAcknowledgement =
+      current.acknowledgement === "pending" &&
+      legacyPendingText?.startsWith(`Task ${entry.taskId} received`);
+    result = update({
+      ...current,
+      pendingAcknowledgementText:
+        current.pendingAcknowledgementText ??
+        (legacyIsAcknowledgement ? legacyPendingText : undefined),
+      pendingProgressText:
+        current.pendingProgressText ??
+        (legacyPendingText && !legacyIsAcknowledgement ? legacyPendingText : undefined),
+      pendingText: undefined,
     });
     entry.progress = {
       ...result,
-      pendingText: result.pendingText?.slice(0, 240),
+      pendingAcknowledgementText: result.pendingAcknowledgementText?.slice(0, 240),
+      pendingProgressText: result.pendingProgressText?.slice(0, 240),
+      pendingText: undefined,
       deliveredTexts: result.deliveredTexts.slice(-20).map((text) => text.slice(0, 240)),
     };
     entry.updatedAt = now;

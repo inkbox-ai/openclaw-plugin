@@ -394,7 +394,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `allowedRecipients` | no | - | Outbound recipient allowlist for messaging targets and A2A Agent Card URLs. Empty means no local outbound filtering. |
 | `allowedInboundContactIds` | no | - | Optional local inbound allowlist by Inkbox contact UUID. Empty means Inkbox contact rules decide reachability. |
 | `includeContactMemories` | no | `true` | Include memories from the matched contact as background context for inbound email, messaging, reactions, and calls. Set `false` to disable them. |
-| `a2aProgressIntervalSeconds` | no | `180` | Send a short nonterminal progress update while serving an A2A task at this cadence. The immediate receipt includes the configured frequency. |
+| `a2aProgressIntervalSeconds` | no | `180` | Send a short nonterminal progress update while serving an A2A task at this cadence. Set to `0` to disable periodic updates. The immediate receipt includes the configured frequency. |
 | `sms.batchDelayMs` | no | `0` | Inbound SMS and iMessage fragment batching window. |
 | `voiceStack` | no | legacy-compatible | `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt`. Setup always writes an explicit value. |
 | `voiceAiAuthorityMode` | Voice AI | saved server value | Informational local copy of the selected `contact_scoped` or `yolo` authority. |

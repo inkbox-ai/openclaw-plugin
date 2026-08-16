@@ -145,8 +145,8 @@
           },
           "a2aProgressIntervalSeconds": {
             "type": "integer",
-            "minimum": 1,
-            "description": "Seconds between short progress updates while serving an A2A task. Defaults to 180."
+            "minimum": 0,
+            "description": "Seconds between short progress updates while serving an A2A task. Set to 0 to disable periodic updates. Defaults to 180."
           },
           "allowedRecipients": {
             "type": "array",
@@ -241,7 +241,7 @@
                 "voiceAgentPrewarm": { "type": "boolean" },
                 "voiceAgentPrewarmTtlMs": { "type": "integer", "minimum": 0 },
                 "voiceAgentPrewarmTimeoutMs": { "type": "integer", "minimum": 1 },
-                "a2aProgressIntervalSeconds": { "type": "integer", "minimum": 1 },
+                "a2aProgressIntervalSeconds": { "type": "integer", "minimum": 0 },
                 "allowedRecipients": {
                   "type": "array",
                   "items": { "type": "string" }
@@ -425,8 +425,8 @@
       },
       "a2aProgressIntervalSeconds": {
         "type": "integer",
-        "minimum": 1,
-        "description": "Seconds between short progress updates while serving an A2A task. Defaults to 180."
+        "minimum": 0,
+        "description": "Seconds between short progress updates while serving an A2A task. Set to 0 to disable periodic updates. Defaults to 180."
       },
       "vault": {
         "type": "object",
