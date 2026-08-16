@@ -4478,7 +4478,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   const a2aAcknowledgements = new Map<string, Promise<A2AAcknowledgementOutcome>>();
   let a2aShuttingDown = false;
   const a2aAdmissionLocks = new Map<string, Promise<void>>();
-  const a2aCanceledTaskContexts = new Set<string>();
+  const a2aCanceledTaskContexts = new Map<string, Set<string>>();
   type A2AAcknowledgementRetry = {
     taskId: string;
     controller: AbortController;
@@ -5093,7 +5093,22 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const taskContextAdmissionKey = `task-context:${data.task_id}:${data.context_id}`;
     if (eventType === "a2a.task.canceled") {
       await serializeA2AAdmission(taskContextAdmissionKey, async () => {
-        a2aCanceledTaskContexts.add(taskContextAdmissionKey);
+        const canceledKeys = new Set(
+          a2aCanceledTaskContexts.get(taskContextAdmissionKey) ?? [],
+        );
+        const registry = await readA2ARegistry();
+        for (const [registryKey, entry] of Object.entries(registry)) {
+          if (
+            entry.data.task_id === data.task_id &&
+            entry.data.context_id === data.context_id
+          ) {
+            canceledKeys.add(registryKey);
+          }
+        }
+        if (data.message_id) {
+          canceledKeys.add(`${data.task_id}:${data.message_id}`);
+        }
+        a2aCanceledTaskContexts.set(taskContextAdmissionKey, canceledKeys);
         const runs = [...(a2aRuns.get(data.task_id) ?? [])].filter(
           (run) => run.contextId === data.context_id,
         );
@@ -5169,7 +5184,14 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const normalized = { ...data, message_id: messageId };
     const key = `${data.task_id}:${messageId}`;
     await serializeA2AAdmission(taskContextAdmissionKey, async () => {
-      if (a2aCanceledTaskContexts.has(taskContextAdmissionKey)) return;
+      const canceledKeys = a2aCanceledTaskContexts.get(taskContextAdmissionKey);
+      if (canceledKeys) {
+        if (eventType !== "a2a.task.message" || canceledKeys.has(key)) return;
+        const identity = await opts.runtime.getIdentity() as any;
+        const task = await identity.a2aTask(data.task_id);
+        if (a2aStoppedStates.has(String(task.state))) return;
+        a2aCanceledTaskContexts.delete(taskContextAdmissionKey);
+      }
       await serializeA2AAdmission(key, async () => {
         if (a2aShuttingDown) return;
         const existing = (await readA2ARegistry())[key];

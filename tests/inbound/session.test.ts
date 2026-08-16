@@ -1817,6 +1817,56 @@ describe("createInkboxSessionBridge", () => {
     await bridge.shutdownA2A();
   });
 
+  it("admits one distinct active caller message after pre-admission cancellation", async () => {
+    const { runtime, a2aTask } = createRuntime();
+    a2aTask.mockResolvedValue({ id: "task-cancel-generation", state: "working" });
+    const channelRuntime = createChannelRuntime("Handled the genuine follow-up.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const canceledData = {
+      task_id: "task-cancel-generation",
+      context_id: "context-cancel-generation",
+      message_id: "message-canceled-generation",
+      caller: { handle: "caller" },
+      parts: [{ text: "This canceled generation must not run." }],
+    };
+
+    await bridge.handlers.onA2A?.({
+      id: "event-cancel-generation",
+      event_type: "a2a.task.canceled",
+      data: canceledData,
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-canceled-generation-replay",
+      event_type: "a2a.task.message",
+      data: canceledData,
+    });
+    await flushMicrotasks(20);
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+
+    const followUpEvent = {
+      id: "event-active-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-active-follow-up",
+        parts: [{ text: "Handle this genuine active follow-up." }],
+      },
+    };
+    await bridge.handlers.onA2A?.(followUpEvent);
+    await flushMicrotasks(80);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+
+    await bridge.handlers.onA2A?.(followUpEvent);
+    await flushMicrotasks(40);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    await bridge.shutdownA2A();
+  });
+
   it("keeps acknowledgement retries active when periodic progress is disabled", async () => {
     vi.useFakeTimers();
     let releaseMain!: () => void;
