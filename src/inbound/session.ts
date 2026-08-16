@@ -4540,6 +4540,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     taskId: string;
     contextId: string;
     messageId: string;
+    parts: Array<Record<string, unknown>>;
+    caller: NonNullable<A2ARegistryData["caller"]>;
   } | undefined {
     const taskId = String(task?.id ?? task?.taskId ?? task?.task_id ?? "");
     const contextId = String(task?.contextId ?? task?.context_id ?? "");
@@ -4554,7 +4556,26 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     });
     const messageId = String(message?.messageId ?? message?.message_id ?? "");
     if (!taskId || !contextId || !messageId) return undefined;
-    return { taskId, contextId, messageId };
+    const taskCaller = task?.caller ?? {};
+    const parts = Array.isArray(message?.parts)
+      ? message.parts.filter(
+        (part: unknown): part is Record<string, unknown> =>
+          Boolean(part) && typeof part === "object" && !Array.isArray(part),
+      )
+      : [];
+    return {
+      taskId,
+      contextId,
+      messageId,
+      parts,
+      caller: {
+        identity_id: String(taskCaller.identityId ?? taskCaller.identity_id ?? ""),
+        organization_id: String(
+          taskCaller.organizationId ?? taskCaller.organization_id ?? "",
+        ),
+        handle: String(taskCaller.handle ?? ""),
+      },
+    };
   }
 
   async function sendA2AProgress(params: {
@@ -5223,25 +5244,41 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       return;
     }
-    const messageId = data.message_id ?? String(event.id ?? "");
-    const normalized = { ...data, message_id: messageId };
-    const key = `${data.task_id}:${messageId}`;
     await serializeA2AAdmission(taskAdmissionKey, async () => {
+      if (a2aShuttingDown) return;
+      if (eventType !== "a2a.task.created" && eventType !== "a2a.task.message") {
+        return;
+      }
+      const identity = await opts.runtime.getIdentity() as any;
+      const task = await identity.a2aTask(data.task_id);
+      if (a2aShuttingDown) return;
+      const state = String(task?.state?.value ?? task?.state ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/^task_state_/, "");
+      const caller = authoritativeA2ACaller(task);
+      const messageId = data.message_id ?? String(event.id ?? "");
+      if (
+        (state !== "submitted" && state !== "working") ||
+        caller?.taskId !== data.task_id ||
+        caller.contextId !== data.context_id ||
+        caller.messageId !== messageId
+      ) return;
+      const normalized: A2ARegistryData = {
+        task_id: caller.taskId,
+        context_id: caller.contextId,
+        state,
+        message_id: caller.messageId,
+        caller: caller.caller,
+        parts: caller.parts,
+      };
+      const key = `${caller.taskId}:${caller.messageId}`;
       const canceled = a2aCanceledTasks.get(taskAdmissionKey);
       if (canceled) {
         if (
           eventType !== "a2a.task.message" ||
-          data.context_id !== canceled.contextId ||
+          caller.contextId !== canceled.contextId ||
           canceled.messageKeys.has(key)
-        ) return;
-        const identity = await opts.runtime.getIdentity() as any;
-        const task = await identity.a2aTask(data.task_id);
-        if (a2aStoppedStates.has(String(task.state))) return;
-        const caller = authoritativeA2ACaller(task);
-        if (
-          caller?.taskId !== data.task_id ||
-          caller.contextId !== data.context_id ||
-          caller.messageId !== messageId
         ) return;
         a2aCanceledTasks.delete(taskAdmissionKey);
       }
