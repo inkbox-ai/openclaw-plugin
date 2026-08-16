@@ -218,7 +218,11 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
   if (typeof value.includeContactMemories === "boolean") {
     out.includeContactMemories = value.includeContactMemories;
   }
-  for (const field of ["voiceAgentPrewarmTtlMs", "voiceAgentPrewarmTimeoutMs"] as const) {
+  for (const field of [
+    "voiceAgentPrewarmTtlMs",
+    "voiceAgentPrewarmTimeoutMs",
+    "a2aProgressIntervalSeconds",
+  ] as const) {
     const raw = value[field];
     if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
       out[field] = raw;

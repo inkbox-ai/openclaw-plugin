@@ -29,16 +29,62 @@ vi.mock("@inkbox/sdk", () => ({
 
 vi.mock("../../src/a2a-registry.js", () => ({
   readA2ARegistry: vi.fn(async () => a2aRegistryMock.entries),
+  refreshA2ARegistryData: vi.fn(async (key: string, data: any) => {
+    const existing = a2aRegistryMock.entries[key];
+    if (!existing) return undefined;
+    return a2aRegistryMock.entries[key] = {
+      ...existing,
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id ?? "",
+      data,
+      updatedAt: Date.now(),
+    };
+  }),
   writeA2ARegistry: vi.fn(async (key: string, data: any, state: string) => {
+    const existing = a2aRegistryMock.entries[key];
     a2aRegistryMock.entries[key] = {
       taskId: data.task_id,
       contextId: data.context_id,
       messageId: data.message_id ?? "",
       state,
       data,
+      progress: existing?.progress,
+      replyIntentFenced: existing?.replyIntentFenced,
       updatedAt: Date.now(),
     };
     a2aRegistryMock.writes.push({ key, state });
+  }),
+  updateA2AProgressJournal: vi.fn(async (key: string, update: any) => {
+    const entry = a2aRegistryMock.entries[key];
+    const taskStartedAt = Object.values(a2aRegistryMock.entries)
+      .filter((candidate: any) => candidate.taskId === entry.taskId)
+      .map((candidate: any) => candidate.progress?.startedAt)
+      .filter((value): value is number => typeof value === "number")
+      .reduce((earliest, value) => Math.min(earliest, value), Date.now());
+    const current = entry.progress ?? {
+      startedAt: taskStartedAt,
+      deliveredTexts: [],
+    };
+    const legacyPendingText = current.pendingText;
+    const legacyIsAcknowledgement = current.acknowledgement === "pending" &&
+      legacyPendingText?.startsWith(`Task ${entry.taskId} received`);
+    const next = update({
+      ...current,
+      pendingAcknowledgementText: current.pendingAcknowledgementText ??
+        (legacyIsAcknowledgement ? legacyPendingText : undefined),
+      pendingProgressText: current.pendingProgressText ??
+        (legacyPendingText && !legacyIsAcknowledgement ? legacyPendingText : undefined),
+      pendingText: undefined,
+    });
+    entry.progress = next;
+    return next;
+  }),
+  fenceA2AReplyIntent: vi.fn(async (key: string) => {
+    const entry = a2aRegistryMock.entries[key];
+    if (!entry) throw new Error("A2A registry entry is missing.");
+    entry.replyIntentFenced = true;
+    entry.updatedAt = Date.now();
   }),
 }));
 
@@ -198,6 +244,8 @@ import {
   recordHostedSmsBeforeToolCall,
   resetHostedSmsToolCapturesForTest,
 } from "../../src/hosted-call-tool-settlement.js";
+import { activeA2ATurn } from "../../src/a2a-context.js";
+import { readA2ARegistry } from "../../src/a2a-registry.js";
 
 type FakeInkboxWebSocketMessage = string | { message: string; advanceMs?: number };
 
@@ -252,7 +300,24 @@ function createRuntime(options: { conversations?: any[] } = {}) {
   const sendIMessageTyping = vi.fn(async () => undefined);
   const listTextConversations = vi.fn(async () => options.conversations ?? []);
   const a2aReply = vi.fn(async () => ({ id: "task-1", state: "completed" }));
-  const a2aTask = vi.fn(async () => ({ id: "task-1", state: "working" }));
+  const a2aTask = vi.fn(async (taskId: string) => {
+    const suffix = taskId.replace(/^task-/, "");
+    return {
+      id: taskId,
+      contextId: `context-${suffix}`,
+      state: "working",
+      caller: {
+        identityId: "caller-1",
+        organizationId: "org-1",
+        handle: "caller",
+      },
+      messages: [{
+        role: "caller",
+        messageId: `message-${suffix}`,
+        parts: [{ text: "Investigate this." }],
+      }],
+    };
+  });
   const iterA2ATasks = vi.fn(() => (async function* () {})());
   const runtime = {
     getIdentity: vi.fn(async () => ({
@@ -1484,6 +1549,2319 @@ describe("createInkboxSessionBridge", () => {
       intent: "complete",
       text: "Investigation complete.",
     });
+    expect(a2aReply).toHaveBeenCalledWith("task-1", {
+      intent: "progress",
+      text: "Task task-1 received. Work is queued and starting. Expect progress updates about every 3 minutes.",
+    });
+  });
+
+  it.each([
+    ["complete", "Complete the task."],
+    ["ask_caller", "Provide another value."],
+    ["fail", "The task cannot continue."],
+  ])("persists a reply-intent fence before an ambiguous %s response", async (
+    intent,
+    text,
+  ) => {
+    const { runtime, a2aReply } = createRuntime();
+    a2aReply.mockImplementation(async (_taskId, reply) => {
+      if (reply.intent === "progress") return { state: "working" };
+      throw new Error("response lost");
+    });
+    const key = `task-fenced-${intent}:message-fenced-${intent}`;
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+      if (params.routeSessionKey !== `a2a:identity-1:context-fenced-${intent}`) return;
+      const context = activeA2ATurn(params.routeSessionKey)!;
+      await context.beforeReplyIntent?.();
+      expect(a2aRegistryMock.entries[key].replyIntentFenced).toBe(true);
+      await a2aReply(`task-fenced-${intent}`, { intent, text });
+      context.replyIntentCommitted = true;
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: `event-fenced-${intent}`,
+      event_type: "a2a.task.created",
+      data: {
+        task_id: `task-fenced-${intent}`,
+        context_id: `context-fenced-${intent}`,
+        message_id: `message-fenced-${intent}`,
+        caller: { handle: "caller" },
+        parts: [{ text: "Attempt an explicit response." }],
+      },
+    });
+    await flushMicrotasks(60);
+    expect(a2aRegistryMock.entries[key].replyIntentFenced).toBe(true);
+    expect(a2aRegistryMock.entries[key].state).toBe("running");
+
+    const restartedRuntime = createChannelRuntime("Should not run.");
+    const restarted = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime: restartedRuntime,
+    });
+    await restarted.catchUpA2A();
+    await flushMicrotasks(30);
+    expect(restartedRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+
+    await bridge.shutdownA2A();
+    await restarted.shutdownA2A();
+  });
+
+  it("fences an ambiguous plain completion while allowing a new caller turn", async () => {
+    const { runtime, a2aReply, a2aTask } = createRuntime();
+    a2aReply.mockImplementation(async (_taskId, reply) => {
+      if (reply.intent === "progress") return { state: "working" };
+      throw new Error("response lost");
+    });
+    const channelRuntime = createChannelRuntime("Plain final answer.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const data = {
+      task_id: "task-fenced-plain",
+      context_id: "context-fenced-plain",
+      message_id: "message-fenced-plain-1",
+      caller: { handle: "caller" },
+      parts: [{ text: "Return a plain response." }],
+    };
+    const authoritativeTask = {
+      id: data.task_id,
+      contextId: data.context_id,
+      state: "working",
+      caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+      messages: [{
+        role: "ROLE_CALLER",
+        messageId: data.message_id,
+        parts: data.parts,
+      }],
+    };
+    a2aTask.mockResolvedValue(authoritativeTask);
+
+    await bridge.handlers.onA2A?.({
+      id: "event-fenced-plain-1",
+      event_type: "a2a.task.created",
+      data,
+    });
+    await flushMicrotasks(60);
+    expect(a2aRegistryMock.entries[
+      "task-fenced-plain:message-fenced-plain-1"
+    ].replyIntentFenced).toBe(true);
+
+    const restartedRuntime = createChannelRuntime("[SILENT]");
+    const restarted = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime: restartedRuntime,
+    });
+    await restarted.catchUpA2A();
+    await flushMicrotasks(30);
+    expect(restartedRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+
+    authoritativeTask.messages = [{
+      role: "ROLE_CALLER",
+      messageId: "message-fenced-plain-2",
+      parts: [{ text: "This is a genuine follow-up." }],
+    }];
+    await restarted.handlers.onA2A?.({
+      id: "event-fenced-plain-2",
+      event_type: "a2a.task.message",
+      data: {
+        ...data,
+        message_id: "message-fenced-plain-2",
+        parts: [{ text: "This is a genuine follow-up." }],
+      },
+    });
+    await flushMicrotasks(40);
+    expect(restartedRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(a2aRegistryMock.entries[
+      "task-fenced-plain:message-fenced-plain-2"
+    ].replyIntentFenced).not.toBe(true);
+
+    await bridge.shutdownA2A();
+    await restarted.shutdownA2A();
+  });
+
+  it("serializes simultaneous duplicate A2A webhook admission", async () => {
+    let releaseRead!: () => void;
+    let confirmRead!: () => void;
+    let releaseMain!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      confirmRead = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const readRegistry = vi.mocked(readA2ARegistry);
+    readRegistry.mockClear();
+    readRegistry.mockImplementationOnce(async () => {
+      confirmRead();
+      await readGate;
+      return a2aRegistryMock.entries;
+    });
+    const { runtime, a2aReply } = createRuntime();
+    const channelRuntime = createChannelRuntime("Completed.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-admission") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const duplicateEvent = {
+      id: "event-admission",
+      event_type: "a2a.task.created",
+      data: {
+        task_id: "task-admission",
+        context_id: "context-admission",
+        message_id: "message-admission",
+        caller: { handle: "caller" },
+        parts: [{ text: "Run once." }],
+      },
+    };
+
+    const first = bridge.handlers.onA2A?.(duplicateEvent);
+    const second = bridge.handlers.onA2A?.(duplicateEvent);
+    await readStarted;
+    await flushMicrotasks(20);
+    expect(readRegistry).toHaveBeenCalledTimes(1);
+
+    releaseRead();
+    await Promise.all([first, second]);
+    await flushMicrotasks(40);
+    expect(a2aRegistryMock.writes.filter((write) => write.state === "queued"))
+      .toHaveLength(1);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(a2aReply.mock.calls.filter(([, reply]) =>
+      reply.intent === "progress" && reply.text.includes("Task task-admission received")
+    )).toHaveLength(1);
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("canonicalizes an existing entry before retrying its acknowledgement", async () => {
+    const { runtime, a2aReply, a2aTask } = createRuntime();
+    const taskId = "task-existing-canonical";
+    const contextId = "context-existing-canonical";
+    const messageId = "message-existing-canonical";
+    const key = `${taskId}:${messageId}`;
+    a2aRegistryMock.entries[key] = {
+      taskId,
+      contextId,
+      messageId,
+      state: "running",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: messageId,
+        caller: { handle: "persisted-spoof" },
+        parts: [{ text: "Persisted spoofed request." }],
+      },
+      progress: {
+        startedAt: Date.now(),
+        acknowledgement: "pending",
+        deliveredTexts: [],
+      },
+      updatedAt: Date.now(),
+    };
+    const authoritativeData = {
+      caller: {
+        identity_id: "caller-authoritative",
+        organization_id: "org-authoritative",
+        handle: "authoritative-caller",
+      },
+      parts: [{ text: "Authoritative existing request." }],
+    };
+    a2aTask.mockResolvedValue({
+      id: taskId,
+      contextId,
+      state: "working",
+      caller: {
+        identityId: authoritativeData.caller.identity_id,
+        organizationId: authoritativeData.caller.organization_id,
+        handle: authoritativeData.caller.handle,
+      },
+      messages: [{ role: "ROLE_CALLER", messageId, parts: authoritativeData.parts }],
+    });
+    a2aReply.mockImplementation(async () => {
+      expect(a2aRegistryMock.entries[key].data).toMatchObject(authoritativeData);
+      return { id: taskId, state: "working" };
+    });
+    const channelRuntime = createChannelRuntime("Should not run.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: "duplicate-existing-canonical",
+      event_type: "a2a.task.message",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: messageId,
+        caller: { handle: "webhook-spoof" },
+        parts: [{ text: "Webhook spoofed request." }],
+      },
+    });
+
+    expect(a2aRegistryMock.entries[key].data).toMatchObject(authoritativeData);
+    expect(a2aReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    await bridge.shutdownA2A();
+  });
+
+  it.each(["completed", "canceled", "input_required", "auth_required"])(
+    "does not replay a stale webhook for an already %s task",
+    async (state) => {
+      const { runtime, a2aReply, a2aTask } = createRuntime();
+      a2aTask.mockResolvedValue({
+        id: "task-stale",
+        contextId: "context-stale",
+        state,
+        caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+        messages: [{
+          role: "ROLE_CALLER",
+          messageId: `message-stale-${state}`,
+          parts: [{ text: "Do not replay this stale task." }],
+        }],
+      });
+      const channelRuntime = createChannelRuntime("Should not run.");
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: `event-stale-${state}`,
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-stale",
+          context_id: "context-stale",
+          message_id: `message-stale-${state}`,
+          caller: { handle: "caller" },
+          parts: [{ text: "Do not replay this stale task." }],
+        },
+      });
+      await flushMicrotasks(40);
+
+      expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+      expect(a2aReply).not.toHaveBeenCalled();
+      expect(a2aRegistryMock.entries[`task-stale:message-stale-${state}`])
+        .toBeUndefined();
+      await bridge.shutdownA2A();
+    },
+  );
+
+  it("serializes cancellation with in-flight task admission", async () => {
+    let releaseRead!: () => void;
+    let confirmRead!: () => void;
+    let releaseIdentity!: (identity: any) => void;
+    let confirmIdentity!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      confirmRead = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const identityStarted = new Promise<void>((resolve) => {
+      confirmIdentity = resolve;
+    });
+    const identityGate = new Promise<any>((resolve) => {
+      releaseIdentity = resolve;
+    });
+    const readRegistry = vi.mocked(readA2ARegistry);
+    readRegistry.mockClear();
+    readRegistry.mockImplementationOnce(async () => {
+      confirmRead();
+      await readGate;
+      return a2aRegistryMock.entries;
+    });
+    const { runtime } = createRuntime();
+    const identity = await runtime.getIdentity();
+    runtime.getIdentity.mockImplementation(async () => {
+      confirmIdentity();
+      return identityGate;
+    });
+    const channelRuntime = createChannelRuntime("Should not run.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const data = {
+      task_id: "task-cancel-admission",
+      context_id: "context-cancel-admission",
+      message_id: "message-cancel-admission",
+      caller: { handle: "caller" },
+      parts: [{ text: "Do not escape cancellation." }],
+    };
+
+    const admitted = bridge.handlers.onA2A?.({
+      id: "event-cancel-admission",
+      event_type: "a2a.task.created",
+      data,
+    });
+    await identityStarted;
+    let cancellationSettled = false;
+    const cancellation = Promise.resolve(bridge.handlers.onA2A?.({
+      id: "event-cancel-admission-stop",
+      event_type: "a2a.task.canceled",
+      data,
+    })).then(() => {
+      cancellationSettled = true;
+    });
+    await flushMicrotasks(20);
+    expect(cancellationSettled).toBe(false);
+
+    releaseIdentity(identity);
+    await readStarted;
+    await flushMicrotasks(20);
+    expect(cancellationSettled).toBe(false);
+
+    releaseRead();
+    await admitted;
+    await cancellation;
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    await bridge.shutdownA2A();
+  });
+
+  it("admits one distinct active caller message after pre-admission cancellation", async () => {
+    const { runtime, a2aTask } = createRuntime();
+    a2aTask.mockResolvedValueOnce({
+      id: "task-cancel-generation",
+      contextId: "context-cancel-generation",
+      state: "canceled",
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-canceled-generation",
+          parts: [{ text: "This canceled generation must not run." }],
+        },
+      ],
+    });
+    const channelRuntime = createChannelRuntime("Handled the genuine follow-up.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const canceledData = {
+      task_id: "task-cancel-generation",
+      context_id: "context-cancel-generation",
+      caller: { handle: "caller" },
+      parts: [{ text: "This canceled generation must not run." }],
+    };
+
+    await bridge.handlers.onA2A?.({
+      id: "event-cancel-generation",
+      event_type: "a2a.task.canceled",
+      data: canceledData,
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-canceled-generation-replay",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-canceled-generation",
+      },
+    });
+    await flushMicrotasks(20);
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+
+    const authoritativeActiveTask = {
+      id: "task-cancel-generation",
+      contextId: "context-cancel-generation",
+      state: "working",
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-active-follow-up",
+          parts: [{ text: "Handle this genuine active follow-up." }],
+        },
+      ],
+    };
+    a2aTask.mockResolvedValue(authoritativeActiveTask);
+    await bridge.handlers.onA2A?.({
+      id: "event-spoofed-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-spoofed-follow-up",
+        parts: [{ text: "This is not the authoritative caller message." }],
+      },
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-wrong-context-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        context_id: "context-wrong",
+        message_id: "message-active-follow-up",
+      },
+    });
+    a2aTask.mockResolvedValueOnce({
+      ...authoritativeActiveTask,
+      messages: [
+        {
+          role: "agent",
+          messageId: "message-active-follow-up",
+          parts: [{ text: "Not caller-authored." }],
+        },
+      ],
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-non-caller-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-active-follow-up",
+      },
+    });
+    a2aTask.mockResolvedValueOnce({
+      ...authoritativeActiveTask,
+      state: "canceled",
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-stopped-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-active-follow-up",
+      },
+    });
+    await flushMicrotasks(20);
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+
+    const followUpEvent = {
+      id: "event-active-follow-up",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-active-follow-up",
+        parts: [{ text: "Handle this genuine active follow-up." }],
+      },
+    };
+    await bridge.handlers.onA2A?.(followUpEvent);
+    await flushMicrotasks(80);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+
+    await bridge.handlers.onA2A?.(followUpEvent);
+    await flushMicrotasks(40);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    await bridge.shutdownA2A();
+  });
+
+  it("rejects a delayed canceled generation after restart and runs the authoritative follow-up once", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aTask } = createRuntime();
+    a2aTask.mockResolvedValue({
+      id: "task-restart-generation",
+      contextId: "context-restart-generation",
+      state: "canceled",
+      caller: {
+        identityId: "caller-old",
+        organizationId: "org-old",
+        handle: "old-caller",
+      },
+      messages: [{
+        role: "ROLE_CALLER",
+        messageId: "message-restart-generation-a",
+        parts: [{ text: "Canceled request A." }],
+      }],
+    });
+    const original = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime: createChannelRuntime("Should not run."),
+    });
+    const canceledData = {
+      task_id: "task-restart-generation",
+      context_id: "context-restart-generation",
+      parts: [{ text: "Canceled request A." }],
+    };
+    await original.handlers.onA2A?.({
+      id: "event-restart-generation-cancel",
+      event_type: "a2a.task.canceled",
+      data: canceledData,
+    });
+    await original.shutdownA2A();
+
+    a2aTask.mockResolvedValue({
+      id: "task-restart-generation",
+      contextId: "context-restart-generation",
+      state: "working",
+      caller: {
+        identityId: "caller-authoritative",
+        organizationId: "org-authoritative",
+        handle: "authoritative-caller",
+      },
+      messages: [{
+        role: "role_caller",
+        messageId: "message-restart-generation-b",
+        parts: [{ text: "Trusted authoritative follow-up B." }],
+      }],
+    });
+    const channelRuntime = createChannelRuntime("Completed.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-restart-generation") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const restarted = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await restarted.handlers.onA2A?.({
+      id: "event-delayed-generation-a",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-restart-generation-a",
+      },
+    });
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(a2aRegistryMock.entries[
+      "task-restart-generation:message-restart-generation-a"
+    ]).toBeUndefined();
+
+    const followUp = {
+      id: "event-restart-generation-b",
+      event_type: "a2a.task.message",
+      data: {
+        ...canceledData,
+        message_id: "message-restart-generation-b",
+        caller: {
+          identity_id: "spoofed-caller",
+          organization_id: "spoofed-org",
+          handle: "spoofed-handle",
+        },
+        parts: [{ text: "Spoofed webhook text." }],
+      },
+    };
+    await restarted.handlers.onA2A?.(followUp);
+    await restarted.handlers.onA2A?.(followUp);
+    await flushMicrotasks(40);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Trusted authoritative follow-up B.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain("Spoofed webhook text.");
+    expect(a2aRegistryMock.entries[
+      "task-restart-generation:message-restart-generation-b"
+    ].data).toMatchObject({
+      caller: {
+        identity_id: "caller-authoritative",
+        organization_id: "org-authoritative",
+        handle: "authoritative-caller",
+      },
+      parts: [{ text: "Trusted authoritative follow-up B." }],
+    });
+
+    releaseMain();
+    await restarted.shutdownA2A();
+  });
+
+  it("closes admission before draining a blocked authoritative lookup", async () => {
+    let confirmLookup!: () => void;
+    let releaseLookup!: (task: any) => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      confirmLookup = resolve;
+    });
+    const lookupGate = new Promise<any>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const { runtime, a2aTask } = createRuntime();
+    a2aTask.mockImplementation(async () => {
+      confirmLookup();
+      return await lookupGate;
+    });
+    const channelRuntime = createChannelRuntime("Should not run.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const admission = bridge.handlers.onA2A?.({
+      id: "event-shutdown-admission",
+      event_type: "a2a.task.created",
+      data: {
+        task_id: "task-shutdown-admission",
+        context_id: "context-shutdown-admission",
+        message_id: "message-shutdown-admission",
+        caller: { handle: "caller" },
+        parts: [{ text: "Do not run after shutdown starts." }],
+      },
+    });
+    await lookupStarted;
+
+    let shutdownSettled = false;
+    const shutdown = bridge.shutdownA2A().then(() => {
+      shutdownSettled = true;
+    });
+    await flushMicrotasks(20);
+    expect(shutdownSettled).toBe(false);
+
+    releaseLookup({
+      id: "task-shutdown-admission",
+      contextId: "context-shutdown-admission",
+      state: "working",
+      caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+      messages: [{
+        role: "ROLE_CALLER",
+        messageId: "message-shutdown-admission",
+        parts: [{ text: "Do not run after shutdown starts." }],
+      }],
+    });
+    await Promise.all([admission, shutdown]);
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(a2aRegistryMock.entries[
+      "task-shutdown-admission:message-shutdown-admission"
+    ]).toBeUndefined();
+  });
+
+  it("keeps acknowledgement retries active when periodic progress is disabled", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      a2aReply.mockRejectedValueOnce(new Error("retry receipt"));
+      const channelRuntime = createChannelRuntime("Unused progress summary.", (params) => {
+        if (params.routeSessionKey === "a2a:identity-1:context-disabled-progress") {
+          return new Promise<void>((resolve) => {
+            releaseMain = resolve;
+          });
+        }
+      });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 0 },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-disabled-progress",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-disabled-progress",
+          context_id: "context-disabled-progress",
+          message_id: "message-disabled-progress",
+          caller: { handle: "caller" },
+          parts: [{ text: "Work without periodic updates." }],
+        },
+      });
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledWith("task-disabled-progress", {
+        intent: "progress",
+        text: "Task task-disabled-progress received. Work is queued and starting. Periodic progress updates are disabled.",
+      });
+      expect(a2aRegistryMock.entries[
+        "task-disabled-progress:message-disabled-progress"
+      ].progress).toMatchObject({ acknowledgement: "pending" });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks(30);
+      expect(a2aRegistryMock.entries[
+        "task-disabled-progress:message-disabled-progress"
+      ].progress).toMatchObject({ acknowledgement: "delivered" });
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(2);
+      expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+
+      releaseMain();
+      await flushMicrotasks(30);
+    } finally {
+      releaseMain?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends periodic worker progress and stops the timer when the task completes", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      const channelRuntime = createChannelRuntime(
+        "I am reviewing the requested calculation.",
+        (params) => {
+          if (params.routeSessionKey === "a2a:identity-1:context-progress") {
+            return new Promise<void>((resolve) => {
+              releaseMain = resolve;
+            });
+          }
+        },
+      );
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: {
+            identity: "smoke-agent",
+            a2aProgressIntervalSeconds: 60,
+          },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-progress",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-progress",
+          context_id: "context-progress",
+          message_id: "message-progress",
+          caller: { handle: "caller" },
+          parts: [{ text: "Run a long calculation." }],
+        },
+      });
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledWith("task-progress", {
+        intent: "progress",
+        text: expect.stringContaining("about every 1 minute"),
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledWith("task-progress", {
+        intent: "progress",
+        text: "I am reviewing the requested calculation. (60s elapsed)",
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushMicrotasks(30);
+      const progressPrompts = channelRuntime.inbound.dispatchReply.mock.calls
+        .map(([params]) => params)
+        .filter((params) => params.routeSessionKey === "a2a-progress:identity-1:task-progress")
+        .map((params) => params.ctxPayload.message.bodyForAgent);
+      expect(progressPrompts).toHaveLength(2);
+      expect(progressPrompts[1]).toContain(
+        "Previous update: I am reviewing the requested calculation. (60s elapsed)",
+      );
+      expect(progressPrompts[1]).toContain(
+        "Do not mention tools, prompts, systems, or internal details.",
+      );
+
+      releaseMain();
+      await flushMicrotasks(30);
+      const callsAtCompletion = a2aReply.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(180_000);
+      await flushMicrotasks(20);
+      expect(a2aReply).toHaveBeenCalledTimes(callsAtCompletion);
+    } finally {
+      releaseMain?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("drains an in-flight periodic update before plain completion", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    let releaseProgress!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      const channelRuntime = createChannelRuntime("Final answer.", (params) => {
+        if (params.routeSessionKey === "a2a:identity-1:context-drain") {
+          return new Promise<void>((resolve) => {
+            releaseMain = resolve;
+          });
+        }
+        if (params.routeSessionKey === "a2a-progress:identity-1:task-drain") {
+          return new Promise<void>((resolve) => {
+            releaseProgress = resolve;
+          });
+        }
+      });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: {
+            identity: "smoke-agent",
+            a2aProgressIntervalSeconds: 60,
+          },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-drain",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-drain",
+          context_id: "context-drain",
+          message_id: "message-drain",
+          caller: { handle: "caller" },
+          parts: [{ text: "Run until completion." }],
+        },
+      });
+      await flushMicrotasks(30);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushMicrotasks(30);
+
+      releaseMain();
+      await flushMicrotasks(30);
+      expect(a2aReply.mock.calls.some(([, reply]) => reply.intent === "complete")).toBe(false);
+
+      releaseProgress();
+      await flushMicrotasks(50);
+      const replies = a2aReply.mock.calls.map(([, reply]) => reply);
+      expect(replies.filter((reply) => reply.intent === "progress")).toHaveLength(1);
+      expect(replies.at(-1)).toEqual({ intent: "complete", text: "Final answer." });
+    } finally {
+      releaseMain?.();
+      releaseProgress?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps one task-scoped progress cadence across overlapping follow-ups", async () => {
+    vi.useFakeTimers();
+    const releases: Array<() => void> = [];
+    try {
+      const { runtime, a2aReply, a2aTask } = createRuntime();
+      let taskState = "working";
+      let callerMessageId = "message-follow-up-1";
+      a2aReply.mockImplementation(async (_taskId, reply) => {
+        if (["complete", "fail", "ask_caller"].includes(reply.intent)) {
+          taskState = reply.intent === "ask_caller" ? "input_required" : "completed";
+        }
+        return { id: "task-follow-up", state: taskState };
+      });
+      a2aTask.mockImplementation(async () => ({
+        id: "task-follow-up",
+        contextId: "context-follow-up",
+        state: taskState,
+        caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+        messages: [{
+          role: "ROLE_CALLER",
+          messageId: callerMessageId,
+          parts: [{ text: "Keep working." }],
+        }, ...a2aReply.mock.calls
+          .filter(([, reply]) => reply.intent === "progress")
+          .map(([, reply]) => ({ role: "agent", parts: [{ text: reply.text }] }))],
+      }));
+      const channelRuntime = createChannelRuntime(
+        "I am reviewing the follow-up.",
+        (params) => {
+          if (params.routeSessionKey === "a2a:identity-1:context-follow-up") {
+            return new Promise<void>((resolve) => releases.push(resolve));
+          }
+        },
+      );
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: {
+            identity: "smoke-agent",
+            a2aProgressIntervalSeconds: 60,
+          },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+      const baseEvent = {
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-follow-up",
+          context_id: "context-follow-up",
+          caller: { handle: "caller" },
+          parts: [{ text: "Keep working." }],
+        },
+      };
+
+      await bridge.handlers.onA2A?.({
+        ...baseEvent,
+        id: "event-follow-up-1",
+        data: { ...baseEvent.data, message_id: "message-follow-up-1" },
+      });
+      await flushMicrotasks(30);
+      await vi.advanceTimersByTimeAsync(30_000);
+      callerMessageId = "message-follow-up-2";
+      await bridge.handlers.onA2A?.({
+        ...baseEvent,
+        id: "event-follow-up-2",
+        event_type: "a2a.task.message",
+        data: { ...baseEvent.data, message_id: "message-follow-up-2" },
+      });
+      await flushMicrotasks(30);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await flushMicrotasks(30);
+      const periodicReplies = () => a2aReply.mock.calls
+        .map(([, reply]) => reply)
+        .filter((reply) => /\(\d+s elapsed\)$/.test(reply.text));
+      expect(periodicReplies()).toHaveLength(1);
+      expect(periodicReplies()[0].text).toMatch(/\(60s elapsed\)$/);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await flushMicrotasks(20);
+      expect(periodicReplies()).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await flushMicrotasks(30);
+      expect(periodicReplies()).toHaveLength(2);
+      expect(periodicReplies()[1].text).toMatch(/\(120s elapsed\)$/);
+
+      for (const release of releases) release();
+      await flushMicrotasks(60);
+    } finally {
+      for (const release of releases) release();
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes the original progress phase after ask-caller follow-up", async () => {
+    vi.useFakeTimers();
+    let releaseFirst!: () => void;
+    let releaseFollowUp!: () => void;
+    try {
+      const { runtime, a2aReply, a2aTask } = createRuntime();
+      let taskState = "working";
+      let callerMessageId = "message-sequential-1";
+      a2aReply.mockImplementation(async (_taskId, reply) => {
+        if (reply.intent === "ask_caller") taskState = "input_required";
+        if (reply.intent === "complete" || reply.intent === "fail") {
+          taskState = "completed";
+        }
+        return { id: "task-sequential", state: taskState };
+      });
+      a2aTask.mockImplementation(async () => ({
+        id: "task-sequential",
+        contextId: "context-sequential",
+        state: taskState,
+        caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+        messages: [{
+          role: "ROLE_CALLER",
+          messageId: callerMessageId,
+          parts: [{ text: "Continue the calculation." }],
+        }, ...a2aReply.mock.calls
+          .filter(([, reply]) => reply.intent === "progress")
+          .map(([, reply]) => ({ role: "agent", parts: [{ text: reply.text }] }))],
+      }));
+      const channelRuntime = createChannelRuntime(
+        "I am continuing the requested work.",
+        async (params) => {
+          const messageId = params.ctxPayload.messageIdFull;
+          if (messageId === "message-sequential-1") {
+            await new Promise<void>((resolve) => {
+              releaseFirst = resolve;
+            });
+            const context = activeA2ATurn(params.routeSessionKey)!;
+            await context.beforeReplyIntent?.();
+            await a2aReply("task-sequential", {
+              intent: "ask_caller",
+              text: "Provide the next value.",
+            });
+            context.replyIntentCommitted = true;
+          } else if (messageId === "message-sequential-2") {
+            await new Promise<void>((resolve) => {
+              releaseFollowUp = resolve;
+            });
+          }
+        },
+      );
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: {
+            identity: "smoke-agent",
+            a2aProgressIntervalSeconds: 60,
+          },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+      const eventData = {
+        task_id: "task-sequential",
+        context_id: "context-sequential",
+        caller: { handle: "caller" },
+        parts: [{ text: "Continue the calculation." }],
+      };
+
+      await bridge.handlers.onA2A?.({
+        id: "event-sequential-1",
+        event_type: "a2a.task.created",
+        data: { ...eventData, message_id: "message-sequential-1" },
+      });
+      await flushMicrotasks(30);
+      await vi.advanceTimersByTimeAsync(70_000);
+      await flushMicrotasks(30);
+      releaseFirst();
+      await flushMicrotasks(60);
+
+      const periodicReplies = () => a2aReply.mock.calls
+        .map(([, reply]) => reply)
+        .filter((reply) => /\(\d+s elapsed\)$/.test(reply.text));
+      expect(periodicReplies()).toHaveLength(1);
+      expect(periodicReplies()[0].text).toMatch(/\(60s elapsed\)$/);
+      expect(taskState).toBe("input_required");
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      taskState = "working";
+      callerMessageId = "message-sequential-2";
+      await bridge.handlers.onA2A?.({
+        id: "event-sequential-2",
+        event_type: "a2a.task.message",
+        data: { ...eventData, message_id: "message-sequential-2" },
+      });
+      await flushMicrotasks(30);
+
+      await vi.advanceTimersByTimeAsync(19_000);
+      await flushMicrotasks(20);
+      expect(periodicReplies()).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks(30);
+      expect(periodicReplies()).toHaveLength(2);
+      expect(periodicReplies()[1].text).toMatch(/\(120s elapsed\)$/);
+
+      releaseFollowUp();
+      await flushMicrotasks(60);
+    } finally {
+      releaseFirst?.();
+      releaseFollowUp?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("replaces a stopped supervisor before the ask-caller turn unwinds", async () => {
+    vi.useFakeTimers();
+    let requestAskCaller!: () => void;
+    let confirmAskCaller!: () => void;
+    let releaseOldTurn!: () => void;
+    let releaseFollowUp!: () => void;
+    const askCallerReady = new Promise<void>((resolve) => {
+      confirmAskCaller = resolve;
+    });
+    try {
+      const { runtime, a2aReply, a2aTask } = createRuntime();
+      let taskState = "working";
+      let callerMessageId = "message-interleaved-1";
+      a2aReply.mockImplementation(async (_taskId, reply) => {
+        if (reply.intent === "ask_caller") taskState = "input_required";
+        if (reply.intent === "complete" || reply.intent === "fail") {
+          taskState = "completed";
+        }
+        return { id: "task-interleaved", state: taskState };
+      });
+      a2aTask.mockImplementation(async () => ({
+        id: "task-interleaved",
+        contextId: "context-interleaved",
+        state: taskState,
+        caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+        messages: [{
+          role: "ROLE_CALLER",
+          messageId: callerMessageId,
+          parts: [{ text: "Continue the calculation." }],
+        }, ...a2aReply.mock.calls
+          .filter(([, reply]) => reply.intent === "progress")
+          .map(([, reply]) => ({ role: "agent", parts: [{ text: reply.text }] }))],
+      }));
+      const channelRuntime = createChannelRuntime(
+        "I am continuing the requested work.",
+        async (params) => {
+          const messageId = params.ctxPayload.messageIdFull;
+          if (messageId === "message-interleaved-1") {
+            await new Promise<void>((resolve) => {
+              requestAskCaller = resolve;
+            });
+            const context = activeA2ATurn(params.routeSessionKey)!;
+            await context.beforeReplyIntent?.();
+            await a2aReply("task-interleaved", {
+              intent: "ask_caller",
+              text: "Provide the next value.",
+            });
+            context.replyIntentCommitted = true;
+            confirmAskCaller();
+            await new Promise<void>((resolve) => {
+              releaseOldTurn = resolve;
+            });
+          } else if (messageId === "message-interleaved-2") {
+            await new Promise<void>((resolve) => {
+              releaseFollowUp = resolve;
+            });
+          }
+        },
+      );
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 60 },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+      const eventData = {
+        task_id: "task-interleaved",
+        context_id: "context-interleaved",
+        caller: { handle: "caller" },
+        parts: [{ text: "Continue the calculation." }],
+      };
+
+      await bridge.handlers.onA2A?.({
+        id: "event-interleaved-1",
+        event_type: "a2a.task.created",
+        data: { ...eventData, message_id: "message-interleaved-1" },
+      });
+      await flushMicrotasks(30);
+      await vi.advanceTimersByTimeAsync(30_000);
+      requestAskCaller();
+      await askCallerReady;
+
+      taskState = "working";
+      callerMessageId = "message-interleaved-2";
+      await bridge.handlers.onA2A?.({
+        id: "event-interleaved-2",
+        event_type: "a2a.task.message",
+        data: { ...eventData, message_id: "message-interleaved-2" },
+      });
+      await flushMicrotasks(30);
+
+      const periodicReplies = () => a2aReply.mock.calls
+        .map(([, reply]) => reply)
+        .filter((reply) => /\(\d+s elapsed\)$/.test(reply.text));
+      await vi.advanceTimersByTimeAsync(30_000);
+      await flushMicrotasks(30);
+      expect(periodicReplies()).toHaveLength(1);
+      expect(periodicReplies()[0].text).toMatch(/\(60s elapsed\)$/);
+
+      releaseOldTurn();
+      await flushMicrotasks(40);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushMicrotasks(30);
+      expect(periodicReplies()).toHaveLength(2);
+      expect(periodicReplies()[1].text).toMatch(/\(120s elapsed\)$/);
+
+      releaseFollowUp();
+      await flushMicrotasks(60);
+    } finally {
+      requestAskCaller?.();
+      releaseOldTurn?.();
+      releaseFollowUp?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a failed acknowledgement without another webhook", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      a2aReply.mockRejectedValueOnce(new Error("response lost"));
+      const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+        if (params.routeSessionKey === "a2a:identity-1:context-active-retry") {
+          return new Promise<void>((resolve) => {
+            releaseMain = resolve;
+          });
+        }
+      });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+        logger: { warn: vi.fn() },
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-active-retry",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-active-retry",
+          context_id: "context-active-retry",
+          message_id: "message-active-retry",
+          caller: { handle: "caller" },
+          parts: [{ text: "Retry the receipt." }],
+        },
+      });
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(1);
+      expect(a2aRegistryMock.entries["task-active-retry:message-active-retry"].progress)
+        .toMatchObject({
+          acknowledgement: "pending",
+          pendingAcknowledgementText: expect.stringContaining(
+            "Task task-active-retry received",
+          ),
+        });
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(a2aReply).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(2);
+      expect(a2aRegistryMock.entries["task-active-retry:message-active-retry"].progress)
+        .toMatchObject({ acknowledgement: "delivered" });
+
+      releaseMain();
+      await flushMicrotasks(30);
+    } finally {
+      releaseMain?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps acknowledgement and periodic retry candidates independent", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    let releaseAcknowledgement!: () => void;
+    let releaseProgress!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      let acknowledgementAttempts = 0;
+      a2aReply.mockImplementation(async (_taskId, reply) => {
+        if (reply.intent !== "progress") return { state: "completed" };
+        if (reply.text.startsWith("Task task-independent-pending received")) {
+          acknowledgementAttempts += 1;
+          if (acknowledgementAttempts === 1) throw new Error("response lost");
+          await new Promise<void>((resolve) => {
+            releaseAcknowledgement = resolve;
+          });
+          return { state: "working" };
+        }
+        await new Promise<void>((resolve) => {
+          releaseProgress = resolve;
+        });
+        return { state: "working" };
+      });
+      const channelRuntime = createChannelRuntime(
+        "I am validating the requested work.",
+        (params) => {
+          if (params.routeSessionKey === "a2a:identity-1:context-independent-pending") {
+            return new Promise<void>((resolve) => {
+              releaseMain = resolve;
+            });
+          }
+        },
+      );
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: {
+          accountId: "default",
+          config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 1 },
+        } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-independent-pending",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-independent-pending",
+          context_id: "context-independent-pending",
+          message_id: "message-independent-pending",
+          caller: { handle: "caller" },
+          parts: [{ text: "Overlap the retries." }],
+        },
+      });
+      await flushMicrotasks(30);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks(50);
+
+      const journal = () => a2aRegistryMock.entries[
+        "task-independent-pending:message-independent-pending"
+      ].progress;
+      expect(journal().pendingAcknowledgementText).toContain(
+        "Task task-independent-pending received",
+      );
+      expect(journal().pendingProgressText).toMatch(/\(1s elapsed\)$/);
+
+      releaseProgress();
+      await flushMicrotasks(30);
+      expect(journal().pendingProgressText).toBeUndefined();
+      expect(journal().pendingAcknowledgementText).toContain(
+        "Task task-independent-pending received",
+      );
+      expect(journal().acknowledgement).toBe("pending");
+
+      releaseAcknowledgement();
+      await flushMicrotasks(30);
+      expect(journal().pendingAcknowledgementText).toBeUndefined();
+      expect(journal().acknowledgement).toBe("delivered");
+      expect(journal().deliveredTexts).toHaveLength(2);
+
+      releaseMain();
+      await flushMicrotasks(30);
+    } finally {
+      releaseMain?.();
+      releaseProgress?.();
+      releaseAcknowledgement?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("joins concurrent duplicate acknowledgement attempts", async () => {
+    vi.useFakeTimers();
+    let rejectAcknowledgement!: (error: Error) => void;
+    let releaseMain!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      a2aReply.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectAcknowledgement = reject;
+      }));
+      const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+        if (params.routeSessionKey === "a2a:identity-1:context-concurrent-retry") {
+          return new Promise<void>((resolve) => {
+            releaseMain = resolve;
+          });
+        }
+      });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+        logger: { warn: vi.fn() },
+      });
+      const event = {
+        id: "event-concurrent-retry",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-concurrent-retry",
+          context_id: "context-concurrent-retry",
+          message_id: "message-concurrent-retry",
+          caller: { handle: "caller" },
+          parts: [{ text: "Retry the receipt." }],
+        },
+      };
+
+      await bridge.handlers.onA2A?.(event);
+      await flushMicrotasks(30);
+      const duplicate = bridge.handlers.onA2A?.(event);
+      await flushMicrotasks(20);
+      expect(a2aReply).toHaveBeenCalledTimes(1);
+
+      rejectAcknowledgement(new Error("response lost"));
+      await duplicate;
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(2);
+      expect(a2aRegistryMock.entries["task-concurrent-retry:message-concurrent-retry"].progress)
+        .toMatchObject({ acknowledgement: "delivered" });
+
+      releaseMain();
+      await flushMicrotasks(30);
+    } finally {
+      rejectAcknowledgement?.(new Error("test cleanup"));
+      releaseMain?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("drains an in-flight acknowledgement retry before completion", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    let finishRetry!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      a2aReply
+        .mockRejectedValueOnce(new Error("response lost"))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          finishRetry = () => resolve({ id: "task-retry-drain", state: "working" });
+        }));
+      const channelRuntime = createChannelRuntime("Final answer.", (params) => {
+        if (params.routeSessionKey === "a2a:identity-1:context-retry-drain") {
+          return new Promise<void>((resolve) => {
+            releaseMain = resolve;
+          });
+        }
+      });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+        logger: { warn: vi.fn() },
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-retry-drain",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-retry-drain",
+          context_id: "context-retry-drain",
+          message_id: "message-retry-drain",
+          caller: { handle: "caller" },
+          parts: [{ text: "Retry before completing." }],
+        },
+      });
+      await flushMicrotasks(30);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks(20);
+      expect(a2aReply).toHaveBeenCalledTimes(2);
+
+      releaseMain();
+      await flushMicrotasks(30);
+      expect(a2aReply.mock.calls.some(([, reply]) => reply.intent === "complete"))
+        .toBe(false);
+
+      finishRetry();
+      await flushMicrotasks(50);
+      expect(a2aReply.mock.calls.at(-1)?.[1]).toEqual({
+        intent: "complete",
+        text: "Final answer.",
+      });
+    } finally {
+      releaseMain?.();
+      finishRetry?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops acknowledgement retries when the task is canceled", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      a2aReply.mockRejectedValue(new Error("offline"));
+      const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+        if (params.routeSessionKey === "a2a:identity-1:context-cancel-retry") {
+          return new Promise<void>((resolve) => {
+            releaseMain = resolve;
+          });
+        }
+      });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+        logger: { warn: vi.fn() },
+      });
+      const data = {
+        task_id: "task-cancel-retry",
+        context_id: "context-cancel-retry",
+        message_id: "message-cancel-retry",
+        caller: { handle: "caller" },
+        parts: [{ text: "Retry the receipt." }],
+      };
+
+      await bridge.handlers.onA2A?.({
+        id: "event-cancel-retry",
+        event_type: "a2a.task.created",
+        data,
+      });
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(1);
+
+      const cancellation = bridge.handlers.onA2A?.({
+        id: "event-cancel-retry-stop",
+        event_type: "a2a.task.canceled",
+        data,
+      });
+      await flushMicrotasks(10);
+      releaseMain();
+      await cancellation;
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseMain?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for a blocked terminal reply before cancellation returns", async () => {
+    let releaseTerminal!: () => void;
+    let terminalStarted!: () => void;
+    const terminalGate = new Promise<void>((resolve) => {
+      releaseTerminal = resolve;
+    });
+    const terminalCall = new Promise<void>((resolve) => {
+      terminalStarted = resolve;
+    });
+    const { runtime, a2aReply } = createRuntime();
+    a2aReply.mockImplementation(async (_taskId, reply) => {
+      if (reply.intent === "complete") {
+        terminalStarted();
+        await terminalGate;
+      }
+      return { id: "task-cancel-terminal", state: "working" };
+    });
+    const channelRuntime = createChannelRuntime("Final answer.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const data = {
+      task_id: "task-cancel-terminal",
+      context_id: "context-cancel-terminal",
+      message_id: "message-cancel-terminal",
+      caller: { handle: "caller" },
+      parts: [{ text: "Return a final answer." }],
+    };
+
+    await bridge.handlers.onA2A?.({
+      id: "event-cancel-terminal",
+      event_type: "a2a.task.created",
+      data,
+    });
+    await terminalCall;
+
+    let cancellationSettled = false;
+    const cancellation = Promise.resolve(bridge.handlers.onA2A?.({
+      id: "event-cancel-terminal-stop",
+      event_type: "a2a.task.canceled",
+      data,
+    })).then(() => {
+      cancellationSettled = true;
+    });
+    await flushMicrotasks(20);
+    expect(cancellationSettled).toBe(false);
+
+    releaseTerminal();
+    await cancellation;
+    const writesAfterCancellation = a2aRegistryMock.writes.length;
+    await flushMicrotasks(30);
+    expect(a2aRegistryMock.writes).toHaveLength(writesAfterCancellation);
+  });
+
+  it("waits for an abort-insensitive worker run before shutdown returns", async () => {
+    let releaseDispatch!: () => void;
+    let dispatchStarted!: () => void;
+    const dispatchGate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const dispatchCall = new Promise<void>((resolve) => {
+      dispatchStarted = resolve;
+    });
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Late answer.", async (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-shutdown-run") {
+        dispatchStarted();
+        await dispatchGate;
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: "event-shutdown-run",
+      event_type: "a2a.task.created",
+      data: {
+        task_id: "task-shutdown-run",
+        context_id: "context-shutdown-run",
+        message_id: "message-shutdown-run",
+        caller: { handle: "caller" },
+        parts: [{ text: "Keep running until released." }],
+      },
+    });
+    await dispatchCall;
+
+    let shutdownSettled = false;
+    const shutdown = bridge.shutdownA2A().then(() => {
+      shutdownSettled = true;
+    });
+    await flushMicrotasks(20);
+    expect(shutdownSettled).toBe(false);
+
+    releaseDispatch();
+    await shutdown;
+    const writesAfterShutdown = a2aRegistryMock.writes.length;
+    await flushMicrotasks(30);
+    expect(a2aRegistryMock.writes).toHaveLength(writesAfterShutdown);
+  });
+
+  it("retries a persisted acknowledgement during restart catch-up", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aReply } = createRuntime();
+    const data = {
+      task_id: "task-restart-retry",
+      context_id: "context-restart-retry",
+      message_id: "message-restart-retry",
+      caller: { handle: "caller" },
+      parts: [{ text: "Resume the receipt." }],
+    };
+    a2aRegistryMock.entries["task-restart-retry:message-restart-retry"] = {
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id,
+      state: "running",
+      data,
+      progress: {
+        startedAt: Date.now() - 5_000,
+        acknowledgement: "pending",
+        pendingText: "Task task-restart-retry received.",
+        deliveredTexts: [],
+      },
+      updatedAt: Date.now(),
+    };
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-restart-retry") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await flushMicrotasks(30);
+    expect(a2aReply).toHaveBeenCalledWith("task-restart-retry", {
+      intent: "progress",
+      text: expect.stringContaining("Task task-restart-retry received"),
+    });
+    expect(a2aRegistryMock.entries["task-restart-retry:message-restart-retry"].progress)
+      .toMatchObject({ acknowledgement: "delivered" });
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("retries persisted periodic progress immediately during restart catch-up", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aReply } = createRuntime();
+    const receipt =
+      "Task task-progress-restart received. Work is queued and starting. Expect progress updates about every 1 minute.";
+    const pending = "I am reviewing the requested work. (60s elapsed)";
+    const data = {
+      task_id: "task-progress-restart",
+      context_id: "context-progress-restart",
+      message_id: "message-progress-restart",
+      caller: { handle: "caller" },
+      parts: [{ text: "Resume the work." }],
+    };
+    a2aRegistryMock.entries["task-progress-restart:message-progress-restart"] = {
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id,
+      state: "running",
+      data,
+      progress: {
+        startedAt: Date.now() - 70_000,
+        acknowledgement: "delivered",
+        pendingText: pending,
+        deliveredTexts: [receipt],
+      },
+      updatedAt: Date.now(),
+    };
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-progress-restart") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 60 },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await flushMicrotasks(40);
+    expect(a2aReply).toHaveBeenCalledTimes(1);
+    expect(a2aReply).toHaveBeenCalledWith("task-progress-restart", {
+      intent: "progress",
+      text: pending,
+    });
+    expect(a2aRegistryMock.entries["task-progress-restart:message-progress-restart"].progress)
+      .toMatchObject({ pendingProgressText: undefined });
+    expect(a2aRegistryMock.entries["task-progress-restart:message-progress-restart"]
+      .progress.deliveredTexts).toContain(pending);
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("reconciles lost periodic progress before a follow-up generates more", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aReply, a2aTask } = createRuntime();
+    const receipt =
+      "Task task-progress-follow-up received. Work is queued and starting. Expect progress updates about every 1 minute.";
+    const pending = "I am reviewing the requested work. (60s elapsed)";
+    const firstData = {
+      task_id: "task-progress-follow-up",
+      context_id: "context-progress-follow-up",
+      message_id: "message-progress-follow-up-1",
+      caller: { handle: "caller" },
+      parts: [{ text: "Start the work." }],
+    };
+    a2aRegistryMock.entries["task-progress-follow-up:message-progress-follow-up-1"] = {
+      taskId: firstData.task_id,
+      contextId: firstData.context_id,
+      messageId: firstData.message_id,
+      state: "finalized",
+      data: firstData,
+      progress: {
+        startedAt: Date.now() - 70_000,
+        acknowledgement: "delivered",
+        pendingText: pending,
+        deliveredTexts: [receipt],
+      },
+      updatedAt: Date.now(),
+    };
+    a2aTask.mockResolvedValue({
+      id: firstData.task_id,
+      contextId: firstData.context_id,
+      state: "working",
+      caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+      messages: [
+        {
+          role: "ROLE_CALLER",
+          messageId: "message-progress-follow-up-2",
+          parts: [{ text: "Continue the work." }],
+        },
+        { role: "agent", parts: [{ text: pending }] },
+      ],
+    });
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-progress-follow-up") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent", a2aProgressIntervalSeconds: 60 },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: "event-progress-follow-up-2",
+      event_type: "a2a.task.message",
+      data: {
+        ...firstData,
+        message_id: "message-progress-follow-up-2",
+        parts: [{ text: "Continue the work." }],
+      },
+    });
+    await flushMicrotasks(40);
+
+    expect(a2aReply).toHaveBeenCalledTimes(1);
+    expect(a2aReply).toHaveBeenCalledWith("task-progress-follow-up", {
+      intent: "progress",
+      text: expect.stringContaining("Task task-progress-follow-up received"),
+    });
+    expect(a2aRegistryMock.entries["task-progress-follow-up:message-progress-follow-up-1"]
+      .progress.pendingProgressText).toBeUndefined();
+    expect(a2aRegistryMock.entries["task-progress-follow-up:message-progress-follow-up-1"]
+      .progress.deliveredTexts).toContain(pending);
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("stops acknowledgement retries during gateway shutdown", async () => {
+    vi.useFakeTimers();
+    let releaseMain!: () => void;
+    try {
+      const { runtime, a2aReply } = createRuntime();
+      a2aReply.mockRejectedValue(new Error("offline"));
+      const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+        if (params.routeSessionKey === "a2a:identity-1:context-shutdown-retry") {
+          return new Promise<void>((resolve) => {
+            releaseMain = resolve;
+          });
+        }
+      });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+        logger: { warn: vi.fn() },
+      });
+
+      await bridge.handlers.onA2A?.({
+        id: "event-shutdown-retry",
+        event_type: "a2a.task.created",
+        data: {
+          task_id: "task-shutdown-retry",
+          context_id: "context-shutdown-retry",
+          message_id: "message-shutdown-retry",
+          caller: { handle: "caller" },
+          parts: [{ text: "Retry the receipt." }],
+        },
+      });
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(1);
+
+      const shutdown = bridge.shutdownA2A();
+      await flushMicrotasks(10);
+      releaseMain();
+      await shutdown;
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushMicrotasks(30);
+      expect(a2aReply).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseMain?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["input_required", "auth_required"])(
+    "finalizes a persisted %s task without acknowledgement or worker replay",
+    async (taskState) => {
+      const { runtime, a2aReply, a2aTask } = createRuntime();
+      const data = {
+        task_id: `task-stopped-${taskState}`,
+        context_id: `context-stopped-${taskState}`,
+        message_id: `message-stopped-${taskState}`,
+        caller: { handle: "caller" },
+        parts: [{ text: "Do not replay this stopped turn." }],
+      };
+      const key = `${data.task_id}:${data.message_id}`;
+      a2aRegistryMock.entries[key] = {
+        taskId: data.task_id,
+        contextId: data.context_id,
+        messageId: data.message_id,
+        state: "running",
+        data,
+        progress: {
+          startedAt: Date.now() - 1_000,
+          acknowledgement: "pending",
+          pendingAcknowledgementText: `Task ${data.task_id} received.`,
+          deliveredTexts: [],
+        },
+        updatedAt: Date.now(),
+      };
+      a2aTask.mockResolvedValue({ id: data.task_id, state: taskState, messages: [] });
+      const channelRuntime = createChannelRuntime("Should not run.");
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+
+      await bridge.catchUpA2A();
+      await flushMicrotasks(30);
+
+      expect(a2aRegistryMock.entries[key].state).toBe("finalized");
+      expect(a2aReply).not.toHaveBeenCalled();
+      expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+      await bridge.shutdownA2A();
+    },
+  );
+
+  it("resumes authoritative caller data once when task history ends in progress", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aTask, iterA2ATasks } = createRuntime();
+    const receipt =
+      "Task task-catchup-existing received. Work is queued and starting. Expect progress updates about every 3 minutes.";
+    const data = {
+      task_id: "task-catchup-existing",
+      context_id: "context-catchup-existing",
+      message_id: "message-catchup-existing",
+      caller: { handle: "caller" },
+      parts: [{ text: "Use the persisted caller request." }],
+    };
+    const oldData = {
+      ...data,
+      message_id: "message-catchup-old",
+      parts: [{ text: "Do not resume this older request." }],
+    };
+    a2aRegistryMock.entries["task-catchup-existing:message-catchup-old"] = {
+      taskId: oldData.task_id,
+      contextId: oldData.context_id,
+      messageId: oldData.message_id,
+      state: "running",
+      data: oldData,
+      updatedAt: Date.now() - 1,
+    };
+    a2aRegistryMock.entries["task-catchup-existing:message-catchup-existing"] = {
+      taskId: data.task_id,
+      contextId: data.context_id,
+      messageId: data.message_id,
+      state: "running",
+      data,
+      progress: {
+        startedAt: Date.now(),
+        acknowledgement: "delivered",
+        deliveredTexts: [receipt, "I am reviewing the request. (180s elapsed)"],
+      },
+      updatedAt: Date.now(),
+    };
+    const remoteTask = {
+      id: data.task_id,
+      contextId: data.context_id,
+      state: "submitted",
+      caller: { identityId: "caller-1", handle: "caller" },
+      messages: [
+        { role: "caller", messageId: data.message_id, parts: [{ text: "Remote copy." }] },
+        { role: "agent", messageId: "receipt-1", parts: [{ text: receipt }] },
+        {
+          role: "role_agent",
+          messageId: "progress-1",
+          parts: [{ text: "I am reviewing the request. (180s elapsed)" }],
+        },
+      ],
+    };
+    a2aTask.mockResolvedValue(remoteTask);
+    iterA2ATasks.mockImplementation(() => (async function* () {
+      yield remoteTask;
+    })());
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-catchup-existing") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await flushMicrotasks(40);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Remote copy.");
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain(
+      "Use the persisted caller request.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain(
+      "I am reviewing the request.",
+    );
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("rejects stale restart data and resumes the authoritative caller generation once", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aReply, a2aTask, iterA2ATasks } = createRuntime();
+    const taskId = "task-catchup-generation";
+    const contextId = "context-catchup-generation";
+    const staleKey = `${taskId}:message-catchup-generation-a`;
+    const currentKey = `${taskId}:message-catchup-generation-b`;
+    a2aRegistryMock.entries[staleKey] = {
+      taskId,
+      contextId,
+      messageId: "message-catchup-generation-a",
+      state: "running",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: "message-catchup-generation-a",
+        caller: { handle: "stale-caller" },
+        parts: [{ text: "Never resume stale generation A." }],
+      },
+      updatedAt: Date.now(),
+    };
+    const authoritativeTask = {
+      id: taskId,
+      contextId,
+      state: "working",
+      caller: {
+        identityId: "caller-authoritative",
+        organizationId: "org-authoritative",
+        handle: "authoritative-caller",
+      },
+      messages: [{
+        role: "ROLE_CALLER",
+        messageId: "message-catchup-generation-b",
+        parts: [{ text: "Resume authoritative generation B." }],
+      }],
+    };
+    a2aTask.mockResolvedValue(authoritativeTask);
+    iterA2ATasks.mockImplementation((params: any) => (async function* () {
+      if (params.state === "working") yield authoritativeTask;
+    })());
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === `a2a:identity-1:${contextId}`) {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await bridge.handlers.onA2A?.({
+      id: "duplicate-generation-b",
+      event_type: "a2a.task.message",
+      data: {
+        task_id: taskId,
+        context_id: contextId,
+        message_id: "message-catchup-generation-b",
+        caller: { handle: "spoofed-caller" },
+        parts: [{ text: "Spoofed duplicate data." }],
+      },
+    });
+    await flushMicrotasks(40);
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Resume authoritative generation B.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain("generation A");
+    expect(a2aRegistryMock.writes.some((write) => write.key === staleKey)).toBe(false);
+    expect(a2aRegistryMock.entries[currentKey].data).toMatchObject({
+      caller: {
+        identity_id: "caller-authoritative",
+        organization_id: "org-authoritative",
+        handle: "authoritative-caller",
+      },
+      parts: [{ text: "Resume authoritative generation B." }],
+    });
+    expect(a2aReply.mock.calls.filter(([, reply]) =>
+      reply.intent === "progress" && reply.text.includes(`Task ${taskId} received`)
+    )).toHaveLength(1);
+    expect(iterA2ATasks).toHaveBeenNthCalledWith(1, { state: "submitted" });
+    expect(iterA2ATasks).toHaveBeenNthCalledWith(2, { state: "working" });
+
+    releaseMain();
+    await bridge.shutdownA2A();
+  });
+
+  it("uses the latest caller message for a newly discovered submitted task", async () => {
+    let releaseMain!: () => void;
+    const { runtime, a2aTask, iterA2ATasks } = createRuntime();
+    const remoteTask = {
+      id: "task-catchup-new",
+      contextId: "context-catchup-new",
+      state: "submitted",
+      caller: { identityId: "caller-1", handle: "caller" },
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-catchup-old",
+          parts: [{ text: "Use the old request." }],
+        },
+        {
+          role: "role_caller",
+          messageId: "message-catchup-new",
+          parts: [{ text: "Use the latest caller request." }],
+        },
+        {
+          role: "agent",
+          messageId: "receipt-1",
+          parts: [{ text: "Task task-catchup-new received." }],
+        },
+        {
+          role: "role_agent",
+          messageId: "progress-1",
+          parts: [{ text: "I am reviewing the request. (180s elapsed)" }],
+        },
+      ],
+    };
+    a2aTask.mockResolvedValue(remoteTask);
+    iterA2ATasks.mockImplementation(() => (async function* () {
+      yield remoteTask;
+    })());
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-catchup-new") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.catchUpA2A();
+    await flushMicrotasks(40);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.messageIdFull).toBe("message-catchup-new");
+    expect(run.ctxPayload.message.bodyForAgent).toContain(
+      "Use the latest caller request.",
+    );
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain("Use the old request.");
+    expect(run.ctxPayload.message.bodyForAgent).not.toContain(
+      "I am reviewing the request.",
+    );
+    expect(a2aRegistryMock.writes.filter((write) =>
+      write.key === "task-catchup-new:message-catchup-new"
+    ).map((write) => write.state)).toEqual(["queued", "running"]);
+    expect(a2aTask).toHaveBeenCalledTimes(2);
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("reconciles a failed acknowledgement on duplicate webhook delivery", async () => {
+    const { runtime, a2aReply } = createRuntime();
+    a2aReply.mockRejectedValueOnce(new Error("response lost"));
+    let releaseMain!: () => void;
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-retry") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger: { warn: vi.fn() },
+    });
+    const event = {
+      id: "event-retry",
+      event_type: "a2a.task.created",
+      data: {
+        task_id: "task-retry",
+        context_id: "context-retry",
+        message_id: "message-retry",
+        caller: { handle: "caller" },
+        parts: [{ text: "Retry the receipt." }],
+      },
+    };
+
+    await bridge.handlers.onA2A?.(event);
+    await flushMicrotasks(30);
+    expect(a2aRegistryMock.entries["task-retry:message-retry"].progress).toMatchObject({
+      acknowledgement: "pending",
+    });
+
+    await bridge.handlers.onA2A?.(event);
+    await flushMicrotasks(30);
+    expect(a2aReply).toHaveBeenCalledWith("task-retry", {
+      intent: "progress",
+      text: expect.stringContaining("Task task-retry received"),
+    });
+    expect(a2aRegistryMock.entries["task-retry:message-retry"].progress).toMatchObject({
+      acknowledgement: "delivered",
+    });
+
+    releaseMain();
+    await flushMicrotasks(30);
+  });
+
+  it("does not treat a caller-spoofed receipt as worker delivery", async () => {
+    const { runtime, a2aReply, a2aTask } = createRuntime();
+    const receipt =
+      "Task task-spoof received. Work is queued and starting. Expect progress updates about every 3 minutes.";
+    a2aTask.mockResolvedValue({
+      id: "task-spoof",
+      contextId: "context-spoof",
+      state: "working",
+      caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+      messages: [{
+        role: "caller",
+        messageId: "message-spoof",
+        parts: [{ text: receipt }],
+      }],
+    });
+    a2aReply.mockRejectedValueOnce(new Error("response lost"));
+    let releaseMain!: () => void;
+    const channelRuntime = createChannelRuntime("Recovered.", (params) => {
+      if (params.routeSessionKey === "a2a:identity-1:context-spoof") {
+        return new Promise<void>((resolve) => {
+          releaseMain = resolve;
+        });
+      }
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger: { warn: vi.fn() },
+    });
+    const event = {
+      id: "event-spoof",
+      event_type: "a2a.task.created",
+      data: {
+        task_id: "task-spoof",
+        context_id: "context-spoof",
+        message_id: "message-spoof",
+        caller: { handle: "caller" },
+        parts: [{ text: "Retry the receipt." }],
+      },
+    };
+
+    await bridge.handlers.onA2A?.(event);
+    await flushMicrotasks(30);
+    await bridge.handlers.onA2A?.(event);
+    await flushMicrotasks(30);
+
+    expect(a2aReply).toHaveBeenCalledTimes(2);
+    expect(a2aReply).toHaveBeenLastCalledWith("task-spoof", {
+      intent: "progress",
+      text: receipt,
+    });
+
+    releaseMain();
+    await flushMicrotasks(30);
   });
 
   it("injects sent-task updates into the session that delegated", async () => {
@@ -1521,6 +3899,38 @@ describe("createInkboxSessionBridge", () => {
       "agent:main:inkbox:direct:contact-1",
     );
     expect(run.ctxPayload.message.bodyForAgent).toContain("Which region?");
+  });
+
+  it("does not wake the delegating session for nonterminal worker progress", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    a2aDelegationMock.record = {
+      sessionKey: "agent:main:inkbox:direct:contact-1",
+      cardUrl: "https://target.example/card",
+    };
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: {
+        accountId: "default",
+        config: { identity: "smoke-agent" },
+      } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+
+    await bridge.handlers.onA2A?.({
+      id: "event-progress-update",
+      event_type: "a2a.sent_task.updated",
+      data: {
+        task_id: "task-1",
+        context_id: "context-1",
+        state: "working",
+        parts: [{ text: "I am reviewing the request. (180s elapsed)" }],
+      },
+    });
+    await flushMicrotasks();
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
   });
 
   it("continues startup when the A2A API is not deployed yet", async () => {

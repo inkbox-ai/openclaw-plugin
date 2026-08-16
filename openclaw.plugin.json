@@ -143,6 +143,11 @@
             "minimum": 1,
             "description": "Maximum time to let the hidden voice agent warmup run before aborting. Defaults to 70000."
           },
+          "a2aProgressIntervalSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Seconds between short progress updates while serving an A2A task. Set to 0 to disable periodic updates. Defaults to 180."
+          },
           "allowedRecipients": {
             "type": "array",
             "items": { "type": "string" }
@@ -236,6 +241,7 @@
                 "voiceAgentPrewarm": { "type": "boolean" },
                 "voiceAgentPrewarmTtlMs": { "type": "integer", "minimum": 0 },
                 "voiceAgentPrewarmTimeoutMs": { "type": "integer", "minimum": 1 },
+                "a2aProgressIntervalSeconds": { "type": "integer", "minimum": 0 },
                 "allowedRecipients": {
                   "type": "array",
                   "items": { "type": "string" }
@@ -416,6 +422,11 @@
         "type": "integer",
         "minimum": 1,
         "description": "Maximum time to let the hidden voice agent warmup run before aborting. Defaults to 70000."
+      },
+      "a2aProgressIntervalSeconds": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Seconds between short progress updates while serving an A2A task. Set to 0 to disable periodic updates. Defaults to 180."
       },
       "vault": {
         "type": "object",

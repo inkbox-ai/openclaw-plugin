@@ -173,6 +173,12 @@ export const inkboxAccountConfigJsonSchema = {
       description:
         "Maximum time to let the hidden voice agent warmup run before aborting. Defaults to 70000.",
     },
+    a2aProgressIntervalSeconds: {
+      type: "integer",
+      minimum: 0,
+      description:
+        "Seconds between short progress updates while serving an A2A task. Set to 0 to disable periodic updates. Defaults to 180.",
+    },
     voiceRealtime: voiceRealtimeSchema,
     voiceStack: voiceStackSchema,
     voiceAiAuthorityMode: voiceAiAuthorityModeSchema,

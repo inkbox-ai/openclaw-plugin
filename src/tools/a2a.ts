@@ -360,6 +360,7 @@ export function registerA2ATools(
                 : name === "inkbox_a2a_ask_caller"
                   ? "ask_caller"
                   : "fail";
+            await context.beforeReplyIntent?.();
             const result = await reply.call(identity, context.taskId, {
               intent,
               text: name === "inkbox_a2a_fail" ? params.reason : params.text,

@@ -241,6 +241,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
       scheduleInkboxAgentPrewarm(ctx, runtime, "public-url-gateway-start");
       await waitForAbort(ctx.abortSignal);
     } finally {
+      await bridge.shutdownA2A();
       callWsContext?.dispose?.();
       ctx.setStatus({
         accountId: account.accountId,
@@ -303,6 +304,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
   try {
     await listener.wait();
   } finally {
+    await bridge.shutdownA2A();
     callWsContext?.dispose?.();
     ctx.abortSignal.removeEventListener("abort", closeOnAbort);
     await listener.close().catch(() => {});

@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   routeOptions: [] as any[],
   rawOnText: vi.fn(),
   configureDelivery: vi.fn(),
+  shutdownA2A: vi.fn(),
   wsHandler: vi.fn(),
   createUpgradeHandler: vi.fn(() => vi.fn(() => true)),
 }));
@@ -25,6 +26,7 @@ vi.mock("../src/inbound/session.js", () => ({
     wsHandler: mocks.wsHandler,
     catchUpA2A: vi.fn(),
     catchUpHostedCalls: vi.fn(),
+    shutdownA2A: mocks.shutdownA2A,
   })),
   prewarmInkboxAgent: vi.fn(),
 }));
@@ -63,6 +65,7 @@ describe("gateway inbound batching", () => {
     mocks.routeOptions.length = 0;
     mocks.rawOnText.mockReset();
     mocks.configureDelivery.mockReset();
+    mocks.shutdownA2A.mockReset();
   });
 
   it("registers an exact account-aware call websocket upgrade route", () => {
@@ -236,6 +239,7 @@ describe("gateway inbound batching", () => {
 describe("public-url call routing", () => {
   beforeEach(() => {
     mocks.configureDelivery.mockReset();
+    mocks.shutdownA2A.mockReset();
   });
 
   it.each([
@@ -310,6 +314,7 @@ describe("public-url call routing", () => {
         }),
       );
       expect(dispose).toHaveBeenCalled();
+      expect(mocks.shutdownA2A).toHaveBeenCalledTimes(1);
     },
   );
 
@@ -353,6 +358,7 @@ describe("public-url call routing", () => {
       "callWebhookUrl",
     );
     expect(register).not.toHaveBeenCalled();
+    expect(mocks.shutdownA2A).toHaveBeenCalledTimes(1);
   });
 
   it("disposes the websocket runtime context when startup fails", async () => {
@@ -387,5 +393,6 @@ describe("public-url call routing", () => {
     ).rejects.toThrow("route update failed");
 
     expect(dispose).toHaveBeenCalledTimes(1);
+    expect(mocks.shutdownA2A).toHaveBeenCalledTimes(1);
   });
 });

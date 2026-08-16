@@ -16,17 +16,42 @@ Run: ``python mock_openai.py [port]`` (default 8088). Stdlib only.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _NONCE = re.compile(r"smoke-[0-9a-f]{6,}")
+_A2A_PROGRESS = re.compile(r"\[inkbox:a2a_progress[^]]*elapsed_seconds=(\d+)")
+_A2A_PROGRESS_TOKEN = re.compile(r"a2a-ci-inbound-progress-[0-9a-f]{12}")
 
 
 def _reply_text(req: dict) -> str:
-    m = _NONCE.search(json.dumps(req))
+    encoded = json.dumps(req)
+    progress = _A2A_PROGRESS.findall(encoded)
+    if progress:
+        return f"I'm working through the requested calculation. ({progress[-1]}s elapsed)"
+    m = _NONCE.search(encoded)
     tag = m.group(0) if m else "no-nonce"
     return f"REPLY_OK {tag} — automated reachability reply from the agent."
+
+
+def _is_streaming_progress_task(req: dict) -> bool:
+    encoded = json.dumps(req)
+    return (
+        os.environ.get("MOCK_A2A_SCENARIO", "").strip() == "inbound-progress"
+        and bool(req.get("stream"))
+        and _A2A_PROGRESS.search(encoded) is None
+        and _A2A_PROGRESS_TOKEN.search(encoded) is not None
+    )
+
+
+def _progress_final_text(req: dict) -> str:
+    token = _A2A_PROGRESS_TOKEN.search(json.dumps(req))
+    if token is None:
+        raise ValueError("Progress task did not contain its completion token")
+    return f"2 + 2 = 4; 3 + 3 = 6; 4 + 6 = 10. {token.group(0)}"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -61,6 +86,28 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
+            if _is_streaming_progress_task(req):
+                wait_seconds = float(
+                    os.environ.get("MOCK_A2A_PROGRESS_WAIT_SECONDS", "125")
+                )
+                remaining = wait_seconds
+                while remaining > 0:
+                    pause = min(5.0, remaining)
+                    time.sleep(pause)
+                    remaining -= pause
+                    heartbeat = {
+                        "id": "chatcmpl-mock",
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": None,
+                        }],
+                    }
+                    self.wfile.write(f"data: {json.dumps(heartbeat)}\n\n".encode())
+                    self.wfile.flush()
+                text = _progress_final_text(req)
             chunks = [
                 {"id": "chatcmpl-mock", "object": "chat.completion.chunk", "model": model,
                  "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]},
