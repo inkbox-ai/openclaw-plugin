@@ -1,6 +1,6 @@
 {
   "name": "@inkbox/inkbox",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "Inkbox plugin for OpenClaw \u2014 adds email, SMS, iMessage, voice, and A2A tools with inbound webhook handling",
   "license": "MIT",
   "type": "module",
