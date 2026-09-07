@@ -17,7 +17,7 @@ function sortedKeys(value: { properties?: Record<string, unknown> }): string[] {
   return Object.keys(value.properties ?? {}).sort();
 }
 
-function collectRuntimeTools(): {
+function collectRuntimeTools(registrationMode = "tool-discovery"): {
   toolNames: string[];
   optionalToolNames: string[];
   hookNames: string[];
@@ -26,7 +26,8 @@ function collectRuntimeTools(): {
   const optionalTools: string[] = [];
   const hookNames: string[] = [];
   const api = {
-    registrationMode: "tool-discovery",
+    registrationMode,
+    registerChannel: vi.fn(),
     pluginConfig: {
       apiKey: "ApiKey_test",
       identity: "smoke-agent",
@@ -80,8 +81,8 @@ describe("openclaw.plugin.json manifest parity", () => {
     ).toEqual(runtime.optionalToolNames);
   });
 
-  it("registers the host-native settlement and delivery-observation hooks", () => {
-    expect(collectRuntimeTools().hookNames).toEqual([
+  it.each(["full", "discovery", "tool-discovery"])("registers settlement hooks once in the host %s registry", (mode) => {
+    expect(collectRuntimeTools(mode).hookNames).toEqual([
       "after_tool_call",
       "after_tool_call",
       "before_agent_run",
@@ -90,6 +91,13 @@ describe("openclaw.plugin.json manifest parity", () => {
       "model_call_ended",
       "model_call_started",
     ]);
+  });
+
+  it("keeps discovery free of tools and skips hooks in setup-only and CLI modes", () => {
+    expect(collectRuntimeTools("discovery").toolNames).toEqual([]);
+    for (const mode of ["cli-metadata", "setup-only", "setup-runtime"]) {
+      expect(collectRuntimeTools(mode).hookNames).toEqual([]);
+    }
   });
 
   it("keeps static config schemas aligned with source config-schema.ts", () => {

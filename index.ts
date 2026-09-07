@@ -193,7 +193,7 @@ function registerHostedCallSettlementHooks(api: any): void {
   api.on("model_call_ended", recordHostedModelCallEnded);
 }
 
-const entry: OpenClawChannelEntry = defineChannelPluginEntry({
+const baseEntry: OpenClawChannelEntry = defineChannelPluginEntry({
   id: "inkbox",
   name: "Inkbox",
   description:
@@ -201,10 +201,22 @@ const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   plugin: inkboxPlugin,
   registerCliMetadata: registerInkboxCli,
   registerFull(api: any) {
-    registerHostedCallSettlementHooks(api);
     registerInkboxTools(api);
     registerInkboxPublicUrlInboundRoutes(api);
   },
 });
+
+// Prepared model runs use discovery registries, not the active gateway's full
+// registry. Keep hooks in every execution-capable registration mode. Wrapping
+// the public entry works on the minimum host, before registerCapabilities existed.
+const entry: OpenClawChannelEntry = {
+  ...baseEntry,
+  register(api) {
+    baseEntry.register(api);
+    if (["full", "discovery", "tool-discovery"].includes(api.registrationMode)) {
+      registerHostedCallSettlementHooks(api);
+    }
+  },
+};
 
 export default entry;
