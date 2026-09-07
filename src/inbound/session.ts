@@ -1,3 +1,4 @@
+import { createInkboxTextReplyCapture } from "../reply-capture.js";
 import { beginSilentSendCapture } from "../silent-send-capture.js";
 import { isInkboxSilentReply, transformInkboxReplyPayload } from "../silent-reply.js";
 import { canonicalInkboxSessionOverride } from "../session-key.js";
@@ -2400,6 +2401,7 @@ async function dispatchInboundTurn(
     dispatchAbortSignal?: AbortSignal;
     onSessionKeyResolved?: (sessionKey: string) => void;
     shouldDeliverReply?: () => boolean;
+    replyCapture?: ReturnType<typeof createInkboxTextReplyCapture>;
     deliveryOverride?: {
       deliver: (payload: unknown) => Promise<{ visibleReplySent?: boolean } | void>;
       onError?: (error: unknown) => void;
@@ -2651,7 +2653,7 @@ async function dispatchInboundTurn(
       ...(replyOptions ? { replyOptions } : {}),
       delivery,
       replyPipeline: {},
-      dispatcherOptions: { transformReplyPayload: silentSendCapture?.transform ?? transformInkboxReplyPayload },
+      dispatcherOptions: { transformReplyPayload: opts.replyCapture?.transformReplyPayload ?? silentSendCapture?.transform ?? transformInkboxReplyPayload },
       record: {
         onRecordError: (error: unknown) => {
           opts.logger?.warn?.(
@@ -4782,7 +4784,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     previousUpdate: string;
     signal: AbortSignal;
   }): Promise<string> {
-    const delivered: string[] = [];
+    const replyCapture = createInkboxTextReplyCapture();
     try {
       await dispatchInboundTurn({
         ...opts,
@@ -4822,13 +4824,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           skillFilter: [],
           abortSignal: params.signal,
         },
-        deliveryOverride: {
-          deliver: async (payload: unknown) => {
-            const text = payloadText(payload).trim();
-            if (text) delivered.push(text);
-            return { visibleReplySent: false };
-          },
-        },
+        replyCapture,
+        deliveryOverride: { deliver: async () => ({ visibleReplySent: false }) },
       });
     } catch (error) {
       if (!params.signal.aborted) {
@@ -4838,7 +4835,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
     }
     return sanitizeA2AProgressText(
-      delivered.at(-1) ?? "",
+      replyCapture.lastText(),
       params.toolIdentifiers,
       params.elapsedSeconds,
     );
@@ -5031,7 +5028,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const marker =
       `[inkbox:a2a_task caller=@${String(caller.handle ?? "unknown").replace(/^@/, "")} ` +
       `caller_org=${caller.organization_id ?? "unknown"}]`;
-    const delivered: string[] = [];
+    const replyCapture = createInkboxTextReplyCapture();
     const progressIntervalSeconds = resolveA2AProgressIntervalSeconds(
       opts.account.config.a2aProgressIntervalSeconds,
     );
@@ -5108,12 +5105,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           bootstrapContextMode: "lightweight",
           abortSignal: controller.signal,
         },
+        replyCapture,
         deliveryOverride: {
-          deliver: async (payload: unknown) => {
-            const text = payloadText(payload).trim();
-            if (text) delivered.push(text);
-            return { visibleReplySent: false };
-          },
+          deliver: async () => ({ visibleReplySent: false }),
           onError: (error: unknown) => {
             opts.logger?.warn?.(
               `Inkbox A2A reply collection failed: ${errorMessage(error)}`,
@@ -5128,7 +5122,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         }
         return;
       }
-      const reply = delivered.at(-1)?.trim();
+      if (replyCapture.hasError() && !context.replyIntentCommitted) {
+        throw new Error("The A2A worker returned an error response.");
+      }
+      const reply = replyCapture.lastText();
       if (
         !context.replyIntentCommitted &&
         reply &&

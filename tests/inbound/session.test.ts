@@ -415,7 +415,10 @@ function createChannelRuntime(
   const deliveryResults: any[] = [];
   const dispatchReply = vi.fn(async (params: any) => {
     await onDispatch?.(params);
-    deliveryResults.push(await params.delivery.deliver({ text: replyText }));
+    const payload = { text: replyText };
+    const transformed = params.dispatcherOptions?.transformReplyPayload
+      ? params.dispatcherOptions.transformReplyPayload(payload) : payload;
+    if (transformed !== null) deliveryResults.push(await params.delivery.deliver(transformed));
   });
   return {
     inbound: {
@@ -1545,11 +1548,12 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
   });
 
-  it("fails a caught A2A dispatch error once instead of leaving the task working", async () => {
+  it.each(["throw", "error-payload"])("fails an A2A %s once instead of leaving the task working", async (failureMode) => {
     const { runtime, a2aReply } = createRuntime();
     const warn = vi.fn();
-    const channelRuntime = createChannelRuntime("unused", () => {
-      throw new TypeError("private model failure text");
+    const channelRuntime = createChannelRuntime("Partial answer must not complete an errored turn.", (params) => {
+      if (failureMode === "throw") throw new TypeError("private model failure text");
+      params.dispatcherOptions.transformReplyPayload({ text: "private model failure text", isError: true });
     });
     const bridge = createInkboxSessionBridge({
       cfg: {},
@@ -1573,7 +1577,8 @@ describe("createInkboxSessionBridge", () => {
     const failures = a2aReply.mock.calls.filter(([, reply]) => reply.intent === "fail");
     expect(failures).toHaveLength(1);
     expect(failures[0][1].text).not.toContain("private");
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("stage=dispatch name=TypeError"));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`stage=dispatch name=${failureMode === "throw" ? "TypeError" : "Error"}`));
+    expect(a2aReply.mock.calls.some(([, reply]) => reply.intent === "complete")).toBe(false);
     expect(JSON.stringify(warn.mock.calls)).not.toContain("private model failure text");
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledOnce();
   });
@@ -1617,6 +1622,7 @@ describe("createInkboxSessionBridge", () => {
       "finalized",
     ]);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.deliveryResults).toHaveLength(0);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
     expect(run.routeSessionKey).toBe("agent:main:inkbox:direct:a2a:identity-1:context-1");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Investigate this.");
@@ -4156,11 +4162,8 @@ describe("createInkboxSessionBridge", () => {
       expect(body).toContain("set completeSilently=true on that final send tool call");
       expect(body).toContain("Leave completeSilently false when more work or a reply here remains");
     }
-    expect(channelRuntime.deliveryResults).toHaveLength(2);
-    expect(channelRuntime.deliveryResults).toEqual([
-      expect.objectContaining({ visibleReplySent: false }),
-      expect.objectContaining({ visibleReplySent: false }),
-    ]);
+    // Intentional channel transformation never enters the delivery adapter.
+    expect(channelRuntime.deliveryResults).toHaveLength(0);
     expect(sendText).not.toHaveBeenCalled();
   });
 
