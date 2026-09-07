@@ -201,6 +201,12 @@ def _gateway_log_text() -> str:
         return ""
 
 
+def _gateway_has_hd_audio(log_text: str, call_id) -> bool:
+    """Require the negotiated wideband format on the current call."""
+    marker = f"realtime audio negotiated: call_id={call_id} format=pcm_s16le_16000".casefold()
+    return any(marker in line.casefold() for line in log_text.splitlines())
+
+
 def _gateway_has_direct_contact_read(log_text: str, call_id) -> bool:
     """Match both console and structured log renderings for one exact call."""
     direct_read_marker = "realtime direct contact read inkbox_"
@@ -771,6 +777,8 @@ def test_outbound_call_realtime():
             aut, "unused", aut_call.id, deadline=deadline
         )
         assert agent_said, "agent produced no speech on the outbound call"
+        assert _gateway_has_hd_audio(_gateway_log_text(), aut_call.id), \
+            "current realtime call did not negotiate 16 kHz PCM audio"
 
         tts, stt = _aut_speech_mode(aut, aut_call.id)
         assert tts is False and stt is False, \
@@ -855,6 +863,8 @@ def test_outbound_call_realtime_direct_contact_lookup():
                 aut, "unused", aut_call.id, deadline=deadline
             )
             assert agent_said, "agent produced no speech on the contact-lookup call"
+            assert _gateway_has_hd_audio(_gateway_log_text(), aut_call.id), \
+                "current realtime contact call did not negotiate 16 kHz PCM audio"
 
             while time.monotonic() < deadline:
                 recite = _recite_from_aut(aut_call.id)

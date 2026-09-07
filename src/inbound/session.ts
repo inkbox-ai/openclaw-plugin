@@ -4240,6 +4240,9 @@ async function runRealtimeCallWebSocket(
       const event = payload.event;
       if (event === "start") {
         callAudio.configure(isRecord(payload.start) ? payload.start.media_format : undefined);
+        opts.logger?.info?.(
+          `Inkbox realtime audio negotiated: call_id=${opts.meta.callId} format=${callAudio.format}`,
+        );
         streamId = typeof payload.stream_id === "string" ? payload.stream_id : streamId;
         if (!greetingTriggered) {
           greetingTriggered = true;

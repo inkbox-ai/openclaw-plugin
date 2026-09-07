@@ -21,6 +21,8 @@ export class RealtimeCallAudio {
   private input = new Pcm16Resampler(16000, 24000);
   private output = new Pcm16Resampler(24000, 16000);
 
+  get format(): string { return this.hd ? INKBOX_HD_AUDIO_FORMAT : "pcmu_8000"; }
+
   get bytesPerSecond(): number { return this.hd ? 32000 : 8000; }
 
   configure(format: unknown): void {

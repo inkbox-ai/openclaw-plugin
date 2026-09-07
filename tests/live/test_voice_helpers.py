@@ -324,3 +324,12 @@ def test_every_call_capable_live_ci_gateway_disables_voicemail_detection():
         "live-external-events.yml",
         "live-voice.yml",
     ]
+
+
+def test_hd_audio_proof_requires_current_call_and_negotiated_format():
+    line = "Inkbox realtime audio negotiated: call_id=current-call format=pcm_s16le_16000"
+    assert voice._gateway_has_hd_audio(line, "current-call")
+    assert voice._gateway_has_hd_audio(line.upper(), "current-call")
+    assert not voice._gateway_has_hd_audio(line, "other-call")
+    assert not voice._gateway_has_hd_audio(line.replace("pcm_s16le_16000", "pcmu_8000"), "current-call")
+    assert not voice._gateway_has_hd_audio(line.replace("current-call", "current-call-extra"), "current-call")

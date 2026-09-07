@@ -3994,6 +3994,25 @@ describe("createInkboxSessionBridge", () => {
     pacer.close();
   });
 
+  it("paces HD PCM at 640 bytes per 20 ms including a partial final frame", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const sent: Array<{ payload: any; at: number }> = [];
+    const pacer = new InkboxRealtimeAudioPacer(
+      async (payload) => { sent.push({ payload, at: Date.now() }); },
+      () => "stream-hd",
+      () => 32000,
+    );
+    pacer.sendAudio(Buffer.alloc(640 * 8 + 320));
+    pacer.sendAudioDone();
+    await vi.advanceTimersByTimeAsync(200);
+    const media = sent.filter((entry) => entry.payload.event === "media");
+    expect(media.map((entry) => Buffer.from(entry.payload.media.payload, "base64").length)).toEqual([...Array(8).fill(640), 320]);
+    expect(media.map((entry) => entry.at)).toEqual([0, 20, 40, 60, 80, 100, 120, 140, 160]);
+    expect(sent.find((entry) => entry.payload.event === "audio_done")?.at).toBe(170);
+    pacer.close();
+  });
+
   it("prewarms the voice agent path without delivering a visible reply", async () => {
     const { runtime, sendText } = createRuntime();
     const channelRuntime = createChannelRuntime("ready");
