@@ -54,7 +54,7 @@ cd openclaw-plugin
 npm install
 npm run build
 openclaw --version
-openclaw plugins install -l --force ./
+openclaw plugins install -l --force --accept-capabilities ./
 ```
 
 Configure Inkbox:
@@ -73,7 +73,7 @@ An agent can complete setup after a human assigns an existing identity handle, A
 1. Confirm the clone's remote, current revision, and clean working tree.
 2. Review `package.json`, its scripts, and the declared and locked dependencies before running `npm install`.
 3. Run `npm install` and `npm run build`, review the installed dependency summary and build output, and check the working tree for unexpected changes.
-4. Only then run the local `openclaw plugins install -l --force ./` command.
+4. Only then run the local `openclaw plugins install -l --force --accept-capabilities ./` command.
 
 First inspect the checkout and manifest. Also review `package-lock.json` before continuing:
 
@@ -96,7 +96,7 @@ git status --short
 Only install the reviewed local build into OpenClaw when those checks have the expected results:
 
 ```bash
-openclaw plugins install -l --force ./
+openclaw plugins install -l --force --accept-capabilities ./
 ```
 
 Keep the credential out of source control, project instructions, command arguments, and transcripts. Place it in the private process environment as `INKBOX_API_KEY`; if entering it in a terminal, read it without echoing:
@@ -136,7 +136,7 @@ docker exec -it inkbox-openclaw bash
 Inside the container, install the already-built local plugin and run setup:
 
 ```bash
-openclaw plugins install -l --force /opt/inkbox-plugin-src
+openclaw plugins install -l --force --accept-capabilities /opt/inkbox-plugin-src
 openclaw inkbox setup
 openclaw inkbox doctor
 openclaw gateway run
