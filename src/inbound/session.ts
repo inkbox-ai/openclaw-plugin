@@ -2557,8 +2557,19 @@ async function dispatchInboundTurn(
         }
       : undefined);
   const delivery = opts.deliveryOverride ?? {
-    deliver: async (payload: unknown) => {
+    deliver: async (payload: unknown, info?: { kind?: string }) => {
       const text = payloadText(payload);
+      if (["email", "sms", "imessage"].includes(opts.turn.mode)) {
+        const kind = ["tool", "block", "final"].includes(info?.kind ?? "")
+          ? info!.kind : "unknown";
+        const isError = Boolean(payload && typeof payload === "object" &&
+          (payload as { isError?: unknown }).isError === true);
+        const isStatus = Boolean(payload && typeof payload === "object" &&
+          (payload as { isStatusNotice?: unknown }).isStatusNotice === true);
+        opts.logger?.info?.(
+          `Inkbox source reply shape: mode=${opts.turn.mode} kind=${kind} chars=${text.length} error=${isError} status=${isStatus} silent=${text.trim().toUpperCase() === "[SILENT]"}`,
+        );
+      }
       if (!text.trim()) {
         return { visibleReplySent: false };
       }

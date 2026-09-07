@@ -82,3 +82,23 @@ def test_card_preflight_requires_enablement_postcondition():
         )
 
     assert a2a.fetch_calls == 0
+
+
+def test_protocol_timeout_reports_shape_without_message_content(monkeypatch):
+    clock = iter([0, 0, 2])
+    monkeypatch.setattr(a2a_driver.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(a2a_driver.time, "sleep", lambda _delay: None)
+    task = SimpleNamespace(
+        state="TASK_STATE_WORKING",
+        raw={"history": [
+            {"role": "ROLE_USER", "parts": [{"text": "private request"}]},
+            {"role": "ROLE_AGENT", "parts": [{"text": "private response"}]},
+        ]},
+    )
+    a2a = SimpleNamespace(get_task=lambda *_args, **_kwargs: task)
+    with pytest.raises(TimeoutError) as error:
+        a2a_driver._wait_protocol_task(
+            a2a, None, "private-task-id", expected={"TASK_STATE_COMPLETED"}, timeout=1
+        )
+    assert "last_state=TASK_STATE_WORKING history_messages=2 worker_messages=1" in str(error.value)
+    assert "private" not in str(error.value)

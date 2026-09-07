@@ -173,6 +173,37 @@ jobs:
             echo "gateway_process=stopped"
           fi
           test -s "$RUNNER_TEMP/gateway.log" && echo "gateway_log=present" || echo "gateway_log=empty"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          log_path = Path(os.environ["RUNNER_TEMP"]) / "gateway.log"
+          log = log_path.read_text(errors="replace") if log_path.exists() else ""
+          for name, marker in {
+              "a2a_subscribed": "Inkbox A2A events subscribed",
+              "a2a_subscription_failure": "Inkbox A2A subscription reconcile failed",
+              "a2a_admission_failure": "Inkbox A2A registry reconcile failed",
+              "a2a_ack_failure": "Inkbox A2A acknowledgement failed",
+              "a2a_turn_failure": "Inkbox A2A turn failed",
+              "a2a_reply_failure": "Inkbox A2A reply collection failed",
+              "host_runtime_missing": "OpenClaw channelRuntime is unavailable",
+          }.items():
+              print(f"{name}={log.count(marker)}")
+          registry_path = Path.home() / ".openclaw" / "inkbox" / "a2a-tasks.json"
+          try:
+              registry = json.loads(registry_path.read_text())
+          except FileNotFoundError:
+              registry = {}
+          except (OSError, ValueError):
+              print("a2a_registry=unreadable")
+              registry = {}
+          for state in ("queued", "running", "finalized"):
+              print(f"a2a_registry_{state}=" + str(sum(
+                  entry.get("state") == state for entry in registry.values()
+                  if isinstance(entry, dict)
+              )))
+          PY
 
       - name: Stop gateway
         if: always()

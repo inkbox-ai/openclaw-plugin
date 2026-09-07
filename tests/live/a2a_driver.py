@@ -152,6 +152,8 @@ def _wait_protocol_task(
     timeout: float,
 ) -> Any:
     deadline = time.monotonic() + timeout
+    task = None
+    state = "not_observed"
     while time.monotonic() < deadline:
         task = a2a.get_task(target, task_id, history_length=50)
         state = _enum_value(task.state)
@@ -160,7 +162,16 @@ def _wait_protocol_task(
         if state in STOPPED_WIRE_STATES:
             raise AssertionError(f"A2A task stopped in unexpected state {state}")
         time.sleep(1)
-    raise TimeoutError(f"A2A task did not reach {sorted(expected)} before timeout")
+    # Report only protocol shape, never task/history content or identity data.
+    known_states = STOPPED_WIRE_STATES | {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
+    safe_state = state if state in known_states else "unknown"
+    history = task.raw.get("history", []) if task is not None else []
+    worker_messages = len(_wire_worker_messages(task)) if task is not None else 0
+    raise TimeoutError(
+        f"A2A task did not reach {sorted(expected)} before timeout; "
+        f"last_state={safe_state} history_messages={len(history)} "
+        f"worker_messages={worker_messages}"
+    )
 
 
 def _send_task(a2a: Any, target: Any, text: str) -> Any:

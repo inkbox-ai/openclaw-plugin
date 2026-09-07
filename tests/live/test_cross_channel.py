@@ -352,6 +352,7 @@ def _observe_email_run(
             shapes.append({
                 "chars": len(body),
                 "current_token": token.casefold() in body.casefold(),
+                "tool_warning": body.lstrip().startswith("⚠"),
                 "silent_marker": body.strip().upper() in {"[SILENT]", "NO_REPLY"},
             })
         detail += f" sms_shapes={shapes!r}"

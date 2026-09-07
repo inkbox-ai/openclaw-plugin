@@ -185,6 +185,22 @@ jobs:
         run: |
           test -s "$GATEWAY_LOG" && echo "gateway_log=present" || echo "gateway_log=empty"
           test -s "$RUNNER_TEMP/mock.log" && echo "mock_log=present" || echo "mock_log=empty"
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          log_path = Path(os.environ["GATEWAY_LOG"])
+          log = log_path.read_text(errors="replace") if log_path.exists() else ""
+          # Extract only the fixed content-free protocol fields, never log lines.
+          for match in re.finditer(
+              r"Inkbox source reply shape: mode=(?:email|sms|imessage) "
+              r"kind=(?:tool|block|final|unknown) chars=\d+ "
+              r"error=(?:true|false) status=(?:true|false) silent=(?:true|false)",
+              log,
+          ):
+              print(match.group(0))
+          PY
 
       - name: Tear down (always)
         if: always()
