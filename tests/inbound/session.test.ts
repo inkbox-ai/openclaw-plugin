@@ -4454,7 +4454,7 @@ describe("createInkboxSessionBridge", () => {
     const inboundAudio = Buffer.alloc(mediaFormat ? 640 : 160, 0x01);
     const echoedOutboundAudio = Buffer.from([0x09, 0x09, 0x09]);
     const ws = new FakeInkboxWebSocket([
-      JSON.stringify({ event: "start", stream_id: "stream-1", media_format: mediaFormat }),
+      JSON.stringify({ event: "start", stream_id: "stream-1", start: { media_format: mediaFormat } }),
       {
         advanceMs: 800,
         message: JSON.stringify({

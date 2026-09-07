@@ -4239,7 +4239,7 @@ async function runRealtimeCallWebSocket(
 
       const event = payload.event;
       if (event === "start") {
-        callAudio.configure(payload.media_format);
+        callAudio.configure(isRecord(payload.start) ? payload.start.media_format : undefined);
         streamId = typeof payload.stream_id === "string" ? payload.stream_id : streamId;
         if (!greetingTriggered) {
           greetingTriggered = true;
