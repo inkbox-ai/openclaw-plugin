@@ -345,6 +345,16 @@ def _observe_email_run(
         wrong_channel_count=len(driver_sms_rows) + len(aut_sms_rows),
         prior_tokens=prior_tokens,
     )
+    if driver_sms_rows or aut_sms_rows:
+        shapes = []
+        for message in [*driver_sms_rows, *aut_sms_rows]:
+            body = str(getattr(message, "text", "") or "")
+            shapes.append({
+                "chars": len(body),
+                "current_token": token.casefold() in body.casefold(),
+                "silent_marker": body.strip().upper() in {"[SILENT]", "NO_REPLY"},
+            })
+        detail += f" sms_shapes={shapes!r}"
     return state, detail, (
         len(driver_rows),
         len(aut_rows),
@@ -434,8 +444,9 @@ def test_sms_request_gets_email_response(xc):
             to=xc["aut_phone"],
             text=(
                 "Use inkbox_send_email to send my email address from my contact "
-                f"details an email containing the code {token}. Do not send the "
-                "code back by SMS; this is complete only after the email is sent. "
+                f"details an email containing the code {token}. Do not send any "
+                "SMS, including a confirmation or acknowledgement; this is complete "
+                "only after the email is sent. Return [SILENT] after sending the email. "
                 f"(attempt {attempt + 1}, ref {token})"
             ),
         )

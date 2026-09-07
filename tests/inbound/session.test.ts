@@ -718,6 +718,7 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "the Inkbox plugin will issue one bounded correction turn",
     );
+    expect(run.ctxPayload.message.bodyForAgent).toContain("copy it verbatim from the open action or transcript");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Please send the release update.");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Send the release update");
     expect(channelRuntime.deliveryResults).toEqual([{ visibleReplySent: false }]);
@@ -729,6 +730,47 @@ describe("createInkboxSessionBridge", () => {
 
     await bridge.handlers.onCallEnded?.(event);
     await flushMicrotasks();
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("admits concurrent completion events for one hosted call only once", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+      await emitHostedSmsTool(params, { content: [{ type: "text", text: "Sent text id=text-concurrent status=queued" }] });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({ id: "call-concurrent" });
+    await Promise.all([
+      bridge.handlers.onCallEnded?.({ ...event, id: "completion-a" }),
+      bridge.handlers.onCallEnded?.({ ...event, id: "completion-b" }),
+    ]);
+    await flushMicrotasks(100);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["read", "write"])("releases hosted admission after a registry %s failure", async (operation) => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+      await emitHostedSmsTool(params, { content: [{ type: "text", text: "Sent text id=text-retry status=queued" }] });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const registry = await import("../../src/hosted-call-registry.js");
+    const failingOperation = operation === "read" ? registry.readHostedCallRegistry : registry.writeHostedCallRegistryEntry;
+    vi.mocked(failingOperation).mockRejectedValueOnce(new Error("temporary storage failure"));
+    const event = hostedCallEndedEvent({ id: `call-admission-${operation}` });
+    await expect(bridge.handlers.onCallEnded?.(event)).rejects.toThrow("temporary storage failure");
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(100);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
   });
 

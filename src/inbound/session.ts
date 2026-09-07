@@ -5557,6 +5557,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           transcript ? `Call transcript:\n${transcript}` : "No transcript was captured for this call.",
           actions ? `Open post-call actions recorded during the call:\n${actions}` : undefined,
           "Review the outcome, transcript, and open actions in one pass. Execute every still-needed commitment with normal OpenClaw tools. Do not repeat work that was completed, canceled, superseded, or already performed during the call.",
+          "If the caller specified an exact SMS body, marker, code, or wording, copy it verbatim from the open action or transcript. Do not paraphrase it or replace it with an acknowledgement or call summary.",
           "If nothing remains, return [SILENT]. Any plain-text reply is suppressed because the call has ended; side effects must come from tool calls.",
         ]
           .filter(Boolean)
@@ -5731,29 +5732,32 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     if (!callId) return;
     const key = hostedCallRegistryKey(opts.account.accountId, callId);
     if (hostedCallRuns.has(key)) return;
-    const existing = (await readHostedCallRegistry())[key];
-    if (existing?.state === "completed" || (existing?.state === "failed" && !existing.retryable)) {
-      return;
-    }
-    const recovery = existing
-      ? hostedSmsRecoveryPhase(existing)
-      : { phase: "initial" as const };
-    if (existing && recovery.phase === "terminal") {
-      await writeHostedCallRegistryEntry({
-        accountId: existing.accountId,
-        callId: existing.callId,
-        eventId: existing.eventId,
-        state: "failed",
-        outcome: "durable_sms_attempt_is_ambiguous",
-        retryable: false,
-        event: existing.event,
-        smsAttempts: existing.smsAttempts,
-      });
-      return;
-    }
-    const replayEvent = recovery.phase === "correction" ? existing!.event : event;
+    // Reserve the call before reading durable state: completion deliveries
+    // with different event IDs can arrive concurrently for the same call.
     hostedCallRuns.add(key);
+    let queued = false;
     try {
+      const existing = (await readHostedCallRegistry())[key];
+      if (existing?.state === "completed" || (existing?.state === "failed" && !existing.retryable)) {
+        return;
+      }
+      const recovery = existing
+        ? hostedSmsRecoveryPhase(existing)
+        : { phase: "initial" as const };
+      if (existing && recovery.phase === "terminal") {
+        await writeHostedCallRegistryEntry({
+          accountId: existing.accountId,
+          callId: existing.callId,
+          eventId: existing.eventId,
+          state: "failed",
+          outcome: "durable_sms_attempt_is_ambiguous",
+          retryable: false,
+          event: existing.event,
+          smsAttempts: existing.smsAttempts,
+        });
+        return;
+      }
+      const replayEvent = recovery.phase === "correction" ? existing!.event : event;
       await writeHostedCallRegistryEntry({
         accountId: opts.account.accountId,
         callId,
@@ -5761,22 +5765,22 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         state: "queued",
         event: replayEvent,
       });
-    } catch (error) {
-      hostedCallRuns.delete(key);
-      throw error;
-    }
-    hostedCallCompletionChain = hostedCallCompletionChain
-      .catch((error) => {
-        opts.logger?.warn?.(
-          `Inkbox Voice AI completion queue recovered from a prior failure: ${errorMessage(error)}`,
+      hostedCallCompletionChain = hostedCallCompletionChain
+        .catch((error) => {
+          opts.logger?.warn?.(
+            `Inkbox Voice AI completion queue recovered from a prior failure: ${errorMessage(error)}`,
+          );
+        })
+        .then(() =>
+          runHostedCallCompletion(
+            replayEvent,
+            recovery.phase === "correction" ? recovery.reason : undefined,
+          ),
         );
-      })
-      .then(() =>
-        runHostedCallCompletion(
-          replayEvent,
-          recovery.phase === "correction" ? recovery.reason : undefined,
-        ),
-      );
+      queued = true;
+    } finally {
+      if (!queued) hostedCallRuns.delete(key);
+    }
   }
 
   async function catchUpHostedCalls(): Promise<void> {
