@@ -597,7 +597,20 @@ def _hangup_call(client, call_id) -> None:
 
 def _hangup_fresh_calls(client, candidates, baseline: set) -> None:
     """End every matching call that appeared after the scenario snapshot."""
-    for call in candidates():
+    # Cleanup must survive a transient inventory timeout without replaying
+    # a call-control mutation whose result may already have committed.
+    for attempt in range(3):
+        try:
+            fresh = list(candidates())
+            break
+        except Exception as exc:
+            if attempt == 2:
+                raise RuntimeError(
+                    "call cleanup inventory unavailable after 3 read attempts "
+                    f"(error_type={type(exc).__name__})"
+                ) from None
+            time.sleep(attempt + 1)
+    for call in fresh:
         if call.id not in baseline:
             _hangup_call(client, call.id)
 

@@ -333,3 +333,39 @@ def test_hd_audio_proof_requires_current_call_and_negotiated_format():
     assert not voice._gateway_has_hd_audio(line, "other-call")
     assert not voice._gateway_has_hd_audio(line.replace("pcm_s16le_16000", "pcmu_8000"), "current-call")
     assert not voice._gateway_has_hd_audio(line.replace("current-call", "current-call-extra"), "current-call")
+
+
+def test_cleanup_retries_inventory_reads_without_repeating_hangup(monkeypatch):
+    calls = _Calls()
+    reads = 0
+    pauses = []
+    monkeypatch.setattr(voice.time, "sleep", pauses.append)
+
+    def inventory():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise TimeoutError("synthetic transport timeout")
+        return [SimpleNamespace(id="old"), SimpleNamespace(id="new")]
+
+    voice._hangup_fresh_calls(SimpleNamespace(calls=calls), inventory, {"old"})
+    assert reads == 2
+    assert pauses == [1]
+    assert calls.hung_up == ["new"]
+
+
+def test_cleanup_read_exhaustion_is_bounded_and_does_not_claim_cleanup(monkeypatch):
+    calls = _Calls()
+    reads = 0
+    monkeypatch.setattr(voice.time, "sleep", lambda _: None)
+
+    def inventory():
+        nonlocal reads
+        reads += 1
+        raise TimeoutError("synthetic private request detail")
+
+    with pytest.raises(RuntimeError, match="after 3 read attempts") as caught:
+        voice._hangup_fresh_calls(SimpleNamespace(calls=calls), inventory, set())
+    assert "private request detail" not in str(caught.value)
+    assert reads == 3
+    assert not calls.hung_up
