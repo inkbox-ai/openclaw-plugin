@@ -40,7 +40,7 @@ If someone in an SMS/text conversation asks you to call them (or you decide to),
 - **Carrier propagation window.** Newly provisioned local numbers take ~10–15 min to propagate to carriers. During this window, sends return "Your Inkbox phone number is still propagating to carriers." Wait it out; don't retry tight-loop.
 - **Toll-free numbers cannot send SMS** today. If the identity's phone is toll-free, sends will fail — recommend the user provision a local number via the setup wizard.
 - **Rate cap.** Roughly 15 outbound sends per number per 24h. The plugin surfaces this as a 409. Pause sending and wait.
-- **Group chats.** Reply only when the sender clearly addresses this agent or asks it to act. Do not comment on every group message. If an inbound group turn says no visible reply is warranted, return exactly `[SILENT]`.
+- **Group chats.** Reply only when the sender clearly addresses this agent or asks it to act. Do not comment on every group message. If an inbound group turn says no visible reply is warranted, return exactly `NO_REPLY`.
 
 ## SMS-specific style
 

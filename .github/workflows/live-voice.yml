@@ -181,6 +181,8 @@ jobs:
             export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $HOSTED_MARKER. Create one post-call action now. Set both the action title and the action details to this exact five-word phrase: Send SMS $HOSTED_MARKER. Wait for the action tool to succeed, then read the exact three-word SMS body back to me. Do not paraphrase, omit a word, or send the SMS during the call."
             # The pytest gate, not the driver timer, owns the intentional hangup.
             export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_REASK=30
+            export VOICE_DRIVER_REASK_LINE="Please verify the one queued SMS contains exactly: $HOSTED_MARKER. Correct the existing action if needed, or record one only if absent. Do not create a duplicate action or send it yet. Read the exact SMS body back."
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
             export VOICE_DRIVER_LISTEN=40

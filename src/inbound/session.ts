@@ -1,3 +1,5 @@
+import { isInkboxSilentReply, transformInkboxReplyPayload } from "../silent-reply.js";
+import { a2aFailureShape, settleCaughtA2AFailure } from "../a2a-failure.js";
 import { INKBOX_HD_AUDIO_FORMAT, RealtimeCallAudio } from "../realtime-audio.js";
 import { createHash } from "node:crypto";
 import { verifyWebhook } from "@inkbox/sdk";
@@ -1596,7 +1598,7 @@ async function deliverReply(
   },
 ): Promise<string | undefined> {
   const text = params.text.trim();
-  if (!text || text.toUpperCase() === "[SILENT]") {
+  if (!text || isInkboxSilentReply(text)) {
     return undefined;
   }
   if (params.turn.mode === "warmup" || params.turn.mode === "external") {
@@ -2567,7 +2569,7 @@ async function dispatchInboundTurn(
         const isStatus = Boolean(payload && typeof payload === "object" &&
           (payload as { isStatusNotice?: unknown }).isStatusNotice === true);
         opts.logger?.info?.(
-          `Inkbox source reply shape: mode=${opts.turn.mode} kind=${kind} chars=${text.length} error=${isError} status=${isStatus} silent=${text.trim().toUpperCase() === "[SILENT]"}`,
+          `Inkbox source reply shape: mode=${opts.turn.mode} kind=${kind} chars=${text.length} error=${isError} status=${isStatus} silent=${isInkboxSilentReply(text)}`,
         );
       }
       if (!text.trim()) {
@@ -2642,6 +2644,7 @@ async function dispatchInboundTurn(
       ...(replyOptions ? { replyOptions } : {}),
       delivery,
       replyPipeline: {},
+      dispatcherOptions: { transformReplyPayload: transformInkboxReplyPayload },
       record: {
         onRecordError: (error: unknown) => {
           opts.logger?.warn?.(
@@ -3013,7 +3016,7 @@ async function runRealtimePostCallActions(
               "If you committed to anything during the call, perform that now via tool calls.",
               "Do not redo work that was already completed on the call. Do not repeat SMS, email, note, contact, or call-history work that an in-call consult result says it sent, queued, canceled, completed, or superseded.",
               "Only perform follow-up if the caller explicitly asked for it, you clearly committed to it, and it was not already handled during the call.",
-              "If there is nothing still needed, return [SILENT]. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
+              "If there is nothing still needed, return NO_REPLY. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
               consultResults ? `In-call OpenClaw consult results:\n${consultResults}` : undefined,
               fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
             ]
@@ -3088,7 +3091,7 @@ async function runSttTtsCallEndedReflection(
         "If you committed to anything during the call, perform that now via tool calls.",
         "Do not redo work that was already completed on the call. Do not repeat SMS, email, note, contact, or call-history work that the transcript shows was already handled, canceled, completed, or superseded.",
         "Only perform follow-up if the caller explicitly asked for it, you clearly committed to it, and it was not already handled during the call.",
-        "If there is nothing still needed, return [SILENT]. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
+        "If there is nothing still needed, return NO_REPLY. Do not send a confirmation, summary, or extra follow-up unless the caller explicitly requested one.",
         fullTranscript ? `Full live-call transcript:\n${fullTranscript}` : undefined,
       ]
         .filter(Boolean)
@@ -3394,7 +3397,7 @@ export async function prewarmInkboxAgent(
         fromLabel: "Inkbox voice warmup",
         body:
           `[inkbox:warmup account_id=${opts.account.accountId}${renderIdentityMarker(opts.account)} reason=${JSON.stringify(reason)}]\n` +
-          `Warm up the Inkbox voice-call agent path. Reply with exactly "[SILENT]". Do not use tools and do not contact the user.`,
+          `Warm up the Inkbox voice-call agent path. Reply with exactly "NO_REPLY". Do not use tools and do not contact the user.`,
         messageId: `inkbox-warmup:${opts.account.accountId}:${startedAt}`,
         threadId: `inkbox-warmup:${opts.account.accountId}`,
         timestamp: startedAt,
@@ -3439,8 +3442,8 @@ function inboundMailBody(message: MailWebhookPayload["data"]["message"]): string
 
 const CROSS_CHANNEL_COMPLETION_POLICY =
   "Source-channel completion policy: after a requested action succeeds through " +
-  "another Inkbox channel or send tool, return exactly [SILENT] when the user " +
-  "did not also request a reply here. Do not omit [SILENT] or send confirmation " +
+  "another Inkbox channel or send tool, return exactly NO_REPLY when the user " +
+  "did not also request a reply here. Do not omit NO_REPLY or send confirmation " +
   "or error prose on this inbound channel.";
 
 async function buildMailTurn(
@@ -3548,7 +3551,7 @@ async function buildTextTurn(
         "Group SMS response policy: you receive every message in this group so you can track context.",
         "Reply only when the latest message clearly addresses this Inkbox agent, asks it to act, or a visible answer would be expected from the agent.",
         "Treat ordinary group chatter as context only.",
-        "If no visible reply is warranted, return exactly [SILENT].",
+        "If no visible reply is warranted, return exactly NO_REPLY.",
       ].join("\n")
     : CROSS_CHANNEL_COMPLETION_POLICY;
   const marker = isGroup
@@ -3648,7 +3651,7 @@ async function buildIMessageTurn(
         "Group iMessage response policy: you receive every message in this group so you can track context.",
         "Reply only when the latest message clearly addresses this Inkbox agent, asks it to act, or a visible answer would be expected from the agent.",
         "Treat ordinary group chatter as context only.",
-        "If no visible reply is warranted, return exactly [SILENT].",
+        "If no visible reply is warranted, return exactly NO_REPLY.",
       ].join("\n")
     : undefined;
   const marker = isGroup
@@ -3688,7 +3691,7 @@ async function buildIMessageTurn(
 // there is no body — the signal is the reaction itself plus which message it
 // targets. The turn hands the agent the reaction and a response policy: a
 // "question" tapback usually wants a reply, the rest usually don't, so the
-// agent is told it may return [SILENT] when no visible reply is warranted
+// agent is told it may return NO_REPLY when no visible reply is warranted
 // (the same sentinel deliverReply already drops).
 async function buildIMessageReactionTurn(
   runtime: InkboxRuntime,
@@ -3746,7 +3749,7 @@ async function buildIMessageReactionTurn(
       "tapback usually asks for clarification or a follow-up, 'emphasize' may " +
       "invite one, while 'love'/'like'/'laugh'/'dislike' are usually just " +
       "acknowledgements that need no response.",
-    "If no visible reply is warranted, return exactly [SILENT].",
+    "If no visible reply is warranted, return exactly NO_REPLY.",
   ].join("\n");
   return {
     mode: "imessage",
@@ -4334,7 +4337,7 @@ async function runRealtimeCallWebSocket(
 // wakeOnSendRejection. The wake-up turn rides the normal dispatchInboundTurn
 // path, so it lands on the failed conversation's session/thread. Its prompt
 // requires the first safe retry only for a first retryable failure; later,
-// terminal, and unknown failures expose [SILENT] according to policy. The
+// terminal, and unknown failures expose NO_REPLY according to policy. The
 // shared 3-send budget (keyed by conversation + recipient) is the loop guard:
 // a recovery send that itself fails increments the same counter until the cap
 // silences the thread.
@@ -5113,7 +5116,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       if (
         !context.replyIntentCommitted &&
         reply &&
-        reply.toUpperCase() !== "[SILENT]"
+        !isInkboxSilentReply(reply)
       ) {
         await context.beforeReplyIntent();
         const task = await identity.a2aTask(data.task_id);
@@ -5127,9 +5130,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       await writeA2ARegistry(key, data, "finalized");
     } catch (error) {
       if (!controller.signal.aborted) {
-        opts.logger?.warn?.(
-          `Inkbox A2A turn failed: task_id=${data.task_id} ${errorMessage(error)}`,
-        );
+        opts.logger?.warn?.(`Inkbox ${a2aFailureShape("dispatch", error)}`);
+        try {
+          const outcome = await settleCaughtA2AFailure({
+            identity,
+            taskId: data.task_id,
+            signal: controller.signal,
+            replyIntentCommitted: context.replyIntentCommitted,
+            replyIntentAttempted: (await readA2ARegistry())[key]?.replyIntentFenced,
+            beforeFail: context.beforeReplyIntent,
+          });
+          if (outcome === "finalized") await writeA2ARegistry(key, data, "finalized");
+        } catch (settlementError) {
+          opts.logger?.warn?.(`Inkbox ${a2aFailureShape("terminal", settlementError)}`);
+        }
       }
     } finally {
       if (progressSupervisor) {
@@ -5144,10 +5158,22 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const taskRuns = a2aRuns.get(data.task_id) ?? new Set<A2ARun>();
     let activeRun!: A2ARun;
     const task = runA2ATurn(key, data, controller)
-      .catch((error) => {
-        opts.logger?.warn?.(
-          `Inkbox A2A turn failed: task_id=${data.task_id} ${errorMessage(error)}`,
-        );
+      .catch(async (error) => {
+        if (controller.signal.aborted) return;
+        opts.logger?.warn?.(`Inkbox ${a2aFailureShape("admission", error)}`);
+        try {
+          const identity = await opts.runtime.getIdentity() as any;
+          const outcome = await settleCaughtA2AFailure({
+            identity,
+            taskId: data.task_id,
+            signal: controller.signal,
+            replyIntentAttempted: (await readA2ARegistry())[key]?.replyIntentFenced,
+            beforeFail: () => fenceA2AReplyIntent(key),
+          });
+          if (outcome === "finalized") await writeA2ARegistry(key, data, "finalized");
+        } catch (settlementError) {
+          opts.logger?.warn?.(`Inkbox ${a2aFailureShape("terminal", settlementError)}`);
+        }
       })
       .finally(() => {
         taskRuns.delete(activeRun);
@@ -5569,7 +5595,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           actions ? `Open post-call actions recorded during the call:\n${actions}` : undefined,
           "Review the outcome, transcript, and open actions in one pass. Execute every still-needed commitment with normal OpenClaw tools. Do not repeat work that was completed, canceled, superseded, or already performed during the call.",
           "If the caller specified an exact SMS body, marker, code, or wording, copy it verbatim from the open action or transcript. Do not paraphrase it or replace it with an acknowledgement or call summary.",
-          "If nothing remains, return [SILENT]. Any plain-text reply is suppressed because the call has ended; side effects must come from tool calls.",
+          "If nothing remains, return NO_REPLY. Any plain-text reply is suppressed because the call has ended; side effects must come from tool calls.",
         ]
           .filter(Boolean)
           .join("\n\n"),
@@ -5638,7 +5664,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           body: [
             `[inkbox:voice_call_correction call_id=${call.id}${renderIdentityMarker(opts.account)} | ${renderContactMarker(contact)}]`,
             "The previous hosted-call reconciliation did not complete its required SMS follow-up.",
-            "This is the only mandatory correction attempt. Do not return [SILENT], skip the tool, or defer the send.",
+            "This is the only mandatory correction attempt. Do not return NO_REPLY, skip the tool, or defer the send.",
             correctionInstruction,
             `Exact open SMS commitment:\n${escapeContactMemoryTokens(smsCommitment ?? "")}`,
             `Call inkbox_send_sms exactly once with to="${escapeContactMemoryTokens(remotePhoneNumber)}". Do not use conversationId, do not send to any other number, and do not make a second attempt in this turn. Plain-text replies are suppressed.`,
@@ -5910,7 +5936,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         }
         // A "question" tapback usually expects a reply, so show the typing
         // indicator while the agent works on it. Other reaction types most
-        // often resolve to [SILENT], so we don't promise a reply that isn't
+        // often resolve to NO_REPLY, so we don't promise a reply that isn't
         // coming.
         const reactionType = (event.data.reaction?.reaction ?? "").toLowerCase();
         if (reactionType === "question") {
@@ -5945,7 +5971,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       clearOutboundFailures("imessage", turn.conversationId, turn.remoteAddress, turn.contactKey);
       // Show the recipient a typing indicator while the agent works on the
       // reply. deliverReply stops it the moment the response goes out; the
-      // finally covers [SILENT] turns and failures.
+      // finally covers NO_REPLY turns and failures.
       imessageTyping.start(turn.conversationId);
       try {
         await dispatchInboundTurn({ ...opts, turn, activeCalls, imessageTyping });
@@ -6122,7 +6148,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           deliveryOverride: {
             deliver: async (payload: unknown) => {
               const replyText = payloadText(payload).trim();
-              if (!replyText || replyText.toUpperCase() === "[SILENT]") {
+              if (!replyText || isInkboxSilentReply(replyText)) {
                 return { visibleReplySent: false };
               }
               if (shouldDeliverReply() === false) {

@@ -22,6 +22,18 @@ STOPPED_WIRE_STATES = {
 PROGRESS_RECEIPT_SUFFIX = "Expect progress updates about every 1 minute."
 PROGRESS_UPDATE_RE = re.compile(r"^(.+) \((\d+)s elapsed\)$")
 GENERIC_PROGRESS_FALLBACK = "I'm continuing the requested work."
+A2A_FAILURE_SHAPE_RE = re.compile(
+    r"A2A failure shape: stage=(?:dispatch|admission|terminal) "
+    r"name=(?:Error|TypeError|RangeError|AbortError|other) "
+    r"frame=(?:[A-Za-z0-9_.-]+\.(?:ts|js|mjs):[0-9]+|unknown:0)(?=[\s\"\\]|$)"
+)
+
+
+def _a2a_failure_shapes(log: str) -> list[str]:
+    """Extract only bounded diagnostics, never adjacent error prose or paths."""
+    return [match.group(0) for match in A2A_FAILURE_SHAPE_RE.finditer(log)][-20:]
+
+
 TERMINAL_PROGRESS_RE = re.compile(
     r"\b(?:done|complete|completed|finished|failed|failure|blocked|"
     r"final\s+(?:answer|result)|cannot\s+(?:complete|continue)|"

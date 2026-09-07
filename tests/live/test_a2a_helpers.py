@@ -7,6 +7,23 @@ import pytest
 import a2a_driver
 
 
+def test_failure_shapes_handle_host_prefixes_without_leaking_error_content():
+    shape = "A2A failure shape: stage=dispatch name=TypeError frame=session.ts:123"
+    log = (
+        f"[inkbox] {shape}\n"
+        f'{{"1":"Inkbox {shape}","private":"private request"}}\n'
+        "A2A turn failed: private task and secret error\n"
+        "A2A failure shape: stage=dispatch name=PrivateError frame=secret.ts:1\n"
+        "A2A failure shape: stage=dispatch name=Error frame=/private/secret.ts:1\n"
+        "A2A failure shape: stage=dispatch name=Error frame=secret.ts:1private\n"
+    )
+    assert a2a_driver._a2a_failure_shapes(log) == [shape, shape]
+    host_shape = "A2A failure shape: stage=terminal name=Error frame=dispatch-from-config.finalize-abc.js:42"
+    assert a2a_driver._a2a_failure_shapes(host_shape) == [host_shape]
+    unknown = "A2A failure shape: stage=admission name=other frame=unknown:0"
+    assert a2a_driver._a2a_failure_shapes(unknown) == [unknown]
+
+
 class _Identity:
     def __init__(self, enabled: bool = True):
         self.enabled = enabled

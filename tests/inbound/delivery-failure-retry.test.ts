@@ -4,7 +4,7 @@
 // lifecycle webhook or a synchronous send rejection) wakes the agent in the
 // failed conversation's own session/thread, capped at
 // OUTBOUND_FAILURE_MAX_ATTEMPTS sends per reply, deduped per failed message,
-// with [SILENT] still suppressing the visible reply. Budget math + prompt text
+// with NO_REPLY still suppressing the visible reply. Budget math + prompt text
 // are covered in tests/delivery-failure.test.ts.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -239,11 +239,11 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(body).toContain("flagged by a SPAM filter");
     expect(body).toContain("Sorry Kim — the site isn't built yet.");
     expect(body).toContain("SMS failure classification: FIRST SAFE RETRY REQUIRED");
-    expect(body).not.toContain("[SILENT]");
+    expect(body).not.toContain("NO_REPLY");
     expect(sendText).toHaveBeenCalledWith({ conversationId: "conv-9", text: "Shorter retry text." });
   });
 
-  it("offers [SILENT] after the first retryable recovery also fails", async () => {
+  it("offers NO_REPLY after the first retryable recovery also fails", async () => {
     const { runtime, sendText } = createRuntime();
     const channelRuntime = createChannelRuntime((call) =>
       call === 0 ? "First safe retry." : "Second optional retry.",
@@ -258,10 +258,10 @@ describe("outbound delivery-failure recovery — session routing", () => {
     const secondBody = channelRuntime.inbound.dispatchReply.mock.calls[1][0].ctxPayload.message.bodyForAgent;
     expect(firstBody).toContain(`attempt=1/${MAX}`);
     expect(firstBody).toContain("FIRST SAFE RETRY REQUIRED");
-    expect(firstBody).not.toContain("[SILENT]");
+    expect(firstBody).not.toContain("NO_REPLY");
     expect(secondBody).toContain(`attempt=2/${MAX}`);
     expect(secondBody).toContain("RETRY OPTIONAL");
-    expect(secondBody).toContain("[SILENT]");
+    expect(secondBody).toContain("NO_REPLY");
     expect(sendText).toHaveBeenNthCalledWith(1, {
       conversationId: "conv-9",
       text: "First safe retry.",
@@ -274,7 +274,7 @@ describe("outbound delivery-failure recovery — session routing", () => {
 
   it("wakes the agent but does not resend after a terminal iMessage delivery failure", async () => {
     const { runtime, sendIMessage } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createBridge(runtime, channelRuntime);
 
     await bridge.handlers.onIMessage?.(imessageFailure());
@@ -287,7 +287,7 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(body).toContain("[OPTED_OUT]");
     expect(body).toContain("See you at 5!");
     expect(body).toContain("iMessage failure classification: DO NOT RETRY");
-    expect(body).toContain("[SILENT]");
+    expect(body).toContain("NO_REPLY");
     expect(sendIMessage).not.toHaveBeenCalled();
   });
 
@@ -308,7 +308,7 @@ describe("outbound delivery-failure recovery — session routing", () => {
       expect(body).toContain(`channel=email stage=${eventType === "message.bounced" ? "bounced" : "delivery_failed"}`);
       expect(body).toContain("Original email body.");
       expect(body).toContain("Email failure classification: REVIEW BEFORE RETRY");
-      expect(body).toContain("[SILENT]");
+      expect(body).toContain("NO_REPLY");
       expect(sendEmail).toHaveBeenCalledWith({
         to: ["kim@example.com"],
         subject: "Re: Launch checklist",
@@ -354,9 +354,9 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("duplicate delivery-failure webhook ignored"));
   });
 
-  it("suppresses the visible resend when the agent replies exactly [SILENT]", async () => {
+  it("suppresses the visible resend when the agent replies exactly NO_REPLY", async () => {
     const { runtime, sendText } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createBridge(runtime, channelRuntime);
 
     await bridge.handlers.onText?.(
@@ -373,7 +373,7 @@ describe("outbound delivery-failure recovery — session routing", () => {
   it("caps the shared budget so a dead conversation goes quiet after the cap", async () => {
     const { runtime } = createRuntime();
     // Silent recovery replies so the wake turns don't send anything downstream.
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const logger = { info: vi.fn(), warn: vi.fn() };
     const bridge = createBridge(runtime, channelRuntime, logger);
 
@@ -395,7 +395,7 @@ describe("outbound delivery-failure recovery — session routing", () => {
 
   it("resets the budget when a fresh inbound arrives on the conversation", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createBridge(runtime, channelRuntime);
 
     await bridge.handlers.onText?.(
@@ -457,7 +457,7 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(body).toContain("channel=sms stage=send_rejected");
     expect(body).toContain("message_blocked_spam_filter rule=emoji_overload");
     expect(body).toContain("SMS failure classification: FIRST SAFE RETRY REQUIRED");
-    expect(body).not.toContain("[SILENT]");
+    expect(body).not.toContain("NO_REPLY");
     // The recovery resend actually went out.
     expect(sendText).toHaveBeenCalledTimes(2);
   });

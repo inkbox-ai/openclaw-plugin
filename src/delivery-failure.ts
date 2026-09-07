@@ -172,20 +172,20 @@ function deliveryFailureReplyInstruction(
     return (
       `${label} failure classification: RETRY OPTIONAL. A safe, materially corrected ` +
       `${label} message may use the remaining retry budget, but the first retry has ` +
-      `already failed. You may instead reply exactly [SILENT].`
+      `already failed. You may instead reply exactly NO_REPLY.`
     );
   }
   if (classification === "terminal") {
     return (
       `${label} failure classification: DO NOT RETRY. The recipient has not consented, ` +
       `the destination is invalid or unreachable, or the content is unsafe or harmful. ` +
-      `Do not resend this message; reply exactly [SILENT].`
+      `Do not resend this message; reply exactly NO_REPLY.`
     );
   }
   return (
     `${label} failure classification: REVIEW BEFORE RETRY. Send one corrected message ` +
     `only if it is safe, permitted, and likely to deliver. Otherwise reply exactly ` +
-    `[SILENT].`
+    `NO_REPLY.`
   );
 }
 

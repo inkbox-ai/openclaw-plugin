@@ -735,7 +735,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("admits concurrent completion events for one hosted call only once", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       await emitHostedSmsTool(params, { content: [{ type: "text", text: "Sent text id=text-concurrent status=queued" }] });
     });
     const bridge = createInkboxSessionBridge({
@@ -755,7 +755,7 @@ describe("createInkboxSessionBridge", () => {
 
   it.each(["read", "write"])("releases hosted admission after a registry %s failure", async (operation) => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       await emitHostedSmsTool(params, { content: [{ type: "text", text: "Sent text id=text-retry status=queued" }] });
     });
     const bridge = createInkboxSessionBridge({
@@ -801,7 +801,7 @@ describe("createInkboxSessionBridge", () => {
     const { runtime } = createRuntime();
     let dispatches = 0;
     const blockedTargets: string[] = [];
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       const target = dispatches === 1 ? "+15559990000" : "+15550001111";
       const blocked = await emitHostedSmsTool(
@@ -853,7 +853,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("completes an explicit hosted SMS action only after the native tool hook reports success", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       await emitHostedSmsTool(params, {
         content: [{ type: "text", text: "Sent text id=text-1 status=queued" }],
       });
@@ -882,7 +882,7 @@ describe("createInkboxSessionBridge", () => {
   it("issues one correction turn when an explicit hosted SMS action made no attempt", async () => {
     const { runtime } = createRuntime();
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
         await emitHostedSmsTool(params, {
@@ -918,7 +918,7 @@ describe("createInkboxSessionBridge", () => {
       "This is the only mandatory correction attempt",
     );
     expect(correction.ctxPayload.message.bodyForAgent).toContain(
-      "Do not return [SILENT], skip the tool, or defer the send",
+      "Do not return NO_REPLY, skip the tool, or defer the send",
     );
     expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
       state: "completed",
@@ -929,7 +929,7 @@ describe("createInkboxSessionBridge", () => {
   it("makes one correction after a recoverable hosted SMS failure", async () => {
     const { runtime } = createRuntime();
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       await emitHostedSmsTool(
         params,
@@ -978,7 +978,7 @@ describe("createInkboxSessionBridge", () => {
     ]);
     runtime.getIdentity = vi.fn(async () => identity) as any;
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
         await emitHostedSmsTool(params, {
@@ -1021,7 +1021,7 @@ describe("createInkboxSessionBridge", () => {
     ]);
     runtime.getIdentity = vi.fn(async () => identity) as any;
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
         await emitHostedSmsTool(params, {
@@ -1062,7 +1062,7 @@ describe("createInkboxSessionBridge", () => {
     const identity = await runtime.getIdentity();
     (identity as any).listTranscripts = vi.fn(async () => [{ party: "remote", text }]);
     runtime.getIdentity = vi.fn(async () => identity) as any;
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1083,7 +1083,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("detects imperative named-recipient text open actions", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1104,7 +1104,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("keeps a positive open-action clause after an earlier negated clause", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1226,7 +1226,7 @@ describe("createInkboxSessionBridge", () => {
     const identity = await runtime.getIdentity();
     (identity as any).listTranscripts = vi.fn(async () => transcriptRows);
     runtime.getIdentity = vi.fn(async () => identity) as any;
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1248,7 +1248,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("does not treat a negated open action as an SMS commitment", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1272,7 +1272,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("does not treat a bare SMS noun in an open action as a send commitment", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1294,7 +1294,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("terminalizes a durable hosted SMS attempt on catch-up without replay", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const event = hostedCallEndedEvent({ id: "call-durable-pending" });
     hostedRegistryMock.entries["default:call-durable-pending"] = {
       accountId: "default",
@@ -1355,7 +1355,7 @@ describe("createInkboxSessionBridge", () => {
       ],
       updatedAt: Date.now(),
     };
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       await emitHostedSmsTool(params, {
         details: { inkboxSendSms: { sent: true } },
         content: [{ type: "text", text: "Sent text id=text-recovery status=queued" }],
@@ -1388,7 +1388,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("terminalizes a failed correction journal without another replay", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const event = hostedCallEndedEvent({ id: "call-failed-correction" });
     hostedRegistryMock.entries["default:call-failed-correction"] = {
       accountId: "default",
@@ -1436,7 +1436,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("replays a clean hosted completion with no durable SMS attempt", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const event = hostedCallEndedEvent({
       id: "call-clean-replay",
       action: "Review the release notes",
@@ -1469,7 +1469,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("persists terminal hosted SMS failure and does not replay the webhook", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       await emitHostedSmsTool(params, {
         isError: true,
         content: [{ type: "text", text: "Recipient has opted out of SMS" }],
@@ -1501,7 +1501,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("persists an aborted hosted SMS reconciliation as terminal and does not replay", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", (params) => {
       bindHostedSmsCaptureToRun(
         { prompt: params.ctxPayload.message.bodyForAgent },
         {
@@ -1543,6 +1543,39 @@ describe("createInkboxSessionBridge", () => {
     await bridge.handlers.onCallEnded?.(event);
     await flushMicrotasks(20);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a caught A2A dispatch error once instead of leaving the task working", async () => {
+    const { runtime, a2aReply } = createRuntime();
+    const warn = vi.fn();
+    const channelRuntime = createChannelRuntime("unused", () => {
+      throw new TypeError("private model failure text");
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger: { warn },
+    });
+    const event = {
+      id: "event-dispatch-failure", event_type: "a2a.task.created",
+      data: {
+        task_id: "task-dispatch-failure", context_id: "context-dispatch-failure",
+        message_id: "message-dispatch-failure", caller: { handle: "caller" },
+        parts: [{ text: "Complete this task." }],
+      },
+    };
+    await bridge.handlers.onA2A?.(event);
+    await vi.waitFor(() => expect(a2aRegistryMock.entries["task-dispatch-failure:message-dispatch-failure"]?.state).toBe("finalized"));
+    await bridge.handlers.onA2A?.(event);
+    await flushMicrotasks(30);
+    const failures = a2aReply.mock.calls.filter(([, reply]) => reply.intent === "fail");
+    expect(failures).toHaveLength(1);
+    expect(failures[0][1].text).not.toContain("private");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("stage=dispatch name=TypeError"));
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("private model failure text");
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledOnce();
   });
 
   it("serves an inbound A2A task in its context session and completes it once", async () => {
@@ -1611,7 +1644,7 @@ describe("createInkboxSessionBridge", () => {
       throw new Error("response lost");
     });
     const key = `task-fenced-${intent}:message-fenced-${intent}`;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       if (params.routeSessionKey !== `a2a:identity-1:context-fenced-${intent}`) return;
       const context = activeA2ATurn(params.routeSessionKey)!;
       await context.beforeReplyIntent?.();
@@ -1699,7 +1732,7 @@ describe("createInkboxSessionBridge", () => {
       "task-fenced-plain:message-fenced-plain-1"
     ].replyIntentFenced).toBe(true);
 
-    const restartedRuntime = createChannelRuntime("[SILENT]");
+    const restartedRuntime = createChannelRuntime("NO_REPLY");
     const restarted = createInkboxSessionBridge({
       cfg: {},
       account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
@@ -4093,7 +4126,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("suppresses 1:1 source replies after a completed cross-channel action", async () => {
     const { runtime, sendText } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -4118,9 +4151,9 @@ describe("createInkboxSessionBridge", () => {
     for (const [params] of channelRuntime.inbound.dispatchReply.mock.calls) {
       const body = params.ctxPayload.message.bodyForAgent;
       expect(body).toContain("Source-channel completion policy");
-      expect(body).toContain("return exactly [SILENT]");
+      expect(body).toContain("return exactly NO_REPLY");
       expect(body).toContain("did not also request a reply here");
-      expect(body).toContain("Do not omit [SILENT]");
+      expect(body).toContain("Do not omit NO_REPLY");
     }
     expect(channelRuntime.deliveryResults).toHaveLength(2);
     expect(channelRuntime.deliveryResults).toEqual([
@@ -4444,7 +4477,7 @@ describe("createInkboxSessionBridge", () => {
         expect(params.ctxPayload.message.bodyForAgent).toContain(
           "Do not redo work that was already completed on the call.",
         );
-        await params.delivery.deliver({ text: "[SILENT]" });
+        await params.delivery.deliver({ text: "NO_REPLY" });
         return;
       }
       expect(params.ctxPayload.message.bodyForAgent).toContain("reply_mode=voice_tts");
@@ -4604,7 +4637,7 @@ describe("createInkboxSessionBridge", () => {
       "Do not redo work that was already completed on the call.",
     );
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
-      "If there is nothing still needed, return [SILENT].",
+      "If there is nothing still needed, return NO_REPLY.",
     );
 
     const frames = parseSentTextFrames(ws);
@@ -5970,7 +6003,7 @@ describe("createInkboxSessionBridge", () => {
         },
       ],
     });
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -6150,7 +6183,7 @@ describe("createInkboxSessionBridge", () => {
         lookup: vi.fn(async () => [{ id: "sender", preferredName: "Sender" }]),
       },
     });
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
@@ -6180,7 +6213,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("escapes contact-memory delimiters in text, iMessage, and reaction content", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
@@ -6241,7 +6274,7 @@ describe("createInkboxSessionBridge", () => {
     expect(body).toContain("participants=+15551234567,+15557654321");
     expect(body).toContain("reply_mode=conversation_id");
     expect(body).toContain("Group iMessage response policy");
-    expect(body).toContain("return exactly [SILENT]");
+    expect(body).toContain("return exactly NO_REPLY");
     expect(body).toContain("Dinner moved to 7.");
     // One shared context: the conversation keys the chat, not the sender.
     expect(run.ctxPayload.conversation.id).toBe("imessage:imconv-777");
@@ -6270,7 +6303,7 @@ describe("createInkboxSessionBridge", () => {
         ]),
       },
     });
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -6444,7 +6477,7 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "[inkbox:imessage_reaction from=+15551234567 reaction=question conversation_id=imconv-123 target_message_id=im-target-9",
     );
-    expect(run.ctxPayload.message.bodyForAgent).toContain("return exactly [SILENT]");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("return exactly NO_REPLY");
     expect(run.ctxPayload.reply.to).toBe("imessage:imconv-123");
     expect(sendIMessage).toHaveBeenCalledWith({
       conversationId: "imconv-123",
@@ -6456,7 +6489,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("uses the sole matched contact for iMessage and reaction memories", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
@@ -6753,9 +6786,9 @@ describe("createInkboxSessionBridge", () => {
     expect(body).toContain('"Prefers direct answers."');
   });
 
-  it("does not promise a reply for non-question tapbacks and honors [SILENT]", async () => {
+  it("does not promise a reply for non-question tapbacks and honors NO_REPLY", async () => {
     const { runtime, sendIMessage, sendIMessageTyping } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {

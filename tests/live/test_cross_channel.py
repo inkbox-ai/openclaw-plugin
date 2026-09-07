@@ -459,7 +459,7 @@ def test_sms_request_gets_email_response(xc):
                 "Use inkbox_send_email to send my email address from my contact "
                 f"details an email containing the code {token}. Do not send any "
                 "SMS, including a confirmation or acknowledgement; this is complete "
-                "only after the email is sent. Return [SILENT] after sending the email. "
+                "only after the email is sent. Return NO_REPLY after sending the email. "
                 f"(attempt {attempt + 1}, ref {token})"
             ),
         )
