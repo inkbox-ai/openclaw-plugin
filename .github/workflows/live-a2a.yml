@@ -78,23 +78,25 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           if [ "${{ matrix.scenario }}" = "inbound-progress" ]; then
-            BASE_URL="http://127.0.0.1:8088/v1"
-            MODEL_ID="mock-model"
-            API_KEY="sk-mock-not-used"
+            openclaw onboard --non-interactive \
+              --auth-choice custom-api-key \
+              --custom-base-url "http://127.0.0.1:8088/v1" \
+              --custom-model-id "mock-model" \
+              --custom-api-key "sk-mock-not-used" \
+              --custom-compatibility openai \
+              --secret-input-mode plaintext \
+              --skip-health \
+              --accept-risk
           else
-            BASE_URL="https://api.openai.com/v1"
-            MODEL_ID="gpt-5.6-sol"
-            API_KEY="$OPENAI_API_KEY"
+            # Native model metadata preserves reasoning and token budgets.
+            openclaw onboard --non-interactive \
+              --auth-choice openai-api-key \
+              --openai-api-key "$OPENAI_API_KEY" \
+              --secret-input-mode plaintext \
+              --skip-health \
+              --accept-risk
+            openclaw models set openai/gpt-5.6-sol
           fi
-          openclaw onboard --non-interactive \
-            --auth-choice custom-api-key \
-            --custom-base-url "$BASE_URL" \
-            --custom-model-id "$MODEL_ID" \
-            --custom-api-key "$API_KEY" \
-            --custom-compatibility openai \
-            --secret-input-mode plaintext \
-            --skip-health \
-            --accept-risk
 
       - name: Configure AUT identity and install plugin
         env:
@@ -181,12 +183,12 @@ jobs:
           log_path = Path(os.environ["RUNNER_TEMP"]) / "gateway.log"
           log = log_path.read_text(errors="replace") if log_path.exists() else ""
           for name, marker in {
-              "a2a_subscribed": "Inkbox A2A events subscribed",
-              "a2a_subscription_failure": "Inkbox A2A subscription reconcile failed",
-              "a2a_admission_failure": "Inkbox A2A registry reconcile failed",
-              "a2a_ack_failure": "Inkbox A2A acknowledgement failed",
-              "a2a_turn_failure": "Inkbox A2A turn failed",
-              "a2a_reply_failure": "Inkbox A2A reply collection failed",
+              "a2a_subscribed": "A2A events subscribed",
+              "a2a_subscription_failure": "A2A subscription reconcile failed",
+              "a2a_admission_failure": "A2A registry reconcile failed",
+              "a2a_ack_failure": "A2A acknowledgement failed",
+              "a2a_turn_failure": "A2A turn failed",
+              "a2a_reply_failure": "A2A reply collection failed",
               "host_runtime_missing": "OpenClaw channelRuntime is unavailable",
           }.items():
               print(f"{name}={log.count(marker)}")

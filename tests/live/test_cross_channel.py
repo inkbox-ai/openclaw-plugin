@@ -54,6 +54,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _source_reply_shapes(log_text: str) -> list[str]:
+    """Read fixed metadata in both compact and structured host log formats."""
+    return re.findall(
+        r"(?:source reply shape: mode=(?:email|sms|imessage) "
+        r"kind=(?:tool|block|final|unknown) chars=\d+ "
+        r"error=(?:true|false) status=(?:true|false) silent=(?:true|false)"
+        r"|send tool shape: tool=(?:inkbox_send_sms|inkbox_send_email|message) chars=\d+"
+        r"|routed send shape: channel=inkbox chars=\d+)",
+        log_text,
+    )
+
+
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 

@@ -160,13 +160,28 @@ function registerInkboxTools(api: any): void {
 }
 
 function registerHostedCallSettlementHooks(api: any): void {
+  api.on("message_sending", (event: any, context: any) => {
+    if (context.channelId !== "inkbox") return;
+    api.logger?.info?.(
+      `Inkbox routed send shape: channel=inkbox chars=${typeof event.content === "string" ? event.content.length : 0}`,
+    );
+  });
   api.on("before_agent_run", (event: any, context: any) => {
     bindHostedSmsCaptureToRun(event, context);
     bindA2AProgressActivityToRun(event, context);
   });
   api.on("before_tool_call", async (event: any, context: any) => {
     const decision = await recordHostedSmsBeforeToolCall(event, context);
-    if (!decision?.block) recordA2AProgressToolActivity(event, context);
+    if (!decision?.block) {
+      recordA2AProgressToolActivity(event, context);
+      // Fixed metadata only: no recipients, bodies, or tool/error prose.
+      if (["inkbox_send_sms", "inkbox_send_email", "message"].includes(event.toolName)) {
+        const body = event.params?.text ?? event.params?.bodyText ?? event.params?.message;
+        api.logger?.info?.(
+          `Inkbox send tool shape: tool=${event.toolName} chars=${typeof body === "string" ? body.length : 0}`,
+        );
+      }
+    }
     return decision;
   });
   api.on("after_tool_call", recordHostedSmsAfterToolCall);

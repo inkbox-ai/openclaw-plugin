@@ -85,19 +85,16 @@ jobs:
           # --skip-health: onboard otherwise waits for a running gateway, and
           # ours starts in a later step.
           if [ "${{ matrix.mode }}" = "real" ]; then
-            # Custom OpenAI-compatible provider pointed straight at OpenAI: the
-            # model id goes through as-is with the real key — no aggregator.
+            # Native model metadata preserves reasoning and token budgets.
             openclaw onboard --non-interactive \
-              --auth-choice custom-api-key \
-              --custom-base-url "https://api.openai.com/v1" \
-              --custom-model-id "gpt-5.6-sol" \
-              --custom-api-key "$OPENAI_API_KEY" \
-              --custom-compatibility openai \
+              --auth-choice openai-api-key \
+              --openai-api-key "$OPENAI_API_KEY" \
               --secret-input-mode plaintext \
               --skip-health \
               --accept-risk
+            openclaw models set openai/gpt-5.6-sol
           else
-            # Same provider shape, but aimed at the local deterministic mock.
+            # Only the deterministic mock needs a custom-compatible endpoint.
             openclaw onboard --non-interactive \
               --auth-choice custom-api-key \
               --custom-base-url "http://127.0.0.1:8088/v1" \
@@ -187,19 +184,17 @@ jobs:
           test -s "$RUNNER_TEMP/mock.log" && echo "mock_log=present" || echo "mock_log=empty"
           python3 - <<'PY'
           import os
-          import re
+          import sys
           from pathlib import Path
+
+          sys.path.insert(0, "tests/live")
+          from test_cross_channel import _source_reply_shapes
 
           log_path = Path(os.environ["GATEWAY_LOG"])
           log = log_path.read_text(errors="replace") if log_path.exists() else ""
-          # Extract only the fixed content-free protocol fields, never log lines.
-          for match in re.finditer(
-              r"Inkbox source reply shape: mode=(?:email|sms|imessage) "
-              r"kind=(?:tool|block|final|unknown) chars=\d+ "
-              r"error=(?:true|false) status=(?:true|false) silent=(?:true|false)",
-              log,
-          ):
-              print(match.group(0))
+          # Only fixed metadata; the host strips redundant subsystem prefixes.
+          for shape in _source_reply_shapes(log):
+              print(shape)
           PY
 
       - name: Tear down (always)
