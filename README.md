@@ -287,6 +287,16 @@ openclaw config set tools.allow '[
 
 Plain-text output from a Voice AI post-call turn is suppressed because the call has ended; requested side effects run through normal tools. Completion receipts are durable and unfinished calls are replayed after gateway restart.
 
+### Agent runner compatibility
+
+Use the native **OpenClaw** runner for hosted-call settlement, A2A progress, and silent cross-channel completion. These features depend on the host's `before_agent_run` and model-call lifecycle hooks; Codex and other external runners do not emit the same lifecycle. Recent OpenClaw versions default official OpenAI models to the Codex runner, so select the native runner explicitly for your chosen model, for example:
+
+```bash
+openclaw config set 'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.id' openclaw
+```
+
+Use your configured model key in place of the example. Inkbox setup does not change your model or override an explicitly chosen runner. This setting concerns the main agent, not the separate realtime voice provider.
+
 Setup also enables OpenClaw's `plugins.entries.inkbox.hooks.allowConversationAccess` permission. The plugin needs this host permission to bind channel sends and Voice AI completions to their exact runs before accepting side-effecting tool evidence, and to associate A2A progress with its worker run. Conversation bodies are not stored in the completion registry or replay journal.
 
 ### OpenAI Realtime

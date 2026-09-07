@@ -75,3 +75,37 @@ describe("run-scoped explicit send completion", () => {
     send(); expect(capture.transform(reply)).toBe(reply);
   });
 });
+
+describe("deferred send transport wrappers", () => {
+  function wrapped(options: { name?: string; childParent?: string; childError?: boolean; outerError?: boolean; outerTerminal?: boolean; omitChild?: boolean } = {}) {
+    const { capture } = begin();
+    const name = options.name ?? "tool_call";
+    const params = { id: "inkbox_send_email", args: { completeSilently: true } };
+    recordSilentSendBeforeToolCall({ toolName: name, toolCallId: "outer", params }, context);
+    const receipt = { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } };
+    const child = { toolName: "inkbox_send_email", toolCallId: `tool_search_code:${options.childParent ?? "outer"}:inkbox_send_email:1`, params: { completeSilently: true } };
+    if (!options.omitChild) {
+      recordSilentSendBeforeToolCall(child, context);
+      recordSilentSendAfterToolCall({ ...child, result: receipt, ...(options.childError ? { error: "failed" } : {}) }, context);
+    }
+    expect(capture.transform(reply)).toBe(reply);
+    recordSilentSendAfterToolCall({
+      toolName: name, toolCallId: "outer", params,
+      result: { terminate: options.outerTerminal !== false, details: { tool: { name: "inkbox_send_email" }, result: receipt } },
+      ...(options.outerError ? { error: "failed" } : {}),
+    }, context);
+    return capture;
+  }
+  it.each(["tool_call", "tool_search_code"])("settles successful %s only with independently accepted children", (name) => {
+    expect(wrapped({ name }).transform(reply)).toBeNull();
+  });
+  it.each([
+    { childParent: "unrelated" }, { childError: true }, { outerError: true },
+    { outerTerminal: false }, { omitChild: true }, { name: "untrusted_wrapper" },
+  ])("preserves visibility without both linked successful boundaries: %j", (options) => {
+    expect(wrapped(options).transform(reply)).toBe(reply);
+  });
+  it("does not trust arbitrary code-returned receipts without observed sends", () => {
+    expect(wrapped({ name: "tool_search_code", omitChild: true }).transform(reply)).toBe(reply);
+  });
+});
