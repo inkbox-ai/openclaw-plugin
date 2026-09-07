@@ -262,21 +262,6 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
     messaging: {
       targetPrefixes: ["inkbox", "email", "mailto", "sms", "text", "phone", "imessage", "conversation"],
       normalizeTarget: normalizeInkboxTarget,
-      parseExplicitTarget: ({ raw }: { raw: string }) => {
-        const parsed = parseInkboxTarget(raw);
-        if (!parsed) {
-          return null;
-        }
-        // Keep iMessage targets channel-prefixed — a stripped conversation
-        // UUID would re-parse as an SMS conversation on the send path.
-        const isIMessage =
-          parsed.mode === "imessage" || parsed.mode === "imessage-conversation";
-        return {
-          to: isIMessage ? `imessage:${parsed.value}` : parsed.value,
-          chatType:
-            parsed.mode === "sms-conversation" ? ("group" as const) : ("direct" as const),
-        };
-      },
       inferTargetChatType: ({ to }: { to: string }) =>
         parseInkboxTarget(to)?.mode === "sms-conversation"
           ? "group"

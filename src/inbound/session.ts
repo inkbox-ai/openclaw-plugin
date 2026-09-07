@@ -1,3 +1,4 @@
+import { INKBOX_HD_AUDIO_FORMAT, RealtimeCallAudio } from "../realtime-audio.js";
 import { createHash } from "node:crypto";
 import { verifyWebhook } from "@inkbox/sdk";
 import type {
@@ -16,7 +17,7 @@ import {
   buildRealtimeVoiceAgentConsultPolicyInstructions,
   createRealtimeVoiceBridgeSession,
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME as OPENCLAW_REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
-  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
+  REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
   resolveConfiguredRealtimeVoiceProvider,
   resolveRealtimeVoiceAgentConsultToolPolicy,
   resolveRealtimeVoiceAgentConsultTools,
@@ -239,7 +240,6 @@ export interface ConfigureIdentityDeliveryOptions {
 const DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS = 1200;
 const DEFAULT_VOICE_AGENT_PREWARM_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_VOICE_AGENT_PREWARM_TIMEOUT_MS = 70 * 1000;
-const TELEPHONY_CHUNK_BYTES = 160;
 const TELEPHONY_CHUNK_MS = 20;
 const REALTIME_AUDIO_START_BUFFER_CHUNKS = 8;
 const REALTIME_AUDIO_MAX_START_BUFFER_MS = 160;
@@ -418,11 +418,6 @@ const REALTIME_SILENT_TOOL_RESPONSE_GRACE_MS = 500;
 const REALTIME_SPEECH_RMS_THRESHOLD = 0.035;
 const REALTIME_REQUIRED_LOUD_CHUNKS = 4;
 const REALTIME_REQUIRED_QUIET_CHUNKS = 12;
-const MULAW_LINEAR_SAMPLES = new Int16Array(256);
-
-for (let i = 0; i < MULAW_LINEAR_SAMPLES.length; i += 1) {
-  MULAW_LINEAR_SAMPLES[i] = decodeMulawSample(i);
-}
 
 const voiceAgentPrewarmState = new Map<
   string,
@@ -462,34 +457,23 @@ function parseTimestamp(value: string | null | undefined): number | undefined {
   return Number.isFinite(ts) ? ts : undefined;
 }
 
-function decodeMulawSample(value: number): number {
-  const muLaw = ~value & 255;
-  const sign = muLaw & 128;
-  const exponent = (muLaw >> 4) & 7;
-  let sample = (((muLaw & 15) << 3) + 132) << exponent;
-  sample -= 132;
-  return sign ? -sample : sample;
-}
-
-function calculateMulawRms(muLaw: Buffer): number {
-  if (muLaw.length === 0) {
-    return 0;
-  }
+function calculatePcmRms(pcm: Buffer): number {
+  if (pcm.length < 2) return 0;
   let sum = 0;
-  for (const byte of muLaw) {
-    const normalized = (MULAW_LINEAR_SAMPLES[byte] ?? 0) / 32768;
-    sum += normalized * normalized;
+  for (let i = 0; i + 1 < pcm.length; i += 2) {
+    const sample = pcm.readInt16LE(i) / 32768;
+    sum += sample * sample;
   }
-  return Math.sqrt(sum / muLaw.length);
+  return Math.sqrt(sum / Math.floor(pcm.length / 2));
 }
 
-class RealtimeMulawSpeechStartDetector {
+class RealtimePcmSpeechStartDetector {
   private loudChunks = 0;
   private quietChunks = REALTIME_REQUIRED_QUIET_CHUNKS;
   private speaking = false;
 
-  accept(muLaw: Buffer): boolean {
-    if (calculateMulawRms(muLaw) >= REALTIME_SPEECH_RMS_THRESHOLD) {
+  accept(pcm: Buffer): boolean {
+    if (calculatePcmRms(pcm) >= REALTIME_SPEECH_RMS_THRESHOLD) {
       this.quietChunks = 0;
       this.loudChunks += 1;
       if (!this.speaking && this.loudChunks >= REALTIME_REQUIRED_LOUD_CHUNKS) {
@@ -522,6 +506,7 @@ export class InkboxRealtimeAudioPacer {
   constructor(
     private readonly send: (payload: Record<string, unknown>) => Promise<void>,
     private readonly streamId: () => string | undefined,
+    private readonly bytesPerSecond: () => number = () => 8000,
   ) {}
 
   get hasQueuedAudio(): boolean {
@@ -532,8 +517,9 @@ export class InkboxRealtimeAudioPacer {
     if (this.closed || audio.length === 0) {
       return;
     }
-    for (let offset = 0; offset < audio.length; offset += TELEPHONY_CHUNK_BYTES) {
-      const chunk = Buffer.from(audio.subarray(offset, offset + TELEPHONY_CHUNK_BYTES));
+    const chunkBytes = this.bytesPerSecond() * TELEPHONY_CHUNK_MS / 1000;
+    for (let offset = 0; offset < audio.length; offset += chunkBytes) {
+      const chunk = Buffer.from(audio.subarray(offset, offset + chunkBytes));
       this.queue.push(chunk);
       this.queuedAudioBytes += chunk.length;
     }
@@ -713,7 +699,7 @@ export class InkboxRealtimeAudioPacer {
       }
       await this.send(message);
       sentChunks += 1;
-      this.nextSendAt += TELEPHONY_CHUNK_MS;
+      this.nextSendAt += item.length / this.bytesPerSecond() * 1000;
     }
     if (!this.closed && this.queue.length > 0) {
       const delay = Math.max(0, this.nextSendAt - Date.now());
@@ -4051,8 +4037,9 @@ async function runRealtimeCallWebSocket(
     }
     await opts.ws.send(JSON.stringify(payload));
   };
-  const audioPacer = new InkboxRealtimeAudioPacer(sendJson, () => streamId);
-  const speechDetector = new RealtimeMulawSpeechStartDetector();
+  const callAudio = new RealtimeCallAudio();
+  const audioPacer = new InkboxRealtimeAudioPacer(sendJson, () => streamId, () => callAudio.bytesPerSecond);
+  const speechDetector = new RealtimePcmSpeechStartDetector();
   let initialGreetingActive = false;
   let initialGreetingOutputStarted = false;
   let suppressInputUntil = 0;
@@ -4105,7 +4092,7 @@ async function runRealtimeCallWebSocket(
     provider: resolved.provider,
     cfg: opts.cfg as any,
     providerConfig: resolved.providerConfig,
-    audioFormat: REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
+    audioFormat: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
     instructions: buildRealtimeInstructions(opts.account, opts.meta),
     initialGreetingInstructions: buildRealtimeGreeting(opts.meta),
     triggerGreetingOnReady: false,
@@ -4129,9 +4116,10 @@ async function runRealtimeCallWebSocket(
           initialGreetingOutputStarted = true;
           suppressInputUntil = Date.now() + REALTIME_GREETING_INPUT_SUPPRESSION_MS;
         }
-        audioPacer.sendAudio(audio);
+        audioPacer.sendAudio(callAudio.outputAudio(audio));
       },
       clearAudio: () => {
+        callAudio.clearOutput();
         audioPacer.clearAudio();
       },
     },
@@ -4163,6 +4151,7 @@ async function runRealtimeCallWebSocket(
         if (initialGreetingActive) {
           initialGreetingActive = false;
         }
+        audioPacer.sendAudio(callAudio.finishOutput());
         audioPacer.sendAudioDone();
         responseWorkGate.responseDone(
           !event.detail || event.detail.includes("status=completed"),
@@ -4222,6 +4211,7 @@ async function runRealtimeCallWebSocket(
     headers: [
       ["x-use-inkbox-text-to-speech", "false"],
       ["x-use-inkbox-speech-to-text", "false"],
+      ["x-inkbox-audio-format", INKBOX_HD_AUDIO_FORMAT],
     ],
   });
 
@@ -4249,6 +4239,7 @@ async function runRealtimeCallWebSocket(
 
       const event = payload.event;
       if (event === "start") {
+        callAudio.configure(payload.media_format);
         streamId = typeof payload.stream_id === "string" ? payload.stream_id : streamId;
         if (!greetingTriggered) {
           greetingTriggered = true;
@@ -4270,7 +4261,9 @@ async function runRealtimeCallWebSocket(
         if (suppressInputUntil > Date.now()) {
           continue;
         }
-        if (audioPacer.hasQueuedAudio && speechDetector.accept(audio)) {
+        const pcm = callAudio.inputAudio(audio);
+        if (audioPacer.hasQueuedAudio && speechDetector.accept(pcm)) {
+          callAudio.clearOutput();
           audioPacer.clearAudio();
           session.handleBargeIn({ audioPlaybackActive: true, force: true });
         }
@@ -4278,11 +4271,12 @@ async function runRealtimeCallWebSocket(
         if (timestampMs !== undefined) {
           session.setMediaTimestamp(timestampMs);
         }
-        session.sendAudio(audio);
+        if (pcm.length) session.sendAudio(pcm);
         continue;
       }
 
       if (event === "barge_in") {
+        callAudio.clearOutput();
         audioPacer.clearAudio();
         session.handleBargeIn({ audioPlaybackActive: true, force: true });
         continue;

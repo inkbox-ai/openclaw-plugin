@@ -119,9 +119,9 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
 
 vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME: "consult_agent",
-  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ: {
-    encoding: "g711_ulaw",
-    sampleRateHz: 8000,
+  REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ: {
+    encoding: "pcm16",
+    sampleRateHz: 24000,
     channels: 1,
   },
   buildRealtimeVoiceAgentConsultChatMessage: vi.fn((args: any) => args.question),
@@ -209,7 +209,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
       sendUserMessage: vi.fn(),
       triggerGreeting: vi.fn(() => {
         params.onTranscript?.("assistant", "Hi there.", true);
-        params.audioSink.sendAudio(Buffer.from([0xff, 0xff]));
+        params.audioSink.sendAudio(Buffer.alloc(960));
         params.onEvent?.({ type: "response.done" });
       }),
       handleBargeIn: vi.fn(),
@@ -402,7 +402,7 @@ const contactMediaMessages = (): FakeInkboxWebSocketMessage[] => [
     message: JSON.stringify({
       event: "media",
       stream_id: "stream-1",
-      media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+      media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
     }),
   },
   JSON.stringify({ event: "stop" }),
@@ -4431,7 +4431,10 @@ describe("createInkboxSessionBridge", () => {
     expect(dispatchReply).toHaveBeenCalledTimes(2);
   });
 
-  it("bridges raw Inkbox media through the OpenClaw realtime voice provider", async () => {
+  it.each([
+    undefined,
+    { encoding: "L16", sample_rate: 16000, channels: 1 },
+  ])("bridges negotiated Inkbox media %j through the realtime voice provider", async (mediaFormat) => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
@@ -4448,10 +4451,10 @@ describe("createInkboxSessionBridge", () => {
       runtime: runtime as any,
       channelRuntime,
     });
-    const inboundAudio = Buffer.from([0x01, 0x02, 0x03]);
+    const inboundAudio = Buffer.alloc(mediaFormat ? 640 : 160, 0x01);
     const echoedOutboundAudio = Buffer.from([0x09, 0x09, 0x09]);
     const ws = new FakeInkboxWebSocket([
-      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({ event: "start", stream_id: "stream-1", media_format: mediaFormat }),
       {
         advanceMs: 800,
         message: JSON.stringify({
@@ -4478,11 +4481,13 @@ describe("createInkboxSessionBridge", () => {
       headers: [
         ["x-use-inkbox-text-to-speech", "false"],
         ["x-use-inkbox-speech-to-text", "false"],
+        ["x-inkbox-audio-format", "pcm_s16le_16000"],
       ],
     });
     const realtimeSession = realtimeMock.sessions[0].session;
     const params = realtimeMock.sessions[0].params;
     expect(realtimeSession.connect).toHaveBeenCalledTimes(1);
+    expect(params.audioFormat).toEqual({ encoding: "pcm16", sampleRateHz: 24000, channels: 1 });
     expect(realtimeMock.resolveCalls.at(-1)).toEqual(
       expect.objectContaining({
         configuredProviderId: "openai",
@@ -4524,7 +4529,8 @@ describe("createInkboxSessionBridge", () => {
       "Greet there in one short sentence and ask how you can help.",
     );
     expect(realtimeSession.sendAudio).not.toHaveBeenCalledWith(echoedOutboundAudio);
-    expect(realtimeSession.sendAudio).toHaveBeenCalledWith(inboundAudio);
+    expect(realtimeSession.sendAudio).toHaveBeenCalledWith(expect.any(Buffer));
+    expect(realtimeSession.sendAudio.mock.calls[0][0].length).toBeGreaterThan(inboundAudio.length);
     expect(realtimeSession.setMediaTimestamp).toHaveBeenCalledWith(40);
     await Promise.resolve();
     await Promise.resolve();
@@ -4576,8 +4582,8 @@ describe("createInkboxSessionBridge", () => {
       runtime: runtime as any,
       channelRuntime,
     });
-    const setupNoise = Buffer.from([0x01]);
-    const callerAudio = Buffer.from([0x02]);
+    const setupNoise = Buffer.alloc(160, 0x01);
+    const callerAudio = Buffer.alloc(160, 0x02);
     const ws = new FakeInkboxWebSocket([
       JSON.stringify({ event: "start", stream_id: "stream-1" }),
       JSON.stringify({
@@ -4600,7 +4606,8 @@ describe("createInkboxSessionBridge", () => {
 
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.sendAudio).not.toHaveBeenCalledWith(setupNoise);
-    expect(realtimeSession.sendAudio).toHaveBeenCalledWith(callerAudio);
+    expect(realtimeSession.sendAudio).toHaveBeenCalledTimes(1);
+    expect(realtimeSession.sendAudio.mock.calls[0][0].length).toBeGreaterThan(callerAudio.length);
   });
 
   it("loads outbound call purpose into realtime greeting instructions", async () => {
@@ -4935,7 +4942,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5021,7 +5028,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       // Hold the call open past the consult timeout backstop, then end it.
@@ -5193,7 +5200,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5254,7 +5261,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5339,7 +5346,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5413,7 +5420,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5492,7 +5499,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5592,7 +5599,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5699,7 +5706,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5755,7 +5762,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5809,7 +5816,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5874,7 +5881,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);

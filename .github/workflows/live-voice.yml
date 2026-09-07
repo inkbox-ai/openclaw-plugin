@@ -125,7 +125,7 @@ jobs:
           )"
           # Install the plugin BEFORE writing channels.inkbox.* — the channel id
           # only validates once the plugin is registered.
-          openclaw plugins install -l --dangerously-force-unsafe-install "$GITHUB_WORKSPACE"
+          openclaw plugins install -l --force "$GITHUB_WORKSPACE"
           openclaw plugins enable inkbox || true
           # Hosted completion settlement uses before_agent_run to bind the
           # exact generated run before accepting any SMS tool evidence.

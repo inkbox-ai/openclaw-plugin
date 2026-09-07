@@ -21,9 +21,9 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
 
 vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME: "consult_agent",
-  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ: {
-    encoding: "g711_ulaw",
-    sampleRateHz: 8000,
+  REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ: {
+    encoding: "pcm16",
+    sampleRateHz: 24000,
     channels: 1,
   },
   buildRealtimeVoiceAgentConsultChatMessage: vi.fn(),

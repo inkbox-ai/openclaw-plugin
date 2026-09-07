@@ -34,7 +34,7 @@ const HOST_SYMBOLS: Record<string, string[]> = {
     "buildRealtimeVoiceAgentConsultPolicyInstructions",
     "createRealtimeVoiceBridgeSession",
     "REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME",
-    "REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ",
+    "REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ",
     "resolveConfiguredRealtimeVoiceProvider",
     "resolveRealtimeVoiceAgentConsultToolPolicy",
     "resolveRealtimeVoiceAgentConsultTools",

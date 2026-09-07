@@ -54,7 +54,7 @@ cd openclaw-plugin
 npm install
 npm run build
 openclaw --version
-openclaw plugins install -l --dangerously-force-unsafe-install ./
+openclaw plugins install -l --force ./
 ```
 
 Configure Inkbox:
@@ -73,7 +73,7 @@ An agent can complete setup after a human assigns an existing identity handle, A
 1. Confirm the clone's remote, current revision, and clean working tree.
 2. Review `package.json`, its scripts, and the declared and locked dependencies before running `npm install`.
 3. Run `npm install` and `npm run build`, review the installed dependency summary and build output, and check the working tree for unexpected changes.
-4. Only then run the local `openclaw plugins install -l --dangerously-force-unsafe-install ./` command.
+4. Only then run the local `openclaw plugins install -l --force ./` command.
 
 First inspect the checkout and manifest. Also review `package-lock.json` before continuing:
 
@@ -96,7 +96,7 @@ git status --short
 Only install the reviewed local build into OpenClaw when those checks have the expected results:
 
 ```bash
-openclaw plugins install -l --dangerously-force-unsafe-install ./
+openclaw plugins install -l --force ./
 ```
 
 Keep the credential out of source control, project instructions, command arguments, and transcripts. Place it in the private process environment as `INKBOX_API_KEY`; if entering it in a terminal, read it without echoing:
@@ -136,7 +136,7 @@ docker exec -it inkbox-openclaw bash
 Inside the container, install the already-built local plugin and run setup:
 
 ```bash
-openclaw plugins install -l --dangerously-force-unsafe-install /opt/inkbox-plugin-src
+openclaw plugins install -l --force /opt/inkbox-plugin-src
 openclaw inkbox setup
 openclaw inkbox doctor
 openclaw gateway run
@@ -291,7 +291,7 @@ Setup also enables OpenClaw's `plugins.entries.inkbox.hooks.allowConversationAcc
 
 ### OpenAI Realtime
 
-Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. Environment keys are setup-time discovery inputs unless the wizard validates and persists them into `channels.inkbox.voiceRealtime.providers.openai.apiKey`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
+Calls can use raw Inkbox call media through OpenAI Realtime. The call transport negotiates HD voice as mono 16 kHz PCM16LE, resampled continuously to and from the realtime provider’s 24 kHz PCM format. Older call endpoints remain compatible with 8 kHz μ-law audio. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. Environment keys are setup-time discovery inputs unless the wizard validates and persists them into `channels.inkbox.voiceRealtime.providers.openai.apiKey`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
 
 ```bash
 export INKBOX_REALTIME_API_KEY="sk-..."
