@@ -442,6 +442,8 @@ Optional:
 - Vault: `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
 - Diagnostic: `inkbox_whoami`
 
+Send and email-forward tools accept optional `completeSilently: true` when the send is the final requested action and no acknowledgment is wanted. Successful sends then end the turn without an extra source-channel reply. Leave it unset when more work or a reply remains; failed sends never silently complete.
+
 ## Bundled Skills
 
 The package includes all `skills/*/SKILL.md` files in npm tarballs.

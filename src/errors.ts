@@ -6,6 +6,7 @@ export interface ToolTextResult {
   content: { type: "text"; text: string }[];
   isError?: boolean;
   details?: Record<string, unknown>;
+  terminate?: boolean;
 }
 
 export function toolText(text: string, details?: Record<string, unknown>): ToolTextResult {

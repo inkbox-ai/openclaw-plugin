@@ -12,6 +12,8 @@ The Inkbox plugin gives you a working mailbox under an agent identity. Use this 
 
 When an inbound email arrives as your current turn (the turn body starts with `[inkbox:email from=…]`), the plugin automatically delivers your final message as the threaded reply. Just write the answer — do **not** call `inkbox_send_email` to answer it, or the sender receives two emails: your tool-sent reply plus your closing message. If no visible reply is warranted, return exactly `NO_REPLY` and nothing is sent.
 
+For a requested send to another channel or recipient, set `completeSilently: true` only when that send is the final requested action and no acknowledgment is wanted. Leave it unset when more work or a reply remains.
+
 `inkbox_send_email` is still the right tool for everything else: new outbound mail, looping in other recipients, or replying to a message other than the one in the current turn (as when working the unread queue below).
 
 ## Required tools

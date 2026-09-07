@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText, toolError } from "../errors.js";
+import { runTool, toolError } from "../errors.js";
+import { sentToolText, silentSendCompletionParameter } from "./send-completion.js";
 import { checkOutboundRecipient } from "../allowlist.js";
 import { SMS_MAX_TEXT_CHARS, smsTextTooLongMessage } from "../message-limits.js";
 
@@ -44,6 +45,7 @@ export function registerSendSms(
     description:
       "Send a text from the configured Inkbox identity's phone number. Use `conversationId` to reply into an existing 1:1 or group conversation, or `to` for one E.164 recipient or a 2-8 recipient group MMS. Recipients must have opted in unless Inkbox policy allows the send.",
     parameters: Type.Object({
+      completeSilently: silentSendCompletionParameter,
       to: Type.Optional(
         Type.Union([
           Type.String({
@@ -123,8 +125,9 @@ export function registerSendSms(
         const msg = await identity.sendText(payload);
         const target = formatTargetSummary(msg, params);
         const status = msg.deliveryStatus ?? "unknown";
-        return toolText(
+        return sentToolText(
           `Sent text id=${msg.id} ${target} status=${status} (${params.text.length} chars)`,
+          params.completeSilently,
           { inkboxSendSms: { sent: true } },
         );
       });

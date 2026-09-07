@@ -61,6 +61,7 @@ def _source_reply_shapes(log_text: str) -> list[str]:
         r"kind=(?:tool|block|final|unknown) chars=\d+ "
         r"error=(?:true|false) status=(?:true|false) silent=(?:true|false)"
         r"|send tool shape: tool=(?:inkbox_send_sms|inkbox_send_email|message) chars=\d+"
+        r"|silent send shape: bound=(?:true|false) batch=(?:true|false) attempts=\d+ accepted=\d+ invalid=(?:true|false)"
         r"|routed send shape: channel=inkbox chars=\d+)",
         log_text,
     )

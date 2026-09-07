@@ -1,3 +1,4 @@
+import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "./src/silent-send-capture.js";
 import {
   defineChannelPluginEntry,
   type ChannelPlugin,
@@ -168,9 +169,11 @@ function registerHostedCallSettlementHooks(api: any): void {
   });
   api.on("before_agent_run", (event: any, context: any) => {
     bindHostedSmsCaptureToRun(event, context);
+    bindSilentSendCaptureToRun(event, context);
     bindA2AProgressActivityToRun(event, context);
   });
   api.on("before_tool_call", async (event: any, context: any) => {
+    recordSilentSendBeforeToolCall(event, context);
     const decision = await recordHostedSmsBeforeToolCall(event, context);
     if (!decision?.block) {
       recordA2AProgressToolActivity(event, context);
@@ -184,6 +187,8 @@ function registerHostedCallSettlementHooks(api: any): void {
     }
     return decision;
   });
+  api.on("model_call_started", recordSilentSendModelStarted);
+  api.on("after_tool_call", recordSilentSendAfterToolCall);
   api.on("after_tool_call", recordHostedSmsAfterToolCall);
   api.on("model_call_ended", recordHostedModelCallEnded);
 }

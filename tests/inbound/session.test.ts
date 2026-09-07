@@ -1618,7 +1618,7 @@ describe("createInkboxSessionBridge", () => {
     ]);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
-    expect(run.routeSessionKey).toBe("a2a:identity-1:context-1");
+    expect(run.routeSessionKey).toBe("agent:main:inkbox:direct:a2a:identity-1:context-1");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Investigate this.");
     expect(a2aReply).toHaveBeenCalledWith("task-1", {
       intent: "complete",
@@ -1645,7 +1645,7 @@ describe("createInkboxSessionBridge", () => {
     });
     const key = `task-fenced-${intent}:message-fenced-${intent}`;
     const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
-      if (params.routeSessionKey !== `a2a:identity-1:context-fenced-${intent}`) return;
+      if (params.routeSessionKey !== `agent:main:inkbox:direct:a2a:identity-1:context-fenced-${intent}`) return;
       const context = activeA2ATurn(params.routeSessionKey)!;
       await context.beforeReplyIntent?.();
       expect(a2aRegistryMock.entries[key].replyIntentFenced).toBe(true);
@@ -1786,7 +1786,7 @@ describe("createInkboxSessionBridge", () => {
     });
     const { runtime, a2aReply } = createRuntime();
     const channelRuntime = createChannelRuntime("Completed.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-admission") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-admission") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -2201,7 +2201,7 @@ describe("createInkboxSessionBridge", () => {
       }],
     });
     const channelRuntime = createChannelRuntime("Completed.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-restart-generation") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-restart-generation") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -2333,7 +2333,7 @@ describe("createInkboxSessionBridge", () => {
       const { runtime, a2aReply } = createRuntime();
       a2aReply.mockRejectedValueOnce(new Error("retry receipt"));
       const channelRuntime = createChannelRuntime("Unused progress summary.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-disabled-progress") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-disabled-progress") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -2396,7 +2396,7 @@ describe("createInkboxSessionBridge", () => {
       const channelRuntime = createChannelRuntime(
         "I am reviewing the requested calculation.",
         (params) => {
-          if (params.routeSessionKey === "a2a:identity-1:context-progress") {
+          if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-progress") {
             return new Promise<void>((resolve) => {
               releaseMain = resolve;
             });
@@ -2444,7 +2444,7 @@ describe("createInkboxSessionBridge", () => {
       await flushMicrotasks(30);
       const progressPrompts = channelRuntime.inbound.dispatchReply.mock.calls
         .map(([params]) => params)
-        .filter((params) => params.routeSessionKey === "a2a-progress:identity-1:task-progress")
+        .filter((params) => params.routeSessionKey === "agent:main:inkbox:direct:a2a-progress:identity-1:task-progress")
         .map((params) => params.ctxPayload.message.bodyForAgent);
       expect(progressPrompts).toHaveLength(2);
       expect(progressPrompts[1]).toContain(
@@ -2473,12 +2473,12 @@ describe("createInkboxSessionBridge", () => {
     try {
       const { runtime, a2aReply } = createRuntime();
       const channelRuntime = createChannelRuntime("Final answer.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-drain") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-drain") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
         }
-        if (params.routeSessionKey === "a2a-progress:identity-1:task-drain") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a-progress:identity-1:task-drain") {
           return new Promise<void>((resolve) => {
             releaseProgress = resolve;
           });
@@ -2557,7 +2557,7 @@ describe("createInkboxSessionBridge", () => {
       const channelRuntime = createChannelRuntime(
         "I am reviewing the follow-up.",
         (params) => {
-          if (params.routeSessionKey === "a2a:identity-1:context-follow-up") {
+          if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-follow-up") {
             return new Promise<void>((resolve) => releases.push(resolve));
           }
         },
@@ -2866,7 +2866,7 @@ describe("createInkboxSessionBridge", () => {
       const { runtime, a2aReply } = createRuntime();
       a2aReply.mockRejectedValueOnce(new Error("response lost"));
       const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-active-retry") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-active-retry") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -2943,7 +2943,7 @@ describe("createInkboxSessionBridge", () => {
       const channelRuntime = createChannelRuntime(
         "I am validating the requested work.",
         (params) => {
-          if (params.routeSessionKey === "a2a:identity-1:context-independent-pending") {
+          if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-independent-pending") {
             return new Promise<void>((resolve) => {
               releaseMain = resolve;
             });
@@ -3017,7 +3017,7 @@ describe("createInkboxSessionBridge", () => {
         rejectAcknowledgement = reject;
       }));
       const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-concurrent-retry") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-concurrent-retry") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -3080,7 +3080,7 @@ describe("createInkboxSessionBridge", () => {
           finishRetry = () => resolve({ id: "task-retry-drain", state: "working" });
         }));
       const channelRuntime = createChannelRuntime("Final answer.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-retry-drain") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-retry-drain") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -3135,7 +3135,7 @@ describe("createInkboxSessionBridge", () => {
       const { runtime, a2aReply } = createRuntime();
       a2aReply.mockRejectedValue(new Error("offline"));
       const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-cancel-retry") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-cancel-retry") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -3249,7 +3249,7 @@ describe("createInkboxSessionBridge", () => {
     });
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime("Late answer.", async (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-shutdown-run") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-shutdown-run") {
         dispatchStarted();
         await dispatchGate;
       }
@@ -3313,7 +3313,7 @@ describe("createInkboxSessionBridge", () => {
       updatedAt: Date.now(),
     };
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-restart-retry") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-restart-retry") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3367,7 +3367,7 @@ describe("createInkboxSessionBridge", () => {
       updatedAt: Date.now(),
     };
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-progress-restart") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-progress-restart") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3441,7 +3441,7 @@ describe("createInkboxSessionBridge", () => {
       ],
     });
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-progress-follow-up") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-progress-follow-up") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3489,7 +3489,7 @@ describe("createInkboxSessionBridge", () => {
       const { runtime, a2aReply } = createRuntime();
       a2aReply.mockRejectedValue(new Error("offline"));
       const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-shutdown-retry") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-shutdown-retry") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -3633,7 +3633,7 @@ describe("createInkboxSessionBridge", () => {
       yield remoteTask;
     })());
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-catchup-existing") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-catchup-existing") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3703,7 +3703,7 @@ describe("createInkboxSessionBridge", () => {
       if (params.state === "working") yield authoritativeTask;
     })());
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === `a2a:identity-1:${contextId}`) {
+      if (params.routeSessionKey === `agent:main:inkbox:direct:a2a:identity-1:${contextId}`) {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3791,7 +3791,7 @@ describe("createInkboxSessionBridge", () => {
       yield remoteTask;
     })());
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-catchup-new") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-catchup-new") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3830,7 +3830,7 @@ describe("createInkboxSessionBridge", () => {
     a2aReply.mockRejectedValueOnce(new Error("response lost"));
     let releaseMain!: () => void;
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-retry") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-retry") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3896,7 +3896,7 @@ describe("createInkboxSessionBridge", () => {
     a2aReply.mockRejectedValueOnce(new Error("response lost"));
     let releaseMain!: () => void;
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-spoof") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-spoof") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -4153,7 +4153,8 @@ describe("createInkboxSessionBridge", () => {
       expect(body).toContain("Source-channel completion policy");
       expect(body).toContain("return exactly NO_REPLY");
       expect(body).toContain("did not also request a reply here");
-      expect(body).toContain("Do not omit NO_REPLY");
+      expect(body).toContain("set completeSilently=true on that final send tool call");
+      expect(body).toContain("Leave completeSilently false when more work or a reply here remains");
     }
     expect(channelRuntime.deliveryResults).toHaveLength(2);
     expect(channelRuntime.deliveryResults).toEqual([
@@ -4184,7 +4185,7 @@ describe("createInkboxSessionBridge", () => {
 
     const body = channelRuntime.inbound.dispatchReply.mock.calls[0][0]
       .ctxPayload.message.bodyForAgent;
-    expect(body).toContain("when the user did not also request a reply here");
+    expect(body).toContain("the user did not also request a reply here");
     expect(sendText).toHaveBeenCalledWith({
       to: "+15551234567",
       text: "Bob is bob@example.com.",

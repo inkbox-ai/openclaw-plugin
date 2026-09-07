@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText, toolError } from "../errors.js";
+import { runTool, toolError } from "../errors.js";
+import { sentToolText, silentSendCompletionParameter } from "./send-completion.js";
 import { checkOutboundRecipients } from "../allowlist.js";
 
 // Forward a previously received message out from the identity's mailbox.
@@ -17,6 +18,7 @@ export function registerForwardEmail(
       description:
         "Forward a previously received email from the configured Inkbox identity's mailbox to one or more new recipients. Use 'inline' mode to re-attach original parts, or 'wrapped' to attach the original as a single .eml-style note.",
       parameters: Type.Object({
+        completeSilently: silentSendCompletionParameter,
         messageId: Type.String({
           description: "UUID of the message to forward.",
         }),
@@ -88,8 +90,9 @@ export function registerForwardEmail(
             ...(params.cc ?? []),
             ...(params.bcc ?? []),
           ].join(",");
-          return toolText(
+          return sentToolText(
             `Forwarded message id=${params.messageId} as=${msg.id} to=${recipients} mode=${params.mode ?? "inline"}`,
+            params.completeSilently,
           );
         });
       },

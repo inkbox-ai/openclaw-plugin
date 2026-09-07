@@ -83,10 +83,12 @@ describe("openclaw.plugin.json manifest parity", () => {
   it("registers the host-native settlement and delivery-observation hooks", () => {
     expect(collectRuntimeTools().hookNames).toEqual([
       "after_tool_call",
+      "after_tool_call",
       "before_agent_run",
       "before_tool_call",
       "message_sending",
       "model_call_ended",
+      "model_call_started",
     ]);
   });
 

@@ -42,6 +42,8 @@ If someone in an SMS/text conversation asks you to call them (or you decide to),
 - **Rate cap.** Roughly 15 outbound sends per number per 24h. The plugin surfaces this as a 409. Pause sending and wait.
 - **Group chats.** Reply only when the sender clearly addresses this agent or asks it to act. Do not comment on every group message. If an inbound group turn says no visible reply is warranted, return exactly `NO_REPLY`.
 
+For a requested send to another channel or recipient, set `completeSilently: true` only when that send is the final requested action and no acknowledgment is wanted. Leave it unset when more work or a reply remains.
+
 ## SMS-specific style
 
 - Short. Often a single sentence is right.

@@ -1,4 +1,6 @@
+import { beginSilentSendCapture } from "../silent-send-capture.js";
 import { isInkboxSilentReply, transformInkboxReplyPayload } from "../silent-reply.js";
+import { canonicalInkboxSessionOverride } from "../session-key.js";
 import { a2aFailureShape, settleCaughtA2AFailure } from "../a2a-failure.js";
 import { INKBOX_HD_AUDIO_FORMAT, RealtimeCallAudio } from "../realtime-audio.js";
 import { createHash } from "node:crypto";
@@ -2396,6 +2398,7 @@ async function dispatchInboundTurn(
     activeCalls: Map<string, ActiveCall>;
     imessageTyping?: IMessageTypingPulse;
     dispatchAbortSignal?: AbortSignal;
+    onSessionKeyResolved?: (sessionKey: string) => void;
     shouldDeliverReply?: () => boolean;
     deliveryOverride?: {
       deliver: (payload: unknown) => Promise<{ visibleReplySent?: boolean } | void>;
@@ -2454,10 +2457,11 @@ async function dispatchInboundTurn(
     (route as { accountId?: string | null }).accountId ?? opts.account.accountId;
   const baseSessionKey = route.sessionKey;
   const effectiveSessionKey =
-    opts.turn.sessionKeyOverride ??
+    opts.turn.sessionKeyOverride ? canonicalInkboxSessionOverride(route.agentId, opts.turn.sessionKeyOverride) :
     (opts.turn.mode === "voice"
       ? voiceSessionKey(route.agentId, opts.turn)
       : baseSessionKey);
+  opts.onSessionKeyResolved?.(effectiveSessionKey);
   const { storePath, body } = buildEnvelope({
     channel: "Inkbox",
     from: opts.turn.fromLabel,
@@ -2468,6 +2472,8 @@ async function dispatchInboundTurn(
   const smsReplyTarget = opts.turn.conversationId
     ? `${conversationPrefix}:${opts.turn.conversationId}`
     : opts.turn.remoteAddress ?? opts.turn.contactKey;
+  const silentSendCapture = !opts.deliveryOverride && ["sms", "email", "imessage"].includes(opts.turn.mode)
+    ? beginSilentSendCapture(effectiveSessionKey) : undefined;
   const ctxPayload = core.inbound.buildContext({
     channel: "inkbox",
     accountId: routeAccountId,
@@ -2517,7 +2523,7 @@ async function dispatchInboundTurn(
     },
     message: {
       body,
-      bodyForAgent: opts.turn.body,
+      bodyForAgent: silentSendCapture ? `${opts.turn.body}\n\n${silentSendCapture.marker}` : opts.turn.body,
       rawBody: opts.turn.body,
       commandBody: opts.turn.body,
       envelopeFrom: opts.turn.fromLabel,
@@ -2629,6 +2635,7 @@ async function dispatchInboundTurn(
         promptMarker: opts.hostedSmsSettlement.promptMarker,
       })
     : undefined;
+  silentSendCapture?.activate();
   try {
     await core.inbound.dispatchReply({
       cfg: opts.cfg as any,
@@ -2644,7 +2651,7 @@ async function dispatchInboundTurn(
       ...(replyOptions ? { replyOptions } : {}),
       delivery,
       replyPipeline: {},
-      dispatcherOptions: { transformReplyPayload: transformInkboxReplyPayload },
+      dispatcherOptions: { transformReplyPayload: silentSendCapture?.transform ?? transformInkboxReplyPayload },
       record: {
         onRecordError: (error: unknown) => {
           opts.logger?.warn?.(
@@ -2654,6 +2661,11 @@ async function dispatchInboundTurn(
       },
     });
   } finally {
+    if (silentSendCapture) {
+      const shape = silentSendCapture.shape();
+      opts.logger?.info?.(`Inkbox silent send shape: bound=${shape.bound} batch=${shape.batch} attempts=${shape.attempts} accepted=${shape.accepted} invalid=${shape.invalid}`);
+      silentSendCapture.finish();
+    }
     if (hostedSmsCapture && opts.hostedSmsSettlement) {
       opts.hostedSmsSettlement.onSettled(hostedSmsCapture.finish());
     }
@@ -3441,10 +3453,12 @@ function inboundMailBody(message: MailWebhookPayload["data"]["message"]): string
 }
 
 const CROSS_CHANNEL_COMPLETION_POLICY =
-  "Source-channel completion policy: after a requested action succeeds through " +
-  "another Inkbox channel or send tool, return exactly NO_REPLY when the user " +
-  "did not also request a reply here. Do not omit NO_REPLY or send confirmation " +
-  "or error prose on this inbound channel.";
+  "Source-channel completion policy: when the last requested action is a send " +
+  "through another Inkbox channel and the user did not also request a reply here, " +
+  "set completeSilently=true on that final send tool call. This ends the turn " +
+  "only after the send succeeds, without an extra source-channel acknowledgment. " +
+  "Leave completeSilently false when more work or a reply here remains. " +
+  "If no action or visible reply is needed, return exactly NO_REPLY.";
 
 async function buildMailTurn(
   runtime: InkboxRuntime,
@@ -5055,19 +5069,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
     if (controller.signal.aborted) return;
     const progressJournal = await updateA2AProgressJournal(key, (current) => current);
-    const progressSupervisor = progressIntervalSeconds > 0
-      ? acquireA2AProgressSupervisor({
-          identity,
-          identityId: String(identity.id),
-          key,
-          data,
-          body,
-          marker,
-          sessionKey: turn.sessionKeyOverride!,
-          startedAt: progressJournal.startedAt,
-          intervalSeconds: progressIntervalSeconds,
-        })
-      : undefined;
+    let progressSupervisor: A2AProgressSupervisor | undefined;
     if (acknowledgementOutcome === "retry") {
       void scheduleA2AAcknowledgementRetry({
         key,
@@ -5087,6 +5089,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         activeCalls,
         dispatchAbortSignal: controller.signal,
         a2aContext: context,
+        onSessionKeyResolved: (sessionKey) => {
+          if (progressIntervalSeconds <= 0) return;
+          progressSupervisor = acquireA2AProgressSupervisor({
+            identity,
+            identityId: String(identity.id),
+            key,
+            data,
+            body,
+            marker,
+            sessionKey,
+            startedAt: progressJournal.startedAt,
+            intervalSeconds: progressIntervalSeconds,
+          });
+        },
         replyOptionsOverride: {
           sourceReplyDeliveryMode: "automatic",
           bootstrapContextMode: "lightweight",
