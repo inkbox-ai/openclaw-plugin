@@ -103,6 +103,7 @@ jobs:
           # only validates once the plugin is registered.
           openclaw plugins install -l --force --accept-capabilities "$GITHUB_WORKSPACE"
           openclaw plugins enable inkbox || true
+          openclaw config set plugins.entries.inkbox.hooks.allowConversationAccess true --strict-json
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"
