@@ -272,6 +272,20 @@ def test_live_voice_marker_is_deterministic_distinct_and_speech_safe():
     assert len(observed) > 900
 
 
+def test_hosted_failure_diagnostics_hide_identifiers_and_unknown_error_text():
+    entry = {
+        "state": "failed", "outcome": "correction_missing_attempt", "callId": "private-call",
+        "smsAttempts": [{"phase": "initial", "state": "failed", "targetMatches": True,
+            "errorKind": "private error body", "toolCallIdHash": "private-hash", "target": "private-recipient"}],
+    }
+    shape = voice._hosted_settlement_diagnostics(entry, 1)
+    assert shape["outcome"] == "correction_missing_attempt"
+    assert shape["marker_rows"] == 1
+    assert shape["attempts"] == 1
+    assert shape["attempt_shapes"] == [{"phase": "initial", "state": "failed", "target_matches": True, "error_kind": "unknown"}]
+    assert "private" not in repr(shape)
+
+
 def test_live_voice_marker_mapping_is_stable():
     assert voice_marker.marker_from_token("55071").split() == [
         "pineapple",

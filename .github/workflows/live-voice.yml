@@ -213,6 +213,37 @@ jobs:
         run: |
           test -s "$GATEWAY_LOG" && echo "gateway_log=present" || echo "gateway_log=empty"
           test -s "$DRIVER_LOG" && echo "driver_log=present" || echo "driver_log=empty"
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "tests/live")
+          from test_voice import _hosted_settlement_diagnostics
+          from test_cross_channel import _source_reply_shapes
+
+          path = Path(os.environ["GATEWAY_LOG"])
+          log = path.read_text(errors="replace") if path.exists() else ""
+          for name, marker in {
+              "hosted_collection_failure": "Voice AI post-call reply collection failed",
+              "hosted_settlement_stopped": "Voice AI post-call SMS settlement stopped",
+              "hosted_settlement_retry": "Voice AI post-call SMS settlement will retry",
+              "hosted_completed": "Voice AI post-call reconciliation completed",
+              "hosted_dispatch_failure": "Voice AI post-call reconciliation failed",
+          }.items():
+              print(f"{name}={log.count(marker)}")
+          for shape in _source_reply_shapes(log)[-20:]:
+              print(shape)
+          path = Path.home() / ".openclaw/inkbox/hosted-call-completions.json"
+          try:
+              entries = json.loads(path.read_text())
+          except (OSError, ValueError):
+              entries = {}
+          if isinstance(entries, dict):
+              for entry in list(entries.values())[-5:]:
+                  print("hosted_registry_shape=" + repr(_hosted_settlement_diagnostics(entry)))
+          PY
 
       - name: Tear down (always)
         if: always()

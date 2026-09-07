@@ -499,6 +499,37 @@ def _wait_for_open_post_call_action(aut, call_id, marker, deadline, progress):
     )
 
 
+def _hosted_settlement_diagnostics(entry, marker_rows=None):
+    """Only bounded state/counter fields; never call IDs, targets or error prose."""
+    entry = entry if isinstance(entry, dict) else {}
+    reasons = {
+        "agent_aborted", "missing_attempt", "correction_missing_attempt",
+        "multiple_attempts", "wrong_target", "unknown_tool_outcome",
+        "pre_send_validation", "content_rejected", "recipient_terminal",
+        "ambiguous_provider_failure", "correction_dispatch_failed",
+        "correction_missing_tool_report", "correction_context_unavailable",
+        "initial_dispatch_failed_before_settlement", "initial_missing_tool_report",
+        "durable_sms_attempt_is_ambiguous",
+    }
+    attempts = entry.get("smsAttempts")
+    attempts = attempts if isinstance(attempts, list) else []
+    def allowed(value, values):
+        return value if isinstance(value, str) and value in values else "unknown"
+    return {
+        "marker_rows": marker_rows,
+        "state": allowed(entry.get("state"), {"queued", "running", "completed", "failed"}),
+        "outcome": allowed(entry.get("outcome"), reasons),
+        "retryable": entry.get("retryable") is True,
+        "attempts": len(attempts),
+        "attempt_shapes": [{
+            "phase": allowed(item.get("phase"), {"initial", "correction"}),
+            "state": allowed(item.get("state"), {"pending", "success", "failed"}),
+            "target_matches": item.get("targetMatches") is True,
+            "error_kind": allowed(item.get("errorKind"), reasons),
+        } for item in attempts[:5] if isinstance(item, dict)],
+    }
+
+
 def _wait_hosted_sms_settlement(
     aut,
     aut_number_id,
@@ -564,7 +595,9 @@ def _wait_hosted_sms_settlement(
                 f"hosted reconciliation sent {len(matches)} marker SMS messages; expected one"
             return
         if registry_entry and registry_entry.get("state") == "failed":
-            pytest.fail("hosted SMS settlement failed")
+            pytest.fail("hosted SMS settlement failed; " + repr(
+                _hosted_settlement_diagnostics(registry_entry, len(matches))
+            ))
         time.sleep(POLL_EVERY_S)
     pytest.fail(
         "hosted voice test exhausted its budget before one API-accepted marker SMS "
