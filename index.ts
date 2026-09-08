@@ -1,3 +1,4 @@
+import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "./src/silent-send-capture.js";
 import {
   defineChannelPluginEntry,
   type ChannelPlugin,
@@ -160,20 +161,39 @@ function registerInkboxTools(api: any): void {
 }
 
 function registerHostedCallSettlementHooks(api: any): void {
+  api.on("message_sending", (event: any, context: any) => {
+    if (context.channelId !== "inkbox") return;
+    api.logger?.info?.(
+      `Inkbox routed send shape: channel=inkbox chars=${typeof event.content === "string" ? event.content.length : 0}`,
+    );
+  });
   api.on("before_agent_run", (event: any, context: any) => {
     bindHostedSmsCaptureToRun(event, context);
+    bindSilentSendCaptureToRun(event, context);
     bindA2AProgressActivityToRun(event, context);
   });
   api.on("before_tool_call", async (event: any, context: any) => {
+    recordSilentSendBeforeToolCall(event, context);
     const decision = await recordHostedSmsBeforeToolCall(event, context);
-    if (!decision?.block) recordA2AProgressToolActivity(event, context);
+    if (!decision?.block) {
+      recordA2AProgressToolActivity(event, context);
+      // Fixed metadata only: no recipients, bodies, or tool/error prose.
+      if (["inkbox_send_sms", "inkbox_send_email", "message"].includes(event.toolName)) {
+        const body = event.params?.text ?? event.params?.bodyText ?? event.params?.message;
+        api.logger?.info?.(
+          `Inkbox send tool shape: tool=${event.toolName} chars=${typeof body === "string" ? body.length : 0}`,
+        );
+      }
+    }
     return decision;
   });
+  api.on("model_call_started", recordSilentSendModelStarted);
+  api.on("after_tool_call", recordSilentSendAfterToolCall);
   api.on("after_tool_call", recordHostedSmsAfterToolCall);
   api.on("model_call_ended", recordHostedModelCallEnded);
 }
 
-const entry: OpenClawChannelEntry = defineChannelPluginEntry({
+const baseEntry: OpenClawChannelEntry = defineChannelPluginEntry({
   id: "inkbox",
   name: "Inkbox",
   description:
@@ -181,10 +201,22 @@ const entry: OpenClawChannelEntry = defineChannelPluginEntry({
   plugin: inkboxPlugin,
   registerCliMetadata: registerInkboxCli,
   registerFull(api: any) {
-    registerHostedCallSettlementHooks(api);
     registerInkboxTools(api);
     registerInkboxPublicUrlInboundRoutes(api);
   },
 });
+
+// Prepared model runs use discovery registries, not the active gateway's full
+// registry. Keep hooks in every execution-capable registration mode. Wrapping
+// the public entry works on the minimum host, before registerCapabilities existed.
+const entry: OpenClawChannelEntry = {
+  ...baseEntry,
+  register(api) {
+    baseEntry.register(api);
+    if (["full", "discovery", "tool-discovery"].includes(api.registrationMode)) {
+      registerHostedCallSettlementHooks(api);
+    }
+  },
+};
 
 export default entry;

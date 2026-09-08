@@ -4,7 +4,7 @@
 // across surfaces, reset on inbound/delivered/TTL), the synchronous
 // send-rejection classification, the webhook payload extractors, and the
 // wake-up prompt. The session-routing half (which conversation/thread the
-// wake-up lands in, dedup, [SILENT]) lives in tests/inbound/delivery-failure-retry.test.ts.
+// wake-up lands in, dedup, NO_REPLY) lives in tests/inbound/delivery-failure-retry.test.ts.
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { InkboxAPIError } from "@inkbox/sdk";
@@ -140,7 +140,7 @@ describe("classifyDeliveryFailure", () => {
 // ── The wake-up decision + prompt ───────────────────────────────────────────
 
 describe("noteOutboundDeliveryFailure", () => {
-  it("wakes a first retryable failure without offering [SILENT]", () => {
+  it("wakes a first retryable failure without offering NO_REPLY", () => {
     const rej = classifySendRejection("sms", spamBlockError());
     const note = noteSms({ errorCode: rej.errorCode, errorDetail: rej.errorDetail });
 
@@ -153,7 +153,7 @@ describe("noteOutboundDeliveryFailure", () => {
     expect(note.body).toContain("reads as bot traffic in SMS");
     expect(note.body).toContain("«**Jane Doe** is on file.»");
     expect(note.body).toContain("SMS failure classification: FIRST SAFE RETRY REQUIRED");
-    expect(note.body).not.toContain("[SILENT]");
+    expect(note.body).not.toContain("NO_REPLY");
   });
 
   it.each([
@@ -163,7 +163,7 @@ describe("noteOutboundDeliveryFailure", () => {
       errorCode: "40002",
       errorDetail: "Temporary spam filter rejection",
       required: "FIRST SAFE RETRY REQUIRED",
-      forbidden: "[SILENT]",
+      forbidden: "NO_REPLY",
     },
     {
       classification: "retryable",
@@ -218,9 +218,9 @@ describe("noteOutboundDeliveryFailure", () => {
       expect(note.body).toContain(required);
       expect(note.body).not.toContain(forbidden);
       if (classification === "retryable" && attempt === 1) {
-        expect(note.body).not.toContain("[SILENT]");
+        expect(note.body).not.toContain("NO_REPLY");
       } else {
-        expect(note.body).toContain("[SILENT]");
+        expect(note.body).toContain("NO_REPLY");
       }
     },
   );

@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText, toolError } from "../errors.js";
+import { runTool, toolError } from "../errors.js";
+import { sentToolText, silentSendCompletionParameter } from "./send-completion.js";
 import { checkOutboundRecipients } from "../allowlist.js";
 
 // Outbound email — the primary write path for the email channel.
@@ -14,6 +15,7 @@ export function registerSendEmail(
     description:
       "Send an email from the configured Inkbox identity. Use for outbound messages addressed to one or more email recipients. Supports CC/BCC and reply threading via inReplyToMessageId.",
     parameters: Type.Object({
+      completeSilently: silentSendCompletionParameter,
       to: Type.Array(Type.String({ description: "Recipient email address" }), {
         minItems: 1,
         description: "Primary recipients (at least one required).",
@@ -51,8 +53,9 @@ export function registerSendEmail(
           bcc: params.bcc,
           inReplyToMessageId: params.inReplyToMessageId,
         });
-        return toolText(
+        return sentToolText(
           `Sent email id=${msg.id} to=${params.to.join(",")} subject="${params.subject}"`,
+          params.completeSilently,
         );
       });
     },

@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText, toolError } from "../errors.js";
+import { runTool, toolError } from "../errors.js";
+import { sentToolText, silentSendCompletionParameter } from "./send-completion.js";
 import { checkOutboundRecipient } from "../allowlist.js";
 import { IMESSAGE_MAX_TEXT_CHARS, imessageTextTooLongMessage } from "../message-limits.js";
 
@@ -44,6 +45,7 @@ export function registerSendIMessage(
     description:
       "Send an iMessage from the configured Inkbox identity. Recipient-first channel: a person must have connected via the Inkbox iMessage router and messaged this agent before outbound sends work, so prefer `conversationId` from an inbound message or `inkbox_list_imessage_conversations`.",
     parameters: Type.Object({
+      completeSilently: silentSendCompletionParameter,
       to: Type.Optional(
         Type.String({
           description:
@@ -123,8 +125,9 @@ export function registerSendIMessage(
           ...(params.sendStyle ? { sendStyle: params.sendStyle } : {}),
         });
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
-        return toolText(
+        return sentToolText(
           `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} status=${msg.status ?? "unknown"}`,
+          params.completeSilently,
         );
       });
     },

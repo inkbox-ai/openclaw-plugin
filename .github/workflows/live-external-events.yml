@@ -76,19 +76,18 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # The agent's reasoning (deciding to place a call) uses the chat
-          # model; send it straight to OpenAI as-is.
+          # Use native model metadata for reasoning and token budgets.
           # --skip-health: onboard otherwise waits for a running gateway, and
           # ours starts in a later step.
           openclaw onboard --non-interactive \
-            --auth-choice custom-api-key \
-            --custom-base-url "https://api.openai.com/v1" \
-            --custom-model-id "gpt-5.6-sol" \
-            --custom-api-key "$OPENAI_API_KEY" \
-            --custom-compatibility openai \
+            --auth-choice openai-api-key \
+            --openai-api-key "$OPENAI_API_KEY" \
             --secret-input-mode plaintext \
             --skip-health \
             --accept-risk
+          openclaw models set openai/gpt-5.6-sol
+          # Inkbox completion/progress hooks require the native OpenClaw runner.
+          openclaw config set 'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.id' openclaw
 
       - name: Configure AUT identity + external events
         env:
@@ -104,8 +103,9 @@ jobs:
           )"
           # Install the plugin BEFORE writing channels.inkbox.* — the channel id
           # only validates once the plugin is registered.
-          openclaw plugins install -l --dangerously-force-unsafe-install "$GITHUB_WORKSPACE"
+          openclaw plugins install -l --force --accept-capabilities "$GITHUB_WORKSPACE"
           openclaw plugins enable inkbox || true
+          openclaw config set plugins.entries.inkbox.hooks.allowConversationAccess true --strict-json
           openclaw config set channels.inkbox.enabled true --strict-json
           openclaw config set channels.inkbox.apiKey "$OPENCLAW_INKBOX_API_KEY"
           openclaw config set channels.inkbox.identity "$HANDLE"

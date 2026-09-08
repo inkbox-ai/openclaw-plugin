@@ -272,6 +272,20 @@ def test_live_voice_marker_is_deterministic_distinct_and_speech_safe():
     assert len(observed) > 900
 
 
+def test_hosted_failure_diagnostics_hide_identifiers_and_unknown_error_text():
+    entry = {
+        "state": "failed", "outcome": "correction_missing_attempt", "callId": "private-call",
+        "smsAttempts": [{"phase": "initial", "state": "failed", "targetMatches": True,
+            "errorKind": "private error body", "toolCallIdHash": "private-hash", "target": "private-recipient"}],
+    }
+    shape = voice._hosted_settlement_diagnostics(entry, 1)
+    assert shape["outcome"] == "correction_missing_attempt"
+    assert shape["marker_rows"] == 1
+    assert shape["attempts"] == 1
+    assert shape["attempt_shapes"] == [{"phase": "initial", "state": "failed", "target_matches": True, "error_kind": "unknown"}]
+    assert "private" not in repr(shape)
+
+
 def test_live_voice_marker_mapping_is_stable():
     assert voice_marker.marker_from_token("55071").split() == [
         "pineapple",
@@ -324,3 +338,48 @@ def test_every_call_capable_live_ci_gateway_disables_voicemail_detection():
         "live-external-events.yml",
         "live-voice.yml",
     ]
+
+
+def test_hd_audio_proof_requires_current_call_and_negotiated_format():
+    line = "Inkbox realtime audio negotiated: call_id=current-call format=pcm_s16le_16000"
+    assert voice._gateway_has_hd_audio(line, "current-call")
+    assert voice._gateway_has_hd_audio(line.upper(), "current-call")
+    assert not voice._gateway_has_hd_audio(line, "other-call")
+    assert not voice._gateway_has_hd_audio(line.replace("pcm_s16le_16000", "pcmu_8000"), "current-call")
+    assert not voice._gateway_has_hd_audio(line.replace("current-call", "current-call-extra"), "current-call")
+
+
+def test_cleanup_retries_inventory_reads_without_repeating_hangup(monkeypatch):
+    calls = _Calls()
+    reads = 0
+    pauses = []
+    monkeypatch.setattr(voice.time, "sleep", pauses.append)
+
+    def inventory():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise TimeoutError("synthetic transport timeout")
+        return [SimpleNamespace(id="old"), SimpleNamespace(id="new")]
+
+    voice._hangup_fresh_calls(SimpleNamespace(calls=calls), inventory, {"old"})
+    assert reads == 2
+    assert pauses == [1]
+    assert calls.hung_up == ["new"]
+
+
+def test_cleanup_read_exhaustion_is_bounded_and_does_not_claim_cleanup(monkeypatch):
+    calls = _Calls()
+    reads = 0
+    monkeypatch.setattr(voice.time, "sleep", lambda _: None)
+
+    def inventory():
+        nonlocal reads
+        reads += 1
+        raise TimeoutError("synthetic private request detail")
+
+    with pytest.raises(RuntimeError, match="after 3 read attempts") as caught:
+        voice._hangup_fresh_calls(SimpleNamespace(calls=calls), inventory, set())
+    assert "private request detail" not in str(caught.value)
+    assert reads == 3
+    assert not calls.hung_up

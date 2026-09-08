@@ -54,7 +54,7 @@ cd openclaw-plugin
 npm install
 npm run build
 openclaw --version
-openclaw plugins install -l --dangerously-force-unsafe-install ./
+openclaw plugins install -l --force --accept-capabilities ./
 ```
 
 Configure Inkbox:
@@ -73,7 +73,7 @@ An agent can complete setup after a human assigns an existing identity handle, A
 1. Confirm the clone's remote, current revision, and clean working tree.
 2. Review `package.json`, its scripts, and the declared and locked dependencies before running `npm install`.
 3. Run `npm install` and `npm run build`, review the installed dependency summary and build output, and check the working tree for unexpected changes.
-4. Only then run the local `openclaw plugins install -l --dangerously-force-unsafe-install ./` command.
+4. Only then run the local `openclaw plugins install -l --force --accept-capabilities ./` command.
 
 First inspect the checkout and manifest. Also review `package-lock.json` before continuing:
 
@@ -96,7 +96,7 @@ git status --short
 Only install the reviewed local build into OpenClaw when those checks have the expected results:
 
 ```bash
-openclaw plugins install -l --dangerously-force-unsafe-install ./
+openclaw plugins install -l --force --accept-capabilities ./
 ```
 
 Keep the credential out of source control, project instructions, command arguments, and transcripts. Place it in the private process environment as `INKBOX_API_KEY`; if entering it in a terminal, read it without echoing:
@@ -136,7 +136,7 @@ docker exec -it inkbox-openclaw bash
 Inside the container, install the already-built local plugin and run setup:
 
 ```bash
-openclaw plugins install -l --dangerously-force-unsafe-install /opt/inkbox-plugin-src
+openclaw plugins install -l --force --accept-capabilities /opt/inkbox-plugin-src
 openclaw inkbox setup
 openclaw inkbox doctor
 openclaw gateway run
@@ -287,11 +287,21 @@ openclaw config set tools.allow '[
 
 Plain-text output from a Voice AI post-call turn is suppressed because the call has ended; requested side effects run through normal tools. Completion receipts are durable and unfinished calls are replayed after gateway restart.
 
-Setup also enables OpenClaw's `plugins.entries.inkbox.hooks.allowConversationAccess` permission. The plugin needs this host permission to bind each Voice AI completion to the exact generated post-call run before accepting side-effecting tool evidence. Conversation bodies are not stored in the completion registry or replay journal.
+### Agent runner compatibility
+
+Use the native **OpenClaw** runner for hosted-call settlement, A2A progress, and silent cross-channel completion. These features depend on the host's `before_agent_run` and model-call lifecycle hooks; Codex and other external runners do not emit the same lifecycle. Recent OpenClaw versions default official OpenAI models to the Codex runner, so select the native runner explicitly for your chosen model, for example:
+
+```bash
+openclaw config set 'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.id' openclaw
+```
+
+Use your configured model key in place of the example. Inkbox setup does not change your model or override an explicitly chosen runner. This setting concerns the main agent, not the separate realtime voice provider.
+
+Setup also enables OpenClaw's `plugins.entries.inkbox.hooks.allowConversationAccess` permission. The plugin needs this host permission to bind channel sends and Voice AI completions to their exact runs before accepting side-effecting tool evidence, and to associate A2A progress with its worker run. Conversation bodies are not stored in the completion registry or replay journal.
 
 ### OpenAI Realtime
 
-Calls can use raw Inkbox call media through OpenAI Realtime. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. Environment keys are setup-time discovery inputs unless the wizard validates and persists them into `channels.inkbox.voiceRealtime.providers.openai.apiKey`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
+Calls can use raw Inkbox call media through OpenAI Realtime. The call transport negotiates HD voice as mono 16 kHz PCM16LE, resampled continuously to and from the realtime provider’s 24 kHz PCM format. Older call endpoints remain compatible with 8 kHz μ-law audio. OpenAI GA Realtime requires an OpenAI API key; ChatGPT/Codex subscription OAuth profiles are not used for this path. During `openclaw inkbox setup`, the wizard looks for an existing OpenAI API key in `channels.inkbox.voiceRealtime.providers.openai.apiKey`, `INKBOX_REALTIME_API_KEY`, an OpenClaw `openai` API-key auth profile, or `OPENAI_API_KEY`. Environment keys are setup-time discovery inputs unless the wizard validates and persists them into `channels.inkbox.voiceRealtime.providers.openai.apiKey`. If it finds one, it asks whether to enable Realtime calls, validates access to `gpt-realtime-2`, and stores the validated key in the Inkbox Realtime provider config. If no key is found, it prompts for one and validates it before enabling Realtime.
 
 ```bash
 export INKBOX_REALTIME_API_KEY="sk-..."
@@ -336,7 +346,7 @@ iMessage works differently from SMS: the agent does not get its own iMessage num
 
 If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignmentStatus` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`, `imessage.delivery_failed`) arrive as webhooks and are logged by the gateway without waking the agent, matching the SMS lifecycle handling.
 
-While the agent composes a reply, the recipient sees a typing indicator — the gateway pulses it until the response sends (or the agent decides no reply is warranted). Inbound tapbacks (`imessage.reaction_received`) do wake the agent: the turn carries the reaction, the message it targets, and a response policy — a `question` tapback usually warrants a reply, while `love`/`like`/`laugh`/`dislike` usually resolve to `[SILENT]` and nothing is sent.
+While the agent composes a reply, the recipient sees a typing indicator — the gateway pulses it until the response sends (or the agent decides no reply is warranted). Inbound tapbacks (`imessage.reaction_received`) do wake the agent: the turn carries the reaction, the message it targets, and a response policy — a `question` tapback usually warrants a reply, while `love`/`like`/`laugh`/`dislike` usually resolve to `NO_REPLY` and nothing is sent.
 
 Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
@@ -441,6 +451,8 @@ Optional:
 - Note access: `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`
 - Vault: `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
 - Diagnostic: `inkbox_whoami`
+
+Send and email-forward tools accept optional `completeSilently: true` when the send is the final requested action and no acknowledgment is wanted. Successful sends then end the turn without an extra source-channel reply. Leave it unset when more work or a reply remains; failed sends never silently complete.
 
 ## Bundled Skills
 

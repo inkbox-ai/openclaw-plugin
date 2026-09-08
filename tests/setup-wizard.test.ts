@@ -346,6 +346,19 @@ describe("runSetupWizard", () => {
     ]);
   });
 
+  it("keeps live host hook permissions aligned with normal setup", async () => {
+    const grants = buildOpenClawConfigBatch({ apiKey: "test", identity: "test" }, {})
+      .filter((entry) => entry.path.startsWith("plugins.entries.inkbox.hooks."));
+    expect(grants.length).toBeGreaterThan(0);
+    for (const workflow of ["live-channels.yml", "live-a2a.yml", "live-external-events.yml", "live-voice.yml"]) {
+      const source = await readFile(new URL(`../.github/workflows/${workflow}`, import.meta.url), "utf8");
+      for (const grant of grants) {
+        expect(source, `${workflow} must grant the same hook access as setup`)
+          .toContain(`openclaw config set ${grant.path} ${JSON.stringify(grant.value)} --strict-json`);
+      }
+    }
+  });
+
   it("writes explicit realtime call overrides when provided", () => {
     expect(
       buildOpenClawConfigBatch(

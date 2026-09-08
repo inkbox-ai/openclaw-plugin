@@ -24,6 +24,8 @@ import os
 import re
 import time
 import uuid
+from collections import Counter
+from itertools import islice
 from pathlib import Path
 from typing import Callable
 
@@ -93,6 +95,47 @@ def _plugin_tool_names() -> list[str]:
     return sorted(names)
 
 
+def _email_failure_shape(aut, aut_email: str, nonce: str, log_path: Path | None, log_offset: int) -> str:
+    """Failure-only bounded reads; never include addresses, subjects, IDs, or prose.
+
+    Mailbox matches belong to this request. Gateway shapes describe the time
+    window only, since an earlier turn can finish during this request's wait.
+    Diagnostics cannot turn a failed assertion into a pass or send another mail.
+    """
+    from inkbox.mail.types import MessageDirection
+    from test_cross_channel import _source_reply_shapes
+
+    fields = []
+    for label, direction in (("aut_inbound", MessageDirection.INBOUND),
+                             ("aut_outbound", MessageDirection.OUTBOUND)):
+        try:
+            rows = list(islice(aut.messages.list(aut_email, direction=direction, page_size=100), 100))
+            matches = [row for row in rows if nonce in (getattr(row, "subject", "") or "")]
+            statuses = Counter(
+                status if status in {"received", "queued", "pending", "sent", "delivered", "bounced", "failed", "blocked"}
+                else "other"
+                for row in matches
+                for status in [str(getattr(row, "status", "") or "")]
+            )
+            fields.append(f"{label}_matches={len(matches)} {label}_scan_capped={len(rows) == 100} "
+                          f"{label}_read={sum(getattr(row, 'is_read', False) is True for row in matches)} "
+                          f"{label}_statuses={dict(sorted(statuses.items()))}")
+        except Exception:
+            fields.append(f"{label}_read_failed=true")
+    try:
+        if log_path is None:
+            fields.append("gateway_window=unavailable")
+        else:
+            with log_path.open("rb") as stream:
+                stream.seek(log_offset)
+                window = stream.read(1_000_001)
+            fields.append(f"gateway_window_capped={len(window) > 1_000_000} "
+                          f"gateway_window_shapes={_source_reply_shapes(window[:1_000_000].decode(errors='replace'))[-20:]}")
+    except OSError:
+        fields.append("gateway_window=unavailable")
+    return " ".join(fields)
+
+
 def _ask(
     remote,
     aut_email: str,
@@ -107,6 +150,11 @@ def _ask(
         return list(remote.messages.list(remote_email, direction=MessageDirection.INBOUND))
 
     before = {str(msg.id) for msg in _inbound()}
+    log_path = Path(os.environ["GATEWAY_LOG"]) if os.environ.get("GATEWAY_LOG") else None
+    try:
+        log_offset = log_path.stat().st_size if log_path else 0
+    except OSError:
+        log_offset = 0
     nonce = f"smoke-{uuid.uuid4().hex[:8]}"
     sent = remote.messages.send(remote_email, to=[aut_email], subject=f"[{nonce}] {question[:40]}", body_text=question)
     thread_id = str(getattr(sent, "thread_id", "") or "")
@@ -137,10 +185,14 @@ def _ask(
             if (accept is None and _is_reply(msg)) or (accept is not None and accept(lowered)):
                 return lowered
         time.sleep(POLL_EVERY_S)
+    try:
+        diagnosis = _email_failure_shape(_client(AUT_KEY), aut_email, nonce, log_path, log_offset)
+    except Exception:
+        diagnosis = "diagnostics_unavailable=true"
     pytest.fail(
         f"no acceptable reply within {TIMEOUT_S:.0f}s "
         f"(candidate_count={len(candidates)} "
-        f"candidate_lengths={[len(body) for body in candidates]})"
+        f"candidate_lengths={[len(body) for body in candidates]}; {diagnosis})"
     )
 
 

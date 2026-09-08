@@ -58,4 +58,6 @@ When someone puts a tapback on one of **your** messages, you receive a turn pref
 - `emphasize` may invite a brief acknowledgement or follow-up.
 - `love` / `like` / `laugh` / `dislike` are usually just acknowledgements that need no response.
 
-Decide based on the reaction and the conversation. **If no visible reply is warranted, return exactly `[SILENT]`** — the Inkbox bridge drops it and nothing is sent. Reply normally (via `inkbox_send_imessage`) only when a response genuinely adds value.
+Decide based on the reaction and the conversation. **If no visible reply is warranted, return exactly `NO_REPLY`** — the Inkbox bridge drops it and nothing is sent. Reply normally (via `inkbox_send_imessage`) only when a response genuinely adds value.
+
+For a requested send to another channel or recipient, set `completeSilently: true` only when that send is the final requested action and no acknowledgment is wanted. Leave it unset when more work or a reply remains.

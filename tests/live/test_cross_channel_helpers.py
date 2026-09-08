@@ -152,3 +152,29 @@ def test_idempotent_read_exhaustion_is_sanitized(monkeypatch):
     message = str(failure.value)
     assert "ConnectionError" in message
     assert "private.invalid" not in message
+
+
+@pytest.mark.parametrize("rendered", [
+    "[inkbox] source reply shape: mode=sms kind=final chars=102 error=false status=false silent=false",
+    '{"message":"Inkbox source reply shape: mode=sms kind=final chars=102 error=false status=false silent=false"}',
+])
+def test_source_reply_diagnostics_accept_host_prefix_stripping_without_content(rendered):
+    assert cross._source_reply_shapes("private-id " + rendered + " private-body") == [
+        "source reply shape: mode=sms kind=final chars=102 error=false status=false silent=false"
+    ]
+
+
+def test_send_boundary_diagnostics_extract_only_allowlisted_metadata():
+    log = "\n".join([
+        "[inkbox] send tool shape: tool=inkbox_send_email chars=13 private recipient",
+        "[plugins] Inkbox routed send shape: channel=inkbox chars=102 private body",
+        "send tool shape: tool=untrusted-tool-name chars=5",
+        '[inkbox] silent send shape: bound=true batch=true attempts=1 accepted=1 invalid=false private body',
+        '{"message":"Inkbox silent send shape: bound=false batch=false attempts=0 accepted=0 invalid=false","secret":"private"}',
+    ])
+    assert cross._source_reply_shapes(log) == [
+        "send tool shape: tool=inkbox_send_email chars=13",
+        "routed send shape: channel=inkbox chars=102",
+        "silent send shape: bound=true batch=true attempts=1 accepted=1 invalid=false",
+        "silent send shape: bound=false batch=false attempts=0 accepted=0 invalid=false",
+    ]

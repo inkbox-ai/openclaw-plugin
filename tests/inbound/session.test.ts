@@ -119,9 +119,9 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
 
 vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME: "consult_agent",
-  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ: {
-    encoding: "g711_ulaw",
-    sampleRateHz: 8000,
+  REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ: {
+    encoding: "pcm16",
+    sampleRateHz: 24000,
     channels: 1,
   },
   buildRealtimeVoiceAgentConsultChatMessage: vi.fn((args: any) => args.question),
@@ -209,7 +209,7 @@ vi.mock("openclaw/plugin-sdk/realtime-voice", () => ({
       sendUserMessage: vi.fn(),
       triggerGreeting: vi.fn(() => {
         params.onTranscript?.("assistant", "Hi there.", true);
-        params.audioSink.sendAudio(Buffer.from([0xff, 0xff]));
+        params.audioSink.sendAudio(Buffer.alloc(960));
         params.onEvent?.({ type: "response.done" });
       }),
       handleBargeIn: vi.fn(),
@@ -402,7 +402,7 @@ const contactMediaMessages = (): FakeInkboxWebSocketMessage[] => [
     message: JSON.stringify({
       event: "media",
       stream_id: "stream-1",
-      media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+      media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
     }),
   },
   JSON.stringify({ event: "stop" }),
@@ -415,7 +415,10 @@ function createChannelRuntime(
   const deliveryResults: any[] = [];
   const dispatchReply = vi.fn(async (params: any) => {
     await onDispatch?.(params);
-    deliveryResults.push(await params.delivery.deliver({ text: replyText }));
+    const payload = { text: replyText };
+    const transformed = params.dispatcherOptions?.transformReplyPayload
+      ? params.dispatcherOptions.transformReplyPayload(payload) : payload;
+    if (transformed !== null) deliveryResults.push(await params.delivery.deliver(transformed));
   });
   return {
     inbound: {
@@ -718,6 +721,7 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "the Inkbox plugin will issue one bounded correction turn",
     );
+    expect(run.ctxPayload.message.bodyForAgent).toContain("copy it verbatim from the open action or transcript");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Please send the release update.");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Send the release update");
     expect(channelRuntime.deliveryResults).toEqual([{ visibleReplySent: false }]);
@@ -729,6 +733,47 @@ describe("createInkboxSessionBridge", () => {
 
     await bridge.handlers.onCallEnded?.(event);
     await flushMicrotasks();
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("admits concurrent completion events for one hosted call only once", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
+      await emitHostedSmsTool(params, { content: [{ type: "text", text: "Sent text id=text-concurrent status=queued" }] });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = hostedCallEndedEvent({ id: "call-concurrent" });
+    await Promise.all([
+      bridge.handlers.onCallEnded?.({ ...event, id: "completion-a" }),
+      bridge.handlers.onCallEnded?.({ ...event, id: "completion-b" }),
+    ]);
+    await flushMicrotasks(100);
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["read", "write"])("releases hosted admission after a registry %s failure", async (operation) => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
+      await emitHostedSmsTool(params, { content: [{ type: "text", text: "Sent text id=text-retry status=queued" }] });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent", voiceStack: "inkbox_voice_ai" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const registry = await import("../../src/hosted-call-registry.js");
+    const failingOperation = operation === "read" ? registry.readHostedCallRegistry : registry.writeHostedCallRegistryEntry;
+    vi.mocked(failingOperation).mockRejectedValueOnce(new Error("temporary storage failure"));
+    const event = hostedCallEndedEvent({ id: `call-admission-${operation}` });
+    await expect(bridge.handlers.onCallEnded?.(event)).rejects.toThrow("temporary storage failure");
+    await bridge.handlers.onCallEnded?.(event);
+    await flushMicrotasks(100);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
   });
 
@@ -759,7 +804,7 @@ describe("createInkboxSessionBridge", () => {
     const { runtime } = createRuntime();
     let dispatches = 0;
     const blockedTargets: string[] = [];
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       const target = dispatches === 1 ? "+15559990000" : "+15550001111";
       const blocked = await emitHostedSmsTool(
@@ -811,7 +856,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("completes an explicit hosted SMS action only after the native tool hook reports success", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       await emitHostedSmsTool(params, {
         content: [{ type: "text", text: "Sent text id=text-1 status=queued" }],
       });
@@ -840,7 +885,7 @@ describe("createInkboxSessionBridge", () => {
   it("issues one correction turn when an explicit hosted SMS action made no attempt", async () => {
     const { runtime } = createRuntime();
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
         await emitHostedSmsTool(params, {
@@ -876,7 +921,7 @@ describe("createInkboxSessionBridge", () => {
       "This is the only mandatory correction attempt",
     );
     expect(correction.ctxPayload.message.bodyForAgent).toContain(
-      "Do not return [SILENT], skip the tool, or defer the send",
+      "Do not return NO_REPLY, skip the tool, or defer the send",
     );
     expect(hostedRegistryMock.writes.at(-1)).toMatchObject({
       state: "completed",
@@ -887,7 +932,7 @@ describe("createInkboxSessionBridge", () => {
   it("makes one correction after a recoverable hosted SMS failure", async () => {
     const { runtime } = createRuntime();
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       await emitHostedSmsTool(
         params,
@@ -936,7 +981,7 @@ describe("createInkboxSessionBridge", () => {
     ]);
     runtime.getIdentity = vi.fn(async () => identity) as any;
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
         await emitHostedSmsTool(params, {
@@ -979,7 +1024,7 @@ describe("createInkboxSessionBridge", () => {
     ]);
     runtime.getIdentity = vi.fn(async () => identity) as any;
     let dispatches = 0;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       dispatches += 1;
       if (dispatches === 2) {
         await emitHostedSmsTool(params, {
@@ -1020,7 +1065,7 @@ describe("createInkboxSessionBridge", () => {
     const identity = await runtime.getIdentity();
     (identity as any).listTranscripts = vi.fn(async () => [{ party: "remote", text }]);
     runtime.getIdentity = vi.fn(async () => identity) as any;
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1041,7 +1086,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("detects imperative named-recipient text open actions", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1062,7 +1107,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("keeps a positive open-action clause after an earlier negated clause", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1184,7 +1229,7 @@ describe("createInkboxSessionBridge", () => {
     const identity = await runtime.getIdentity();
     (identity as any).listTranscripts = vi.fn(async () => transcriptRows);
     runtime.getIdentity = vi.fn(async () => identity) as any;
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1206,7 +1251,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("does not treat a negated open action as an SMS commitment", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1230,7 +1275,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("does not treat a bare SMS noun in an open action as a send commitment", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -1252,7 +1297,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("terminalizes a durable hosted SMS attempt on catch-up without replay", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const event = hostedCallEndedEvent({ id: "call-durable-pending" });
     hostedRegistryMock.entries["default:call-durable-pending"] = {
       accountId: "default",
@@ -1313,7 +1358,7 @@ describe("createInkboxSessionBridge", () => {
       ],
       updatedAt: Date.now(),
     };
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       await emitHostedSmsTool(params, {
         details: { inkboxSendSms: { sent: true } },
         content: [{ type: "text", text: "Sent text id=text-recovery status=queued" }],
@@ -1346,7 +1391,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("terminalizes a failed correction journal without another replay", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const event = hostedCallEndedEvent({ id: "call-failed-correction" });
     hostedRegistryMock.entries["default:call-failed-correction"] = {
       accountId: "default",
@@ -1394,7 +1439,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("replays a clean hosted completion with no durable SMS attempt", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const event = hostedCallEndedEvent({
       id: "call-clean-replay",
       action: "Review the release notes",
@@ -1427,7 +1472,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("persists terminal hosted SMS failure and does not replay the webhook", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
       await emitHostedSmsTool(params, {
         isError: true,
         content: [{ type: "text", text: "Recipient has opted out of SMS" }],
@@ -1459,7 +1504,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("persists an aborted hosted SMS reconciliation as terminal and does not replay", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]", (params) => {
+    const channelRuntime = createChannelRuntime("NO_REPLY", (params) => {
       bindHostedSmsCaptureToRun(
         { prompt: params.ctxPayload.message.bodyForAgent },
         {
@@ -1503,6 +1548,41 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["throw", "error-payload"])("fails an A2A %s once instead of leaving the task working", async (failureMode) => {
+    const { runtime, a2aReply } = createRuntime();
+    const warn = vi.fn();
+    const channelRuntime = createChannelRuntime("Partial answer must not complete an errored turn.", (params) => {
+      if (failureMode === "throw") throw new TypeError("private model failure text");
+      params.dispatcherOptions.transformReplyPayload({ text: "private model failure text", isError: true });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+      logger: { warn },
+    });
+    const event = {
+      id: "event-dispatch-failure", event_type: "a2a.task.created",
+      data: {
+        task_id: "task-dispatch-failure", context_id: "context-dispatch-failure",
+        message_id: "message-dispatch-failure", caller: { handle: "caller" },
+        parts: [{ text: "Complete this task." }],
+      },
+    };
+    await bridge.handlers.onA2A?.(event);
+    await vi.waitFor(() => expect(a2aRegistryMock.entries["task-dispatch-failure:message-dispatch-failure"]?.state).toBe("finalized"));
+    await bridge.handlers.onA2A?.(event);
+    await flushMicrotasks(30);
+    const failures = a2aReply.mock.calls.filter(([, reply]) => reply.intent === "fail");
+    expect(failures).toHaveLength(1);
+    expect(failures[0][1].text).not.toContain("private");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`stage=dispatch name=${failureMode === "throw" ? "TypeError" : "Error"}`));
+    expect(a2aReply.mock.calls.some(([, reply]) => reply.intent === "complete")).toBe(false);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("private model failure text");
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledOnce();
+  });
+
   it("serves an inbound A2A task in its context session and completes it once", async () => {
     const { runtime, a2aReply } = createRuntime();
     const channelRuntime = createChannelRuntime("Investigation complete.");
@@ -1542,8 +1622,9 @@ describe("createInkboxSessionBridge", () => {
       "finalized",
     ]);
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(channelRuntime.deliveryResults).toHaveLength(0);
     const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
-    expect(run.routeSessionKey).toBe("a2a:identity-1:context-1");
+    expect(run.routeSessionKey).toBe("agent:main:inkbox:direct:a2a:identity-1:context-1");
     expect(run.ctxPayload.message.bodyForAgent).toContain("Investigate this.");
     expect(a2aReply).toHaveBeenCalledWith("task-1", {
       intent: "complete",
@@ -1569,8 +1650,8 @@ describe("createInkboxSessionBridge", () => {
       throw new Error("response lost");
     });
     const key = `task-fenced-${intent}:message-fenced-${intent}`;
-    const channelRuntime = createChannelRuntime("[SILENT]", async (params) => {
-      if (params.routeSessionKey !== `a2a:identity-1:context-fenced-${intent}`) return;
+    const channelRuntime = createChannelRuntime("NO_REPLY", async (params) => {
+      if (params.routeSessionKey !== `agent:main:inkbox:direct:a2a:identity-1:context-fenced-${intent}`) return;
       const context = activeA2ATurn(params.routeSessionKey)!;
       await context.beforeReplyIntent?.();
       expect(a2aRegistryMock.entries[key].replyIntentFenced).toBe(true);
@@ -1657,7 +1738,7 @@ describe("createInkboxSessionBridge", () => {
       "task-fenced-plain:message-fenced-plain-1"
     ].replyIntentFenced).toBe(true);
 
-    const restartedRuntime = createChannelRuntime("[SILENT]");
+    const restartedRuntime = createChannelRuntime("NO_REPLY");
     const restarted = createInkboxSessionBridge({
       cfg: {},
       account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
@@ -1711,7 +1792,7 @@ describe("createInkboxSessionBridge", () => {
     });
     const { runtime, a2aReply } = createRuntime();
     const channelRuntime = createChannelRuntime("Completed.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-admission") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-admission") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -2126,7 +2207,7 @@ describe("createInkboxSessionBridge", () => {
       }],
     });
     const channelRuntime = createChannelRuntime("Completed.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-restart-generation") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-restart-generation") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -2258,7 +2339,7 @@ describe("createInkboxSessionBridge", () => {
       const { runtime, a2aReply } = createRuntime();
       a2aReply.mockRejectedValueOnce(new Error("retry receipt"));
       const channelRuntime = createChannelRuntime("Unused progress summary.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-disabled-progress") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-disabled-progress") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -2321,7 +2402,7 @@ describe("createInkboxSessionBridge", () => {
       const channelRuntime = createChannelRuntime(
         "I am reviewing the requested calculation.",
         (params) => {
-          if (params.routeSessionKey === "a2a:identity-1:context-progress") {
+          if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-progress") {
             return new Promise<void>((resolve) => {
               releaseMain = resolve;
             });
@@ -2369,7 +2450,7 @@ describe("createInkboxSessionBridge", () => {
       await flushMicrotasks(30);
       const progressPrompts = channelRuntime.inbound.dispatchReply.mock.calls
         .map(([params]) => params)
-        .filter((params) => params.routeSessionKey === "a2a-progress:identity-1:task-progress")
+        .filter((params) => params.routeSessionKey === "agent:main:inkbox:direct:a2a-progress:identity-1:task-progress")
         .map((params) => params.ctxPayload.message.bodyForAgent);
       expect(progressPrompts).toHaveLength(2);
       expect(progressPrompts[1]).toContain(
@@ -2398,12 +2479,12 @@ describe("createInkboxSessionBridge", () => {
     try {
       const { runtime, a2aReply } = createRuntime();
       const channelRuntime = createChannelRuntime("Final answer.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-drain") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-drain") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
         }
-        if (params.routeSessionKey === "a2a-progress:identity-1:task-drain") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a-progress:identity-1:task-drain") {
           return new Promise<void>((resolve) => {
             releaseProgress = resolve;
           });
@@ -2482,7 +2563,7 @@ describe("createInkboxSessionBridge", () => {
       const channelRuntime = createChannelRuntime(
         "I am reviewing the follow-up.",
         (params) => {
-          if (params.routeSessionKey === "a2a:identity-1:context-follow-up") {
+          if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-follow-up") {
             return new Promise<void>((resolve) => releases.push(resolve));
           }
         },
@@ -2791,7 +2872,7 @@ describe("createInkboxSessionBridge", () => {
       const { runtime, a2aReply } = createRuntime();
       a2aReply.mockRejectedValueOnce(new Error("response lost"));
       const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-active-retry") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-active-retry") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -2868,7 +2949,7 @@ describe("createInkboxSessionBridge", () => {
       const channelRuntime = createChannelRuntime(
         "I am validating the requested work.",
         (params) => {
-          if (params.routeSessionKey === "a2a:identity-1:context-independent-pending") {
+          if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-independent-pending") {
             return new Promise<void>((resolve) => {
               releaseMain = resolve;
             });
@@ -2942,7 +3023,7 @@ describe("createInkboxSessionBridge", () => {
         rejectAcknowledgement = reject;
       }));
       const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-concurrent-retry") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-concurrent-retry") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -3005,7 +3086,7 @@ describe("createInkboxSessionBridge", () => {
           finishRetry = () => resolve({ id: "task-retry-drain", state: "working" });
         }));
       const channelRuntime = createChannelRuntime("Final answer.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-retry-drain") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-retry-drain") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -3060,7 +3141,7 @@ describe("createInkboxSessionBridge", () => {
       const { runtime, a2aReply } = createRuntime();
       a2aReply.mockRejectedValue(new Error("offline"));
       const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-cancel-retry") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-cancel-retry") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -3174,7 +3255,7 @@ describe("createInkboxSessionBridge", () => {
     });
     const { runtime } = createRuntime();
     const channelRuntime = createChannelRuntime("Late answer.", async (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-shutdown-run") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-shutdown-run") {
         dispatchStarted();
         await dispatchGate;
       }
@@ -3238,7 +3319,7 @@ describe("createInkboxSessionBridge", () => {
       updatedAt: Date.now(),
     };
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-restart-retry") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-restart-retry") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3292,7 +3373,7 @@ describe("createInkboxSessionBridge", () => {
       updatedAt: Date.now(),
     };
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-progress-restart") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-progress-restart") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3366,7 +3447,7 @@ describe("createInkboxSessionBridge", () => {
       ],
     });
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-progress-follow-up") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-progress-follow-up") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3414,7 +3495,7 @@ describe("createInkboxSessionBridge", () => {
       const { runtime, a2aReply } = createRuntime();
       a2aReply.mockRejectedValue(new Error("offline"));
       const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-        if (params.routeSessionKey === "a2a:identity-1:context-shutdown-retry") {
+        if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-shutdown-retry") {
           return new Promise<void>((resolve) => {
             releaseMain = resolve;
           });
@@ -3558,7 +3639,7 @@ describe("createInkboxSessionBridge", () => {
       yield remoteTask;
     })());
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-catchup-existing") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-catchup-existing") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3628,7 +3709,7 @@ describe("createInkboxSessionBridge", () => {
       if (params.state === "working") yield authoritativeTask;
     })());
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === `a2a:identity-1:${contextId}`) {
+      if (params.routeSessionKey === `agent:main:inkbox:direct:a2a:identity-1:${contextId}`) {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3716,7 +3797,7 @@ describe("createInkboxSessionBridge", () => {
       yield remoteTask;
     })());
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-catchup-new") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-catchup-new") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3755,7 +3836,7 @@ describe("createInkboxSessionBridge", () => {
     a2aReply.mockRejectedValueOnce(new Error("response lost"));
     let releaseMain!: () => void;
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-retry") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-retry") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3821,7 +3902,7 @@ describe("createInkboxSessionBridge", () => {
     a2aReply.mockRejectedValueOnce(new Error("response lost"));
     let releaseMain!: () => void;
     const channelRuntime = createChannelRuntime("Recovered.", (params) => {
-      if (params.routeSessionKey === "a2a:identity-1:context-spoof") {
+      if (params.routeSessionKey === "agent:main:inkbox:direct:a2a:identity-1:context-spoof") {
         return new Promise<void>((resolve) => {
           releaseMain = resolve;
         });
@@ -3994,6 +4075,25 @@ describe("createInkboxSessionBridge", () => {
     pacer.close();
   });
 
+  it("paces HD PCM at 640 bytes per 20 ms including a partial final frame", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const sent: Array<{ payload: any; at: number }> = [];
+    const pacer = new InkboxRealtimeAudioPacer(
+      async (payload) => { sent.push({ payload, at: Date.now() }); },
+      () => "stream-hd",
+      () => 32000,
+    );
+    pacer.sendAudio(Buffer.alloc(640 * 8 + 320));
+    pacer.sendAudioDone();
+    await vi.advanceTimersByTimeAsync(200);
+    const media = sent.filter((entry) => entry.payload.event === "media");
+    expect(media.map((entry) => Buffer.from(entry.payload.media.payload, "base64").length)).toEqual([...Array(8).fill(640), 320]);
+    expect(media.map((entry) => entry.at)).toEqual([0, 20, 40, 60, 80, 100, 120, 140, 160]);
+    expect(sent.find((entry) => entry.payload.event === "audio_done")?.at).toBe(170);
+    pacer.close();
+  });
+
   it("prewarms the voice agent path without delivering a visible reply", async () => {
     const { runtime, sendText } = createRuntime();
     const channelRuntime = createChannelRuntime("ready");
@@ -4032,7 +4132,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("suppresses 1:1 source replies after a completed cross-channel action", async () => {
     const { runtime, sendText } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -4057,15 +4157,13 @@ describe("createInkboxSessionBridge", () => {
     for (const [params] of channelRuntime.inbound.dispatchReply.mock.calls) {
       const body = params.ctxPayload.message.bodyForAgent;
       expect(body).toContain("Source-channel completion policy");
-      expect(body).toContain("return exactly [SILENT]");
+      expect(body).toContain("return exactly NO_REPLY");
       expect(body).toContain("did not also request a reply here");
-      expect(body).toContain("Do not omit [SILENT]");
+      expect(body).toContain("set completeSilently=true on that final send tool call");
+      expect(body).toContain("Leave completeSilently false when more work or a reply here remains");
     }
-    expect(channelRuntime.deliveryResults).toHaveLength(2);
-    expect(channelRuntime.deliveryResults).toEqual([
-      expect.objectContaining({ visibleReplySent: false }),
-      expect.objectContaining({ visibleReplySent: false }),
-    ]);
+    // Intentional channel transformation never enters the delivery adapter.
+    expect(channelRuntime.deliveryResults).toHaveLength(0);
     expect(sendText).not.toHaveBeenCalled();
   });
 
@@ -4090,7 +4188,7 @@ describe("createInkboxSessionBridge", () => {
 
     const body = channelRuntime.inbound.dispatchReply.mock.calls[0][0]
       .ctxPayload.message.bodyForAgent;
-    expect(body).toContain("when the user did not also request a reply here");
+    expect(body).toContain("the user did not also request a reply here");
     expect(sendText).toHaveBeenCalledWith({
       to: "+15551234567",
       text: "Bob is bob@example.com.",
@@ -4383,7 +4481,7 @@ describe("createInkboxSessionBridge", () => {
         expect(params.ctxPayload.message.bodyForAgent).toContain(
           "Do not redo work that was already completed on the call.",
         );
-        await params.delivery.deliver({ text: "[SILENT]" });
+        await params.delivery.deliver({ text: "NO_REPLY" });
         return;
       }
       expect(params.ctxPayload.message.bodyForAgent).toContain("reply_mode=voice_tts");
@@ -4431,7 +4529,10 @@ describe("createInkboxSessionBridge", () => {
     expect(dispatchReply).toHaveBeenCalledTimes(2);
   });
 
-  it("bridges raw Inkbox media through the OpenClaw realtime voice provider", async () => {
+  it.each([
+    undefined,
+    { encoding: "L16", sample_rate: 16000, channels: 1 },
+  ])("bridges negotiated Inkbox media %j through the realtime voice provider", async (mediaFormat) => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
@@ -4448,10 +4549,10 @@ describe("createInkboxSessionBridge", () => {
       runtime: runtime as any,
       channelRuntime,
     });
-    const inboundAudio = Buffer.from([0x01, 0x02, 0x03]);
+    const inboundAudio = Buffer.alloc(mediaFormat ? 640 : 160, 0x01);
     const echoedOutboundAudio = Buffer.from([0x09, 0x09, 0x09]);
     const ws = new FakeInkboxWebSocket([
-      JSON.stringify({ event: "start", stream_id: "stream-1" }),
+      JSON.stringify({ event: "start", stream_id: "stream-1", start: { media_format: mediaFormat } }),
       {
         advanceMs: 800,
         message: JSON.stringify({
@@ -4478,11 +4579,13 @@ describe("createInkboxSessionBridge", () => {
       headers: [
         ["x-use-inkbox-text-to-speech", "false"],
         ["x-use-inkbox-speech-to-text", "false"],
+        ["x-inkbox-audio-format", "pcm_s16le_16000"],
       ],
     });
     const realtimeSession = realtimeMock.sessions[0].session;
     const params = realtimeMock.sessions[0].params;
     expect(realtimeSession.connect).toHaveBeenCalledTimes(1);
+    expect(params.audioFormat).toEqual({ encoding: "pcm16", sampleRateHz: 24000, channels: 1 });
     expect(realtimeMock.resolveCalls.at(-1)).toEqual(
       expect.objectContaining({
         configuredProviderId: "openai",
@@ -4524,7 +4627,8 @@ describe("createInkboxSessionBridge", () => {
       "Greet there in one short sentence and ask how you can help.",
     );
     expect(realtimeSession.sendAudio).not.toHaveBeenCalledWith(echoedOutboundAudio);
-    expect(realtimeSession.sendAudio).toHaveBeenCalledWith(inboundAudio);
+    expect(realtimeSession.sendAudio).toHaveBeenCalledWith(expect.any(Buffer));
+    expect(realtimeSession.sendAudio.mock.calls[0][0].length).toBeGreaterThan(inboundAudio.length);
     expect(realtimeSession.setMediaTimestamp).toHaveBeenCalledWith(40);
     await Promise.resolve();
     await Promise.resolve();
@@ -4537,7 +4641,7 @@ describe("createInkboxSessionBridge", () => {
       "Do not redo work that was already completed on the call.",
     );
     expect(reflectionRun.ctxPayload.message.bodyForAgent).toContain(
-      "If there is nothing still needed, return [SILENT].",
+      "If there is nothing still needed, return NO_REPLY.",
     );
 
     const frames = parseSentTextFrames(ws);
@@ -4576,8 +4680,8 @@ describe("createInkboxSessionBridge", () => {
       runtime: runtime as any,
       channelRuntime,
     });
-    const setupNoise = Buffer.from([0x01]);
-    const callerAudio = Buffer.from([0x02]);
+    const setupNoise = Buffer.alloc(160, 0x01);
+    const callerAudio = Buffer.alloc(160, 0x02);
     const ws = new FakeInkboxWebSocket([
       JSON.stringify({ event: "start", stream_id: "stream-1" }),
       JSON.stringify({
@@ -4600,7 +4704,8 @@ describe("createInkboxSessionBridge", () => {
 
     const realtimeSession = realtimeMock.sessions[0].session;
     expect(realtimeSession.sendAudio).not.toHaveBeenCalledWith(setupNoise);
-    expect(realtimeSession.sendAudio).toHaveBeenCalledWith(callerAudio);
+    expect(realtimeSession.sendAudio).toHaveBeenCalledTimes(1);
+    expect(realtimeSession.sendAudio.mock.calls[0][0].length).toBeGreaterThan(callerAudio.length);
   });
 
   it("loads outbound call purpose into realtime greeting instructions", async () => {
@@ -4935,7 +5040,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5021,7 +5126,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       // Hold the call open past the consult timeout backstop, then end it.
@@ -5193,7 +5298,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5254,7 +5359,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5339,7 +5444,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5413,7 +5518,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
       JSON.stringify({ event: "stop" }),
@@ -5492,7 +5597,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5592,7 +5697,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5699,7 +5804,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5755,7 +5860,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5809,7 +5914,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5874,7 +5979,7 @@ describe("createInkboxSessionBridge", () => {
         message: JSON.stringify({
           event: "media",
           stream_id: "stream-1",
-          media: { payload: Buffer.from([0x01]).toString("base64"), track: "inbound" },
+          media: { payload: Buffer.alloc(160, 0x01).toString("base64"), track: "inbound" },
         }),
       },
     ], undefined, true);
@@ -5902,7 +6007,7 @@ describe("createInkboxSessionBridge", () => {
         },
       ],
     });
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -6082,7 +6187,7 @@ describe("createInkboxSessionBridge", () => {
         lookup: vi.fn(async () => [{ id: "sender", preferredName: "Sender" }]),
       },
     });
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
@@ -6112,7 +6217,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("escapes contact-memory delimiters in text, iMessage, and reaction content", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
@@ -6173,7 +6278,7 @@ describe("createInkboxSessionBridge", () => {
     expect(body).toContain("participants=+15551234567,+15557654321");
     expect(body).toContain("reply_mode=conversation_id");
     expect(body).toContain("Group iMessage response policy");
-    expect(body).toContain("return exactly [SILENT]");
+    expect(body).toContain("return exactly NO_REPLY");
     expect(body).toContain("Dinner moved to 7.");
     // One shared context: the conversation keys the chat, not the sender.
     expect(run.ctxPayload.conversation.id).toBe("imessage:imconv-777");
@@ -6202,7 +6307,7 @@ describe("createInkboxSessionBridge", () => {
         ]),
       },
     });
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
@@ -6376,7 +6481,7 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "[inkbox:imessage_reaction from=+15551234567 reaction=question conversation_id=imconv-123 target_message_id=im-target-9",
     );
-    expect(run.ctxPayload.message.bodyForAgent).toContain("return exactly [SILENT]");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("return exactly NO_REPLY");
     expect(run.ctxPayload.reply.to).toBe("imessage:imconv-123");
     expect(sendIMessage).toHaveBeenCalledWith({
       conversationId: "imconv-123",
@@ -6388,7 +6493,7 @@ describe("createInkboxSessionBridge", () => {
 
   it("uses the sole matched contact for iMessage and reaction memories", async () => {
     const { runtime } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
@@ -6685,9 +6790,9 @@ describe("createInkboxSessionBridge", () => {
     expect(body).toContain('"Prefers direct answers."');
   });
 
-  it("does not promise a reply for non-question tapbacks and honors [SILENT]", async () => {
+  it("does not promise a reply for non-question tapbacks and honors NO_REPLY", async () => {
     const { runtime, sendIMessage, sendIMessageTyping } = createRuntime();
-    const channelRuntime = createChannelRuntime("[SILENT]");
+    const channelRuntime = createChannelRuntime("NO_REPLY");
     const bridge = createInkboxSessionBridge({
       cfg: {},
       account: {
