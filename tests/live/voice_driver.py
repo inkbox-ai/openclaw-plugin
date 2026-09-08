@@ -58,8 +58,6 @@ SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "5"))
 # must send an explicit stop or the leg lingers until the server max-duration cap.
 LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
 ANSWER_SETTLE_S = float(os.environ.get("VOICE_DRIVER_ANSWER_SETTLE", "0"))
-REASK_S = float(os.environ.get("VOICE_DRIVER_REASK", "0"))
-REASK_LINE = os.environ.get("VOICE_DRIVER_REASK_LINE", LINE)
 
 app = FastAPI()
 
@@ -83,7 +81,6 @@ async def phone_media_ws(ws: WebSocket) -> None:
     spoke = asyncio.Event()
     answered = asyncio.Event()
     convo: asyncio.Task | None = None
-    last_heard = 0.0
 
     async def _say(text: str) -> None:
         await ws.send_text(json.dumps({"event": "text", "delta": text}))
@@ -101,20 +98,10 @@ async def phone_media_ws(ws: WebSocket) -> None:
         await _say(GREETING)
         await asyncio.sleep(SPEAK_AFTER_S)
         await _speak(LINE)
-        deadline = time.monotonic() + LISTEN_S
-        last_prompt = time.monotonic()
-        reasks = 0
-        while not answered.is_set() and time.monotonic() < deadline:
-            try:
-                await asyncio.wait_for(answered.wait(), timeout=min(1, max(0, deadline - time.monotonic())))
-            except asyncio.TimeoutError:
-                pass
-            if (not answered.is_set() and REASK_S > 0 and reasks < 2
-                    and time.monotonic() < deadline
-                    and time.monotonic() - max(last_prompt, last_heard) >= REASK_S):
-                await _say(REASK_LINE)
-                last_prompt = time.monotonic()
-                reasks += 1
+        try:
+            await asyncio.wait_for(answered.wait(), timeout=LISTEN_S)
+        except asyncio.TimeoutError:
+            pass
         if answered.is_set() and ANSWER_SETTLE_S > 0:
             await asyncio.sleep(ANSWER_SETTLE_S)
         try:
@@ -132,7 +119,6 @@ async def phone_media_ws(ws: WebSocket) -> None:
                 log.info("call started")
                 convo = asyncio.create_task(_run_turn())
             elif kind == "transcript" and ev.get("is_final"):
-                last_heard = time.monotonic()
                 text = ev.get("text") or ""
                 log.info("heard final agent transcript")
                 if "@" in text or "example" in text.lower().replace(" ", ""):
