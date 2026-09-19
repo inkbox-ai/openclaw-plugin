@@ -178,6 +178,7 @@ jobs:
             echo "gateway_process=stopped"
           fi
           test -s "$RUNNER_TEMP/gateway.log" && echo "gateway_log=present" || echo "gateway_log=empty"
+          export OPENCLAW_HOST_DIST="$(npm root -g)/openclaw/dist"
           python3 - <<'PY'
           import json
           import os
@@ -185,7 +186,7 @@ jobs:
           from pathlib import Path
 
           sys.path.insert(0, "tests/live")
-          from a2a_driver import _a2a_failure_shapes, _a2a_host_failure_counts
+          from a2a_driver import _a2a_failure_shapes, _a2a_host_failure_counts, _a2a_host_error_sites
 
           log_path = Path(os.environ["RUNNER_TEMP"]) / "gateway.log"
           log = log_path.read_text(errors="replace") if log_path.exists() else ""
@@ -193,6 +194,11 @@ jobs:
               print(shape)
           for name, count in _a2a_host_failure_counts(log).items():
               print(f"{name}={count}")
+          try:
+              for shape in _a2a_host_error_sites(log, Path(os.environ["OPENCLAW_HOST_DIST"])):
+                  print("host_error_site_shape=" + json.dumps(shape))
+          except (OSError, ValueError):
+              print("host_error_sites_unavailable=true")
           for name, marker in {
               "a2a_subscribed": "A2A events subscribed",
               "a2a_subscription_failure": "A2A subscription reconcile failed",

@@ -7,6 +7,7 @@ import os
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from inkbox import Inkbox
@@ -55,6 +56,34 @@ def _a2a_host_failure_counts(log: str) -> dict[str, int]:
     }
     return {name: len(re.findall(pattern, plain_log, re.IGNORECASE))
             for name, pattern in signatures.items()}
+
+
+def _a2a_host_error_sites(log: str, host_dist: Path) -> list[dict[str, Any]]:
+    """Locate matching public host error templates without returning error text.
+
+    This is a diagnostic candidate location, not proof of the throwing frame.
+    Only literal prefixes from new Error-family constructors are considered;
+    dynamic values, source snippets, and absolute paths never leave this helper.
+    """
+    errors = re.findall(r"Embedded agent failed before reply: ([^\r\n]*)", ANSI_SGR_RE.sub("", log))[-20:]
+    if not errors:
+        return []
+    literal = re.compile(r"\bnew [A-Za-z0-9_]*Error\(\s*([\"'`])([^\"'`\\$\r\n]{12,})(?:[\"'`]|\$\{)")
+    candidates: list[tuple[int, str, str]] = []
+    for path in sorted(host_dist.iterdir()):
+        if not path.is_file() or not re.fullmatch(r"[A-Za-z0-9_.-]+\.m?js", path.name):
+            continue
+        for number, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            for match in literal.finditer(line):
+                prefix = match.group(2)
+                candidates.append((len(prefix), prefix, f"{path.name}:{number}"))
+    result = []
+    for error in errors:
+        matches = [(length, site) for length, prefix, site in candidates if error.startswith(prefix)]
+        longest = max((length for length, _site in matches), default=0)
+        sites = sorted({site for length, site in matches if length == longest})
+        result.append({"matched": bool(sites), "candidate_sites": sites[:3], "site_count": len(sites)})
+    return result
 
 
 TERMINAL_PROGRESS_RE = re.compile(

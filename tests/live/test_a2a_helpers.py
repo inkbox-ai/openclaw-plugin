@@ -54,6 +54,25 @@ def test_host_failure_counts_emit_only_fixed_keys_and_counts():
     assert "private" not in repr(counts)
 
 
+def test_host_error_sites_return_only_public_locations_not_dynamic_error_text(tmp_path):
+    (tmp_path / "runtime-example.mjs").write_text(
+        'throw new Error(`Unknown model transport for ${privateValue}`);\n'
+        'throw new Error(`Unknown model ${privateValue}`);\n'
+    )
+    (tmp_path / "ignored.txt").write_text('throw new Error("private full error contents");')
+    shapes = a2a_driver._a2a_host_error_sites(
+        "\x1b[31mEmbedded agent failed before reply: Unknown model transport for private-secret\x1b[39m\n"
+        "Embedded agent failed before reply: private unrecognized error\n",
+        tmp_path,
+    )
+    assert shapes == [
+        {"matched": True, "candidate_sites": ["runtime-example.mjs:1"], "site_count": 1},
+        {"matched": False, "candidate_sites": [], "site_count": 0},
+    ]
+    assert "private" not in repr(shapes)
+    assert str(tmp_path) not in repr(shapes)
+
+
 class _Identity:
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
