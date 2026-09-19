@@ -21,7 +21,7 @@ Env:
   VOICE_DRIVER_LINE       the one line the driver speaks (default below)
   VOICE_DRIVER_ANSWER_SETTLE  seconds to keep media open after hearing the answer
   VOICE_DRIVER_TEST_OWNS_HANGUP  leave completion hangup to the asserting test
-  VOICE_DRIVER_WAIT_FOR_PEER  require initial peer speech before the quiet gate
+  VOICE_DRIVER_WAIT_FOR_PEER  allow a bounded wait for an initial peer greeting
 """
 
 from __future__ import annotations
@@ -88,7 +88,11 @@ async def _wait_for_greeting(state: dict[str, float]) -> bool:
         if quiet_in <= 0 and (not WAIT_FOR_PEER or state["last_heard"] > 0):
             return True
         if now >= deadline:
-            return False
+            # A silent peer may be waiting for our actual request. After the
+            # bounded greeting opportunity, ask once instead of hanging up
+            # without ever exercising the scenario. Ongoing speech still fails
+            # the quiet gate; this does not permit talking over a late greeting.
+            return state["last_heard"] == 0
         await asyncio.sleep(min(max(quiet_in, 1.0), deadline - now))
 
 

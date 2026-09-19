@@ -224,21 +224,27 @@ def test_partial_transcript_extends_quiet_gate_before_final_transcript(driver, m
     assert observed["stopped"]
 
 
-def test_required_peer_greeting_has_bounded_wait(driver, monkeypatch):
+def test_silent_peer_gets_request_after_bounded_greeting_wait(driver, monkeypatch):
     state = {"last_heard": 0.0}
     now, _pauses = _clock(driver, monkeypatch, state)
     monkeypatch.setattr(driver, "WAIT_FOR_PEER", True)
 
-    assert not asyncio.run(driver._wait_for_greeting(state))
+    assert asyncio.run(driver._wait_for_greeting(state))
     assert now() == 130
 
 
 @pytest.mark.parametrize(
-    "test_owns_hangup, external_stop, expected_stops",
-    [(False, 130, [120.0]), (True, 130, []), (True, None, [296.0])],
+    "test_owns_hangup, external_stop, peer_greeting, expected_request, expected_stops",
+    [
+        (False, 130, True, 116.0, [120.0]),
+        (True, 130, True, 116.0, []),
+        (True, None, True, 116.0, [296.0]),
+        (True, 145, False, 130.0, []),
+    ],
 )
 def test_contact_peer_waits_for_late_greeting_and_test_owned_completion(
-    driver, monkeypatch, test_owns_hangup, external_stop, expected_stops,
+    driver, monkeypatch, test_owns_hangup, external_stop, peer_greeting,
+    expected_request, expected_stops,
 ):
     now = 100.0
     pending = [
@@ -246,7 +252,7 @@ def test_contact_peer_waits_for_late_greeting_and_test_owned_completion(
         (110, {"event": "transcript", "text": "Hi, caller", "is_final": True}),
         # An incomplete email-like answer must not stop a test-owned call.
         (120, {"event": "transcript", "text": "example", "is_final": True}),
-    ]
+    ] if peer_greeting else []
     if external_stop is not None:
         pending.append((external_stop, {"event": "stop"}))
     incoming = None
@@ -309,7 +315,7 @@ def test_contact_peer_waits_for_late_greeting_and_test_owned_completion(
 
     sent = asyncio.run(run())
     assert [(when, event["delta"]) for when, event in sent if "delta" in event] == [
-        (100.0, driver.GREETING), (116.0, driver.LINE),
+        (100.0, driver.GREETING), (expected_request, driver.LINE),
     ]
     stops = [when for when, event in sent if event["event"] == "stop"]
     assert stops == expected_stops
