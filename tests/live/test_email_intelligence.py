@@ -233,10 +233,14 @@ def test_reports_own_identity(ctx):
             and display_name.casefold() in candidate and _phone_present(aut_phone, candidate)
         ),
     )
-    assert handle in body, "reply missing the expected handle"
-    assert aut_email in body, "reply missing the expected email"
-    assert display_name.casefold() in body, "reply missing the expected display name"
-    assert _phone_present(aut_phone, body), "reply missing the expected phone"
+    handle_matches = handle in body
+    email_matches = aut_email in body
+    display_name_matches = display_name.casefold() in body
+    phone_matches = _phone_present(aut_phone, body)
+    assert handle_matches, "reply missing the expected handle"
+    assert email_matches, "reply missing the expected email"
+    assert display_name_matches, "reply missing the expected display name"
+    assert phone_matches, "reply missing the expected phone"
 
 
 def test_reports_sender_name(ctx):

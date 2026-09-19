@@ -448,14 +448,15 @@ def _outbound_texts(aut, aut_number_id, since):
 
 def _assert_hosted_sms_rows(rows, marker, remote_phone, ended_at):
     """Validate every fresh outbound side effect, not only marker matches."""
-    assert len(rows) <= 1, f"hosted call sent {len(rows)} SMS messages; expected one"
+    row_count = len(rows)
+    assert row_count <= 1, f"hosted call sent {row_count} SMS messages; expected one"
     if not rows:
         return False
     message = rows[0]
-    assert _sms_target_numbers(message) == {_digits(remote_phone)}, \
-        "hosted SMS has an unexpected recipient"
-    assert _normalized_spoken_text(getattr(message, "text", "")) == _normalized_spoken_text(marker), \
-        "hosted SMS body is not exactly the requested words"
+    recipient_matches = _sms_target_numbers(message) == {_digits(remote_phone)}
+    body_matches = _normalized_spoken_text(getattr(message, "text", "")) == _normalized_spoken_text(marker)
+    assert recipient_matches, "hosted SMS has an unexpected recipient"
+    assert body_matches, "hosted SMS body is not exactly the requested words"
     created_at = _message_created_at(message)
     assert created_at is not None, "hosted SMS has no authoritative creation timestamp"
     assert ended_at is not None, "hosted call has no authoritative end timestamp"
@@ -654,9 +655,10 @@ def _wait_hosted_sms_settlement(
             # observed for its full duration without exceeding the shared
             # scenario budget.
             time.sleep(duplicate_grace)
-            assert _assert_hosted_sms_rows(
+            still_exact = _assert_hosted_sms_rows(
                 fresh_outbound(), HOSTED_POST_CALL_MARKER, remote_phone, ended_at,
-            ), "hosted SMS disappeared during settlement"
+            )
+            assert still_exact, "hosted SMS disappeared during settlement"
             return
         if registry_entry and registry_entry.get("state") == "failed":
             pytest.fail("hosted SMS settlement failed; " + repr(

@@ -348,8 +348,11 @@ def test_hosted_waiter_requires_exact_body_all_sends_and_post_call_time(
         )
 
     if expected_error:
-        with pytest.raises(AssertionError, match=expected_error):
+        with pytest.raises(AssertionError, match=expected_error) as error:
             run()
+        assert marker not in str(error.value)
+        assert phone not in str(error.value)
+        assert "Unrequested confirmation" not in str(error.value)
     else:
         run()
         assert reads == 2, "successful proof must include the duplicate-grace reread"

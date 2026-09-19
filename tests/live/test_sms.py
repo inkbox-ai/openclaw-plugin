@@ -243,7 +243,8 @@ def test_sms_reachability(sms):
 @real_only
 def test_sms_basic_reply(sms):
     body = _ask_sms(sms, "Please reply OK to confirm you got this text.")
-    assert re.search(r"\bok\b", body, re.IGNORECASE), "reply did not confirm OK"
+    acknowledged = re.search(r"\bok\b", body, re.IGNORECASE) is not None
+    assert acknowledged, "reply did not confirm OK"
 
 
 @real_only
@@ -252,8 +253,10 @@ def test_sms_reports_own_identity(sms):
 
     aut_email = sms["aut"].mailboxes.list()[0].email_address
     body = _ask_sms(sms, "Reply with just your Inkbox email address and phone number — short.")
-    assert aut_email in body, "reply missing the expected email"
-    assert _phone_present(sms["aut_phone"], body), "reply missing the full expected phone"
+    email_matches = aut_email in body
+    phone_matches = _phone_present(sms["aut_phone"], body)
+    assert email_matches, "reply missing the expected email"
+    assert phone_matches, "reply missing the full expected phone"
 
 
 @real_only
@@ -265,7 +268,8 @@ def test_sms_reports_sender_details(sms):
     name = (getattr(matches[0], "preferred_name", None) or getattr(matches[0], "given_name", None) or "")
     assert name, "synthetic sender contact fixture has no name"
     body = _ask_sms(sms, "Who am I to you? Tell me what you have on file about me.")
-    assert name.lower() in body, "reply missing the expected sender name"
+    name_matches = name.lower() in body
+    assert name_matches, "reply missing the expected sender name"
 
 
 @real_only
