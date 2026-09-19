@@ -253,23 +253,29 @@ def test_email_request_gets_sms_response(xc):
     )
 
 
-def _inbound_emails_from_aut(remote, remote_email: str, aut_email: str):
+def _inbound_emails_from_aut(
+    remote, remote_email: str, aut_email: str, since: datetime | None = None
+):
     from inkbox.mail.types import MessageDirection
 
     return [
         message for message in remote.messages.list(
-            remote_email, direction=MessageDirection.INBOUND
+            remote_email, direction=MessageDirection.INBOUND,
+            start_datetime=since.isoformat() if since is not None else None,
         )
         if _email_address(getattr(message, "from_address", ""))
         == aut_email.casefold()
     ]
 
 
-def _outbound_emails(aut, aut_email: str):
+def _outbound_emails(aut, aut_email: str, since: datetime | None = None):
     from inkbox.mail.types import MessageDirection
 
     return list(
-        aut.messages.list(aut_email, direction=MessageDirection.OUTBOUND)
+        aut.messages.list(
+            aut_email, direction=MessageDirection.OUTBOUND,
+            start_datetime=since.isoformat() if since is not None else None,
+        )
     )
 
 
@@ -317,13 +323,16 @@ def _observe_email_run(
 ):
     driver_rows = _fresh(
         _inbound_emails_from_aut(
-            xc["remote"], xc["remote_email"], xc["aut_email"]
+            xc["remote"], xc["remote_email"], xc["aut_email"],
+            since=baselines["driver"][1],
         ),
         baselines["driver"][0],
         baselines["driver"][1],
     )
     aut_rows = _fresh(
-        _outbound_emails(xc["aut"], xc["aut_email"]),
+        _outbound_emails(
+            xc["aut"], xc["aut_email"], since=baselines["aut"][1]
+        ),
         baselines["aut"][0],
         baselines["aut"][1],
     )
@@ -375,6 +384,19 @@ def _observe_email_run(
         len(driver_sms_rows),
         len(aut_sms_rows),
     )
+
+
+def _verify_email_settlement(xc, baselines, token, prior_tokens=()):
+    """Recheck both owners after delivery grace and after the source turn settles."""
+    for delay in (EMAIL_DUPLICATE_GRACE_S, POST_TOOL_TURN_SETTLE_S):
+        time.sleep(delay)
+        state, detail, counts = _observe_email_run(
+            xc, baselines, token, prior_tokens
+        )
+        assert state == "success", (
+            "email settlement found a late/duplicate/wrong-channel effect: "
+            f"{detail} counts={counts}"
+        )
 
 
 def test_sms_request_gets_email_response(xc):
@@ -432,18 +454,9 @@ def test_sms_request_gets_email_response(xc):
                 tuple(attempt_tokens[:-1]),
             )
             if state == "success":
-                time.sleep(EMAIL_DUPLICATE_GRACE_S)
-                state, detail, counts = _observe_email_run(
-                    xc,
-                    run_baselines,
-                    attempt_tokens[-1],
-                    tuple(attempt_tokens[:-1]),
+                _verify_email_settlement(
+                    xc, run_baselines, attempt_tokens[-1], tuple(attempt_tokens[:-1])
                 )
-                assert state == "success", (
-                    "late email side effects invalidated the exact-one result: "
-                    f"{detail}"
-                )
-                _settle_after_tool_side_effect()
                 return
             if state != "empty":
                 pytest.fail(
@@ -478,15 +491,9 @@ def test_sms_request_gets_email_response(xc):
                     f"unsafe external effect: {detail} counts={counts}"
                 )
             if state == "success":
-                time.sleep(EMAIL_DUPLICATE_GRACE_S)
-                state, detail, counts = _observe_email_run(
+                _verify_email_settlement(
                     xc, run_baselines, token, tuple(attempt_tokens[:-1])
                 )
-                assert state == "success", (
-                    "email duplicate grace found a late/duplicate/wrong-channel "
-                    f"effect: {detail} counts={counts}"
-                )
-                _settle_after_tool_side_effect()
                 return
             time.sleep(
                 min(POLL_EVERY_S, max(0.0, attempt_deadline - time.monotonic()))
@@ -495,6 +502,14 @@ def test_sms_request_gets_email_response(xc):
         state, detail, counts = _observe_email_run(
             xc, run_baselines, token, tuple(attempt_tokens[:-1])
         )
+        # This final observation can be the first to see both owners. The
+        # observation cutoff reserves settlement time; it is not a failure of
+        # a successful delivery. Apply the same strict settlement checks.
+        if state == "success":
+            _verify_email_settlement(
+                xc, run_baselines, token, tuple(attempt_tokens[:-1])
+            )
+            return
         attempt_fresh = {
             name: len(
                 _fresh(
