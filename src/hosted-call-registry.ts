@@ -3,6 +3,7 @@ import { chmod, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import { ensureStateDir, statePaths } from "./state.js";
+import { runtimeState } from "./runtime-state.js";
 
 export interface HostedCallRegistryEntry {
   accountId: string;
@@ -28,7 +29,12 @@ export interface HostedSmsJournalEntry {
 export type HostedCallRegistry = Record<string, HostedCallRegistryEntry>;
 
 const PROCESS_OWNER_ID = randomUUID();
-let writeChain: Promise<void> = Promise.resolve();
+// Channel completion and tool hooks can come from different module loads in
+// one host process. Atomic rename alone does not serialize their read/modify/
+// write cycles: a late journal write could otherwise undo a completed receipt.
+const writes = runtimeState("hosted-call-registry-writes-v1", () => ({
+  chain: Promise.resolve() as Promise<void>,
+}));
 
 function boundedString(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -114,8 +120,8 @@ async function mutateHostedCallRegistry(
   mutate: (registry: HostedCallRegistry, now: number) => void,
 ): Promise<void> {
   let release!: () => void;
-  const previous = writeChain;
-  writeChain = new Promise<void>((resolve) => {
+  const previous = writes.chain;
+  writes.chain = new Promise<void>((resolve) => {
     release = resolve;
   });
   await previous;
