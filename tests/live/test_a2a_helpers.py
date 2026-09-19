@@ -33,6 +33,27 @@ def test_failure_shapes_handle_host_console_color_without_exposing_adjacent_pros
     assert a2a_driver._a2a_failure_shapes(f"{shape}\x1b[39mprivate") == []
 
 
+def test_host_failure_counts_emit_only_fixed_keys_and_counts():
+    log = (
+        "\x1b[31mEmbedded agent failed before reply: private request\x1b[39m\n"
+        "FailoverError: rate_limit_exceeded private provider details\n"
+        "fetch failed: private endpoint\n"
+        "HealthCheckRegistrationError private plugin details\n"
+    )
+    counts = a2a_driver._a2a_host_failure_counts(log)
+    assert counts == {
+        "host_before_reply_failure": 1,
+        "host_failover_error": 1,
+        "host_rate_limit_signature": 1,
+        "host_auth_signature": 0,
+        "host_transport_signature": 1,
+        "host_session_lock_signature": 0,
+        "host_tool_schema_signature": 0,
+        "host_plugin_registration_signature": 1,
+    }
+    assert "private" not in repr(counts)
+
+
 class _Identity:
     def __init__(self, enabled: bool = True):
         self.enabled = enabled

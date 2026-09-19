@@ -36,6 +36,27 @@ def _a2a_failure_shapes(log: str) -> list[str]:
     return [match.group(0) for match in A2A_FAILURE_SHAPE_RE.finditer(plain_log)][-20:]
 
 
+def _a2a_host_failure_counts(log: str) -> dict[str, int]:
+    """Count fixed host failure signatures; never return matched log contents.
+
+    These describe the job window, not a correlated task or definitive cause.
+    Host error replies expose isError but do not preserve a typed failure code.
+    """
+    plain_log = ANSI_SGR_RE.sub("", log)
+    signatures = {
+        "host_before_reply_failure": r"Embedded agent failed before reply:",
+        "host_failover_error": r"\bFailoverError\b",
+        "host_rate_limit_signature": r"\brate_limit(?:_error|_exceeded)?\b|\brate limit(?:ed| exceeded)?\b",
+        "host_auth_signature": r"\bauthentication_error\b|\binvalid_api_key\b|\bNo API key found\b",
+        "host_transport_signature": r"\bfetch failed\b|\bETIMEDOUT\b|\bECONNRESET\b",
+        "host_session_lock_signature": r"\bsession file locked\b|\bSessionLockTimeoutError\b",
+        "host_tool_schema_signature": r"\bInvalid schema for function\b|\binvalid_function_parameters\b",
+        "host_plugin_registration_signature": r"\bHealthCheckRegistrationError\b",
+    }
+    return {name: len(re.findall(pattern, plain_log, re.IGNORECASE))
+            for name, pattern in signatures.items()}
+
+
 TERMINAL_PROGRESS_RE = re.compile(
     r"\b(?:done|complete|completed|finished|failed|failure|blocked|"
     r"final\s+(?:answer|result)|cannot\s+(?:complete|continue)|"

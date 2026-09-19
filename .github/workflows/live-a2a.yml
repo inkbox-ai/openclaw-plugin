@@ -185,12 +185,14 @@ jobs:
           from pathlib import Path
 
           sys.path.insert(0, "tests/live")
-          from a2a_driver import _a2a_failure_shapes
+          from a2a_driver import _a2a_failure_shapes, _a2a_host_failure_counts
 
           log_path = Path(os.environ["RUNNER_TEMP"]) / "gateway.log"
           log = log_path.read_text(errors="replace") if log_path.exists() else ""
           for shape in _a2a_failure_shapes(log):
               print(shape)
+          for name, count in _a2a_host_failure_counts(log).items():
+              print(f"{name}={count}")
           for name, marker in {
               "a2a_subscribed": "A2A events subscribed",
               "a2a_subscription_failure": "A2A subscription reconcile failed",
