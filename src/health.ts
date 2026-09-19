@@ -1,5 +1,6 @@
 import { Inkbox, InkboxAPIError } from "@inkbox/sdk";
 import {
+  getHealthCheck,
   registerHealthCheck,
   type HealthCheck,
   type HealthCheckContext,
@@ -576,7 +577,6 @@ async function repairCachedState(
 }
 
 const cache = new WeakMap<object, Promise<readonly HealthFinding[]>>();
-let registered = false;
 
 async function detectCached(ctx: HealthCheckContext): Promise<readonly HealthFinding[]> {
   let promise = cache.get(ctx);
@@ -604,11 +604,10 @@ function makeHealthCheck(id: InkboxCheckId): HealthCheck {
 }
 
 export function registerInkboxHealthChecks(): void {
-  if (registered) {
-    return;
-  }
-  registered = true;
   for (const id of CHECKS) {
+    // The host can reload the plugin while retaining its health registry.
+    const existing = getHealthCheck(id);
+    if (existing?.kind === "plugin" && existing.source === SOURCE) continue;
     registerHealthCheck(makeHealthCheck(id));
   }
 }

@@ -25,7 +25,7 @@ const HOST_SYMBOLS: Record<string, string[]> = {
     "createMessageReceiptFromOutboundResults",
     "defineChannelMessageAdapter",
   ],
-  "openclaw/plugin-sdk/health": ["registerHealthCheck"],
+  "openclaw/plugin-sdk/health": ["getHealthCheck", "registerHealthCheck"],
   "openclaw/plugin-sdk/inbound-envelope": [
     "resolveInboundRouteEnvelopeBuilderWithRuntime",
   ],
