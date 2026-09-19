@@ -1,7 +1,6 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { wrapToolWithBeforeToolCallHook } from "openclaw/plugin-sdk/agent-harness-runtime";
@@ -10,22 +9,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { beginSilentSendCapture, bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "../../src/silent-send-capture.js";
+import { hostFunction } from "./host-function.js";
 
 const require = createRequire(import.meta.url);
 const hostDist = dirname(dirname(require.resolve("openclaw/plugin-sdk/reply-runtime")));
 const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json"), "utf8")).version;
 const baselineWithoutFinalizer = hostVersion === "2026.5.27";
-
-async function hostFunction(bundle: string, name: string): Promise<any> {
-  const files = readdirSync(hostDist).filter((file) => file.startsWith(`${bundle}-`) &&
-    (file.endsWith(".js") || file.endsWith(".mjs")) &&
-    readFileSync(join(hostDist, file), "utf8").includes(`function ${name}(`));
-  expect(files, `Expected one host ${bundle} bundle`).toHaveLength(1);
-  const exports = await import(pathToFileURL(join(hostDist, files[0])).href);
-  const fn = Object.values(exports).find((value) => typeof value === "function" && value.name === name);
-  expect(fn, `Missing host ${name} contract`).toBeTypeOf("function");
-  return fn;
-}
 
 function settledAttempt(results: Array<{ terminate?: boolean; isError?: boolean }>) {
   const assistant = {
@@ -57,14 +46,14 @@ describe("public host tool-result completion envelope", () => {
 
 describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch completion", () => {
   it.each([true, false])("handles real outer/nested transport hooks with send success=%s", async (succeeds) => {
-    const initialize = await hostFunction("hook-runner-global", "initializeGlobalHookRunner");
-    const reset = await hostFunction("hook-runner-global", "resetGlobalHookRunner");
-    const currentRegistry = await hostFunction("hook-runner-global", "getGlobalHookRunnerRegistry");
-    const getRunner = await hostFunction("hook-runner-global", "getGlobalHookRunner");
+    const initialize = await hostFunction("initializeGlobalHookRunner");
+    const reset = await hostFunction("resetGlobalHookRunner");
+    const currentRegistry = await hostFunction("getGlobalHookRunnerRegistry");
+    const getRunner = await hostFunction("getGlobalHookRunner");
     const priorRegistry = currentRegistry();
-    const catalogRef = (await hostFunction("local-model-lean", "createToolSearchCatalogRef"))();
-    const register = await hostFunction("local-model-lean", "registerHeadlessToolSearchCatalog");
-    const createControls = await hostFunction("local-model-lean", "createToolSearchTools");
+    const catalogRef = (await hostFunction("createToolSearchCatalogRef"))();
+    const register = await hostFunction("registerHeadlessToolSearchCatalog");
+    const createControls = await hostFunction("createToolSearchTools");
     const context = { sessionKey: `agent:main:inkbox:direct:${randomUUID()}`, runId: randomUUID() };
     const events: Array<{ toolName: string; toolCallId: string; runId: string }> = [];
     const receipt = { accepted: true, completeSilently: true };
@@ -151,7 +140,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     }
   });
   it("recognizes only entirely successful, explicitly terminating batches", async () => {
-    const evidence = await hostFunction("builtin-openclaw", "resolveSettledToolBatchEvidence");
+    const evidence = await hostFunction("resolveSettledToolBatchEvidence");
     expect(evidence(settledAttempt([{ terminate: true }])).intentionalTermination).toBe(true);
     expect(evidence(settledAttempt([{ terminate: true }, { terminate: true }])).intentionalTermination).toBe(true);
     expect(evidence(settledAttempt([{ terminate: true }, {}])).intentionalTermination).toBe(false);
@@ -160,7 +149,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
   });
 
   it("skips isolated finalization only for intentional completed actions", async () => {
-    const continuation = await hostFunction("builtin-openclaw", "resolveSettledToolTerminalContinuationInstruction");
+    const continuation = await hostFunction("resolveSettledToolTerminalContinuationInstruction");
     const input = { executionContract: "strict-agentic", allowEmptyStopContinuation: true, payloadCount: 0, aborted: false, timedOut: false };
     expect(continuation({ ...input, attempt: settledAttempt([{ terminate: true }]) })).toBeNull();
     expect(continuation({ ...input, attempt: settledAttempt([{}]) })).toBeTypeOf("string");
@@ -168,8 +157,8 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
   });
 
   it("does not misclassify intentional termination as an empty interactive failure", async () => {
-    const classify = await hostFunction("result-fallback-classifier", "hasIntentionalTerminalCompletion");
-    const empty = await hostFunction("reply-admission-ticket", "buildEmptyInteractiveReplyPayload");
+    const classify = await hostFunction("hasIntentionalTerminalCompletion");
+    const empty = await hostFunction("buildEmptyInteractiveReplyPayload");
     const result = { meta: { intentionalTerminalCompletion: "tool-batch" } };
     expect(classify(result)).toBe(true);
     expect(empty({ isInteractive: true, hasIntentionalTerminalCompletion: classify(result) })).toBeUndefined();
@@ -177,8 +166,8 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
   });
 
   it("reproduces the outer dispatch propagation gap without inventing visible delivery", async () => {
-    const classify = await hostFunction("result-fallback-classifier", "hasDeliberateSilentTerminalReply");
-    const finalize = await hostFunction("dispatch-from-config.finalize", "finalizeDispatchAndAudit");
+    const classify = await hostFunction("hasDeliberateSilentTerminalReply");
+    const finalize = await hostFunction("finalizeDispatchAndAudit");
     const route = vi.fn(async () => ({ ok: true }));
     const deliberateSilentTerminalReply = classify({ meta: { intentionalTerminalCompletion: "tool-batch" } });
     expect(deliberateSilentTerminalReply).toBe(false);

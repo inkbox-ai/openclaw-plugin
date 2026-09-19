@@ -1,29 +1,14 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseAgentSessionKey } from "openclaw/plugin-sdk/routing";
 import { describe, expect, it } from "vitest";
 import { canonicalInkboxSessionOverride } from "../../src/session-key.js";
+import { hostFunction } from "./host-function.js";
 
 const require = createRequire(import.meta.url);
 const hostDist = dirname(dirname(require.resolve("openclaw/plugin-sdk/routing")));
 const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json"), "utf8")).version;
-
-async function storageValidator(): Promise<(key: string, agentId?: string) => void> {
-  const files = readdirSync(hostDist).filter((file) =>
-    file.startsWith("session-accessor.sqlite-") &&
-    (file.endsWith(".js") || file.endsWith(".mjs")) &&
-    readFileSync(join(hostDist, file), "utf8").includes("function assertCanonicalSessionKeyWrite("),
-  );
-  expect(files, "The latest host must expose its canonical storage-key validator").toHaveLength(1);
-  const exports = await import(pathToFileURL(join(hostDist, files[0])).href);
-  const validate = Object.values(exports).find((value) =>
-    typeof value === "function" && value.name === "assertCanonicalSessionKeyWrite",
-  );
-  expect(validate).toBeTypeOf("function");
-  return validate as (key: string, agentId?: string) => void;
-}
 
 function scoped(raw: string, agentId = "worker") {
   return canonicalInkboxSessionOverride(agentId, raw);
@@ -55,7 +40,7 @@ describe("actual host A2A session-key contract", () => {
   // skip missing validators on later hosts: that is a latest-host CI contract.
   it.skipIf(hostVersion === "2026.5.27")(
     "reproduces rejected raw A2A keys and accepts their agent-scoped form", async () => {
-      const validate = await storageValidator();
+      const validate = await hostFunction("assertCanonicalSessionKeyWrite");
       for (const raw of ["a2a:identity:context-one", "a2a-progress:identity:task-one"]) {
         expect(() => validate(raw, "worker")).toThrow("non-canonical session key");
         expect(() => validate(scoped(raw), "worker")).not.toThrow();
