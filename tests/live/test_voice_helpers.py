@@ -307,10 +307,10 @@ def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hang
         '"$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"'
     ) in workflow
     assert (
-        'export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing '
-        'exactly: $HOSTED_MARKER. Save one post-call action now, with both title '
-        'and details exactly: Send SMS $HOSTED_MARKER. After the tool succeeds, '
-        'read back the exact three-word SMS body. Do not text during this call."'
+        'export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, '
+        'send one SMS exactly: $HOSTED_MARKER. Save one action now, with title '
+        'and details exactly: Send SMS $HOSTED_MARKER. After saving, '
+        'read back the three-word body."'
     ) in workflow
     assert "send me one SMS containing exactly these words" not in workflow
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
