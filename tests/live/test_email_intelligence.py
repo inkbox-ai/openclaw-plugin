@@ -52,19 +52,12 @@ def _digits(s: str) -> str:
 
 
 def _phone_present(phone: str, body: str) -> bool:
-    """True if the agent reported ``phone`` in ``body``.
-
-    Accepts the full number, a privacy-masked form ending in the real last 4,
-    or an explicit ``ending in 3235`` reference.
-    """
+    """Require every digit, including country code; tolerate only formatting."""
     want = _digits(phone)
-    if want[-10:] in _digits(body):
-        return True
-    tail = re.escape(want[-4:])
-    return bool(
-        re.search(r"[*xX•·]{2,}\D{0,2}" + tail, body)
-        or re.search(r"\bending\s+in\D{0,4}" + tail + r"\b", body, re.IGNORECASE)
-    )
+    if not want:
+        return False
+    pattern = r"(?<!\d)\+?" + r"[ ().-]*".join(want) + r"(?!\d)"
+    return re.search(pattern, body) is not None
 
 
 def _mailbox(client) -> str:
@@ -227,6 +220,8 @@ def test_reports_own_identity(ctx):
     aut_email = ctx["aut_email"]
     aut_phone = _first_phone(aut)
     assert aut_phone, "AUT identity has no phone number to report"
+    display_name = (aut.get_identity(handle).display_name or "").strip()
+    assert display_name, "AUT identity has no display name to report"
 
     body = _ask(
         ctx["remote"], aut_email, ctx["remote_email"],
@@ -234,13 +229,13 @@ def test_reports_own_identity(ctx):
         "name, email address, and phone number. Write the phone number in "
         "full — every digit, with no masking, asterisks, or abbreviation.",
         accept=lambda candidate: (
-            handle in candidate and aut_email in candidate and _phone_present(aut_phone, candidate)
+            handle in candidate and aut_email in candidate
+            and display_name.casefold() in candidate and _phone_present(aut_phone, candidate)
         ),
     )
     assert handle in body, "reply missing the expected handle"
     assert aut_email in body, "reply missing the expected email"
-    # Accept a privacy-masked phone (the model self-redacts the middle digits
-    # in formal listings) as well as full.
+    assert display_name.casefold() in body, "reply missing the expected display name"
     assert _phone_present(aut_phone, body), "reply missing the expected phone"
 
 

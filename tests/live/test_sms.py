@@ -47,7 +47,7 @@ GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
 # would un-skip them inside a workflow that isn't configured for them
 # (no external-events pass-through on this gateway).
 SIGNING_KEY = os.environ.get("AUT_INKBOX_SIGNING_KEY", "")
-AUT_WEBHOOK_URL = os.environ.get("AUT_WEBHOOK_URL", "http://127.0.0.1:18789/inkbox/webhook")
+AUT_WEBHOOK_URL = os.environ.get("AUT_WEBHOOK_URL", "")
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY),
@@ -243,14 +243,17 @@ def test_sms_reachability(sms):
 @real_only
 def test_sms_basic_reply(sms):
     body = _ask_sms(sms, "Please reply OK to confirm you got this text.")
-    assert len(body.strip()) > 0, "empty reply"
+    assert re.search(r"\bok\b", body, re.IGNORECASE), "reply did not confirm OK"
 
 
 @real_only
 def test_sms_reports_own_identity(sms):
+    from test_email_intelligence import _phone_present
+
     aut_email = sms["aut"].mailboxes.list()[0].email_address
     body = _ask_sms(sms, "Reply with just your Inkbox email address and phone number — short.")
     assert aut_email in body, "reply missing the expected email"
+    assert _phone_present(sms["aut_phone"], body), "reply missing the full expected phone"
 
 
 @real_only
@@ -258,12 +261,11 @@ def test_sms_reports_sender_details(sms):
     aut, remote = sms["aut"], sms["remote"]
     remote_email = remote.mailboxes.list()[0].email_address
     matches = aut.contacts.lookup(email=remote_email)
-    if not matches:
-        pytest.skip("no contact card for the sender to report")
+    assert matches, "synthetic sender contact fixture is missing"
     name = (getattr(matches[0], "preferred_name", None) or getattr(matches[0], "given_name", None) or "")
+    assert name, "synthetic sender contact fixture has no name"
     body = _ask_sms(sms, "Who am I to you? Tell me what you have on file about me.")
-    if name:
-        assert name.lower() in body, "reply missing the expected sender name"
+    assert name.lower() in body, "reply missing the expected sender name"
 
 
 @real_only
@@ -328,22 +330,23 @@ def _sign_inkbox_webhook(payload: bytes, request_id: str, timestamp: str, secret
     return "sha256=" + hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
 
 
-def _inject_inkbox_webhook(envelope: dict) -> int:
-    """POST a signed Inkbox-style webhook to the gateway's local listener.
-
-    Returns the HTTP status. A ``404``/connection error is returned rather than
-    raised: the local ``/inkbox/webhook`` route only exists when the gateway
-    runs in publicUrl mode. This channels suite runs the gateway in TUNNEL mode
-    (so real inbound SMS reaches the AUT), where webhooks arrive over the tunnel
-    WS and there is no local HTTP route to inject at — the caller skips in that
-    case rather than false-red. The async carrier path is covered end-to-end by
-    the unit suite; the sync path is proven live by the internal-spam-block test.
-    """
+def _inject_inkbox_webhook(envelope: dict, aut) -> int:
+    """POST the signed event through the AUT's actual configured ingress."""
+    target = AUT_WEBHOOK_URL
+    if not target:
+        boxes = aut.mailboxes.list()
+        assert len(boxes) == 1, "AUT must resolve to one mailbox"
+        identity = aut.get_identity(boxes[0].email_address.split("@", 1)[0])
+        tunnel = identity.tunnel
+        assert tunnel is not None, "AUT has no tunnel for delivery-failure injection"
+        host = tunnel.public_host
+        assert re.fullmatch(r"[A-Za-z0-9.-]+", host), "AUT tunnel has an invalid public host"
+        target = f"https://{host}/"
     payload = json.dumps(envelope).encode()
     request_id = str(uuid.uuid4())
     timestamp = str(int(time.time()))
     req = urllib.request.Request(
-        AUT_WEBHOOK_URL,
+        target,
         data=payload,
         headers={
             "Content-Type": "application/json",
@@ -403,19 +406,19 @@ def _assert_internal_block_surfaced(log_offset: int, *, delivered_fallback: bool
 
 
 @real_only
-@pytest.mark.skipif(not SIGNING_KEY, reason="needs AUT_INKBOX_SIGNING_KEY to sign the fake webhook")
 def test_sms_retry_after_carrier_delivery_failure(sms):
     """Inject a fake carrier delivery-failure webhook; expect a real follow-up.
 
     Simulates the async failure surface: the send was accepted, then the
     carrier flagged it (error 40002) and the server reported it via a
     ``text.delivery_failed`` webhook. The webhook is forged with the AUT's
-    own signing key and posted to the gateway's local webhook listener —
-    exactly how a real delivery would arrive through the tunnel. The
+    own signing key and posted through the gateway's active tunnel ingress.
+    This uses the same receiving path as a real carrier webhook. The
     plugin must wake the agent, and the agent must send a real follow-up
     SMS that reaches the remote.
     """
     aut, remote = sms["aut"], sms["remote"]
+    assert SIGNING_KEY, "AUT signing key is required for the delivery-failure scenario"
     aut_phone = sms["aut_phone"]
     remote_phone, _remote_pid = _phone(remote)
     _aut_number, aut_pid = _phone(aut)
@@ -473,15 +476,7 @@ def test_sms_retry_after_carrier_delivery_failure(sms):
             "recipient_phone_number": None,
         },
     }
-    status = _inject_inkbox_webhook(envelope)
-    if status in (0, 404):
-        pytest.skip(
-            "no local Inkbox webhook route to inject at "
-            f"({AUT_WEBHOOK_URL} → {status or 'connection refused'}); the gateway "
-            "runs in tunnel mode here, so async delivery-failure webhooks arrive "
-            "over the tunnel, not a local HTTP port. Async recovery is covered by "
-            "the unit suite; the loop is proven live by the internal-spam-block test."
-        )
+    status = _inject_inkbox_webhook(envelope, aut)
     assert status == 200, f"gateway rejected the forged delivery-failure webhook: {status}"
 
     # The agent must react with a real, delivered follow-up SMS.

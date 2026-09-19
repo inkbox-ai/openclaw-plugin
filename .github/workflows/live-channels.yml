@@ -168,11 +168,10 @@ jobs:
           OPENCLAW_INKBOX_API_KEY: ${{ secrets.OPENCLAW_INKBOX_API_KEY }}
           LIVE_EMAIL_TIMEOUT: ${{ inputs.timeout_s || '150' }}
           # The delivery-failure retry test forges a signed text.delivery_failed
-          # webhook and POSTs it at the gateway's local webhook route. It needs
+          # webhook and POSTs it through the AUT's active tunnel. It needs
           # the AUT org's signing key (the same secret the gateway verifies
           # webhooks with) re-exported under an AUT_* name the test reads.
           AUT_INKBOX_SIGNING_KEY: ${{ secrets.OPENCLAW_INKBOX_SIGNING_KEY }}
-          AUT_WEBHOOK_URL: http://127.0.0.1:18789/inkbox/webhook
         run: |
           if [ "${{ matrix.mode }}" = "real" ]; then
             LIVE_REAL_MODEL=1 LIVE_CONTACT_CRUD=1 python3 -m pytest tests/live -v --tb=short
