@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -58,6 +59,8 @@ def test_email_reachability():
 
     nonce = f"smoke-{uuid.uuid4().hex[:8]}"
     subject = f"[{nonce}] are you there?"
+    # Keep a fixed inclusive window across all polls, even if delivery is slow.
+    start_datetime = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     sent = remote.messages.send(
         remote_email,
         to=[aut_email],
@@ -78,7 +81,9 @@ def test_email_reachability():
     deadline = time.monotonic() + TIMEOUT_S
     reply = None
     while time.monotonic() < deadline and reply is None:
-        for msg in remote.messages.list(remote_email, direction=MessageDirection.INBOUND):
+        for msg in remote.messages.list(
+            remote_email, direction=MessageDirection.INBOUND, start_datetime=start_datetime,
+        ):
             if _is_reply(msg):
                 reply = msg
                 break

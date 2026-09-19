@@ -25,6 +25,7 @@ import re
 import time
 import uuid
 from collections import Counter
+from datetime import UTC, datetime, timedelta
 from itertools import islice
 from pathlib import Path
 from typing import Callable
@@ -146,8 +147,14 @@ def _ask(
     """Return a matching new AUT email, whether in-thread or tool-sent."""
     from inkbox.mail.types import MessageDirection
 
+    # Freeze before the baseline/send so later polls retain all current replies,
+    # including rows at the inclusive boundary, without scanning lifetime history.
+    start_datetime = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+
     def _inbound():
-        return list(remote.messages.list(remote_email, direction=MessageDirection.INBOUND))
+        return list(remote.messages.list(
+            remote_email, direction=MessageDirection.INBOUND, start_datetime=start_datetime,
+        ))
 
     before = {str(msg.id) for msg in _inbound()}
     log_path = Path(os.environ["GATEWAY_LOG"]) if os.environ.get("GATEWAY_LOG") else None
