@@ -27,11 +27,13 @@ A2A_FAILURE_SHAPE_RE = re.compile(
     r"name=(?:Error|TypeError|RangeError|AbortError|other) "
     r"frame=(?:[A-Za-z0-9_.-]+\.(?:ts|js|mjs):[0-9]+|unknown:0)(?=[\s\"\\]|$)"
 )
+ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _a2a_failure_shapes(log: str) -> list[str]:
     """Extract only bounded diagnostics, never adjacent error prose or paths."""
-    return [match.group(0) for match in A2A_FAILURE_SHAPE_RE.finditer(log)][-20:]
+    plain_log = ANSI_SGR_RE.sub("", log)
+    return [match.group(0) for match in A2A_FAILURE_SHAPE_RE.finditer(plain_log)][-20:]
 
 
 TERMINAL_PROGRESS_RE = re.compile(

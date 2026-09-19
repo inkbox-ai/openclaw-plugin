@@ -12,7 +12,7 @@ export function a2aFailureShape(stage: "dispatch" | "admission" | "terminal", er
     const stack = error.stack?.startsWith(header) ? error.stack.slice(header.length) : "";
     for (const line of stack.split("\n")) {
       if (!/^\s*at\s/.test(line)) continue;
-      const host = line.match(/\/openclaw\/dist\/(?:plugin-sdk\/)?([A-Za-z0-9_.-]+\.js):(\d+):\d+/);
+      const host = line.match(/\/openclaw\/dist\/(?:plugin-sdk\/)?([A-Za-z0-9_.-]+\.m?js):(\d+):\d+/);
       const plugin = line.match(/\/src\/(?:inbound\/)?(session|a2a|a2a-registry)\.(ts|js):(\d+):\d+/);
       if (host) frame = `${host[1]}:${host[2]}`;
       else if (plugin) frame = `${plugin[1]}.${plugin[2]}:${plugin[3]}`;

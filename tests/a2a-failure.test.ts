@@ -85,6 +85,14 @@ describe("caught A2A execution failures", () => {
 });
 
 describe("content-free A2A diagnostics", () => {
+  it("recognizes current host mjs stack frames", () => {
+    const error = new Error("private message");
+    error.stack = "Error: private message\n    at dispatch (/private/node_modules/openclaw/dist/builtin-openclaw-example.mjs:42:9)";
+    expect(a2aFailureShape("dispatch", error)).toBe(
+      "A2A failure shape: stage=dispatch name=Error frame=builtin-openclaw-example.mjs:42",
+    );
+  });
+
   it("keeps only the allowlisted class and public source location", () => {
     const error = new TypeError("secret test message");
     error.stack = "TypeError: secret test message\n    at dispatch (/private/root/node_modules/openclaw/dist/lifecycle-test.js:42:9)";

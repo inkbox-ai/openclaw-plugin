@@ -24,6 +24,15 @@ def test_failure_shapes_handle_host_prefixes_without_leaking_error_content():
     assert a2a_driver._a2a_failure_shapes(unknown) == [unknown]
 
 
+def test_failure_shapes_handle_host_console_color_without_exposing_adjacent_prose():
+    shape = "A2A failure shape: stage=dispatch name=Error frame=builtin-openclaw-example.mjs:42"
+    assert a2a_driver._a2a_failure_shapes(
+        f"private prefix \x1b[33mInkbox {shape}\x1b[39m\nprivate suffix"
+    ) == [shape]
+    # Removing terminal styling must not bypass the strict field boundary.
+    assert a2a_driver._a2a_failure_shapes(f"{shape}\x1b[39mprivate") == []
+
+
 class _Identity:
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
