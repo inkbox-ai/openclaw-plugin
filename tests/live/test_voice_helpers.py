@@ -308,13 +308,30 @@ def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hang
     ) in workflow
     assert (
         'export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, '
-        'send one SMS exactly: $HOSTED_MARKER. Save one action now, with title '
+        'send me one SMS exactly: $HOSTED_MARKER. Save one action now, with title '
         'and details exactly: Send SMS $HOSTED_MARKER. After saving, '
         'read back the three-word body."'
     ) in workflow
     assert "send me one SMS containing exactly these words" not in workflow
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
     assert "export VOICE_DRIVER_ANSWER_SETTLE=4" in workflow
+
+
+def test_configured_hosted_request_satisfies_persisted_caller_intent_gate(monkeypatch):
+    workflow = (
+        Path(__file__).parents[2] / ".github" / "workflows" / "live-voice.yml"
+    ).read_text(encoding="utf-8")
+    statement = next(line.strip() for line in workflow.splitlines()
+                     if 'export VOICE_DRIVER_LINE="' in line and "$HOSTED_MARKER" in line)
+    marker = "telescope library pineapple"
+    spoken = statement.split('"', 1)[1].rsplit('"', 1)[0].replace("$HOSTED_MARKER", marker)
+    remote = SimpleNamespace(calls=_Calls([_segment("local", spoken)]))
+    # One ready observation must suffice; otherwise fail without a live wait.
+    monkeypatch.setattr(voice.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(voice.time, "sleep", lambda _delay: pytest.fail(
+        "configured request does not express the recipient, timing, SMS intent and marker"
+    ))
+    voice._wait_for_hosted_transcript_ready(remote, "unused", "call", marker, 1, {})
 
 
 def test_every_call_capable_live_ci_gateway_disables_voicemail_detection():
