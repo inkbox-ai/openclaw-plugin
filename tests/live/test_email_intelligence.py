@@ -331,7 +331,7 @@ def test_aware_of_inkbox_tools(ctx):
     try:
         body = _ask(
             ctx["remote"], ctx["aut_email"], ctx["remote_email"],
-            "Use your Inkbox contact tools to look up the contact whose "
+            "Look up the contact whose "
             f"email address is {probe_email}, then reply with that contact's full name.",
             accept=lambda candidate: surname in candidate,
         )
@@ -369,9 +369,9 @@ def test_contact_crud_tool_use(ctx):
             ctx["remote"],
             ctx["aut_email"],
             ctx["remote_email"],
-            "Use inkbox_create_contact now. Create a new contact named "
+            "Create a new contact named "
             f"{contact_name} with email {contact_email}. Do not just describe the action. "
-            f"After the tool succeeds, reply exactly: CREATED {nonce}",
+            f"When done, reply: CREATED {nonce}",
             accept=lambda candidate: "created" in candidate and nonce in candidate,
         )
         assert "created" in created and nonce in created, "contact create reply mismatch"
@@ -384,9 +384,9 @@ def test_contact_crud_tool_use(ctx):
             ctx["remote"],
             ctx["aut_email"],
             ctx["remote_email"],
-            "Use inkbox_update_contact now. Update contactId "
-            f"{contact_id} and set notes to {updated_notes}. Do not create a second contact. "
-            f"After the tool succeeds, reply exactly: UPDATED {nonce}",
+            "Update the contact whose email address is "
+            f"{contact_email}: set their notes to {updated_notes}. Do not create a second contact. "
+            f"When done, reply: UPDATED {nonce}",
             accept=lambda candidate: "updated" in candidate and nonce in candidate,
         )
         assert "updated" in updated and nonce in updated, "contact update reply mismatch"
@@ -397,8 +397,8 @@ def test_contact_crud_tool_use(ctx):
             ctx["remote"],
             ctx["aut_email"],
             ctx["remote_email"],
-            "I confirm this is a temporary test contact. Use inkbox_delete_contact now "
-            f"to delete contactId {contact_id}. After the tool succeeds, reply exactly: DELETED {nonce}",
+            "I confirm this temporary contact should be deleted. "
+            f"Delete the contact whose email is {contact_email}. When done, reply: DELETED {nonce}",
             accept=lambda candidate: "deleted" in candidate and nonce in candidate,
         )
         assert "deleted" in deleted and nonce in deleted, "contact delete reply mismatch"

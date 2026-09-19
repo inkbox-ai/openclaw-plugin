@@ -168,3 +168,23 @@ def test_protocol_timeout_reports_shape_without_message_content(monkeypatch):
         )
     assert "last_state=TASK_STATE_WORKING history_messages=2 worker_messages=1" in str(error.value)
     assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize("history, passes", [
+    ([('user', 'a2a-ci-inbound-single-proof'), ('agent', 'Done')], False),
+    ([('agent', 'a2a-ci-inbound-single-proof'), ('agent', 'Done')], False),
+    ([('user', 'a2a-ci-inbound-single-proof')], False),
+    ([('user', 'Request'), ('ROLE_AGENT', 'a2a-ci-inbound-single-proof')], True),
+])
+def test_inbound_completion_proof_comes_from_final_agent_reply(monkeypatch, history, passes):
+    task = SimpleNamespace(id="task", state="TASK_STATE_COMPLETED", raw={"history": [
+        {"role": role, "parts": [{"text": text}]} for role, text in history
+    ]})
+    monkeypatch.setattr(a2a_driver, "_send_task", lambda *_args: task)
+    monkeypatch.setattr(a2a_driver, "_cancel_if_open", lambda *_args: None)
+    a2a = SimpleNamespace(get_task=lambda *_args, **_kwargs: task)
+    if passes:
+        a2a_driver._inbound_single(a2a, None, 1, "proof")
+    else:
+        with pytest.raises(AssertionError):
+            a2a_driver._inbound_single(a2a, None, 1, "proof")

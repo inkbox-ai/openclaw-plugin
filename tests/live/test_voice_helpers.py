@@ -1,6 +1,7 @@
 """Focused contracts for live voice ownership and correlation."""
 
 import inspect
+import json
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -286,6 +287,75 @@ def test_hosted_failure_diagnostics_hide_identifiers_and_unknown_error_text():
     assert "private" not in repr(shape)
 
 
+@pytest.mark.parametrize("case, expected_error", [
+    ("valid", None),
+    ("extra_prose", "body is not exactly"),
+    ("unrelated_duplicate", "2 SMS messages"),
+    ("late_duplicate", "2 SMS messages"),
+    ("in_call", "before the call ended"),
+    ("wrong_recipient", "unexpected recipient"),
+    ("missing_created", "no creation timestamp"),
+    ("missing_end", "no authoritative end timestamp"),
+])
+def test_hosted_waiter_requires_exact_body_all_sends_and_post_call_time(
+    case, expected_error, monkeypatch, tmp_path,
+):
+    when = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    marker = "hospital kangaroo chocolate"
+    phone = "+15550001111"
+    message = SimpleNamespace(
+        id="new", direction="outbound", remote_phone_number=phone,
+        recipients=[], text=marker, created_at=when,
+    )
+    extra = SimpleNamespace(
+        id="extra", direction="outbound", remote_phone_number=phone,
+        recipients=[], text="Unrequested confirmation", created_at=when,
+    )
+    if case == "extra_prose":
+        message.text = f"Here are the words: {marker}"
+    if case == "wrong_recipient":
+        message.remote_phone_number = "+15559999999"
+    if case == "in_call":
+        message.created_at = when - timedelta(seconds=1)
+    if case == "missing_created":
+        message.created_at = None
+    reads = 0
+
+    def texts(*_args, **_kwargs):
+        nonlocal reads
+        reads += 1
+        return [message, extra] if (
+            case == "unrelated_duplicate" or case == "late_duplicate" and reads > 1
+        ) else [message]
+
+    aut = SimpleNamespace(
+        texts=SimpleNamespace(list=texts),
+        calls=SimpleNamespace(get=lambda _id: SimpleNamespace(
+            ended_at=None if case == "missing_end" else when,
+        )),
+    )
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"current": {"callId": "call", "state": "completed"}}))
+    monkeypatch.setattr(voice.os.path, "expanduser", lambda _path: str(registry))
+    monkeypatch.setattr(voice, "HOSTED_POST_CALL_MARKER", marker)
+    now = [0.0]
+    monkeypatch.setattr(voice.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(voice.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    def run():
+        voice._wait_hosted_sms_settlement(
+            aut, "number", phone, set(), when - timedelta(seconds=10), "call", 100, {},
+        )
+
+    if expected_error:
+        with pytest.raises(AssertionError, match=expected_error):
+            run()
+    else:
+        run()
+        assert reads == 2, "successful proof must include the duplicate-grace reread"
+        assert now[0] == 2 * voice.POLL_EVERY_S
+
+
 def test_live_voice_marker_mapping_is_stable():
     assert voice_marker.marker_from_token("55071").split() == [
         "pineapple",
@@ -294,7 +364,7 @@ def test_live_voice_marker_mapping_is_stable():
     ]
 
 
-def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hangup():
+def test_live_workflow_preserves_marker_and_test_owned_hangup():
     workflow = (
         Path(__file__).parents[2] / ".github" / "workflows" / "live-voice.yml"
     ).read_text(encoding="utf-8")
@@ -306,14 +376,7 @@ def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hang
         'HOSTED_MARKER="$(python3 '
         '"$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"'
     ) in workflow
-    assert (
-        'export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, '
-        'send me one SMS exactly: $HOSTED_SPOKEN_MARKER. Save one action now, with title '
-        'and details exactly: Send SMS $HOSTED_SPOKEN_MARKER. After saving, '
-        'read back the three-word body."'
-    ) in workflow
     assert 'HOSTED_SPOKEN_MARKER="${HOSTED_MARKER// /, }"' in workflow
-    assert "send me one SMS containing exactly these words" not in workflow
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
     contact_case = workflow.split('elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then', 1)[1].split("\n          fi", 1)[0]
     assert "export VOICE_DRIVER_TEST_OWNS_HANGUP=1" in contact_case
@@ -329,6 +392,13 @@ def test_configured_hosted_request_satisfies_persisted_caller_intent_gate(monkey
     marker = "hospital kangaroo chocolate"
     spoken = statement.split('"', 1)[1].rsplit('"', 1)[0].replace("$HOSTED_SPOKEN_MARKER", marker.replace(" ", ", "))
     assert voice._voice_marker_key(marker) in voice._voice_marker_key(spoken)
+    # Callers express outcomes, not the tool/schema solution being evaluated.
+    for internal in ("action", "title", "details", "tool", "save", "registry"):
+        assert internal not in spoken.lower().split()
+    assert "do not text during this call" in spoken.lower()
+    assert "one sms" in spoken.lower()
+    assert "exactly" in spoken.lower()
+    assert "repeat" in spoken.lower()
     remote = SimpleNamespace(calls=_Calls([_segment("local", spoken)]))
     # One ready observation must suffice; otherwise fail without a live wait.
     monkeypatch.setattr(voice.time, "monotonic", lambda: 0)
@@ -336,6 +406,62 @@ def test_configured_hosted_request_satisfies_persisted_caller_intent_gate(monkey
         "configured request does not express the recipient, timing, SMS intent and marker"
     ))
     voice._wait_for_hosted_transcript_ready(remote, "unused", "call", marker, 1, {})
+
+
+@pytest.mark.parametrize("heard_party, passes", [("local", False), ("remote", True)])
+def test_hosted_heard_intent_requires_aut_remote_speech(monkeypatch, heard_party, passes):
+    marker = "hospital kangaroo chocolate"
+    request = f"After we hang up, send me one SMS exactly: {marker}"
+    aut = SimpleNamespace(calls=_Calls([_segment(heard_party, request)]))
+    ticks = iter([0, 2])
+    monkeypatch.setattr(voice.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(voice.time, "sleep", lambda _delay: None)
+    if passes:
+        voice._wait_for_hosted_transcript_ready(
+            aut, "unused", "call", marker, 1, {}, caller_party="remote",
+        )
+    else:
+        with pytest.raises(pytest.fail.Exception, match="caller intent"):
+            voice._wait_for_hosted_transcript_ready(
+                aut, "unused", "call", marker, 1, {}, caller_party="remote",
+            )
+
+
+@pytest.mark.parametrize("speaker_party", ["local", "remote"])
+@pytest.mark.parametrize("segments, passes", [
+    ([("remote", "hospital kangaroo chocolate"), ("local", "Hello")], False),
+    ([("local", "hospital kangaroo")], False),
+    ([("local", "hospital"), ("local", "kangaroo chocolate")], True),
+])
+def test_hosted_readback_requires_all_words_from_aut_speech(monkeypatch, segments, passes, speaker_party):
+    if speaker_party == "remote":
+        segments = [("remote" if party == "local" else "local", text) for party, text in segments]
+    aut = SimpleNamespace(calls=_Calls([_segment(*row) for row in segments]))
+    ticks = iter([0, 2])
+    monkeypatch.setattr(voice.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(voice.time, "sleep", lambda _delay: None)
+    if passes:
+        voice._wait_for_hosted_readback(aut, "call", "hospital kangaroo chocolate", 1, {}, speaker_party=speaker_party)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="AUT marker readback"):
+            voice._wait_for_hosted_readback(aut, "call", "hospital kangaroo chocolate", 1, {}, speaker_party=speaker_party)
+
+
+def test_hosted_outbound_inventory_keeps_all_pages_and_fixed_window():
+    since = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    rows = [SimpleNamespace(id=str(index), direction="outbound") for index in range(201)]
+    queries = []
+
+    def page(_number, **query):
+        queries.append(query)
+        return rows[:200] if query["offset"] == 0 else [rows[199], rows[200]]
+
+    aut = SimpleNamespace(texts=SimpleNamespace(list=page))
+    assert voice._outbound_texts(aut, "number", since) == rows
+    assert queries == [
+        {"limit": 200, "offset": offset, "start_datetime": (since - timedelta(minutes=5)).isoformat()}
+        for offset in [0, 200]
+    ]
 
 
 def test_hosted_heard_marker_diagnostics_use_aut_remote_speech_without_content():

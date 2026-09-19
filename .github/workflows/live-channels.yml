@@ -175,7 +175,7 @@ jobs:
           AUT_WEBHOOK_URL: http://127.0.0.1:18789/inkbox/webhook
         run: |
           if [ "${{ matrix.mode }}" = "real" ]; then
-            LIVE_REAL_MODEL=1 python3 -m pytest tests/live -v --tb=short
+            LIVE_REAL_MODEL=1 LIVE_CONTACT_CRUD=1 python3 -m pytest tests/live -v --tb=short
           else
             python3 -m pytest tests/live -v --tb=short
           fi
@@ -185,19 +185,29 @@ jobs:
         run: |
           test -s "$GATEWAY_LOG" && echo "gateway_log=present" || echo "gateway_log=empty"
           test -s "$RUNNER_TEMP/mock.log" && echo "mock_log=present" || echo "mock_log=empty"
+          export OPENCLAW_HOST_DIST="$(npm root -g)/openclaw/dist"
           python3 - <<'PY'
+          import json
           import os
           import sys
           from pathlib import Path
 
           sys.path.insert(0, "tests/live")
           from test_cross_channel import _source_reply_shapes
+          from a2a_driver import _a2a_host_failure_counts, _a2a_host_error_sites
 
           log_path = Path(os.environ["GATEWAY_LOG"])
           log = log_path.read_text(errors="replace") if log_path.exists() else ""
           # Only fixed metadata; the host strips redundant subsystem prefixes.
           for shape in _source_reply_shapes(log):
               print(shape)
+          for name, count in _a2a_host_failure_counts(log).items():
+              print(f"{name}={count}")
+          try:
+              for shape in _a2a_host_error_sites(log, Path(os.environ["OPENCLAW_HOST_DIST"])):
+                  print("host_error_site_shape=" + json.dumps(shape))
+          except (OSError, ValueError):
+              print("host_error_sites_unavailable=true")
           PY
 
       - name: Tear down (always)

@@ -235,7 +235,7 @@ def test_email_request_gets_sms_response(xc):
     remote.messages.send(
         xc["remote_email"], to=[xc["aut_email"]], subject=f"[{token}] text me please",
         body_text=(
-            "Use inkbox_send_sms to send my phone number from my contact "
+            "Send my phone number from my contact "
             f"details an SMS that says: lalala {token}. Do not reply by email; "
             "this is complete only after the SMS is sent."
         ),
@@ -470,10 +470,10 @@ def test_sms_request_gets_email_response(xc):
             xc["remote_pid"],
             to=xc["aut_phone"],
             text=(
-                "Use inkbox_send_email to send my email address from my contact "
+                "Send my email address from my contact "
                 f"details an email containing the code {token}. Do not send any "
                 "SMS, including a confirmation or acknowledgement; this is complete "
-                "only after the email is sent. Return NO_REPLY after sending the email. "
+                "only after the email is sent. "
                 f"(attempt {attempt + 1}, ref {token})"
             ),
         )
@@ -653,7 +653,7 @@ def test_email_request_gets_call(xc):
             to=[xc["aut_email"]],
             subject=f"please call me [{ref}]",
             body_text=(
-                "Use inkbox_place_call to call my phone number from my contact "
+                "Call my phone number from my contact "
                 "details now. Do not reply by email; this is complete only after "
                 f"the call is placed. (attempt {attempt + 1}, ref {ref})"
             ),
@@ -706,7 +706,7 @@ def test_sms_request_gets_call(xc):
             remote_pid,
             to=aut_phone,
             text=(
-                "Use inkbox_place_call to call my phone number from my contact "
+                "Call my phone number from my contact "
                 "details now. Do not reply by SMS; this is complete only after "
                 f"the call is placed. (attempt {attempt + 1}, ref {ref})"
             ),

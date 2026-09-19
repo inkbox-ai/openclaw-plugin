@@ -146,14 +146,18 @@ def _post_call_action_diagnostics(
 
 def _message_created_at(message) -> datetime | None:
     """Return an aware server timestamp from an SDK SMS row."""
-    value = getattr(message, "created_at", None)
+    return _server_datetime(getattr(message, "created_at", None))
+
+
+def _server_datetime(value) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     text = str(value or "").strip()
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -425,25 +429,55 @@ def _aut_speech_mode(aut, call_id):
     return c.use_inkbox_tts, c.use_inkbox_stt
 
 
-def _outbound_texts_to(aut, aut_number_id, recipient_number):
-    recipient = _digits(recipient_number)
-    return [m for m in aut.texts.list(aut_number_id, limit=200)
-            if (getattr(m, "direction", "") or "").lower() == "outbound"
-            and recipient in _sms_target_numbers(m)]
+def _outbound_texts(aut, aut_number_id, since):
+    rows = {}
+    offset = 0
+    # Freeze this inclusive window before the baseline/request, not per poll.
+    start = (since - timedelta(minutes=5)).isoformat()
+    while True:
+        page = aut.texts.list(
+            aut_number_id, limit=200, offset=offset, start_datetime=start,
+        )
+        for message in page:
+            if (getattr(message, "direction", "") or "").lower() == "outbound":
+                rows[message.id] = message
+        if len(page) < 200:
+            return list(rows.values())
+        offset += len(page)
+
+
+def _assert_hosted_sms_rows(rows, marker, remote_phone, ended_at):
+    """Validate every fresh outbound side effect, not only marker matches."""
+    assert len(rows) <= 1, f"hosted call sent {len(rows)} SMS messages; expected one"
+    if not rows:
+        return False
+    message = rows[0]
+    assert _sms_target_numbers(message) == {_digits(remote_phone)}, \
+        "hosted SMS has an unexpected recipient"
+    assert _normalized_spoken_text(getattr(message, "text", "")) == _normalized_spoken_text(marker), \
+        "hosted SMS body is not exactly the requested words"
+    created_at = _message_created_at(message)
+    assert created_at is not None, "hosted SMS has no authoritative creation timestamp"
+    assert ended_at is not None, "hosted call has no authoritative end timestamp"
+    assert created_at >= ended_at, "hosted SMS was sent before the call ended"
+    return True
 
 
 def _wait_for_hosted_transcript_ready(
     remote, remote_number_id, call_id, marker, deadline, progress,
+    *, caller_party="local",
 ):
-    """Require the persisted caller's post-call SMS intent on the driver leg."""
+    """Require persisted intent on the submitted or AUT-heard caller leg."""
+    assert caller_party in {"local", "remote"}
     expected_marker = _voice_marker_key(marker)
     assert expected_marker
     while time.monotonic() < deadline:
         progress["phase"] = "caller-intent transcript readiness"
         try:
-            _all, _agent_segments, caller_segments = _segments(
+            _all, remote_segments, local_segments = _segments(
                 remote, remote_number_id, call_id,
             )
+            caller_segments = local_segments if caller_party == "local" else remote_segments
             caller_text = _normalized_spoken_text(
                 " ".join(segment.text or "" for segment in caller_segments)
             )
@@ -503,6 +537,20 @@ def _wait_for_open_post_call_action(aut, call_id, marker, deadline, progress):
     )
 
 
+def _wait_for_hosted_readback(client, call_id, marker, deadline, progress, *, speaker_party="local"):
+    assert speaker_party in {"local", "remote"}
+    expected = _voice_marker_key(marker)
+    while time.monotonic() < deadline:
+        progress["phase"] = "AUT spoken marker readback"
+        _all, remote, local = _segments(client, "unused", call_id)
+        spoken = local if speaker_party == "local" else remote
+        if expected in _voice_marker_key(" ".join(segment.text or "" for segment in spoken)):
+            return
+        progress["last"] = f"readback_party={speaker_party} segments={len(spoken)} marker_readback=false"
+        time.sleep(POLL_EVERY_S)
+    pytest.fail("hosted voice test exhausted its budget before AUT marker readback")
+
+
 def _hosted_heard_marker_shape(segments, marker):
     """Failure-only AUT-heard speech shape, not the driver's submitted text."""
     caller = [row for row in segments if getattr(row, "party", "") == "remote"]
@@ -559,23 +607,31 @@ def _wait_hosted_sms_settlement(
 ):
     """Require one API-accepted exact-target SMS and completed host settlement."""
     assert HOSTED_POST_CALL_MARKER
-    expected_marker = _voice_marker_key(HOSTED_POST_CALL_MARKER)
     duplicate_grace = 2 * POLL_EVERY_S
     settlement_deadline = deadline - duplicate_grace
     matches = []
     registry_entry = None
+    ended_at = None
+
+    def fresh_outbound():
+        rows = []
+        for message in _outbound_texts(aut, aut_number_id, sms_watermark):
+            if message.id in before_ids:
+                continue
+            created_at = _message_created_at(message)
+            assert created_at is not None, "fresh outbound SMS has no creation timestamp"
+            if created_at >= sms_watermark:
+                rows.append(message)
+        return rows
+
     while time.monotonic() < settlement_deadline:
         progress["phase"] = "post-call tool settlement"
-        fresh = [m for m in _outbound_texts_to(aut, aut_number_id, remote_phone)
-                 if m.id not in before_ids
-                 and (created_at := _message_created_at(m)) is not None
-                 and created_at >= sms_watermark]
-        matches = [
-            message for message in fresh
-            if expected_marker in _voice_marker_key(
-                getattr(message, "text", "") or ""
-            )
-        ]
+        if ended_at is None:
+            ended_at = _server_datetime(getattr(aut.calls.get(call_id), "ended_at", None))
+        matches = fresh_outbound()
+        has_exact_sms = _assert_hosted_sms_rows(
+            matches, HOSTED_POST_CALL_MARKER, remote_phone, ended_at,
+        )
         registry_path = os.path.expanduser("~/.openclaw/inkbox/hosted-call-completions.json")
         try:
             with open(registry_path) as fh:
@@ -593,23 +649,14 @@ def _wait_hosted_sms_settlement(
         progress["last"] = (
             f"current_marker_rows={len(matches)} registry_state={registry_state!r}"
         )
-        if len(matches) == 1 and registry_entry and registry_entry.get("state") == "completed":
+        if has_exact_sms and registry_entry and registry_entry.get("state") == "completed":
             # The grace window is reserved before polling, so exact-one is
             # observed for its full duration without exceeding the shared
             # scenario budget.
             time.sleep(duplicate_grace)
-            fresh = [m for m in _outbound_texts_to(aut, aut_number_id, remote_phone)
-                     if m.id not in before_ids
-                     and (created_at := _message_created_at(m)) is not None
-                     and created_at >= sms_watermark]
-            matches = [
-                message for message in fresh
-                if expected_marker in _voice_marker_key(
-                    getattr(message, "text", "") or ""
-                )
-            ]
-            assert len(matches) == 1, \
-                f"hosted reconciliation sent {len(matches)} marker SMS messages; expected one"
+            assert _assert_hosted_sms_rows(
+                fresh_outbound(), HOSTED_POST_CALL_MARKER, remote_phone, ended_at,
+            ), "hosted SMS disappeared during settlement"
             return
         if registry_entry and registry_entry.get("state") == "failed":
             pytest.fail("hosted SMS settlement failed; " + repr(
@@ -991,18 +1038,9 @@ def test_outbound_call_hosted_and_settles_sms_once():
     baseline_aut_calls = _outbound_calls_to_driver()
     before_calls = {c.id for c in baseline_remote_calls}
     before_aut_calls = {c.id for c in baseline_aut_calls}
-    baseline_texts = _outbound_texts_to(
-        aut, str(aut_number.id), st["number"],
-    )
+    sms_watermark = datetime.now(timezone.utc)
+    baseline_texts = _outbound_texts(aut, str(aut_number.id), sms_watermark)
     before_texts = {message.id for message in baseline_texts}
-    baseline_times = [
-        created_at for message in baseline_texts
-        if (created_at := _message_created_at(message)) is not None
-    ]
-    sms_watermark = max(
-        baseline_times,
-        default=datetime.min.replace(tzinfo=timezone.utc),
-    )
     identity_handle = aut.mailboxes.list()[0].email_address.split("@", 1)[0]
     expected_authority = _saved_hosted_authority(aut, identity_handle)
     assert expected_authority in {"contact_scoped", "yolo"}, (
@@ -1013,8 +1051,8 @@ def test_outbound_call_hosted_and_settles_sms_once():
         st["number_id"],
         to=aut_phone,
         text=(
-            "Use inkbox_place_call to call me now. Inkbox Voice AI must handle the call. "
-            "The purpose is to complete my spoken request and record any post-call action. "
+            "Call me now. "
+            "I have a request I will explain on the call. "
             f"Do not text before calling. Request ref {uuid.uuid4().hex[:6]}."
         ),
     )
@@ -1070,12 +1108,23 @@ def test_outbound_call_hosted_and_settles_sms_once():
             action_gate_deadline,
             progress,
         )
+        _wait_for_hosted_transcript_ready(
+            aut, "unused", aut_call_id, HOSTED_POST_CALL_MARKER,
+            action_gate_deadline, progress, caller_party="remote",
+        )
         _wait_for_open_post_call_action(
             aut,
             aut_call_id,
             HOSTED_POST_CALL_MARKER,
             action_gate_deadline,
             progress,
+        )
+        _wait_for_hosted_readback(
+            aut, aut_call_id, HOSTED_POST_CALL_MARKER, action_gate_deadline, progress,
+        )
+        _wait_for_hosted_readback(
+            remote, remote_call_id, HOSTED_POST_CALL_MARKER,
+            action_gate_deadline, progress, speaker_party="remote",
         )
 
     finally:

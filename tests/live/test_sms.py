@@ -296,7 +296,7 @@ def test_sms_aware_of_inkbox_tools(sms):
         )
         body = _ask_sms(
             sms,
-            "Use your Inkbox contact tools to look up the contact whose email "
+            "Look up the contact whose email "
             f"is {probe_email}, then reply with that contact's full name.",
         )
         assert surname in body, "agent did not report the looked-up contact surname"
