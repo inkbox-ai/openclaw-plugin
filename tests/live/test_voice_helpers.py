@@ -308,10 +308,11 @@ def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hang
     ) in workflow
     assert (
         'export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, '
-        'send me one SMS exactly: $HOSTED_MARKER. Save one action now, with title '
-        'and details exactly: Send SMS $HOSTED_MARKER. After saving, '
+        'send me one SMS exactly: $HOSTED_SPOKEN_MARKER. Save one action now, with title '
+        'and details exactly: Send SMS $HOSTED_SPOKEN_MARKER. After saving, '
         'read back the three-word body."'
     ) in workflow
+    assert 'HOSTED_SPOKEN_MARKER="${HOSTED_MARKER// /, }"' in workflow
     assert "send me one SMS containing exactly these words" not in workflow
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
     contact_case = workflow.split('elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then', 1)[1].split("\n          fi", 1)[0]
@@ -324,9 +325,10 @@ def test_configured_hosted_request_satisfies_persisted_caller_intent_gate(monkey
         Path(__file__).parents[2] / ".github" / "workflows" / "live-voice.yml"
     ).read_text(encoding="utf-8")
     statement = next(line.strip() for line in workflow.splitlines()
-                     if 'export VOICE_DRIVER_LINE="' in line and "$HOSTED_MARKER" in line)
-    marker = "telescope library pineapple"
-    spoken = statement.split('"', 1)[1].rsplit('"', 1)[0].replace("$HOSTED_MARKER", marker)
+                     if 'export VOICE_DRIVER_LINE="' in line and "$HOSTED_SPOKEN_MARKER" in line)
+    marker = "hospital kangaroo chocolate"
+    spoken = statement.split('"', 1)[1].rsplit('"', 1)[0].replace("$HOSTED_SPOKEN_MARKER", marker.replace(" ", ", "))
+    assert voice._voice_marker_key(marker) in voice._voice_marker_key(spoken)
     remote = SimpleNamespace(calls=_Calls([_segment("local", spoken)]))
     # One ready observation must suffice; otherwise fail without a live wait.
     monkeypatch.setattr(voice.time, "monotonic", lambda: 0)
@@ -334,6 +336,19 @@ def test_configured_hosted_request_satisfies_persisted_caller_intent_gate(monkey
         "configured request does not express the recipient, timing, SMS intent and marker"
     ))
     voice._wait_for_hosted_transcript_ready(remote, "unused", "call", marker, 1, {})
+
+
+def test_hosted_heard_marker_diagnostics_use_aut_remote_speech_without_content():
+    marker = "hospital kangaroo chocolate"
+    shape = voice._hosted_heard_marker_shape([
+        _segment("local", marker),
+        _segment("remote", "private phrase kangaroo chocolate"),
+    ], marker)
+    assert shape == {"caller_segments": 1, "marker": False, "marker_word_positions": [-1, 2, 3]}
+    assert "private" not in repr(shape)
+    assert voice._hosted_heard_marker_shape([
+        _segment("remote", "hospital, kangaroo, chocolate"),
+    ], marker) == {"caller_segments": 1, "marker": True, "marker_word_positions": [0, 1, 2]}
 
 
 def test_every_call_capable_live_ci_gateway_disables_voicemail_detection():

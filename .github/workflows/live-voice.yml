@@ -180,7 +180,10 @@ jobs:
             RUN_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             HOSTED_MARKER="$(python3 "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, send me one SMS exactly: $HOSTED_MARKER. Save one action now, with title and details exactly: Send SMS $HOSTED_MARKER. After saving, read back the three-word body."
+            # Speak the marker as a list to avoid blending adjacent words over
+            # the phone. Correlation still uses the unchanged three-word marker.
+            HOSTED_SPOKEN_MARKER="${HOSTED_MARKER// /, }"
+            export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, send me one SMS exactly: $HOSTED_SPOKEN_MARKER. Save one action now, with title and details exactly: Send SMS $HOSTED_SPOKEN_MARKER. After saving, read back the three-word body."
             # The pytest gate, not the driver timer, owns the intentional hangup.
             export VOICE_DRIVER_LISTEN=180
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then

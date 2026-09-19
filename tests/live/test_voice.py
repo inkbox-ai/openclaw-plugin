@@ -492,11 +492,28 @@ def _wait_for_open_post_call_action(aut, call_id, marker, deadline, progress):
         except Exception as exc:
             progress["last"] = f"post-call actions not ready: {type(exc).__name__}"
         time.sleep(POLL_EVERY_S)
+    try:
+        heard_shape = _hosted_heard_marker_shape(aut.calls.transcripts(call_id), marker)
+    except Exception:
+        heard_shape = {"unavailable": True}
     pytest.fail(
         "hosted voice test exhausted its budget before the current-run open "
         "post-call SMS action was persisted; "
-        f"phase={progress['phase']} last={progress['last']}"
+        f"phase={progress['phase']} last={progress['last']} aut_heard={heard_shape}"
     )
+
+
+def _hosted_heard_marker_shape(segments, marker):
+    """Failure-only AUT-heard speech shape, not the driver's submitted text."""
+    caller = [row for row in segments if getattr(row, "party", "") == "remote"]
+    text = _normalized_spoken_text(" ".join(getattr(row, "text", "") or "" for row in caller))
+    words = text.split()
+    return {
+        "caller_segments": len(caller),
+        "marker": _voice_marker_key(marker) in _voice_marker_key(text),
+        "marker_word_positions": [words.index(word) if word in words else -1
+                                  for word in _normalized_spoken_text(marker).split()],
+    }
 
 
 def _hosted_settlement_diagnostics(entry, marker_rows=None):
