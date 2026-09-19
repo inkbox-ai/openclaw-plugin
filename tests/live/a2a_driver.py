@@ -53,6 +53,14 @@ def _a2a_host_failure_counts(log: str) -> dict[str, int]:
         "host_session_lock_signature": r"\bsession file locked\b|\bSessionLockTimeoutError\b",
         "host_tool_schema_signature": r"\bInvalid schema for function\b|\binvalid_function_parameters\b",
         "host_plugin_registration_signature": r"\bHealthCheckRegistrationError\b",
+        "host_tool_allowlist_empty": r"No callable tools remain after resolving explicit tool allowlist ",
+        "host_tool_allowlist_no_match": r"No callable tools remain after resolving explicit tool allowlist [^\r\n]*; no registered tools matched\.",
+        "host_tool_allowlist_disabled": r"No callable tools remain after resolving explicit tool allowlist [^\r\n]*; tools are disabled for this run\.",
+        "host_tool_allowlist_model_unsupported": r"No callable tools remain after resolving explicit tool allowlist [^\r\n]*; the selected model does not support tools\.",
+        "host_tool_schema_quarantine": r"\[tools\] quarantined [0-9]+ unsupported tool schemas? before model runtime projection:",
+        "host_tool_registry_empty": r"plugin tool registry did not include selected plugin tools after cold load",
+        "host_tool_factory_null": r"plugin tool factory returned null ",
+        "host_plugin_initialize_failure": r"\[plugins\] [0-9]+ plugin\(s\) failed to initialize ",
     }
     return {name: len(re.findall(pattern, plain_log, re.IGNORECASE))
             for name, pattern in signatures.items()}

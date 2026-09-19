@@ -50,7 +50,56 @@ def test_host_failure_counts_emit_only_fixed_keys_and_counts():
         "host_session_lock_signature": 0,
         "host_tool_schema_signature": 0,
         "host_plugin_registration_signature": 1,
+        "host_tool_allowlist_empty": 0,
+        "host_tool_allowlist_no_match": 0,
+        "host_tool_allowlist_disabled": 0,
+        "host_tool_allowlist_model_unsupported": 0,
+        "host_tool_schema_quarantine": 0,
+        "host_tool_registry_empty": 0,
+        "host_tool_factory_null": 0,
+        "host_plugin_initialize_failure": 0,
     }
+    assert "private" not in repr(counts)
+
+
+def test_host_tool_admission_counts_distinguish_reasons_without_exposing_operands():
+    prefix = (
+        "Embedded agent failed before reply: No callable tools remain after "
+        "resolving explicit tool allowlist (tools.allow: private-tool)"
+    )
+    reasons = {
+        "host_tool_allowlist_no_match": "no registered tools matched",
+        "host_tool_allowlist_disabled": "tools are disabled for this run",
+        "host_tool_allowlist_model_unsupported": "the selected model does not support tools",
+    }
+    for expected_key, reason in reasons.items():
+        counts = a2a_driver._a2a_host_failure_counts(
+            f"\x1b[31m{prefix}; {reason}. Fix private-config.\x1b[39m\n"
+        )
+        assert counts["host_tool_allowlist_empty"] == 1
+        assert counts[expected_key] == 1
+        assert all(counts[key] == 0 for key in reasons if key != expected_key)
+        assert "private" not in repr(counts)
+    # Do not attach a reason from a later unrelated log record.
+    split_counts = a2a_driver._a2a_host_failure_counts(
+        f"{prefix}\nprivate unrelated; no registered tools matched.\n"
+    )
+    assert split_counts["host_tool_allowlist_empty"] == 1
+    assert split_counts["host_tool_allowlist_no_match"] == 0
+
+
+def test_host_tool_loading_diagnostics_return_counts_not_tool_or_plugin_names():
+    counts = a2a_driver._a2a_host_failure_counts(
+        "[tools] quarantined 2 unsupported tool schemas before model runtime projection: private-schema\n"
+        "plugin tool registry did not include selected plugin tools after cold load (private-plugin)\n"
+        "plugin tool factory returned null (private-plugin): [private-tool]\n"
+        "[plugins] 1 plugin(s) failed to initialize (private-plugin: private-error).\n"
+    )
+    for key in (
+        "host_tool_schema_quarantine", "host_tool_registry_empty",
+        "host_tool_factory_null", "host_plugin_initialize_failure",
+    ):
+        assert counts[key] == 1
     assert "private" not in repr(counts)
 
 
