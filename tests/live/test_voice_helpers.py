@@ -160,7 +160,7 @@ def test_open_post_call_action_matches_marker_and_sms_intent_across_shapes():
         SimpleNamespace(
             status=SimpleNamespace(value="open"),
             action="Send a text message",
-            details="Content: openclaw xray bravo",
+            details="Content: openclaw x ray bravo",
         ),
     )
 
@@ -228,6 +228,24 @@ def test_hosted_marker_normalizes_asr_separators_without_unsafe_prefix():
     assert voice._voice_marker_key(marker) == voice._voice_marker_key(asr_variant)
     assert len(voice._matching_open_post_call_actions(call, marker)) == 1
     assert "openclaw" not in marker
+
+
+@pytest.mark.parametrize("heard", [
+    "hospitalkangaroo chocolate",
+    "hospital kangaroo chocolatebar",
+    "prehospital kangaroo chocolate",
+    "hospital chocolate kangaroo",
+])
+def test_hosted_marker_rejects_merged_subword_or_reordered_speech(heard):
+    marker = "hospital kangaroo chocolate"
+    call = _call_with({"status": "open", "action": "Send SMS", "details": heard})
+    assert voice._matching_open_post_call_actions(call, marker) == []
+    assert voice._hosted_heard_marker_shape([_segment("remote", heard)], marker)["marker"] is False
+
+
+def test_hosted_marker_does_not_alias_xray_and_x_ray():
+    call = _call_with({"status": "open", "action": "Send SMS", "details": "openclaw xray bravo"})
+    assert voice._matching_open_post_call_actions(call, "openclaw x ray bravo") == []
 
 
 def test_post_call_action_diagnostics_are_content_free_and_redacted():

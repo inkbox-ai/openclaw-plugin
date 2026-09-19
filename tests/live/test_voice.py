@@ -75,8 +75,9 @@ def _normalized_spoken_text(value: str | None) -> str:
 
 
 def _voice_marker_key(value: str | None) -> str:
-    """Normalize spacing variants such as xray, x-ray, and x ray."""
-    return re.sub(r"\W+", "", value or "").casefold()
+    """Keep whole ordered words; normalize only case and punctuation."""
+    words = _normalized_spoken_text(value)
+    return f" {words} " if words else ""
 
 
 def _has_sms_send_intent(value: str | None) -> bool:
