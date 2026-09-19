@@ -1,3 +1,5 @@
+import { runtimeState } from "./runtime-state.js";
+
 // Which line is a conversation happening on? The inbound session bridge
 // records the modality of every dispatched turn here (same in-process seam
 // as outbound-call-context), so the place-call tool can follow the current
@@ -14,8 +16,11 @@ type HintEntry = { hint: ChannelHint; at: number };
 
 // Last inbound modality per remote address, plus the most recent turn overall
 // (the "current conversation" while the agent is processing that turn).
-const byAddress = new Map<string, HintEntry>();
-let latest: HintEntry | undefined;
+const state = runtimeState("channel-hints.v1", () => ({
+  byAddress: new Map<string, HintEntry>(),
+  latest: undefined as HintEntry | undefined,
+}));
+const byAddress = state.byAddress;
 
 function normalizeAddress(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -50,11 +55,11 @@ export function recordInboundChannelHint(params: {
   const hint = hintForMode(params.mode);
   const now = Date.now();
   if (!hint) {
-    latest = undefined;
+    state.latest = undefined;
     return;
   }
   prune(now);
-  latest = { hint, at: now };
+  state.latest = { hint, at: now };
   const address = normalizeAddress(params.remoteAddress);
   if (address) {
     byAddress.set(address, { hint, at: now });
@@ -73,11 +78,11 @@ export function resolveChannelHint(remoteAddress?: string): ChannelHint | undefi
   if (entry) {
     return entry.hint;
   }
-  return latest && now - latest.at <= CHANNEL_HINT_TTL_MS ? latest.hint : undefined;
+  return state.latest && now - state.latest.at <= CHANNEL_HINT_TTL_MS ? state.latest.hint : undefined;
 }
 
-// Test hook — the module-level store persists across vitest cases otherwise.
+// Test hook — the process-shared store persists across vitest cases otherwise.
 export function resetChannelHintsForTest(): void {
   byAddress.clear();
-  latest = undefined;
+  state.latest = undefined;
 }

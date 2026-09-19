@@ -1,3 +1,4 @@
+import { runtimeState } from "./runtime-state.js";
 interface HookContext {
   sessionKey?: string;
   runId?: string;
@@ -14,7 +15,7 @@ interface ActivityCapture {
   toolIdentifiers: string[];
 }
 
-const captures = new Map<string, ActivityCapture>();
+const captures = runtimeState("a2a-progress-captures.v1", () => new Map<string, ActivityCapture>());
 const MAX_TOOL_IDENTIFIERS = 8;
 const MAX_TOOL_IDENTIFIER_CHARS = 80;
 

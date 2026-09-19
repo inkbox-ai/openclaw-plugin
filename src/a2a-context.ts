@@ -1,3 +1,4 @@
+import { runtimeState } from "./runtime-state.js";
 export interface ActiveA2ATurn {
   taskId: string;
   messageId: string;
@@ -6,7 +7,7 @@ export interface ActiveA2ATurn {
   beforeReplyIntent?: () => Promise<void>;
 }
 
-const active = new Map<string, ActiveA2ATurn>();
+const active = runtimeState("active-a2a-turns.v1", () => new Map<string, ActiveA2ATurn>());
 
 export function setActiveA2ATurn(
   sessionKey: string,

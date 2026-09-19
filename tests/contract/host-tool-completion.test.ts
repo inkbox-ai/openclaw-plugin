@@ -62,13 +62,23 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
       : { content: [{ type: "text" as const, text: "Rejected" }], details: {}, isError: true });
     const capture = beginSilentSendCapture(context.sessionKey);
     capture.activate();
-    bindSilentSendCaptureToRun({ prompt: capture.marker }, context);
-    recordSilentSendModelStarted({}, context);
-    initialize({ hooks: [], plugins: [], trustedToolPolicies: [], typedHooks: [{ pluginId: "inkbox", hookName: "before_tool_call", handler: (event: any, hookContext: any) => {
-      events.push(event);
-      recordSilentSendBeforeToolCall(event, hookContext);
-    } }, { pluginId: "inkbox", hookName: "after_tool_call", handler: recordSilentSendAfterToolCall }] });
+    // Prepared model runs can load fresh hook modules while the channel's
+    // existing dispatch still owns this capture.
+    vi.resetModules();
+    const reloadedHooks = await import("../../src/silent-send-capture.js");
+    initialize({ hooks: [], plugins: [], trustedToolPolicies: [], typedHooks: [
+      { pluginId: "inkbox", hookName: "before_agent_run", handler: reloadedHooks.bindSilentSendCaptureToRun },
+      { pluginId: "inkbox", hookName: "model_call_started", handler: reloadedHooks.recordSilentSendModelStarted },
+      { pluginId: "inkbox", hookName: "before_tool_call", handler: (event: any, hookContext: any) => {
+        events.push(event);
+        reloadedHooks.recordSilentSendBeforeToolCall(event, hookContext);
+      } },
+      { pluginId: "inkbox", hookName: "after_tool_call", handler: reloadedHooks.recordSilentSendAfterToolCall },
+    ] });
     try {
+      await getRunner().runBeforeAgentRun({ prompt: capture.marker }, context);
+      await getRunner().runModelCallStarted({}, context);
+      expect(capture.shape()).toMatchObject({ bound: true, batch: true });
       register({ catalogRef, hookContext: context, tools: [{ name: "inkbox_send_email", label: "Send email", description: "Send email", parameters: Type.Object({ completeSilently: Type.Boolean() }), execute }] });
       const rawControl = createControls({ ...context, catalogRef, config: {}, executeTool: async (params: any) => {
         const result = await params.tool.execute(params.toolCallId, params.input, params.signal, params.onUpdate);

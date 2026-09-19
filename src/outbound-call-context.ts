@@ -1,3 +1,4 @@
+import { runtimeState } from "./runtime-state.js";
 import { randomUUID } from "node:crypto";
 
 const OUTBOUND_CALL_CONTEXT_PARAM = "inkbox_call_context_id";
@@ -15,7 +16,7 @@ export type OutboundCallContext = OutboundCallContextInput & {
   createdAt: number;
 };
 
-const contexts = new Map<string, OutboundCallContext>();
+const contexts = runtimeState("outbound-call-contexts.v1", () => new Map<string, OutboundCallContext>());
 
 function nonEmptyString(value: unknown): string | undefined {
   if (typeof value !== "string") {

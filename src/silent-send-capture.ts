@@ -1,3 +1,4 @@
+import { runtimeState } from "./runtime-state.js";
 import { randomUUID } from "node:crypto";
 import { transformInkboxReplyPayload } from "./silent-reply.js";
 
@@ -29,7 +30,7 @@ type Result = {
     result?: unknown;
   };
 };
-const captures = new Set<Capture>();
+const captures = runtimeState("silent-send-captures.v1", () => new Set<Capture>());
 const sendTools = new Set([
   "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_forward_email",
 ]);

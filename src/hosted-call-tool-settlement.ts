@@ -1,3 +1,4 @@
+import { runtimeState } from "./runtime-state.js";
 import {
   recordHostedSmsAttemptPending,
   settleHostedSmsAttempt,
@@ -65,7 +66,7 @@ export type HostedSmsErrorKind =
   | "recipient_terminal"
   | "ambiguous_provider_failure";
 
-const captures = new Map<string, ActiveCapture>();
+const captures = runtimeState("hosted-sms-captures.v1", () => new Map<string, ActiveCapture>());
 
 function eventRunId(event: { runId?: string }, ctx: ToolHookContext): string | undefined {
   return event.runId ?? ctx.runId;
