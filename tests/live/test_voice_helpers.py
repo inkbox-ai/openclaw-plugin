@@ -314,7 +314,9 @@ def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hang
     ) in workflow
     assert "send me one SMS containing exactly these words" not in workflow
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
-    assert "export VOICE_DRIVER_ANSWER_SETTLE=4" in workflow
+    contact_case = workflow.split('elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then', 1)[1].split("\n          fi", 1)[0]
+    assert "export VOICE_DRIVER_TEST_OWNS_HANGUP=1" in contact_case
+    assert "export VOICE_DRIVER_WAIT_FOR_PEER=1" in contact_case
 
 
 def test_configured_hosted_request_satisfies_persisted_caller_intent_gate(monkeypatch):

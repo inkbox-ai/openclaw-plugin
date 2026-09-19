@@ -184,9 +184,12 @@ jobs:
             # The pytest gate, not the driver timer, owns the intentional hangup.
             export VOICE_DRIVER_LISTEN=180
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
-            export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
-            export VOICE_DRIVER_LISTEN=40
-            export VOICE_DRIVER_ANSWER_SETTLE=4
+            export VOICE_DRIVER_LINE="Look up Olivia Parker's contact card. Read her full name and email address aloud. Then wait for me to confirm."
+            # The test owns hangup after direct-read and persisted-answer proof.
+            # This safety timer stays inside the unchanged overall test budget.
+            export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_TEST_OWNS_HANGUP=1
+            export VOICE_DRIVER_WAIT_FOR_PEER=1
           fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             python3 "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &

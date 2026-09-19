@@ -20,6 +20,8 @@ Env:
   VOICE_DRIVER_STATE      path to write the JSON state file
   VOICE_DRIVER_LINE       the one line the driver speaks (default below)
   VOICE_DRIVER_ANSWER_SETTLE  seconds to keep media open after hearing the answer
+  VOICE_DRIVER_TEST_OWNS_HANGUP  leave completion hangup to the asserting test
+  VOICE_DRIVER_WAIT_FOR_PEER  require initial peer speech before the quiet gate
 """
 
 from __future__ import annotations
@@ -70,6 +72,9 @@ REASK_EVERY_S = float(os.environ.get("VOICE_DRIVER_REASK", "20"))
 QUIET_GAP_S = float(os.environ.get("VOICE_DRIVER_QUIET_GAP", "6"))
 MAX_REASKS = int(os.environ.get("VOICE_DRIVER_MAX_REASKS", "2"))
 ANSWER_SETTLE_S = float(os.environ.get("VOICE_DRIVER_ANSWER_SETTLE", "0"))
+# Hearing an email-like fragment does not prove the full answer was persisted.
+TEST_OWNS_HANGUP = os.environ.get("VOICE_DRIVER_TEST_OWNS_HANGUP", "0") == "1"
+WAIT_FOR_PEER = os.environ.get("VOICE_DRIVER_WAIT_FOR_PEER", "0") == "1"
 
 
 async def _wait_for_greeting(state: dict[str, float]) -> bool:
@@ -80,11 +85,11 @@ async def _wait_for_greeting(state: dict[str, float]) -> bool:
     while True:
         now = loop.time()
         quiet_in = QUIET_GAP_S - (now - state["last_heard"])
-        if quiet_in <= 0:
+        if quiet_in <= 0 and (not WAIT_FOR_PEER or state["last_heard"] > 0):
             return True
         if now >= deadline:
             return False
-        await asyncio.sleep(min(quiet_in, deadline - now))
+        await asyncio.sleep(min(max(quiet_in, 1.0), deadline - now))
 
 
 app = FastAPI()
@@ -173,7 +178,9 @@ async def phone_media_ws(ws: WebSocket) -> None:
                 if not ev.get("is_final"):
                     continue
                 log.info("heard final agent transcript")
-                if "@" in text or "example" in text.lower().replace(" ", ""):
+                if not TEST_OWNS_HANGUP and (
+                    "@" in text or "example" in text.lower().replace(" ", "")
+                ):
                     answered.set()
             elif kind == "stop":
                 log.info("call stopped")
