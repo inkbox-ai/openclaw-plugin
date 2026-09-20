@@ -66,13 +66,13 @@ jobs:
       - name: Build the plugin
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@2026.5.27
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@latest
           npm run build
 
-      - name: Install OpenClaw host
+      - name: Use the plugin's OpenClaw host
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g openclaw@latest
-          openclaw --version
+          echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/node_modules/.bin/openclaw" --version
 
       - name: Onboard model provider (real OpenAI)
         env:

@@ -12,6 +12,15 @@ const workflows = [
 ];
 
 describe("CI resilience contracts", () => {
+  it("runs live gateways from the same host package used by the plugin", () => {
+    for (const name of workflows.filter((value) => value.startsWith("live-"))) {
+      const workflow = readFileSync(resolve(".github", "workflows", name), "utf8");
+      expect(workflow).toContain('echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"');
+      expect(workflow).toContain('"$GITHUB_WORKSPACE/node_modules/.bin/openclaw" --version');
+      expect(workflow).not.toContain("install -g openclaw");
+      expect(workflow).not.toContain("openclaw@2026.5.27");
+    }
+  });
   it("bounds setup-only npm retries in every host workflow", () => {
     for (const name of workflows) {
       const workflow = readFileSync(
