@@ -2,8 +2,9 @@
 
 Opens an Inkbox tunnel for the driver identity, serves the call-media WebSocket
 behind it, and bridges audio in Inkbox STT/TTS mode (text frames only — no local
-model). It speaks one scripted line so the agent under test gets a turn, and the
-call transcript (read separately by the test) proves the agent replied.
+model). It speaks a scripted line so the agent under test gets a turn, re-asking
+while the agent is idle, and the call transcript (read separately by the test)
+proves the agent replied.
 
 Run as a standalone process alongside the gateway. On startup it writes a small
 JSON state file (its public WS URL + phone-number id) that the test reads to place
@@ -53,10 +54,22 @@ LINE = os.environ.get(
 # and the call is hung up before the agent ever speaks. Answer the way a person
 # does - one word, then silence - and hold the prompt until that window closes.
 GREETING = os.environ.get("VOICE_DRIVER_GREETING", "Hello?")
+# Delay before the first ask. A greeting arrives as several final transcripts
+# 1.5-5s apart, so no silence threshold tells "between greeting sentences" from
+# "greeting over" — the first ask is simply allowed to land wherever it lands, and
+# _run_turn re-asks once the agent is actually idle.
 SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "5"))
 # Then give the agent a turn and hang up — a dropped WS does NOT end the call, so we
 # must send an explicit stop or the leg lingers until the server max-duration cap.
 LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
+# Re-ask the question this often while the agent is idle. An ask the greeting
+# talked over is otherwise never repeated and the call idles out with the agent
+# still waiting for a request. 0 disables re-asking.
+REASK_EVERY_S = float(os.environ.get("VOICE_DRIVER_REASK", "20"))
+# Never re-ask until the agent has been silent this long, so a reply or a tool
+# round-trip in progress is never talked over.
+QUIET_GAP_S = float(os.environ.get("VOICE_DRIVER_QUIET_GAP", "6"))
+MAX_REASKS = int(os.environ.get("VOICE_DRIVER_MAX_REASKS", "2"))
 ANSWER_SETTLE_S = float(os.environ.get("VOICE_DRIVER_ANSWER_SETTLE", "0"))
 
 app = FastAPI()
@@ -78,8 +91,9 @@ async def phone_media_ws(ws: WebSocket) -> None:
         (b"x-use-inkbox-speech-to-text", b"true"),
     ])
     log.info("call WS accepted")
-    spoke = asyncio.Event()
-    answered = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    answered = asyncio.Event()        # agent recited the thing we asked for
+    state = {"last_heard": 0.0}       # monotonic ts of the agent's most recent turn
     convo: asyncio.Task | None = None
 
     async def _say(text: str) -> None:
@@ -87,21 +101,35 @@ async def phone_media_ws(ws: WebSocket) -> None:
         await ws.send_text(json.dumps({"event": "text", "done": True}))
         log.info("spoke scripted line")
 
-    async def _speak(text: str) -> None:
-        if spoke.is_set():
-            return
-        spoke.set()
-        await _say(text)
-
     async def _run_turn() -> None:
         # Speak one line, give the agent a turn, then hang up so the call ends fast.
         await _say(GREETING)
         await asyncio.sleep(SPEAK_AFTER_S)
-        await _speak(LINE)
-        try:
-            await asyncio.wait_for(answered.wait(), timeout=LISTEN_S)
-        except asyncio.TimeoutError:
-            pass
+        await _say(LINE)
+        asked_at = loop.time()
+        state["last_heard"] = asked_at
+        # Re-ask if the agent never got the question: the greeting routinely runs
+        # several seconds past our first ask, and a lost ask leaves the agent
+        # waiting while the call idles out. Re-ask ONLY once the agent has itself
+        # gone quiet, so an in-progress reply or tool round-trip is never talked over.
+        started = loop.time()
+        reasks = 0
+        while loop.time() - started < LISTEN_S and not answered.is_set():
+            try:
+                await asyncio.wait_for(answered.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            if answered.is_set() or loop.time() - started >= LISTEN_S:
+                break
+            if (
+                REASK_EVERY_S > 0
+                and reasks < MAX_REASKS
+                and loop.time() - asked_at >= REASK_EVERY_S
+                and loop.time() - state["last_heard"] >= QUIET_GAP_S
+            ):
+                await _say(LINE)
+                asked_at = loop.time()
+                reasks += 1
         if answered.is_set() and ANSWER_SETTLE_S > 0:
             await asyncio.sleep(ANSWER_SETTLE_S)
         try:
@@ -121,9 +149,9 @@ async def phone_media_ws(ws: WebSocket) -> None:
             elif kind == "transcript" and ev.get("is_final"):
                 text = ev.get("text") or ""
                 log.info("heard final agent transcript")
+                state["last_heard"] = loop.time()  # agent is actively talking
                 if "@" in text or "example" in text.lower().replace(" ", ""):
                     answered.set()
-                await _speak(LINE)  # speak now if the greeting beat our timer
             elif kind == "stop":
                 log.info("call stopped")
                 break
