@@ -51,6 +51,19 @@ describe("actual host A2A session-key contract", () => {
     expect(scoped("unknown")).toBe("unknown");
   });
 
+  it("keeps Companion ordinary, activation, identity, and cohort routes distinct", () => {
+    const keys = [
+      "companion:account:identity:mail:conversation-cohort:ordinary",
+      "companion:account:identity:mail:conversation-cohort:activation:one",
+      "companion:account:identity:mail:conversation-cohort:activation:two",
+      "companion:account:identity:mail:another-cohort:activation:one",
+      "companion:account:another-identity:mail:conversation-cohort:activation:one",
+      "companion:account:identity:imessage:conversation-cohort:activation:one",
+    ].map((raw) => scoped(raw));
+    expect(new Set(keys).size).toBe(keys.length);
+    for (const key of keys) expect(parseAgentSessionKey(key)?.agentId).toBe("worker");
+  });
+
   // The minimum supported May host predates canonical SQLite writes. Do not
   // skip missing validators on later hosts: that is a latest-host CI contract.
   it.skipIf(hostVersion === "2026.5.27")(

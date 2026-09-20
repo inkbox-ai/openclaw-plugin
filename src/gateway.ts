@@ -128,6 +128,7 @@ export function registerInkboxPublicUrlInboundRoutes(api: any): void {
       account.config,
       api.logger,
     );
+    void bridge.catchUpCompanion().catch(() => api.logger?.warn?.("Companion recovery is unavailable."));
     if (!registeredPublicRoutes.has(key)) {
       registerInboundHttpRoute({
         api,
@@ -189,6 +190,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
     getCallWebsocketUrl: () => callWebsocketUrl,
   });
   const handlers = wrapInboundHandlersWithBatching(bridge.handlers, account.config, ctx.log);
+  void bridge.catchUpCompanion().catch(() => ctx.log?.warn?.("Companion recovery is unavailable."));
 
   ctx.setStatus({
     accountId: account.accountId,

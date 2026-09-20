@@ -26,6 +26,7 @@ vi.mock("../src/inbound/session.js", () => ({
     wsHandler: mocks.wsHandler,
     catchUpA2A: vi.fn(),
     catchUpHostedCalls: vi.fn(),
+    catchUpCompanion: vi.fn(async () => {}),
     shutdownA2A: mocks.shutdownA2A,
   })),
   prewarmInkboxAgent: vi.fn(),

@@ -79,7 +79,7 @@ jobs:
         # uvicorn[standard] (not bare uvicorn): the driver accepts a WebSocket
         # upgrade, which needs the websockets extra.
         run: |
-          pip install 'inkbox==0.6.10' pytest fastapi 'uvicorn[standard]'
+          pip install 'inkbox==0.7.3' pytest fastapi 'uvicorn[standard]'
 
       - name: Build the plugin
         run: |

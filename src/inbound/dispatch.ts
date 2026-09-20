@@ -58,6 +58,7 @@ function isExplicitOutboundCallEnded(parsed: any): boolean {
 }
 
 export interface InboundHandlers {
+  onCompanion?(event: Record<string, any>): Promise<void>;
   // Mail events fire-and-forget. Six event_types: message.received/sent/
   // forwarded/delivered/bounced/failed. Most workflows only care about
   // message.received; the rest are telemetry.
@@ -138,6 +139,12 @@ export async function dispatchInbound(
     typeof (parsed as { event_type: unknown }).event_type === "string"
   ) {
     const eventType = (parsed as { event_type: string }).event_type;
+    if ("companion" in parsed && ["message.received", "text.received", "imessage.received"].includes(eventType)) {
+      if (!handlers.onCompanion) throw new Error("Companion mode requires a compatible receiver.");
+      const kind = eventType === "message.received" ? "mail" : eventType === "text.received" ? "text" : "imessage";
+      await handlers.onCompanion(parsed);
+      return { kind };
+    }
     if (eventType.startsWith("message.")) {
       const contactIds = resolveRemoteContactIds(parsed, "mail");
       if (!anyInboundContactAllowed(contactIds, allowedContactIds)) {

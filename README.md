@@ -427,7 +427,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The plugin pins `@inkbox/sdk` 0.6.10.
+- The plugin pins `@inkbox/sdk` 0.7.3.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
@@ -447,6 +447,31 @@ Optional:
 - Diagnostic: `inkbox_whoami`
 
 Send and email-forward tools accept optional `completeSilently: true` when the send is the final requested action and no acknowledgment is wanted. Successful sends then end the turn without an extra source-channel reply. Leave it unset when more work or a reply remains; failed sends never silently complete.
+
+## Companion mode
+
+Companion mode is configured on the Inkbox identity and remains off until an
+administrator enables it and selects a sponsor. Installing this plugin does not
+change that configuration.
+
+Sponsored email, group MMS, and supported dedicated-line iMessage conversations
+receive one combined initialization input containing all available authorized
+history and the sponsor's message. Later messages wait for initialization to
+complete. Each conversation/cohort and activation has a separate OpenClaw session;
+ordinary tracked messages use a separate session without loading sponsored history.
+Replies retain the email parent and approved To/CC audience or the canonical text
+conversation. MMS chats with identical participants share one logical conversation.
+
+History loading and the combined input are bounded at 128 KiB. Oversized or incomplete inputs pause
+delivery without truncation. Local sender filters require the sponsor to be locally
+permitted; existing send restrictions and host tool approvals still apply.
+
+Jobs are saved before webhook acknowledgment under `~/.openclaw/inkbox/` in private
+`companion-*.json` journals. Pending work resumes at startup. A `paused` job includes
+a reason; resolve that cause before retrying it. If a host submission was interrupted,
+inspect the corresponding OpenClaw session before recovery. Never blindly reset a
+`submitting` or uncertain job: the host may already have acted. Webhook delivery is
+at least once, not a guarantee of exactly-once model execution.
 
 ## Bundled Skills
 

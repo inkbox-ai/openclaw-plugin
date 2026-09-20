@@ -82,6 +82,23 @@ describe("handleInkboxWebhook", () => {
     expect(vi.mocked(verifyWebhook)).toHaveBeenCalledTimes(2);
   });
 
+  it("waits for durable Companion acceptance on every concurrent retry", async () => {
+    let release!: () => void;
+    const durable = new Promise<void>((resolve) => { release = resolve; });
+    const onCompanion = vi.fn(() => durable);
+    const options = { signingKey: "whsec_x", dedup: new RequestIdDedup(), handlers: { onCompanion } };
+    const body = JSON.stringify({ ...JSON.parse(mailBody), companion: { phase: "initialization" } });
+    let acknowledgments = 0;
+    const first = handleInkboxWebhook(body, baseHeaders, options).then(() => { acknowledgments++; });
+    const duplicate = handleInkboxWebhook(body, baseHeaders, options).then(() => { acknowledgments++; });
+    await Promise.resolve();
+    expect(onCompanion).toHaveBeenCalledTimes(2);
+    expect(acknowledgments).toBe(0);
+    release();
+    await Promise.all([first, duplicate]);
+    expect(acknowledgments).toBe(2);
+  });
+
   it("does not let an invalid signature poison dedup state", async () => {
     const dedup = new RequestIdDedup();
     const onMail = vi.fn();

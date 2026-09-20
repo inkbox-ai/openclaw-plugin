@@ -2,6 +2,7 @@ import { createInkboxTextReplyCapture } from "../reply-capture.js";
 import { beginSilentSendCapture } from "../silent-send-capture.js";
 import { isInkboxSilentReply, transformInkboxReplyPayload } from "../silent-reply.js";
 import { canonicalInkboxSessionOverride } from "../session-key.js";
+import { COMPANION_MAX_BYTES, createCompanionReceiver, type CompanionReply } from "./companion.js";
 import { a2aFailureShape, settleCaughtA2AFailure } from "../a2a-failure.js";
 import { INKBOX_HD_AUDIO_FORMAT, RealtimeCallAudio } from "../realtime-audio.js";
 import { createHash } from "node:crypto";
@@ -125,6 +126,9 @@ type WebhookMatchedContact = {
 };
 
 type InkboxInboundTurn = {
+  companionReply?: CompanionReply;
+  companionValidateBeforeDispatch?: () => Promise<void>;
+  companionRecordDelivery?: (messageId: string) => Promise<void>;
   mode: InboundMode;
   contactKey: string;
   contact?: ContactSummary;
@@ -224,6 +228,7 @@ export interface InkboxSessionBridge {
   activeCalls: Map<string, ActiveCall>;
   catchUpA2A(): Promise<void>;
   catchUpHostedCalls(): Promise<void>;
+  catchUpCompanion(): Promise<void>;
   shutdownA2A(): Promise<void>;
 }
 
@@ -1623,6 +1628,9 @@ async function deliverReply(
     return undefined;
   }
 
+  if (params.turn.companionReply && (await params.runtime.getIdentity()).id !== params.turn.companionReply.identityId) {
+    throw new Error("Companion reply identity has changed.");
+  }
   if (params.turn.mode === "imessage") {
     // Length guard stays a plain throw before the send: an over-limit reply is
     // a local bug to surface, not a server delivery failure to recover from.
@@ -1668,7 +1676,7 @@ async function deliverReply(
     }
   }
 
-  if (!params.turn.remoteAddress) {
+  if (!params.turn.remoteAddress && !params.turn.companionReply) {
     throw new Error("Inkbox email reply missing remote email address.");
   }
   const identity = await params.runtime.getIdentity();
@@ -1678,11 +1686,27 @@ async function deliverReply(
       : `Re: ${params.turn.subject}`
     : "(no subject)";
   try {
+    let parentMessageId = params.turn.replyToId;
+    const companion = params.turn.companionReply;
+    if (companion) {
+      if (!companion.replyToMessageId) throw new Error("Companion email parent is missing.");
+      const parent = await identity.getMessage(companion.replyToMessageId);
+      if (parent.id !== companion.replyToMessageId || parent.threadId !== companion.conversationId || !parent.messageId) {
+        throw new Error("Companion email parent does not match its conversation.");
+      }
+      const audience = (addresses: string[]) => JSON.stringify([...new Set(addresses.map((v) => v.trim().toLowerCase()))].sort());
+      const resolved = parent.replyAllRecipients;
+      if (!resolved || audience([...resolved.to, ...resolved.cc]) !== audience([...(companion.to ?? []), ...(companion.cc ?? [])])) {
+        throw new Error("Companion email reply audience has changed.");
+      }
+      parentMessageId = parent.messageId;
+    }
     const msg = await identity.sendEmail({
-      to: [params.turn.remoteAddress],
+      to: params.turn.companionReply?.to ?? [params.turn.remoteAddress!],
+      ...(params.turn.companionReply ? { cc: params.turn.companionReply.cc } : {}),
       subject,
       bodyText: text,
-      inReplyToMessageId: params.turn.replyToId,
+      inReplyToMessageId: parentMessageId,
     });
     return msg.id;
   } catch (error) {
@@ -2420,6 +2444,7 @@ async function dispatchInboundTurn(
 ): Promise<void> {
   const core = opts.channelRuntime;
   if (!core?.inbound?.dispatchReply) {
+    if (opts.turn.companionReply) throw new Error("OpenClaw channelRuntime is unavailable for Companion delivery.");
     opts.logger?.warn?.(
       "Inkbox inbound event received, but OpenClaw channelRuntime is unavailable; dropping event.",
     );
@@ -2472,10 +2497,14 @@ async function dispatchInboundTurn(
   });
   const conversationPrefix = opts.turn.mode === "imessage" ? "imessage" : "sms";
   const smsReplyTarget = opts.turn.conversationId
-    ? `${conversationPrefix}:${opts.turn.conversationId}`
+    ? `${opts.turn.mode === "email" ? "email" : conversationPrefix}:${opts.turn.conversationId}`
     : opts.turn.remoteAddress ?? opts.turn.contactKey;
   const silentSendCapture = !opts.deliveryOverride && ["sms", "email", "imessage"].includes(opts.turn.mode)
     ? beginSilentSendCapture(effectiveSessionKey) : undefined;
+  if (opts.turn.companionReply && Buffer.byteLength(`${body}\n\n${silentSendCapture?.marker ?? ""}`) > COMPANION_MAX_BYTES) {
+    silentSendCapture?.finish();
+    throw new Error("Companion initialization exceeds the host input limit.");
+  }
   const ctxPayload = core.inbound.buildContext({
     channel: "inkbox",
     accountId: routeAccountId,
@@ -2527,11 +2556,11 @@ async function dispatchInboundTurn(
       body,
       bodyForAgent: silentSendCapture ? `${opts.turn.body}\n\n${silentSendCapture.marker}` : opts.turn.body,
       rawBody: opts.turn.body,
-      commandBody: opts.turn.body,
+      commandBody: opts.turn.companionReply ? "" : opts.turn.body,
       envelopeFrom: opts.turn.fromLabel,
     },
     extra: {
-      CommandAuthorized: true,
+      CommandAuthorized: !opts.turn.companionReply,
       Provider: "inkbox",
       Surface: "inkbox",
       InkboxMode: opts.turn.mode,
@@ -2540,6 +2569,7 @@ async function dispatchInboundTurn(
       InkboxConversationId: opts.turn.conversationId,
       InkboxConversationKind: opts.turn.conversationKind,
       InkboxConversationParticipants: opts.turn.conversationParticipants?.join(","),
+      InkboxCompanionReplyContext: opts.turn.companionReply,
       InkboxContactId: opts.turn.contact?.id,
       MessageThreadId: opts.turn.threadId,
       InkboxVoiceReplyOnly: opts.turn.mode === "voice" ? true : undefined,
@@ -2599,6 +2629,7 @@ async function dispatchInboundTurn(
           imessageTyping: opts.imessageTyping,
           logger: opts.logger,
         });
+        if (messageId) await opts.turn.companionRecordDelivery?.(messageId);
       } catch (error) {
         if (error instanceof OutboundSendRejection) {
           // The agent's reply was rejected at send time (content policy,
@@ -2606,6 +2637,7 @@ async function dispatchInboundTurn(
           // loop so the agent is woken to fix and resend — unless it's a
           // transient failure, which wakeOnSendRejection rethrows for the host
           // gateway to retry.
+          if (opts.turn.companionReply) throw error;
           await wakeOnSendRejection({ ...opts }, opts.turn, text, error);
           return { visibleReplySent: false };
         }
@@ -2638,8 +2670,10 @@ async function dispatchInboundTurn(
       })
     : undefined;
   silentSendCapture?.activate();
+  let recordFailed = false;
   try {
-    await core.inbound.dispatchReply({
+    await opts.turn.companionValidateBeforeDispatch?.();
+    const result = await core.inbound.dispatchReply({
       cfg: opts.cfg as any,
       channel: "inkbox",
       accountId: opts.account.accountId,
@@ -2656,12 +2690,17 @@ async function dispatchInboundTurn(
       dispatcherOptions: { transformReplyPayload: opts.replyCapture?.transformReplyPayload ?? silentSendCapture?.transform ?? transformInkboxReplyPayload },
       record: {
         onRecordError: (error: unknown) => {
+          recordFailed = true;
           opts.logger?.warn?.(
             `Inkbox session record failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         },
       },
     });
+    if (opts.turn.companionReply && (recordFailed || result?.dispatched !== true ||
+        result.admission?.kind === "observeOnly" || result.dispatchResult?.beforeAgentRunBlocked)) {
+      throw new Error("OpenClaw did not confirm Companion turn execution and session recording.");
+    }
   } finally {
     if (silentSendCapture) {
       const shape = silentSendCapture.shape();
@@ -5874,7 +5913,33 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   }
 
+  const companion = createCompanionReceiver({
+    accountId: opts.account.accountId,
+    config: opts.account.config,
+    runtime: opts.runtime,
+    warn: (message) => opts.logger?.warn?.(message),
+    async submit(input) {
+      const mode = input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
+      await dispatchInboundTurn({
+        ...opts, activeCalls,
+        turn: {
+          mode, contactKey: input.key, sessionKeyOverride: input.key,
+          conversationKind: "group", conversationLabel: "Inkbox Companion conversation",
+          conversationId: input.reply.conversationId,
+          fromLabel: "Inkbox Companion conversation", body: input.body,
+          messageId: input.messageId, raw: input.event,
+          subject: input.channel === "mail" ? input.event.data?.message?.subject : undefined,
+          companionReply: structuredClone(input.reply),
+          companionValidateBeforeDispatch: input.validateBeforeDispatch,
+          companionRecordDelivery: input.recordDelivery,
+          replyToId: input.reply.replyToMessageId ?? undefined,
+          threadId: `${mode}:${input.reply.conversationId}`,
+        },
+      });
+    },
+  });
   const handlers: InboundHandlers = {
+    onCompanion: companion.accept,
     async onCallEnded(event) {
       await ingestHostedCallCompletion(event);
     },
@@ -5886,6 +5951,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       // transitions (sent/delivered/forwarded) stay log-only. Email budget
       // resets on a fresh inbound + TTL, not on a delivered receipt.
       if (event.event_type === "message.bounced" || event.event_type === "message.failed") {
+        if (await companion.ownsDelivery(event.data?.message?.id, event.data?.message?.thread_id)) {
+          opts.logger?.warn?.("Companion email reply delivery failed; no private contact turn was created.");
+          return;
+        }
         await handleDeliveryFailure({ ...opts, activeCalls }, mailDeliveryFailure(event));
         return;
       }
@@ -5904,6 +5973,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       // The hard failure wakes the agent; text.delivery_unconfirmed is status
       // uncertainty, not a failed delivery, and stays log-only below.
       if (event.event_type === "text.delivery_failed") {
+        if (await companion.ownsDelivery(event.data?.text_message?.id, event.data?.text_message?.conversation_id)) {
+          opts.logger?.warn?.("Companion text reply delivery failed; no private contact turn was created.");
+          return;
+        }
         await handleDeliveryFailure({ ...opts, activeCalls }, textDeliveryFailure(event));
         return;
       }
@@ -5929,6 +6002,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     },
     async onIMessage(event) {
       if (event.event_type === "imessage.delivery_failed") {
+        if (await companion.ownsDelivery(event.data?.message?.id, event.data?.message?.conversation_id)) {
+          opts.logger?.warn?.("Companion iMessage reply delivery failed; no private contact turn was created.");
+          return;
+        }
         await handleDeliveryFailure({ ...opts, activeCalls }, imessageDeliveryFailure(event));
         return;
       }
@@ -6278,6 +6355,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     activeCalls,
     catchUpA2A,
     catchUpHostedCalls,
+    catchUpCompanion: companion.recover,
     shutdownA2A,
   };
 }

@@ -144,7 +144,9 @@ export async function handleInkboxWebhook(
       ? parsed.id.trim()
       : "";
   const dedupId = eventId || requestId;
-  if (opts.dedup && !opts.dedup.begin(dedupId)) {
+  const durableCompanion = "companion" in parsed &&
+    ["message.received", "text.received", "imessage.received"].includes(String(parsed.event_type));
+  if (!durableCompanion && opts.dedup && !opts.dedup.begin(dedupId)) {
     return { status: 200, body: "dup" };
   }
 
@@ -159,10 +161,10 @@ export async function handleInkboxWebhook(
       requestId,
     });
   } catch (error) {
-    opts.dedup?.rollback(dedupId);
+    if (!durableCompanion) opts.dedup?.rollback(dedupId);
     throw error;
   }
-  opts.dedup?.commit(dedupId);
+  if (!durableCompanion) opts.dedup?.commit(dedupId);
 
   // For inbound calls, the response body IS the routing decision.
   if (result.kind === "call") {

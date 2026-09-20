@@ -59,13 +59,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install protocol driver
-        run: pip install 'inkbox==0.6.10' pytest
+        run: pip install 'inkbox==0.7.3' pytest
 
       - name: Build plugin
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.6.10 openclaw@2026.5.27
+            @inkbox/sdk@0.7.3 openclaw@2026.5.27
           npm run build
 
       - name: Install OpenClaw

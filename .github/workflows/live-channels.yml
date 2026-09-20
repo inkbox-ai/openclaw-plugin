@@ -65,7 +65,7 @@ jobs:
 
       - name: Install live-test deps (Inkbox SDK + pytest)
         run: |
-          pip install 'inkbox==0.6.10' pytest
+          pip install 'inkbox==0.7.3' pytest
 
       - name: Build the plugin
         run: |
