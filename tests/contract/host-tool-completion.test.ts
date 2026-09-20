@@ -16,8 +16,8 @@ const hostDist = dirname(dirname(require.resolve("openclaw/plugin-sdk/reply-runt
 const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json"), "utf8")).version;
 const baselineWithoutFinalizer = hostVersion === "2026.5.27";
 
-async function hostFunction(bundle: string, name: string): Promise<any> {
-  const files = readdirSync(hostDist).filter((file) => file.startsWith(`${bundle}-`) &&
+async function hostFunction(bundle: string, name: string, aliases: string[] = []): Promise<any> {
+  const files = readdirSync(hostDist).filter((file) => [bundle, ...aliases].some((prefix) => file.startsWith(`${prefix}-`)) &&
     (file.endsWith(".js") || file.endsWith(".mjs")) &&
     readFileSync(join(hostDist, file), "utf8").includes(`function ${name}(`));
   expect(files, `Expected one host ${bundle} bundle`).toHaveLength(1);
@@ -169,7 +169,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
 
   it("does not misclassify intentional termination as an empty interactive failure", async () => {
     const classify = await hostFunction("result-fallback-classifier", "hasIntentionalTerminalCompletion");
-    const empty = await hostFunction("reply-admission-ticket", "buildEmptyInteractiveReplyPayload");
+    const empty = await hostFunction("reply-admission-ticket", "buildEmptyInteractiveReplyPayload", ["get-reply.types"]);
     const result = { meta: { intentionalTerminalCompletion: "tool-batch" } };
     expect(classify(result)).toBe(true);
     expect(empty({ isInteractive: true, hasIntentionalTerminalCompletion: classify(result) })).toBeUndefined();
