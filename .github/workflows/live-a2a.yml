@@ -58,8 +58,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install protocol driver
-        run: pip install 'inkbox==0.7.3' pytest
+      - uses: ./.github/actions/inkbox-sdk
+      - uses: astral-sh/setup-uv@v7
+      - name: Install protocol driver from pinned SDK source
+        run: uv pip install --system "$INKBOX_PYTHON_SDK_PATH" pytest
 
       - name: Build plugin
         run: |

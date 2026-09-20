@@ -1,0 +1,27 @@
+name: Build unreleased Inkbox SDK
+description: Build SDK 0.7.3 from its pinned public source for CI only.
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+      with:
+        repository: inkbox-ai/inkbox
+        ref: 449966c885208d41f995d09c54072e012df9eb1a
+        path: .ci/inkbox-sdk-source
+        persist-credentials: false
+        sparse-checkout: |
+          sdk/typescript
+          sdk/python
+    - name: Build and pack SDK
+      shell: bash
+      working-directory: ${{ github.workspace }}/.ci/inkbox-sdk-source/sdk/typescript
+      run: |
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = 449966c885208d41f995d09c54072e012df9eb1a
+        test "$(node -p 'require("./package.json").version')" = 0.7.3
+        npm ci --ignore-scripts
+        npm run build
+        mkdir -p "$RUNNER_TEMP/inkbox-sdk"
+        npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/inkbox-sdk"
+        echo "INKBOX_SDK_PATH=$RUNNER_TEMP/inkbox-sdk/inkbox-sdk-0.7.3.tgz" >> "$GITHUB_ENV"
+        echo "INKBOX_PYTHON_SDK_PATH=$GITHUB_WORKSPACE/.ci/inkbox-sdk-source/sdk/python" >> "$GITHUB_ENV"

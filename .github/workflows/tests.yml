@@ -28,6 +28,8 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
+      - uses: ./.github/actions/inkbox-sdk
+
       - name: Install dependencies
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
@@ -53,6 +55,8 @@ jobs:
         with:
           node-version: "24.16.0"
           cache: npm
+
+      - uses: ./.github/actions/inkbox-sdk
 
       - name: Install deps + latest OpenClaw host
         run: |
