@@ -93,6 +93,14 @@ describe("content-free A2A diagnostics", () => {
     );
   });
 
+  it("keeps the latest host's mjs basename without its private installation path", () => {
+    const error = new Error("private model response");
+    error.stack = "Error: private model response\n    at dispatch (/private/root/node_modules/openclaw/dist/dispatch-from-config-test.mjs:42:9)";
+    expect(a2aFailureShape("dispatch", error)).toBe(
+      "A2A failure shape: stage=dispatch name=Error frame=dispatch-from-config-test.mjs:42",
+    );
+  });
+
   it("does not print arbitrary names, paths, messages or object strings", () => {
     const error = new Error("private");
     error.name = "private-name";

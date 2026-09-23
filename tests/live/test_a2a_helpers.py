@@ -24,6 +24,18 @@ def test_failure_shapes_handle_host_prefixes_without_leaking_error_content():
     assert a2a_driver._a2a_failure_shapes(unknown) == [unknown]
 
 
+def test_failure_shapes_handle_host_ansi_colors_without_leaking_adjacent_content():
+    shape = "A2A failure shape: stage=dispatch name=Error frame=unknown:0"
+    host_shape = "A2A failure shape: stage=terminal name=TypeError frame=dispatch-test.mjs:42"
+    log = (
+        f"\x1b[33m[inkbox] {shape}\x1b[39m\n"
+        f"\x1b[38;5;208m{host_shape}\x1b[0m private error details\n"
+        "\x1b[33mA2A failure shape: stage=dispatch name=PrivateError frame=secret.js:1\x1b[39m\n"
+        f"{shape}\x1b[39mprivate-adjacent-content\n"
+    )
+    assert a2a_driver._a2a_failure_shapes(log) == [shape, host_shape]
+
+
 class _Identity:
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
