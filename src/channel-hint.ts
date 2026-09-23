@@ -14,8 +14,10 @@ type HintEntry = { hint: ChannelHint; at: number };
 
 // Last inbound modality per remote address, plus the most recent turn overall
 // (the "current conversation" while the agent is processing that turn).
-const byAddress = new Map<string, HintEntry>();
-let latest: HintEntry | undefined;
+const hintRegistry = Symbol.for("inkbox.channel-hints.v1");
+const processState = globalThis as typeof globalThis & { [hintRegistry]?: { byAddress: Map<string, HintEntry>; latest?: HintEntry } };
+const hintState = processState[hintRegistry] ??= { byAddress: new Map<string, HintEntry>() };
+const byAddress = hintState.byAddress;
 
 function normalizeAddress(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -50,11 +52,11 @@ export function recordInboundChannelHint(params: {
   const hint = hintForMode(params.mode);
   const now = Date.now();
   if (!hint) {
-    latest = undefined;
+    hintState.latest = undefined;
     return;
   }
   prune(now);
-  latest = { hint, at: now };
+  hintState.latest = { hint, at: now };
   const address = normalizeAddress(params.remoteAddress);
   if (address) {
     byAddress.set(address, { hint, at: now });
@@ -73,11 +75,11 @@ export function resolveChannelHint(remoteAddress?: string): ChannelHint | undefi
   if (entry) {
     return entry.hint;
   }
-  return latest && now - latest.at <= CHANNEL_HINT_TTL_MS ? latest.hint : undefined;
+  return hintState.latest && now - hintState.latest.at <= CHANNEL_HINT_TTL_MS ? hintState.latest.hint : undefined;
 }
 
 // Test hook — the module-level store persists across vitest cases otherwise.
 export function resetChannelHintsForTest(): void {
   byAddress.clear();
-  latest = undefined;
+  hintState.latest = undefined;
 }

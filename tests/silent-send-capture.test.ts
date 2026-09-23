@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { beginSilentSendCapture, bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "../src/silent-send-capture.js";
 
 const active: Array<ReturnType<typeof beginSilentSendCapture>> = [];
@@ -20,6 +20,30 @@ function send(ctx = context, extra: Record<string, unknown> = {}) {
 }
 
 describe("run-scoped explicit send completion", () => {
+  it("shares exact-run capture evidence across host plugin module graphs", async () => {
+    const capture = beginSilentSendCapture(context.sessionKey); active.push(capture); capture.activate();
+    vi.resetModules();
+    const reloaded = await import("../src/silent-send-capture.js");
+    expect(reloaded.beginSilentSendCapture).not.toBe(beginSilentSendCapture);
+    reloaded.bindSilentSendCaptureToRun({ prompt: capture.marker }, { ...context, sessionKey: "another-session" });
+    expect(capture.shape().bound).toBe(false);
+    reloaded.bindSilentSendCaptureToRun({ prompt: capture.marker }, context);
+    reloaded.recordSilentSendModelStarted({}, context);
+    const event = { toolName: "inkbox_send_email", toolCallId: "cross-graph-send", params: { completeSilently: true } };
+    reloaded.recordSilentSendBeforeToolCall(event, context);
+    reloaded.recordSilentSendAfterToolCall({ ...event, result: { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } } }, context);
+    expect(capture.shape()).toMatchObject({ bound: true, batch: true, accepted: 1, invalid: false });
+    expect(capture.transform(reply)).toBeNull();
+    capture.finish();
+    reloaded.recordSilentSendModelStarted({}, context);
+    expect(capture.transform(reply)).toBe(reply);
+    const next = reloaded.beginSilentSendCapture(context.sessionKey); active.push(next); next.activate();
+    bindSilentSendCaptureToRun({ prompt: next.marker }, context);
+    expect(next.shape().bound).toBe(true);
+    next.finish();
+    recordSilentSendModelStarted({}, context);
+    expect(next.shape().batch).toBe(false);
+  });
   it("suppresses only after positively settled final actions and preserves errors/attachments", () => {
     const { capture } = begin();
     expect(capture.transform(reply)).toBe(reply);

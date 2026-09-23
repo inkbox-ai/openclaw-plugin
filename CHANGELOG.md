@@ -38,6 +38,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Hydrate incomplete Companion email bodies, retain compact quiet-group context with explicit retention notices, and keep local sponsor checks independent of live contact-service availability.
 - Preserve unseen ordinary group context across local diagnostics and rejected host dispatches; clear it only after actual model consumption or a confirmed native reset.
 - Make health registration idempotent across host plugin-discovery module reloads.
+- Preserve exact-run send completion, hosted SMS settlement, A2A task/progress evidence, and outbound call context across host module graphs.
 
 ## [0.2.7] - 2026-07-29
 

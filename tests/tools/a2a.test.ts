@@ -140,6 +140,31 @@ describe("registerA2ATools", () => {
     }
   });
 
+  it("retains active task intent across prepared-tool module graphs", async () => {
+    const { api, contextualTools } = createApi();
+    const { identity, runtime } = createRuntime();
+    const sessionKey = "a2a:identity-1:graph-context";
+    const context: ActiveA2ATurn = { taskId: "graph-task", contextId: "graph-context", messageId: "graph-message", replyIntentCommitted: false };
+    setActiveA2ATurn(sessionKey, context);
+    vi.resetModules();
+    const reloaded = await import("../../src/tools/a2a.js");
+    expect(reloaded.registerA2ATools).not.toBe(registerA2ATools);
+    reloaded.registerA2ATools(api, runtime);
+    try {
+      const wrong = await contextualTools("another-session").get("inkbox_a2a_ask_caller")!.execute("graph-call", { text: "Access code?" });
+      expect(wrong.isError).toBe(true);
+      expect(identity.a2aReply).not.toHaveBeenCalled();
+      const asked = await contextualTools(sessionKey).get("inkbox_a2a_ask_caller")!.execute("graph-call", { text: "Access code?" });
+      expect(asked.isError).not.toBe(true);
+      expect(identity.a2aReply).toHaveBeenCalledWith("graph-task", { intent: "ask_caller", text: "Access code?" });
+      expect(context.replyIntentCommitted).toBe(true);
+    } finally { clearActiveA2ATurn(sessionKey, context); }
+    identity.a2aReply.mockClear();
+    const closed = await contextualTools(sessionKey).get("inkbox_a2a_complete")!.execute("late-call", { text: "Done" });
+    expect(closed.isError).toBe(true);
+    expect(identity.a2aReply).not.toHaveBeenCalled();
+  });
+
   it("drains worker progress before committing an inbound terminal intent", async () => {
     const { api, contextualTools } = createApi();
     const { identity, runtime } = createRuntime();

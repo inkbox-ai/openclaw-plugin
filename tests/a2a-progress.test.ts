@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   beginA2AProgressActivityCapture,
   bindA2AProgressActivityToRun,
@@ -15,6 +15,28 @@ import {
 } from "../src/a2a-progress.js";
 
 describe("A2A worker progress", () => {
+  it("shares bounded run-scoped progress across host plugin module graphs", async () => {
+    const sessionKey = "graph-progress";
+    const capture = beginA2AProgressActivityCapture({ sessionKey, promptMarker: "[graph-task]" });
+    vi.resetModules();
+    const hooks = await import("../src/a2a-progress-activity.js");
+    expect(hooks.beginA2AProgressActivityCapture).not.toBe(beginA2AProgressActivityCapture);
+    try {
+      hooks.bindA2AProgressActivityToRun({ prompt: "[graph-task]" }, { sessionKey: "other-session", runId: "graph-run" });
+      hooks.recordA2AProgressToolActivity({ toolName: "wrong-session" }, { sessionKey, runId: "graph-run" });
+      expect(capture.snapshot()).toEqual([]);
+      hooks.bindA2AProgressActivityToRun({ prompt: "[graph-task]" }, { sessionKey, runId: "graph-run" });
+      hooks.recordA2AProgressToolActivity({ toolName: "calculate" }, { sessionKey, runId: "graph-run" });
+      expect(capture.snapshot()).toEqual(["calculate"]);
+    } finally { capture.finish(); }
+    hooks.recordA2AProgressToolActivity({ toolName: "after-close" }, { sessionKey, runId: "graph-run" });
+    expect(capture.snapshot()).toEqual(["calculate"]);
+    const next = hooks.beginA2AProgressActivityCapture({ sessionKey, promptMarker: "[next-graph-task]" });
+    next.finish();
+    bindA2AProgressActivityToRun({ prompt: "[next-graph-task]" }, { sessionKey, runId: "next-run" });
+    recordA2AProgressToolActivity({ toolName: "after-close" }, { sessionKey, runId: "next-run" });
+    expect(next.snapshot()).toEqual([]);
+  });
   it("defaults to three minutes and renders the configured cadence", () => {
     expect(DEFAULT_A2A_PROGRESS_INTERVAL_SECONDS).toBe(180);
     expect(resolveA2AProgressIntervalSeconds(undefined)).toBe(180);

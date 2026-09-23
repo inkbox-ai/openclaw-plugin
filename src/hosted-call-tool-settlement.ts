@@ -65,7 +65,10 @@ export type HostedSmsErrorKind =
   | "recipient_terminal"
   | "ambiguous_provider_failure";
 
-const captures = new Map<string, ActiveCapture>();
+// Prepared-run hooks and channel dispatch may use separate host module graphs.
+const captureRegistry = Symbol.for("inkbox.hosted-sms-captures.v1");
+const processState = globalThis as typeof globalThis & { [captureRegistry]?: Map<string, ActiveCapture> };
+const captures = processState[captureRegistry] ??= new Map<string, ActiveCapture>();
 
 function eventRunId(event: { runId?: string }, ctx: ToolHookContext): string | undefined {
   return event.runId ?? ctx.runId;

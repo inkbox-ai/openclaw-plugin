@@ -15,7 +15,9 @@ export interface A2ADelegationRecord {
 }
 
 type Records = Record<string, A2ADelegationRecord>;
-let writeChain: Promise<void> = Promise.resolve();
+const registryStateKey = Symbol.for("inkbox.a2a-delegation-registry-state.v1");
+const processState = globalThis as typeof globalThis & { [registryStateKey]?: { writeChain: Promise<void> } };
+const registryState = processState[registryStateKey] ??= { writeChain: Promise.resolve() };
 
 function filePath(): string {
   return join(
@@ -40,8 +42,8 @@ async function read(): Promise<Records> {
 
 async function mutate(change: (records: Records) => void): Promise<void> {
   let release!: () => void;
-  const previous = writeChain;
-  writeChain = new Promise<void>((resolve) => {
+  const previous = registryState.writeChain;
+  registryState.writeChain = new Promise<void>((resolve) => {
     release = resolve;
   });
   await previous;

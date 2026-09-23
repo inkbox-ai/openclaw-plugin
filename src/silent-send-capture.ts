@@ -29,7 +29,11 @@ type Result = {
     result?: unknown;
   };
 };
-const captures = new Set<Capture>();
+// The host can load channel dispatch and prepared-run hooks in separate module
+// graphs. Keep the ephemeral, exact-run evidence shared within this process.
+const captureRegistry = Symbol.for("inkbox.silent-send-captures.v1");
+const processState = globalThis as typeof globalThis & { [captureRegistry]?: Set<Capture> };
+const captures = processState[captureRegistry] ??= new Set<Capture>();
 const sendTools = new Set([
   "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_forward_email",
 ]);

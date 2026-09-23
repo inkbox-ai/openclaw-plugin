@@ -27,8 +27,10 @@ export interface HostedSmsJournalEntry {
 
 export type HostedCallRegistry = Record<string, HostedCallRegistryEntry>;
 
-const PROCESS_OWNER_ID = randomUUID();
-let writeChain: Promise<void> = Promise.resolve();
+const registryStateKey = Symbol.for("inkbox.hosted-call-registry-state.v1");
+const processState = globalThis as typeof globalThis & { [registryStateKey]?: { ownerId: string; writeChain: Promise<void> } };
+const registryState = processState[registryStateKey] ??= { ownerId: randomUUID(), writeChain: Promise.resolve() };
+const PROCESS_OWNER_ID = registryState.ownerId;
 
 function boundedString(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -114,8 +116,8 @@ async function mutateHostedCallRegistry(
   mutate: (registry: HostedCallRegistry, now: number) => void,
 ): Promise<void> {
   let release!: () => void;
-  const previous = writeChain;
-  writeChain = new Promise<void>((resolve) => {
+  const previous = registryState.writeChain;
+  registryState.writeChain = new Promise<void>((resolve) => {
     release = resolve;
   });
   await previous;

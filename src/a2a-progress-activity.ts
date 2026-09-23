@@ -14,7 +14,10 @@ interface ActivityCapture {
   toolIdentifiers: string[];
 }
 
-const captures = new Map<string, ActivityCapture>();
+// Prepared-run hooks and channel dispatch may use separate host module graphs.
+const captureRegistry = Symbol.for("inkbox.a2a-progress-captures.v1");
+const processState = globalThis as typeof globalThis & { [captureRegistry]?: Map<string, ActivityCapture> };
+const captures = processState[captureRegistry] ??= new Map<string, ActivityCapture>();
 const MAX_TOOL_IDENTIFIERS = 8;
 const MAX_TOOL_IDENTIFIER_CHARS = 80;
 

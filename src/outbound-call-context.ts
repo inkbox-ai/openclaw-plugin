@@ -15,7 +15,10 @@ export type OutboundCallContext = OutboundCallContextInput & {
   createdAt: number;
 };
 
-const contexts = new Map<string, OutboundCallContext>();
+// Call tools and the inbound WebSocket gateway may use separate module graphs.
+const contextRegistry = Symbol.for("inkbox.outbound-call-contexts.v1");
+const processState = globalThis as typeof globalThis & { [contextRegistry]?: Map<string, OutboundCallContext> };
+const contexts = processState[contextRegistry] ??= new Map<string, OutboundCallContext>();
 
 function nonEmptyString(value: unknown): string | undefined {
   if (typeof value !== "string") {

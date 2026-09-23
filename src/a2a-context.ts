@@ -6,7 +6,10 @@ export interface ActiveA2ATurn {
   beforeReplyIntent?: () => Promise<void>;
 }
 
-const active = new Map<string, ActiveA2ATurn>();
+// Prepared tools must see the channel worker's active task and reply-intent fence.
+const activeRegistry = Symbol.for("inkbox.active-a2a-turns.v1");
+const processState = globalThis as typeof globalThis & { [activeRegistry]?: Map<string, ActiveA2ATurn> };
+const active = processState[activeRegistry] ??= new Map<string, ActiveA2ATurn>();
 
 export function setActiveA2ATurn(
   sessionKey: string,

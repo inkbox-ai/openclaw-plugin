@@ -83,6 +83,25 @@ describe("hosted-call SMS tool settlement", () => {
     journalMock.settle.mockResolvedValue(undefined);
   });
 
+  it("shares exact hosted settlement evidence across host plugin module graphs", async () => {
+    const capture = beginCapture();
+    vi.resetModules();
+    const hooks = await import("../src/hosted-call-tool-settlement.js");
+    expect(hooks.beginHostedSmsToolCapture).not.toBe(beginHostedSmsToolCapture);
+    const event = { toolName: "inkbox_send_sms", params: { to: expectedTarget, text: "Synthetic result" }, runId: context.runId, toolCallId: "graph-send" };
+    hooks.bindHostedSmsCaptureToRun({ prompt: promptMarker }, { ...context, sessionKey: "another-session" });
+    expect(await hooks.recordHostedSmsBeforeToolCall(event, context)).toMatchObject({ block: true });
+    hooks.bindHostedSmsCaptureToRun({ prompt: promptMarker }, context);
+    expect(await hooks.recordHostedSmsBeforeToolCall(event, context)).toBeUndefined();
+    await hooks.recordHostedSmsAfterToolCall({ ...event, result: successResult() }, context);
+    expect(capture.finish().attempts).toMatchObject([{ outcome: "success" }]);
+    const next = hooks.beginHostedSmsToolCapture({ accountId: "default", callId: promptMarker, phase: "initial", sessionKey, expectedTarget, promptMarker });
+    next.finish();
+    journalMock.pending.mockClear();
+    await recordHostedSmsBeforeToolCall(event, context);
+    expect(journalMock.pending).not.toHaveBeenCalled();
+  });
+
   it("accepts exactly one successful send to the authoritative target", async () => {
     const report = await captureAttempt({ to: expectedTarget, result: successResult() });
     expect(evaluateHostedSmsSettlement(report, "initial")).toEqual({
