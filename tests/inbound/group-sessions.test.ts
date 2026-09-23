@@ -6,7 +6,17 @@ import { AgentIdentity, Inkbox } from "@inkbox/sdk";
 import { bindNativeApprovalTurnToRun, markNativeConversationReset } from "../../src/inbound/native-approvals.js";
 import { controlText, mentionsAgent } from "../../src/inbound/reply-policy.js";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
-const state = vi.hoisted(() => ({ dir: "" }));
+const state = vi.hoisted(() => ({ dir: "", failContextAck: false }));
+vi.mock("../../src/inbound/context-buffer.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/inbound/context-buffer.js")>();
+  return { contextBuffer: (...args: Parameters<typeof actual.contextBuffer>) => {
+    const buffer = actual.contextBuffer(...args);
+    return { ...buffer, acknowledge: async (entries: Parameters<typeof buffer.acknowledge>[0]) => {
+      if (state.failContextAck) throw new Error("synthetic context storage failure");
+      return buffer.acknowledge(entries);
+    } };
+  } };
+});
 vi.mock("../../src/state.js", async () => {
   const fs = await import("node:fs/promises");
   return { statePaths: () => ({ dir: state.dir }), ensureStateDir: () => fs.mkdir(state.dir, { recursive: true, mode: 0o700 }) };
@@ -30,15 +40,16 @@ function setup(mode: "auto" | "mention" = "auto") {
     reply: { resolveEnvelopeFormatOptions: () => ({}), formatAgentEnvelope: ({ body }: any) => body, dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
   };
   const account: any = { accountId: "default", identity: "test-agent", config: { identity: "test-agent", groupReplyMode: mode } };
-  const makeBridge = () => createInkboxSessionBridge({ cfg: { session: { dmScope: "per-channel-peer" } }, account, runtime, channelRuntime: core });
-  return { identity, core, runtime, dispatchReply, bridge: makeBridge(), makeBridge };
+  const logger = { warn: vi.fn() };
+  const makeBridge = () => createInkboxSessionBridge({ cfg: { session: { dmScope: "per-channel-peer" } }, account, runtime, channelRuntime: core, logger });
+  return { identity, core, runtime, dispatchReply, logger, bridge: makeBridge(), makeBridge };
 }
 function event(channel: "sms" | "imessage", sender = "+15555550100", conversation = "group-one", text = "hello", isGroup = true): any {
   const message = { id: `${sender}-${conversation}-${text}`, text, content: text, remote_number: sender, sender_phone_number: sender, conversation_id: conversation, is_group: isGroup, participants: isGroup ? ["+15555550100", "+15555550200"] : [] };
   return { event_type: channel === "sms" ? "text.received" : "imessage.received", data: channel === "sms" ? { text_message: message } : { message } };
 }
 async function receive(bridge: any, channel: string, value: any) { await (channel === "sms" ? bridge.handlers.onText : bridge.handlers.onIMessage)(value); }
-beforeEach(async () => { state.dir = await mkdtemp(join(tmpdir(), "inkbox-groups-")); });
+beforeEach(async () => { state.failContextAck = false; state.dir = await mkdtemp(join(tmpdir(), "inkbox-groups-")); });
 afterEach(async () => { vi.unstubAllGlobals(); await rm(state.dir, { recursive: true, force: true }); });
 
 describe("group conversation host routing", () => {
@@ -118,6 +129,29 @@ describe("group conversation host routing", () => {
     await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent new request"));
     const body = s.dispatchReply.mock.calls.at(-1)![0].ctxPayload.message.bodyForAgent;
     if (outcome.startsWith("committed")) expect(body).not.toContain("old background fact"); else expect(body).toContain("old background fact");
+  });
+  it.each(["model-replied", "reset-committed", "reset-reply-failed"])("does not replace %s with a background-context acknowledgment error", async (outcome) => {
+    const s = setup("mention");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "background fact"));
+    const originalError = new Error("original reset reply failed");
+    s.dispatchReply.mockImplementationOnce(async (params) => {
+      state.failContextAck = true;
+      if (outcome.startsWith("reset")) {
+        markNativeConversationReset(s.core, ["default"], { type: "command", action: "new", sessionKey: params.routeSessionKey, context: { commandSource: "inkbox", senderId: "+15555550100" } });
+        if (outcome === "reset-reply-failed") throw originalError;
+      } else {
+        bindNativeApprovalTurnToRun(s.core, ["default"], { prompt: params.ctxPayload.message.bodyForAgent }, { sessionKey: params.routeSessionKey, runId: "replied-run" });
+        await params.delivery.deliver({ text: "Already answered." });
+      }
+      return { dispatched: true };
+    });
+    const result = receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", outcome.startsWith("reset") ? "/clear" : "@agent answer"));
+    if (outcome === "reset-reply-failed") await expect(result).rejects.toBe(originalError); else await expect(result).resolves.toBeUndefined();
+    expect(s.logger.warn).toHaveBeenCalledWith("Inkbox background context could not be acknowledged; retaining it for the next model turn.");
+    if (outcome === "model-replied") expect(s.identity.sendText).toHaveBeenCalledTimes(1);
+    state.failContextAck = false;
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent next request"));
+    expect(s.dispatchReply.mock.calls.at(-1)![0].ctxPayload.message.bodyForAgent).toContain("background fact");
   });
 
   it("passes raw /stop through framing and keeps an earlier reply's original route", async () => {

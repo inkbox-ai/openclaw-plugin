@@ -292,6 +292,7 @@ openclaw config set 'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.i
 Use your configured model key in place of the example. Inkbox setup does not change your model or override an explicitly chosen runner. This setting concerns the main agent, not the separate realtime voice provider.
 
 Setup also enables OpenClaw's `plugins.entries.inkbox.hooks.allowConversationAccess` permission. The plugin needs this host permission to bind channel sends and Voice AI completions to their exact runs before accepting side-effecting tool evidence, and to associate A2A progress with its worker run. Conversation bodies are not stored in the completion registry or replay journal.
+For manual configuration, explicitly set `plugins.entries.inkbox.hooks.allowConversationAccess: true` to enable those lifecycle hooks, native approval routing, and confirmation that background group context was consumed. Without that permission, unconfirmed background context remains retained and may appear in later turns; the plugin does not enable the permission automatically outside setup.
 
 ### OpenAI Realtime
 

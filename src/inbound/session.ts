@@ -2697,6 +2697,10 @@ async function dispatchInboundTurn(
     }, ready: opts.turn.companionApprovalReady,
   };
   const releaseApprovalTurn = trackNativeApprovalTurn(core, approvalBinding);
+  const acknowledgeBackgroundContext = async () => {
+    try { await opts.turn.contextAcknowledged?.(); }
+    catch { opts.logger?.warn?.("Inkbox background context could not be acknowledged; retaining it for the next model turn."); }
+  };
   try {
     await opts.turn.companionValidateBeforeDispatch?.();
     const result = await core.inbound.dispatchReply({
@@ -2729,7 +2733,7 @@ async function dispatchInboundTurn(
     }
     if (result?.dispatched === true && !recordFailed && result.admission?.kind !== "observeOnly" && !result.dispatchResult?.beforeAgentRunBlocked &&
         !opts.turn.contextResetExpected && approvalBinding.modelStarted) {
-      await opts.turn.contextAcknowledged?.();
+      await acknowledgeBackgroundContext();
     }
   } finally {
     releaseApprovalTurn();
@@ -2745,7 +2749,7 @@ async function dispatchInboundTurn(
       clearActiveA2ATurn(effectiveSessionKey, opts.a2aContext);
     }
     // A committed reset remains successful even if its acknowledgment delivery fails.
-    if (opts.turn.contextResetExpected && approvalBinding.resetCommitted) await opts.turn.contextAcknowledged?.();
+    if (opts.turn.contextResetExpected && approvalBinding.resetCommitted) await acknowledgeBackgroundContext();
   }
 }
 
