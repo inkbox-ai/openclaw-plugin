@@ -42,6 +42,14 @@ export function contextBuffer(namespace: string, options: { retainLatest?: boole
       try { return JSON.parse(await readFile(path, "utf8")); }
       catch (error: any) { if (error.code === "ENOENT") return []; throw error; }
     },
+    async replace(entry: Entry, replacement: Entry): Promise<boolean> {
+      let replaced = false;
+      await update((entries) => entries.map((item) => {
+        if (item.id !== entry.id || item.body !== entry.body) return item;
+        replaced = true; return replacement;
+      }));
+      return replaced;
+    },
     async acknowledge(entries: Entry[]) { const captured = new Map(entries.map((entry) => [entry.id, entry.body])); await update((current) => current.filter((entry) => captured.get(entry.id) !== entry.body)); },
   };
 }

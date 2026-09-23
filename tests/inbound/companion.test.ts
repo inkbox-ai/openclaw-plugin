@@ -89,6 +89,7 @@ describe("Companion host boundary", () => {
     let promptStarted = false;
     if (race) s.identity.sendText.mockImplementationOnce(async () => { promptStarted = true; await sending; return { id: "prompt" }; });
     nativeGateway.resolve.mockImplementation(async ({ approvalId, decision }) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
       // Exercise the real native runtime's resolved-during-delivery queue as well.
       await handler!.handleResolved({ id: approvalId, decision, resolvedAtMs: Date.now() } as any);
       releaseModel();
@@ -124,11 +125,14 @@ describe("Companion host boundary", () => {
       expect(nativeGateway.resolve).not.toHaveBeenCalled();
       s.account.config.companionResponseMode = "relaxed";
       const answer = event("live", 8, "phone"); Object.assign(answer.data.text_message!, { sender_phone_number: "+15555550200", sender_access: "sponsored", text: `@agent /approve ${approvalId} allow-once` });
-      await dispatchInbound(answer, s.bridge.handlers);
+      const duplicate = structuredClone(answer); duplicate.id = "duplicate-approval-answer";
+      duplicate.data.text_message!.id = "duplicate-approval-source";
+      await Promise.all([dispatchInbound(answer, s.bridge.handlers), dispatchInbound(duplicate, s.bridge.handlers)]);
       if (race) { expect(promptStarted).toBe(true); expect(nativeGateway.resolve).not.toHaveBeenCalled(); releaseSend(); }
       await vi.waitFor(() => expect(nativeGateway.resolve).toHaveBeenCalledTimes(1));
       await settle(s.bridge);
       expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+      expect(Object.values((await journal()).value.jobs).some((job: any) => job.state === "paused")).toBe(false);
       expect(s.identity.sendText).toHaveBeenCalledTimes(2);
       expect(s.identity.sendText).toHaveBeenLastCalledWith({ conversationId: "conversation-one", text: "Approved task complete" });
       expect(nativeGateway.resolve).toHaveBeenCalledWith(expect.objectContaining({ approvalId, decision: "allow-once" }));

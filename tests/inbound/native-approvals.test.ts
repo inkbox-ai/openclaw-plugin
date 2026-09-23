@@ -60,3 +60,18 @@ it("does not attach a stale run's request to a newer sole binding", async () => 
     expect(await resolveNativeApproval(s.binding, `/approve ${id} allow-once`, {})).toBe(false);
   } finally { release(); await handler!.stop(); }
 });
+
+it.each([false, true])("claims a native approval once across concurrent answers and uncertain outcomes (uncertain=%s)", async (uncertain) => {
+  const s = setup(); const release = trackNativeApprovalTurn(s.core, s.binding);
+  const handler = await createChannelApprovalHandlerFromCapability({ capability: inkboxApprovalCapability, cfg: {}, channel: "inkbox", channelLabel: "Inkbox", accountId: "default", label: "native-contract", clientDisplayName: "Synthetic", context: s.context });
+  try {
+    await handler!.handleRequested(request(s.binding.sessionKey));
+    state.resolve.mockImplementation(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); if (uncertain) throw new Error("connection lost after resolution"); });
+    const results = await Promise.allSettled(Array.from({ length: 4 }, () => resolveNativeApproval(s.binding, `/approve ${id} allow-once`, {})));
+    expect(state.resolve).toHaveBeenCalledTimes(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(uncertain ? 1 : 0);
+    expect(results.filter((result) => result.status === "fulfilled" && result.value)).toHaveLength(uncertain ? 0 : 1);
+    expect(await resolveNativeApproval(s.binding, `/approve ${id} allow-once`, {})).toBe(false);
+    expect(state.resolve).toHaveBeenCalledTimes(1);
+  } finally { release(); await handler!.stop(); }
+});

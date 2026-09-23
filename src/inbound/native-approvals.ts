@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { withFileLock } from "openclaw/plugin-sdk/file-lock";
+import { ensureStateDir, statePaths } from "../state.js";
 import { createChannelApprovalNativeRuntimeAdapter, resolveApprovalOverGateway, type ChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-runtime";
 import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";
 import { contextBuffer } from "./context-buffer.js";
@@ -11,7 +15,7 @@ export type NativeApprovalBinding = NativeApprovalOwner & {
   deliver(text: string): Promise<void>;
   ready?(): Promise<void>;
 };
-type RecordValue = { author: string; kind: ApprovalKind; expiresAt: number; decisions: string[] };
+type RecordValue = { author: string; kind: ApprovalKind; expiresAt: number; decisions: string[]; resolutionPending?: boolean };
 type NativeEntry = { binding: NativeApprovalBinding; id: string };
 type NativeContext = { bindings: Map<string, NativeApprovalBinding[]>; accountId: string };
 const capability = "approval.native";
@@ -62,19 +66,27 @@ async function clear(entry: NativeEntry): Promise<void> {
 export async function resolveNativeApproval(owner: NativeApprovalOwner, raw: string, cfg: unknown, beforeResolve?: () => Promise<boolean>): Promise<boolean> {
   const match = /^\/approve\s+(\S+)\s+(allow-once|allow-always|deny)\s*$/i.exec(raw.trim());
   if (!match) return false;
-  const buffer = contextBuffer(owner.scope);
-  const entry = (await buffer.snapshot()).find((item) => item.id === match[1]);
-  if (!entry) return false;
-  let record: RecordValue;
-  try { record = JSON.parse(entry.body); } catch { return false; }
-  if (!["exec", "plugin"].includes(record.kind) || record.expiresAt <= Date.now() || !sameAuthor(owner.channel, record.author, owner.author) || !record.decisions.includes(match[2]!.toLowerCase())) return false;
-  if (beforeResolve && !await beforeResolve()) return true;
-  const resolution = { cfg: cfg as any, approvalId: entry.id, decision: match[2]!.toLowerCase() as Decision,
-    resolveMethod: record.kind, clientDisplayName: "Inkbox conversation approval" };
-  // Older hosts treat an explicit exec method as their default exec resolver.
-  await resolveApprovalOverGateway(resolution as unknown as Parameters<typeof resolveApprovalOverGateway>[0]);
-  await buffer.acknowledge([entry]);
-  return true;
+  await ensureStateDir();
+  const lock = join(statePaths().dir, `approval-resolution-${createHash("sha256").update(JSON.stringify([owner.scope, match[1]])).digest("hex")}`);
+  return withFileLock(lock, { stale: 120_000, retries: { retries: 40, factor: 1.4, minTimeout: 20, maxTimeout: 1000 } }, async () => {
+    const buffer = contextBuffer(owner.scope);
+    const entry = (await buffer.snapshot()).find((item) => item.id === match[1]);
+    if (!entry) return false;
+    let record: RecordValue;
+    try { record = JSON.parse(entry.body); } catch { return false; }
+    if (record.resolutionPending || !["exec", "plugin"].includes(record.kind) || record.expiresAt <= Date.now() || !sameAuthor(owner.channel, record.author, owner.author) || !record.decisions.includes(match[2]!.toLowerCase())) return false;
+    if (beforeResolve && !await beforeResolve()) return false;
+    const claimed = { ...entry, body: JSON.stringify({ ...record, resolutionPending: true }) };
+    // The native lifecycle may have settled the approval during local validation.
+    if (!await buffer.replace(entry, claimed)) return true;
+    const resolution = { cfg: cfg as any, approvalId: entry.id, decision: match[2]!.toLowerCase() as Decision,
+      resolveMethod: record.kind, clientDisplayName: "Inkbox conversation approval" };
+    // Older hosts treat an explicit exec method as their default exec resolver.
+    // Keep the persisted claim on an uncertain RPC outcome; never replay it.
+    await resolveApprovalOverGateway(resolution as unknown as Parameters<typeof resolveApprovalOverGateway>[0]);
+    await buffer.acknowledge([claimed]);
+    return true;
+  });
 }
 
 export const inkboxApprovalCapability = {
