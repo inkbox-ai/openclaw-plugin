@@ -1,4 +1,4 @@
-import { companionWakes, controlText, isCompanionControl, sameAuthor } from "./reply-policy.js";
+import { companionWakes, controlText, isCompanionControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ type Metadata = CompanionMetadata;
 type Job = { event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -169,7 +169,8 @@ export function createCompanionReceiver(opts: {
     const m = metadata(job.event);
     if (m.phase === "initialization") return false;
     const { message, author } = source(job.event, m);
-    const raw = controlText(String(m.channel === "mail" ? message.body ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.content ?? message.text ?? ""), opts.config.identity);
+    const originalText = String(m.channel === "mail" ? message.body ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.content ?? message.text ?? "");
+    const raw = controlText(originalText, opts.config.identity);
     if (!isCompanionControl(raw) || message.body_truncated || ["truncated", "unavailable"].includes(message.body_state)) return false;
     const identity = await opts.runtime.getIdentity();
     if (identity.id !== job.identityId || !companionWakes(opts.config, message, m.channel, identity.emailAddress ?? undefined)) return false;
@@ -187,6 +188,7 @@ export function createCompanionReceiver(opts: {
       checkSponsor(parent.sponsor, parent.sponsorContactId);
       const input: CompanionInput = {
         key: scope, messageId: id, channel: m.channel, body: raw, rawText: raw, author,
+        wasMentioned: mentionsAgent(originalText, opts.config.identity),
         reply: structuredClone(parent.reply), event: job.event, commandAuthorized: true,
         validateBeforeDispatch: async () => {
           checkSponsor(parent.sponsor!, parent.sponsorContactId);
@@ -228,6 +230,7 @@ export function createCompanionReceiver(opts: {
     const makeInput = (reply: CompanionReply, body = "", sponsor = author): CompanionInput => ({
       key: scope, messageId: id, channel: m.channel, body, reply, event: job.event, author,
       rawText: controlText(rawText, opts.config.identity),
+      wasMentioned: mentionsAgent(rawText, opts.config.identity),
       commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, sponsor) && isCompanionControl(controlText(rawText, opts.config.identity)),
       validateBeforeDispatch: async () => {
         checkSponsor(sponsor, sponsorContactId);

@@ -78,6 +78,22 @@ beforeEach(async () => { nativeGateway.resolve.mockReset(); state.dir = await mk
 afterEach(async () => { vi.unstubAllGlobals(); await rm(state.dir, { recursive: true, force: true }); });
 
 describe("Companion host boundary", () => {
+  it.each(["phone", "imessage"])("preserves current %s mention provenance before native command normalization", async (channel) => {
+    const s = setup(channel);
+    s.snapshot.text = "Historical sponsor: @agent previous request";
+    const first = event("initialization", 1, channel);
+    Object.assign((first.data.text_message ?? first.data.message)!, { text: "@agent answer this", content: "@agent answer this" });
+    await dispatchInbound(first, s.bridge.handlers); await settle(s.bridge);
+    const next = event("live", 2, channel);
+    Object.assign((next.data.text_message ?? next.data.message)!, { text: "ambient follow-up", content: "ambient follow-up" });
+    await dispatchInbound(next, s.bridge.handlers); await settle(s.bridge);
+    const [mentioned, ambient] = s.dispatchReply.mock.calls.map(([call]) => call);
+    expect(mentioned.ctxPayload.extra.WasMentioned).toBe(true);
+    expect(mentioned.ctxPayload.message.rawBody).toBe("answer this");
+    expect(mentioned.ctxPayload.message.commandBody).toBe("");
+    expect(ambient.ctxPayload.extra.WasMentioned).toBe(false);
+  });
+
   it.each([[false, "exec"], [true, "exec"], [false, "plugin"]] as const)("resolves a native approval while its original host turn is waiting (answer races prompt=%s, kind=%s)", async (race, kind) => {
     const s = setup("phone", { groupReplyMode: "mention", companionResponseMode: "relaxed" });
     const quiet = event("initialization", 1, "phone"); quiet.data.text_message!.text = "quiet sponsor";

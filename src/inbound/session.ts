@@ -3,7 +3,7 @@ import { ensureNativeApprovalContext, nativeApprovalScope, resolveNativeApproval
 import { mentionsAgent, isLocalControl, sameAuthor, controlText, isCompanionControl } from "./reply-policy.js";
 import { createInkboxTextReplyCapture } from "../reply-capture.js";
 import { beginSilentSendCapture } from "../silent-send-capture.js";
-import { isInkboxSilentReply, transformInkboxReplyPayload } from "../silent-reply.js";
+import { isInkboxSilentReply, transformInkboxReplyPayload, withInkboxGroupSilenceDefault } from "../silent-reply.js";
 import { canonicalInkboxSessionOverride } from "../session-key.js";
 import { COMPANION_MAX_BYTES, createCompanionReceiver, type CompanionReply, type CompanionInput } from "./companion.js";
 import { a2aFailureShape, settleCaughtA2AFailure } from "../a2a-failure.js";
@@ -135,6 +135,9 @@ type InkboxInboundTurn = {
   rawText?: string;
   storedMessageId?: string;
   reaction?: boolean;
+  nativeEventKind?: "user_request" | "room_event";
+  deliveryFailureNotification?: boolean;
+  wasMentioned?: boolean;
   commandAuthorized?: boolean;
   contextAcknowledged?: () => Promise<void>;
   contextResetExpected?: boolean;
@@ -2472,6 +2475,9 @@ async function dispatchInboundTurn(
   });
 
   const conversationKind = opts.turn.conversationKind ?? "direct";
+  const groupMessaging = conversationKind === "group" && ["sms", "imessage"].includes(opts.turn.mode);
+  const dispatchCfg = groupMessaging && opts.account.config.groupReplyMode !== "mention"
+    ? withInkboxGroupSilenceDefault(opts.cfg) : opts.cfg;
   const channelThreadRouteId =
     opts.turn.conversationId
       ? `${opts.turn.mode === "email" ? "email" : opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
@@ -2566,6 +2572,7 @@ async function dispatchInboundTurn(
       messageThreadId: opts.turn.threadId,
     },
     message: {
+      inboundEventKind: opts.turn.nativeEventKind,
       body,
       bodyForAgent: ["sms", "email", "imessage"].includes(opts.turn.mode) ? `${opts.turn.body}\n\n${approvalMarker}` : opts.turn.body,
       rawBody: opts.turn.rawText ?? opts.turn.body,
@@ -2573,6 +2580,9 @@ async function dispatchInboundTurn(
       envelopeFrom: opts.turn.fromLabel,
     },
     extra: {
+      InputProvenance: opts.turn.deliveryFailureNotification
+        ? { kind: "internal_system", sourceChannel: "inkbox", sourceTool: "inkbox_delivery_failure" } : undefined,
+      WasMentioned: opts.turn.wasMentioned ?? mentionsAgent(opts.turn.rawText ?? "", opts.account.config.identity),
       CommandAuthorized: opts.turn.commandAuthorized ?? !opts.turn.companionReply,
       Provider: "inkbox",
       Surface: "inkbox",
@@ -2704,7 +2714,7 @@ async function dispatchInboundTurn(
   try {
     await opts.turn.companionValidateBeforeDispatch?.();
     const result = await core.inbound.dispatchReply({
-      cfg: opts.cfg as any,
+      cfg: dispatchCfg as any,
       channel: "inkbox",
       accountId: opts.account.accountId,
       agentId: route.agentId,
@@ -3536,7 +3546,7 @@ const CROSS_CHANNEL_COMPLETION_POLICY =
   "set completeSilently=true on that final send tool call. This ends the turn " +
   "only after the send succeeds, without an extra source-channel acknowledgment. " +
   "Leave completeSilently false when more work or a reply here remains. " +
-  "If no action or visible reply is needed, return exactly NO_REPLY.";
+  "For an ordinary direct request, provide a brief answer here unless an explicit silent completion was requested.";
 
 async function buildMailTurn(
   runtime: InkboxRuntime,
@@ -3848,7 +3858,9 @@ async function buildIMessageReactionTurn(
       "tapback usually asks for clarification or a follow-up, 'emphasize' may " +
       "invite one, while 'love'/'like'/'laugh'/'dislike' are usually just " +
       "acknowledgements that need no response.",
-    "If no visible reply is warranted, return exactly NO_REPLY.",
+    reactionType === "question"
+      ? "Respond to the clarification or follow-up this question tapback requests."
+      : "This is an ambient reaction event. If a response is warranted, use inkbox_send_imessage to reply in this same conversation; otherwise return exactly NO_REPLY. Plain-text acknowledgements are not sent automatically for ambient reactions.",
   ].join("\n");
   return {
     mode: "imessage",
@@ -3859,6 +3871,8 @@ async function buildIMessageReactionTurn(
     conversationId,
     conversationKind: isGroup ? "group" : "direct",
     reaction: true, rawText: "",
+    nativeEventKind: reactionType === "question" ? "user_request" : "room_event",
+    wasMentioned: reactionType === "question",
     conversationParticipants: participants,
     conversationLabel: senderLabel,
     body: [marker, renderContactMemories(account, contactMemories), policy]
@@ -4543,6 +4557,9 @@ async function handleDeliveryFailure(
     body: note.body,
     rawText: note.body,
     reaction: undefined,
+    nativeEventKind: undefined,
+    deliveryFailureNotification: true,
+    wasMentioned: false,
     commandAuthorized: false,
     contextAcknowledged: undefined,
     messageId: `delivery-failure:${failure.eventType}:${failure.messageId ?? Date.now()}`,
@@ -5977,7 +5994,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       conversationKind: "group", conversationLabel: "Inkbox Companion conversation",
       conversationId: input.reply.conversationId,
       fromLabel: input.author, remoteAddress: input.author, body: input.body,
-      rawText: input.rawText, commandAuthorized: input.commandAuthorized,
+      rawText: input.rawText, wasMentioned: input.wasMentioned, commandAuthorized: input.commandAuthorized,
       messageId: input.messageId, raw: input.event,
       subject: input.channel === "mail" ? input.event.data?.message?.subject : undefined,
       companionReply: structuredClone(input.reply),
@@ -6034,6 +6051,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     if (turn.conversationKind !== "group") return false;
     const buffer = contextBuffer(JSON.stringify([opts.account.config.baseUrl ?? "", opts.account.accountId, opts.account.identity, turn.mode, turn.conversationId]), { retainLatest: true });
     const raw = turn.rawText ?? "";
+    turn.wasMentioned ??= mentionsAgent(raw, opts.account.config.identity);
     const command = controlText(raw, opts.account.config.identity);
     const localControl = isLocalControl(command) || isCompanionControl(command);
     if (isCompanionControl(command) && command.toLowerCase() === "/resume") {

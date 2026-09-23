@@ -1,87 +1,132 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { createReplyDispatcher, SILENT_REPLY_TOKEN } from "openclaw/plugin-sdk/reply-runtime";
+import { createReplyDispatcher, dispatchInboundMessageWithDispatcher, SILENT_REPLY_TOKEN } from "openclaw/plugin-sdk/reply-runtime";
 import { describe, expect, it, vi } from "vitest";
-import { transformInkboxReplyPayload } from "../../src/silent-reply.js";
+import { transformInkboxReplyPayload, withInkboxGroupSilenceDefault } from "../../src/silent-reply.js";
 
 const require = createRequire(import.meta.url);
 const hostDist = dirname(dirname(require.resolve("openclaw/plugin-sdk/reply-runtime")));
 const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json"), "utf8")).version;
 // The supported May baseline predates the host's no-visible-reply finalizer.
-// Public dispatcher behavior is tested there; every newer host must satisfy
-// the additional finalizer contract, with missing internals treated as drift.
+// Public dispatcher behavior is tested there; newer hosts also exercise
+// end-to-end fallback and policy-permitted silence through native dispatch.
 const baselineWithoutFinalizer = hostVersion === "2026.5.27";
+// Earlier supported hosts let canonical silence waive a required source reply.
+const nativeRequiredReplyPolicy = hostVersion.localeCompare("2026.9.6", undefined, { numeric: true }) >= 0;
 
-// These two host internals have no public test entry point. Discover their
-// bundled filenames instead of pinning build hashes; fail on contract drift.
-async function hostFunction(bundle: string, name: string): Promise<any> {
-  const files = readdirSync(hostDist).filter((file) => file.startsWith(`${bundle}-`) &&
-    (file.endsWith(".js") || file.endsWith(".mjs")) &&
-    readFileSync(join(hostDist, file), "utf8").includes(`function ${name}(`));
-  expect(files, `Expected one host ${bundle} bundle`).toHaveLength(1);
-  const exports = await import(pathToFileURL(join(hostDist, files[0])).href);
-  const fn = Object.values(exports).find((value) => typeof value === "function" && value.name === name);
-  expect(fn, `Missing host ${name} contract`).toBeTypeOf("function");
-  return fn;
-}
-
-async function finishInvisibleReply(text: string, transformed = false) {
-  const classify = await hostFunction("result-fallback-classifier", "hasDeliberateSilentTerminalReply");
-  const finalize = await hostFunction("dispatch-from-config.finalize", "finalizeDispatchAndAudit");
-  const route = vi.fn(async () => ({ ok: true }));
-  const result = await finalize({
-    cfg: {}, ctx: {}, replyRoute: {},
-    deliberateSilentTerminalReply: classify({ meta: { finalAssistantRawText: text } }),
-    noVisibleReplyFallbackDirected: true,
-    sourceReplyDeliveryMode: "automatic",
-    progressState: { accumulatedBlockTtsText: "", blockCount: 0, channelTransformSuppressed: transformed },
-    replyOperationRunState: {}, bindingState: {}, routeState: {},
-    dispatcher: { getQueuedCounts: () => ({ final: 0, block: 0, tool: 0 }) },
-    turnLedger: { canAttemptFallback: () => true, settleQueued: async () => "settled" },
-    flushPendingCommentaryProgress: async () => {},
-    waitForPendingDirectBlockReplyDelivery: async () => {},
-    getDispatchAbortSignal: () => undefined,
-    getObservedReplyDelivery: () => false,
-    getAgentRunId: () => undefined,
-    throwIfDispatchOperationAborted: () => {},
-    routeReplyToOriginating: route,
-    isRoutedReplyDelivered: (value: any) => value.ok,
-    getAgentRunTerminalOutcome: () => undefined,
-    commitInboundDedupeIfClaimed: () => {},
-    recordAgentDispatchCompleted: () => {}, recordProcessed: () => {}, markIdle: () => {},
-    completeDispatchReplyOperation: () => {}, attachSourceReplyDeliveryMode: (value: any) => value,
-  });
-  return { route, result: result.result };
+// Exercise native dispatch through its public entry point. Private finalizer
+// booleans changed in September; host-owned reply expectations are authoritative.
+async function finishInvisibleReply(text: string, transformed = false, ambient = false, options: { eventKind?: "user_request" | "room_event"; wasMentioned?: boolean; policy?: "allow" | "disallow"; deliveryNotification?: boolean } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "inkbox-host-silence-"));
+  vi.stubEnv("OPENCLAW_STATE_DIR", directory);
+  const deliver = vi.fn(async (payload: any) => ({ visibleReplySent: payload.text !== "[SILENT]" }));
+  const transform = vi.fn(transformInkboxReplyPayload);
+  const resolver = vi.fn(async () => ({ text }));
+  try {
+    const result = await dispatchInboundMessageWithDispatcher({
+      ctx: {
+        Body: "Synthetic silence contract.", From: "inkbox:sms:peer", To: "inkbox:sms:peer",
+        OriginatingChannel: "inkbox", OriginatingTo: "inkbox:sms:peer", Provider: "inkbox", Surface: "inkbox",
+        ChatType: ambient ? "group" : "direct", WasMentioned: options.wasMentioned ?? false,
+        InboundEventKind: options.eventKind,
+        InputProvenance: options.deliveryNotification
+          ? { kind: "internal_system", sourceChannel: "inkbox", sourceTool: "inkbox_delivery_failure" } : undefined,
+        SessionKey: `agent:main:inkbox:${ambient ? "group" : "direct"}:${randomUUID()}`,
+        MessageSid: randomUUID(), CommandAuthorized: true,
+      },
+      cfg: withInkboxGroupSilenceDefault({
+        session: { store: join(directory, "sessions.json") },
+        agents: { defaults: { workspace: directory } },
+        ...(options.policy ? { surfaces: { inkbox: { silentReply: { group: options.policy } } } } : {}),
+      }),
+      dispatcherOptions: { deliver, ...(transformed ? { transformReplyPayload: transform } : {}) },
+      replyResolver: resolver,
+    });
+    expect(resolver).toHaveBeenCalledOnce();
+    return { deliver, transform, result };
+  } finally {
+    vi.unstubAllEnvs();
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 describe("actual host intentional-silence contract", () => {
   it.skipIf(baselineWithoutFinalizer)("reproduces fallback after a private sentinel is hidden only by the adapter", async () => {
-    const { route, result } = await finishInvisibleReply("[SILENT]");
-    expect(route).toHaveBeenCalledOnce();
+    const { deliver, result } = await finishInvisibleReply("[SILENT]");
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls[0][0].text).toBe("[SILENT]");
+    expect(deliver.mock.calls[1][0].text).not.toBe("[SILENT]");
     expect(result.noVisibleReplyFallbackDelivered).toBe(true);
   });
 
-  it.skipIf(baselineWithoutFinalizer)("does not manufacture a fallback after canonical silent completion", async () => {
+  it.skipIf(baselineWithoutFinalizer)("does not manufacture a fallback when ambient group policy permits canonical silence", async () => {
     expect(SILENT_REPLY_TOKEN).toBe("NO_REPLY");
-    const { route, result } = await finishInvisibleReply(SILENT_REPLY_TOKEN);
-    expect(route).not.toHaveBeenCalled();
-    expect(result.deliberateSilentTerminalReply).toBe(true);
+    const { deliver, result } = await finishInvisibleReply(SILENT_REPLY_TOKEN, true, true);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(result.queuedFinal).toBe(false);
+    expect(result.counts.final).toBe(0);
     expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
   });
 
-  it.skipIf(baselineWithoutFinalizer)("honors channel-transform suppression for legacy silent completion", async () => {
-    const prepare = await hostFunction("reply-dispatcher", "prepareReplyPayloadForDispatcher");
-    const deliver = vi.fn(async () => ({ visibleReplySent: true }));
-    const dispatcher = createReplyDispatcher({ deliver, transformReplyPayload: transformInkboxReplyPayload });
-    const outcome = prepare(dispatcher, "final", { text: "[SILENT]" });
-    expect(outcome).toMatchObject({ kind: "suppress", reason: "channel_transform" });
-    dispatcher.markComplete();
-    await dispatcher.waitForIdle();
+  it.skipIf(baselineWithoutFinalizer)("does not send a fallback for an ambient reaction", async () => {
+    const { deliver, result } = await finishInvisibleReply("NO_REPLY", true, false, { eventKind: "room_event" });
     expect(deliver).not.toHaveBeenCalled();
-    const { route, result } = await finishInvisibleReply("[SILENT]", outcome.reason === "channel_transform");
-    expect(route).not.toHaveBeenCalled();
+    expect(result.queuedFinal).toBe(false);
+    expect(result.counts.final).toBe(0);
+    expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
+  });
+
+  it.skipIf(baselineWithoutFinalizer)("preserves automatic corrected replies for a generated delivery notification", async () => {
+    const text = "Here is the corrected reply.";
+    const { deliver, result } = await finishInvisibleReply(text, true, false, { deliveryNotification: true });
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(deliver.mock.calls[0][0]).toMatchObject({ text });
+    expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
+  });
+
+  it.skipIf(!nativeRequiredReplyPolicy)("uses native optional completion for a generated delivery notification", async () => {
+    const { deliver, result } = await finishInvisibleReply("NO_REPLY", true, false, { deliveryNotification: true });
+    expect(deliver).not.toHaveBeenCalled();
+    expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
+  });
+
+  it.skipIf(baselineWithoutFinalizer)("keeps ordinary and question-tapback visible replies available", async () => {
+    for (const eventKind of [undefined, "user_request"] as const) {
+      const { deliver, result } = await finishInvisibleReply("The answer is thirteen.", true, false, { eventKind, wasMentioned: true });
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][0]).toMatchObject({ text: "The answer is thirteen." });
+      expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
+    }
+  });
+
+  it.skipIf(baselineWithoutFinalizer)("keeps a normal ambient-group answer available", async () => {
+    const { deliver, result } = await finishInvisibleReply("The answer is thirteen.", true, true);
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
+  });
+
+  it.skipIf(!nativeRequiredReplyPolicy).each([
+    { name: "ordinary direct request", ambient: false, wasMentioned: false, policy: undefined },
+    { name: "current group mention", ambient: true, wasMentioned: true, policy: undefined },
+    { name: "explicit required group policy", ambient: true, wasMentioned: false, policy: "disallow" as const },
+  ])("keeps native required replies explicit for $name", async ({ ambient, wasMentioned, policy }) => {
+    const { deliver, transform, result } = await finishInvisibleReply("NO_REPLY", true, ambient, { wasMentioned, policy });
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(result.noVisibleReplyFallbackDelivered).toBe(true);
+    expect(transform.mock.calls.some(([payload]) => payload.text === "NO_REPLY")).toBe(false);
+  });
+
+  it.skipIf(baselineWithoutFinalizer)("honors channel-transform suppression for legacy silent completion", async () => {
+    const { deliver, transform, result } = await finishInvisibleReply("[SILENT]", true);
+    expect(transform).toHaveBeenCalledWith(expect.objectContaining({ text: "[SILENT]" }));
+    expect(deliver).not.toHaveBeenCalled();
+    expect(result.queuedFinal).toBe(false);
+    expect(result.counts.final).toBe(0);
+    expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
     expect(result.noVisibleReplyFallbackEligible).toBeUndefined();
   });
 

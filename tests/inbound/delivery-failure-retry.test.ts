@@ -462,6 +462,9 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(recovered.message.rawBody).not.toBe("/new");
     expect(recovered.message.commandBody).not.toBe("/new");
     expect(recovered.extra.CommandAuthorized).toBe(false);
+    expect(recovered.message.inboundEventKind).toBeUndefined();
+    expect(recovered.extra.InputProvenance).toEqual({ kind: "internal_system", sourceChannel: "inkbox", sourceTool: "inkbox_delivery_failure" });
+    expect(recovered.extra.WasMentioned).toBe(false);
     // The recovery resend actually went out.
     expect(sendText).toHaveBeenCalledTimes(2);
   });

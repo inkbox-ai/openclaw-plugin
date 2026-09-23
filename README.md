@@ -341,7 +341,7 @@ iMessage works differently from SMS: the agent does not get its own iMessage num
 
 If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignmentStatus` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`, `imessage.delivery_failed`) arrive as webhooks and are logged by the gateway without waking the agent, matching the SMS lifecycle handling.
 
-While the agent composes a reply, the recipient sees a typing indicator — the gateway pulses it until the response sends (or the agent decides no reply is warranted). Inbound tapbacks (`imessage.reaction_received`) do wake the agent: the turn carries the reaction, the message it targets, and a response policy — a `question` tapback usually warrants a reply, while `love`/`like`/`laugh`/`dislike` usually resolve to `NO_REPLY` and nothing is sent.
+While the agent composes a reply, the recipient sees a typing indicator — the gateway pulses it until the response sends. In automatic group mode and direct conversations, a `question` tapback is treated as a request for clarification. Other tapbacks are ambient events: normally nothing is sent; if a response is warranted, the agent sends it explicitly into the same conversation. In group mention mode, unmentioned reactions remain background context without waking the agent.
 
 Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
@@ -475,6 +475,14 @@ Eligible ordinary messages reach OpenClaw immediately and follow its native
 queue/steering settings; the plugin does not replace that scheduler or force an
 abort-and-restart on every new message. Quiet messages never enter that queue.
 Companion model turns are processed serially within their conversation scope.
+
+Automatic SMS/iMessage groups allow the model to remain silent during ordinary
+chatter. The dispatch uses OpenClaw's Inkbox-only
+`surfaces.inkbox.silentReply.group="allow"` default without changing saved config;
+explicit surface or agent-default silence settings are preserved. Current mentions
+and commands retain the host's required-reply behavior. On newer OpenClaw hosts,
+ordinary direct requests require an answer: `NO_REPLY` alone does not suppress it.
+Successful explicit `completeSilently` sends still suppress duplicate acknowledgements.
 
 Companion mode is enabled separately on the Inkbox identity by an administrator
 who selects a sponsor. Installing this plugin does not change that configuration.

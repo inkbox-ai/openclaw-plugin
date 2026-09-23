@@ -24,7 +24,7 @@ vi.mock("../../src/state.js", async () => {
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
 
-function setup(mode: "auto" | "mention" = "auto") {
+function setup(mode: "auto" | "mention" = "auto", cfg: any = { session: { dmScope: "per-channel-peer" } }) {
   const identity = { id: "agent-one", agentHandle: "test-agent", emailAddress: "agent@example.com",
     sendText: vi.fn(async () => ({ id: "reply" })), sendIMessage: vi.fn(async () => ({ id: "reply" })), replyAllEmail: vi.fn(async () => ({ id: "reply" })), sendIMessageTyping: vi.fn(),
     listTextConversations: vi.fn(async () => []), listIMessageConversations: vi.fn(async () => [{ id: "group-one", isGroup: true, participants: ["+15555550100", "+15555550200"] }]),
@@ -41,7 +41,7 @@ function setup(mode: "auto" | "mention" = "auto") {
   };
   const account: any = { accountId: "default", identity: "test-agent", config: { identity: "test-agent", groupReplyMode: mode } };
   const logger = { warn: vi.fn() };
-  const makeBridge = () => createInkboxSessionBridge({ cfg: { session: { dmScope: "per-channel-peer" } }, account, runtime, channelRuntime: core, logger });
+  const makeBridge = () => createInkboxSessionBridge({ cfg, account, runtime, channelRuntime: core, logger });
   return { identity, core, runtime, dispatchReply, logger, bridge: makeBridge(), makeBridge };
 }
 function event(channel: "sms" | "imessage", sender = "+15555550100", conversation = "group-one", text = "hello", isGroup = true): any {
@@ -53,6 +53,32 @@ beforeEach(async () => { state.failContextAck = false; state.dir = await mkdtemp
 afterEach(async () => { vi.unstubAllGlobals(); await rm(state.dir, { recursive: true, force: true }); });
 
 describe("group conversation host routing", () => {
+  it("defaults only Inkbox ambient groups to optional replies and preserves current mentions", async () => {
+    const cfg = { surfaces: { other: { silentReply: { group: "disallow" } } } };
+    const before = structuredClone(cfg);
+    const s = setup("auto", cfg);
+    await receive(s.bridge, "sms", event("sms", undefined, undefined, "background chatter"));
+    await receive(s.bridge, "sms", event("sms", undefined, undefined, "@agent answer please"));
+    await receive(s.bridge, "sms", event("sms", undefined, undefined, "@agent /skill summarize"));
+    const [quiet, waking, skill] = s.dispatchReply.mock.calls.map(([call]) => call);
+    expect(quiet.cfg.surfaces.inkbox.silentReply.group).toBe("allow");
+    expect(quiet.cfg.surfaces.other.silentReply.group).toBe("disallow");
+    expect(quiet.ctxPayload.extra.WasMentioned).toBe(false);
+    expect(waking.ctxPayload.extra.WasMentioned).toBe(true);
+    expect(skill.ctxPayload.extra.WasMentioned).toBe(true);
+    expect(skill.ctxPayload.message.commandBody).toBe("/skill summarize");
+    expect(cfg).toEqual(before);
+  });
+
+  it.each([
+    { surfaces: { inkbox: { silentReply: { group: "disallow" } } } },
+    { agents: { defaults: { silentReply: { group: "disallow" } } } },
+  ])("preserves explicit native group silence policy", async (cfg) => {
+    const s = setup("auto", cfg);
+    await receive(s.bridge, "sms", event("sms"));
+    expect(s.dispatchReply.mock.calls[0][0].cfg).toBe(cfg);
+  });
+
   it.each(["sms", "imessage"] as const)("shares %s host context across contacts, isolates other groups and DMs", async (channel) => {
     const s = setup();
     for (const [sender, group, isGroup] of [["+15555550100", "group-one", true], ["+15555550200", "group-one", true], ["+15555550100", "group-two", true], ["+15555550100", "dm", false]] as const) {

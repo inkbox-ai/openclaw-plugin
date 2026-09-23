@@ -4,6 +4,23 @@ export function isInkboxSilentReply(text: string): boolean {
   return normalized === "NO_REPLY" || normalized === "[SILENT]";
 }
 
+/** Preserve ambient group silence without changing the user's stored policy. */
+export function withInkboxGroupSilenceDefault<T>(cfg: T): T {
+  const config = cfg as Record<string, any>;
+  if (config.surfaces?.inkbox?.silentReply?.group !== undefined ||
+      config.agents?.defaults?.silentReply?.group !== undefined) return cfg;
+  return {
+    ...config,
+    surfaces: {
+      ...config.surfaces,
+      inkbox: {
+        ...config.surfaces?.inkbox,
+        silentReply: { ...config.surfaces?.inkbox?.silentReply, group: "allow" },
+      },
+    },
+  } as T;
+}
+
 /** Tell the host this was intentionally suppressed, not a failed delivery. */
 export function transformInkboxReplyPayload<T extends {
   text?: string;

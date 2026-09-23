@@ -4157,7 +4157,7 @@ describe("createInkboxSessionBridge", () => {
     for (const [params] of channelRuntime.inbound.dispatchReply.mock.calls) {
       const body = params.ctxPayload.message.bodyForAgent;
       expect(body).toContain("Source-channel completion policy");
-      expect(body).toContain("return exactly NO_REPLY");
+      expect(body).toContain("unless an explicit silent completion was requested");
       expect(body).toContain("did not also request a reply here");
       expect(body).toContain("set completeSilently=true on that final send tool call");
       expect(body).toContain("Leave completeSilently false when more work or a reply here remains");
@@ -6457,6 +6457,20 @@ describe("createInkboxSessionBridge", () => {
     expect(sendIMessageTyping).toHaveBeenCalledWith("imconv-123");
   });
 
+  it("classifies acknowledgement tapbacks as ambient events without changing the reply audience", async () => {
+    const { runtime, sendIMessage } = createRuntime();
+    const channelRuntime = createChannelRuntime("NO_REPLY");
+    const bridge = createInkboxSessionBridge({ cfg: {}, account: { accountId: "default", identity: "smoke-agent", config: { identity: "smoke-agent" } } as any, runtime: runtime as any, channelRuntime });
+    await bridge.handlers.onIMessage?.(imessageReactionWebhookEvent({ reaction: "like" }));
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.message.inboundEventKind).toBe("room_event");
+    expect(run.ctxPayload.extra.InputProvenance).toBeUndefined();
+    expect(run.ctxPayload.extra.WasMentioned).toBe(false);
+    expect(run.ctxPayload.message.bodyForAgent).toContain("use inkbox_send_imessage");
+    expect(run.ctxPayload.reply.to).toBe("imessage:imconv-123");
+    expect(sendIMessage).not.toHaveBeenCalled();
+  });
+
   it("dispatches inbound tapbacks with a reply-or-silent policy and replies into the thread", async () => {
     const { runtime, sendIMessage, sendIMessageTyping } = createRuntime();
     const channelRuntime = createChannelRuntime("Yes — 7pm at the usual place.");
@@ -6481,7 +6495,10 @@ describe("createInkboxSessionBridge", () => {
     expect(run.ctxPayload.message.bodyForAgent).toContain(
       "[inkbox:imessage_reaction from=+15551234567 reaction=question conversation_id=imconv-123 target_message_id=im-target-9",
     );
-    expect(run.ctxPayload.message.bodyForAgent).toContain("return exactly NO_REPLY");
+    expect(run.ctxPayload.message.bodyForAgent).toContain("Respond to the clarification");
+    expect(run.ctxPayload.message.inboundEventKind).toBe("user_request");
+    expect(run.ctxPayload.extra.InputProvenance).toBeUndefined();
+    expect(run.ctxPayload.extra.WasMentioned).toBe(true);
     expect(run.ctxPayload.reply.to).toBe("imessage:imconv-123");
     expect(sendIMessage).toHaveBeenCalledWith({
       conversationId: "imconv-123",
