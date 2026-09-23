@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { withFileLock } from "openclaw/plugin-sdk/file-lock";
 import { ensureStateDir, statePaths } from "../state.js";
 
-type Entry = { id: string; body: string };
+type Entry = { id: string; body: string; omitted?: number };
+const MAX_BYTES = 128 * 1024;
 
 /** Durable background input. Reading does not consume it before a host turn succeeds. */
-export function contextBuffer(namespace: string) {
+export function contextBuffer(namespace: string, options: { retainLatest?: boolean } = {}) {
   const path = join(statePaths().dir, `group-context-${createHash("sha256").update(namespace).digest("hex")}.json`);
   async function update(fn: (entries: Entry[]) => Entry[]): Promise<Entry[]> {
     await ensureStateDir();
@@ -15,8 +16,17 @@ export function contextBuffer(namespace: string) {
       let entries: Entry[];
       try { entries = JSON.parse(await readFile(path, "utf8")); }
       catch (error: any) { if (error.code !== "ENOENT") throw error; entries = []; }
-      const next = fn(entries);
-      if (Buffer.byteLength(JSON.stringify(next)) > 128 * 1024) throw new Error("Group background context exceeds the input limit.");
+      let next = fn(entries);
+      if (options.retainLatest && Buffer.byteLength(JSON.stringify(next)) > MAX_BYTES) {
+        let omitted = next.reduce((sum, entry) => sum + (entry.omitted ?? 0), 0);
+        next = next.filter((entry) => !entry.omitted);
+        while (next.length > 1 && Buffer.byteLength(JSON.stringify(next)) > MAX_BYTES - 1024) { next.shift(); omitted++; }
+        if (Buffer.byteLength(JSON.stringify(next)) > MAX_BYTES - 1024) {
+          next = next.map((entry) => ({ ...entry, body: `${entry.body.slice(0, 16_000)}\n[This oversized background message was truncated by the context retention limit.]` }));
+        }
+        if (omitted) next.unshift({ id: "background-context-retention-notice", omitted, body: `[${omitted} older background message(s) were omitted by the context retention limit; the following entries are the most recent context.]` });
+      }
+      if (Buffer.byteLength(JSON.stringify(next)) > MAX_BYTES) throw new Error("Group background context exceeds the input limit.");
       const temporary = `${path}.${randomUUID()}.tmp`;
       const file = await open(temporary, "wx", 0o600);
       try { await file.writeFile(JSON.stringify(next)); await file.sync(); } finally { await file.close(); }
@@ -32,6 +42,6 @@ export function contextBuffer(namespace: string) {
       try { return JSON.parse(await readFile(path, "utf8")); }
       catch (error: any) { if (error.code === "ENOENT") return []; throw error; }
     },
-    async acknowledge(entries: Entry[]) { const ids = new Set(entries.map((entry) => entry.id)); await update((current) => current.filter((entry) => !ids.has(entry.id))); },
+    async acknowledge(entries: Entry[]) { const captured = new Map(entries.map((entry) => [entry.id, entry.body])); await update((current) => current.filter((entry) => captured.get(entry.id) !== entry.body)); },
   };
 }

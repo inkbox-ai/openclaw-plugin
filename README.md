@@ -486,9 +486,19 @@ statement of trust or permission to execute commands. In Companion email mention
 mode, the agent's actual mailbox in the current **To** list also counts as
 addressed; Cc-only messages do not. This never bypasses Safe mode.
 
-Companion controls require the current access/addressing gates and the sponsor.
-Native `/approve` answers additionally require the prompted sender (email matching
-is case-insensitive). In mention mode, include `@agent` before `/approve`.
+Companion slash controls require the current access/addressing gates and the sponsor.
+Eligible controls can reach a running turn without waiting for its model reply.
+`/clear` uses OpenClaw's `/new`, `/cancel` uses `/stop`, and `/health` shows native
+session `/status`. OpenClaw has no historical-session picker for `/resume`; the
+channel explains that limitation without starting a model or claiming a session
+was resumed.
+Native `/approve <id> <decision>` answers require those same access/addressing gates
+and the original waking turn's sender, who may differ from the sponsor in Relaxed
+mode (email matching is case-insensitive). In mention mode, use, for example,
+`@agent /approve <id> allow-once`.
+Native approval prompts are delivered immediately on the original turn's route;
+eligible answers resolve the waiting host approval without starting another model
+turn. Pending prompts expire or clear with the host's approval lifecycle.
 History never acts as a new command or approval. Later replies use the saved
 sponsor message for email or the canonical group conversation for texts; they do
 not reload activation history before every turn or send.
@@ -496,9 +506,14 @@ not reload activation history before every turn or send.
 Inputs are bounded at 128 KiB and are not silently truncated. Private journals in
 `~/.openclaw/inkbox/` persist receipts before acknowledgment and background context
 across restarts. Completed model replies are checkpointed before sending. Known
-pre-submission/pre-send failures retry with bounded backoff; uncertain host
+transient pre-submission/pre-send failures retry with bounded backoff. Other
+preparation failures stop after five retries; uncertain host
 submissions or sends remain paused for inspection, never blindly replayed. This is
 at-least-once webhook delivery, not a guarantee of exactly-once model execution.
+Ordinary mention-mode background context retains compact sender/text/media entries
+up to 128 KiB; when older context is omitted, the next waking turn receives an
+explicit retention notice. Companion snapshots remain fail-closed at their size
+limit and are never silently truncated.
 
 ## Bundled Skills
 

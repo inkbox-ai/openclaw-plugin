@@ -1,4 +1,4 @@
-import { companionWakes, controlText, sameAuthor } from "./reply-policy.js";
+import { companionWakes, controlText, isCompanionControl, sameAuthor } from "./reply-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
@@ -11,14 +11,24 @@ export const COMPANION_MAX_BYTES = 128 * 1024;
 type Channel = CompanionChannel;
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc"> & { to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = CompanionMetadata;
-type Job = { event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; attempts?: number; retryAt?: number };
-type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; reply: CompanionReply };
+type Job = { event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
 export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void> };
 class SenderNotPermitted extends Error {}
+function retryableRead(error: unknown, depth = 0): boolean {
+  if (!error || typeof error !== "object" || depth > 4) return false;
+  const detail = error as { name?: string; statusCode?: number; status_code?: number; code?: string; cause?: unknown };
+  const status = detail.statusCode ?? detail.status_code;
+  return detail.name === "InkboxConnectionError" || detail.name === "TimeoutError" || status === 429 ||
+    (typeof status === "number" && status >= 500 && status < 600) ||
+    ["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH"].includes(detail.code ?? "") ||
+    (detail.cause !== error && retryableRead(detail.cause, depth + 1));
+}
 const retries = new Map<string, ReturnType<typeof setTimeout>>();
 const chains = new Map<string, Promise<unknown>>();
 const workers = new Map<string, Promise<void>>();
+const controls = new Set<string>();
 const lockOptions = { stale: 60_000, retries: { retries: 10, factor: 1.5, minTimeout: 20, maxTimeout: 1000 } };
 
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
@@ -71,6 +81,7 @@ export function createCompanionReceiver(opts: {
   accountId: string; config: Partial<InkboxPluginConfig>; runtime: InkboxRuntime;
   submit(input: CompanionInput): Promise<string[] | void>;
   canApprove?(input: CompanionInput): Promise<boolean>;
+  resolveApproval?(event: Record<string, any>, key: string, beforeResolve: () => Promise<boolean>): Promise<boolean>;
   deliver(input: CompanionInput, text: string, beforeSend: () => Promise<void>): Promise<string | undefined>; warn?(message: string): void;
 }) {
   const owner = hash(JSON.stringify([opts.accountId, opts.config.identity, opts.config.baseUrl ?? ""]));
@@ -103,16 +114,21 @@ export function createCompanionReceiver(opts: {
     chains.set(path, next);
     return next;
   }
-  async function checkSender(author: string, channel: Channel) {
+  function checkInboundContact(contactId: string | null | undefined) {
     const inbound = opts.config.allowedInboundContactIds;
-    if (inbound?.length) {
+    if (inbound?.length && (!contactId || !inbound.includes(contactId))) throw new SenderNotPermitted("Companion sender is not locally permitted.");
+  }
+  async function checkSender(author: string, channel: Channel, contactId?: string | null): Promise<string | null | undefined> {
+    if (opts.config.allowedInboundContactIds?.length && contactId === undefined) {
       const client = await opts.runtime.getClient();
       const matches = await client.contacts.lookup(channel === "mail" ? { email: author } : { phone: author });
-      if (matches.length !== 1 || !inbound.includes(matches[0]!.id)) throw new SenderNotPermitted("Companion sender is not locally permitted.");
+      contactId = matches.length === 1 ? matches[0]!.id : null;
     }
+    checkInboundContact(contactId);
+    return contactId;
   }
-  async function checkSponsor(author: string, channel: Channel) {
-    await checkSender(author, channel);
+  function checkSponsor(author: string, contactId: string | null | undefined) {
+    checkInboundContact(contactId);
     checkOutboundSponsor(author);
   }
   function checkOutboundSponsor(author: string) {
@@ -122,28 +138,108 @@ export function createCompanionReceiver(opts: {
     }
   }
   function key(m: Metadata, identityId: string) { return `companion:${owner}:${identityId}:${m.channel}:${hash(`${m.conversation_id}:${m.scope_id}`)}:${m.activation_id ? `activation:${hash(m.activation_id)}` : "ordinary"}`; }
+  async function tryApproval(id: string, job: Job): Promise<boolean> {
+    if (!opts.resolveApproval || job.state !== "pending") return false;
+    const m = metadata(job.event);
+    if (m.phase === "initialization") return false;
+    const { message } = source(job.event, m);
+    const identity = await opts.runtime.getIdentity();
+    if (identity.id !== job.identityId || !companionWakes(opts.config, message, m.channel, identity.emailAddress ?? undefined)) return false;
+    let claimed = false;
+    try {
+      const resolved = await opts.resolveApproval(job.event, key(m, job.identityId), async () => mutate((j) => {
+        if (j.jobs[id]?.state !== "pending") return false;
+        const parent = Object.values(j.jobs).find((other) => other.state === "submitting" && other.sponsor && key(metadata(other.event), other.identityId) === key(m, job.identityId));
+        if (!parent?.sponsor || parent.sources?.includes(message.id) || j.activations[key(m, job.identityId)]?.sources.includes(message.id)) return false;
+        checkSponsor(parent.sponsor, parent.sponsorContactId);
+        if (Object.entries(j.jobs).some(([otherId, other]) => otherId !== id && other.state === "done" && other.identityId === job.identityId && key(metadata(other.event), other.identityId) === key(m, job.identityId) && source(other.event, metadata(other.event)).message.id === message.id)) return false;
+        j.jobs[id]!.state = "submitting"; claimed = true; return true;
+      }));
+      if (resolved && claimed) await mutate((j) => { j.jobs[id]!.state = "done"; });
+      return resolved && claimed;
+    } catch (error) {
+      if (!claimed) throw error;
+      await mutate((j) => { j.jobs[id]!.state = "paused"; j.jobs[id]!.reason = "Native approval resolution has an uncertain outcome."; });
+      opts.warn?.("Native approval retained for inspection; resolution was not replayed.");
+      return true;
+    }
+  }
+  async function tryControl(id: string, job: Job): Promise<boolean> {
+    if (job.state !== "pending") return false;
+    const m = metadata(job.event);
+    if (m.phase === "initialization") return false;
+    const { message, author } = source(job.event, m);
+    const raw = controlText(String(m.channel === "mail" ? message.body ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.content ?? message.text ?? ""), opts.config.identity);
+    if (!isCompanionControl(raw) || message.body_truncated || ["truncated", "unavailable"].includes(message.body_state)) return false;
+    const identity = await opts.runtime.getIdentity();
+    if (identity.id !== job.identityId || !companionWakes(opts.config, message, m.channel, identity.emailAddress ?? undefined)) return false;
+    const scope = key(m, job.identityId);
+    const journal = await read();
+    const parent = Object.values(journal.jobs).find((other) => other.state === "submitting" && other.sponsor && key(metadata(other.event), other.identityId) === scope);
+    if (!parent?.sponsor || !parent.reply || !sameAuthor(m.channel, author, parent.sponsor) || parent.sources?.includes(message.id) || journal.activations[scope]?.sources.includes(message.id)) return false;
+    if (Object.entries(journal.jobs).some(([otherId, other]) => otherId !== id && other.state === "done" && key(metadata(other.event), other.identityId) === scope && source(other.event, metadata(other.event)).message.id === message.id)) return false;
+    const controlKey = `${path}:${id}`;
+    if (controls.has(controlKey)) return true;
+    controls.add(controlKey);
+    let claimed = false;
+    try {
+      if ((await read()).jobs[id]?.state !== "pending") return true;
+      checkSponsor(parent.sponsor, parent.sponsorContactId);
+      const input: CompanionInput = {
+        key: scope, messageId: id, channel: m.channel, body: raw, rawText: raw, author,
+        reply: structuredClone(parent.reply), event: job.event, commandAuthorized: true,
+        validateBeforeDispatch: async () => {
+          checkSponsor(parent.sponsor!, parent.sponsorContactId);
+          await mutate((j) => {
+            if (!claimed && j.jobs[id]?.state !== "pending") throw new Error("Companion control was already claimed.");
+            Object.assign(j.jobs[id]!, { state: "submitting", sponsor: parent.sponsor, sponsorContactId: parent.sponsorContactId }); claimed = true;
+          });
+        },
+        recordDelivery: async (messageId) => { await mutate((j) => { j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), messageId])]; }); },
+      };
+      const texts = await opts.submit(input) ?? [];
+      await mutate((j) => { Object.assign(j.jobs[id]!, { replies: texts, reply: input.reply, sponsor: parent.sponsor, sponsorContactId: parent.sponsorContactId, state: "reply_pending" }); });
+      await processJob(id, (await read()).jobs[id]!);
+      return true;
+    } catch (error) {
+      if (!claimed) throw error;
+      await mutate((j) => { if (j.jobs[id]!.state === "submitting" || j.jobs[id]!.state === "sending") { j.jobs[id]!.state = "paused"; j.jobs[id]!.reason = "Companion control has an uncertain outcome."; } });
+      opts.warn?.("Companion control retained for recovery; uncertain execution was not replayed.");
+      return true;
+    } finally { controls.delete(controlKey); }
+  }
+  async function reconsiderApprovals() {
+    for (const [id, job] of Object.entries((await read()).jobs)) if (job.state === "pending") await tryApproval(id, job);
+  }
   async function processJob(id: string, job: Job) {
+    if (!["pending", "reply_pending"].includes(job.state) || (await read()).jobs[id]?.state !== job.state) return;
+    if (await tryApproval(id, job)) return;
+    if ((await read()).jobs[id]?.state !== job.state) return;
     const m = metadata(job.event);
     const scope = key(m, job.identityId);
     const identity = await opts.runtime.getIdentity();
     if (!job.identityId || identity.id !== job.identityId) throw new Error("Companion job identity has changed.");
-    const { message, author } = source(job.event, m);
-    const rawText = String(m.channel === "imessage" ? message.content ?? message.text ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.body ?? "");
+    const sourceMessage = source(job.event, m);
+    let message = sourceMessage.message;
+    const author = sourceMessage.author;
+    let rawText = String(m.channel === "imessage" ? message.content ?? message.text ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.body ?? "");
     const recordDelivery = async (messageId: string) => { await mutate((j) => { j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), messageId])]; }); };
+    let sponsorContactId = job.sponsorContactId;
     const makeInput = (reply: CompanionReply, body = "", sponsor = author): CompanionInput => ({
       key: scope, messageId: id, channel: m.channel, body, reply, event: job.event, author,
       rawText: controlText(rawText, opts.config.identity),
-      commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, sponsor),
+      commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, sponsor) && isCompanionControl(controlText(rawText, opts.config.identity)),
       validateBeforeDispatch: async () => {
-        checkOutboundSponsor(sponsor);
-        await mutate((j) => { j.jobs[id]!.state = "submitting"; });
+        checkSponsor(sponsor, sponsorContactId);
+        await mutate((j) => { j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; });
       }, recordDelivery,
     });
     async function sendSaved() {
       const current = (await read()).jobs[id]!;
       const input = makeInput(current.reply!);
       for (const text of current.replies ?? []) {
-        checkOutboundSponsor(current.sponsor ?? (await read()).activations[scope]?.sponsor ?? author);
+        const savedActivation = (await read()).activations[scope];
+        checkSponsor(current.sponsor ?? savedActivation?.sponsor ?? author, current.sponsorContactId ?? savedActivation?.sponsorContactId);
         const sent = await opts.deliver(input, text, async () => { await mutate((j) => { j.jobs[id]!.state = "sending"; }); });
         await mutate((j) => {
           if (sent) j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), sent])];
@@ -158,6 +254,21 @@ export function createCompanionReceiver(opts: {
         ["done", "reply_pending"].includes(other.state) && key(metadata(other.event), other.identityId) === scope &&
         source(other.event, metadata(other.event)).message.id === message.id)) {
       await mutate((j) => { j.jobs[id]!.state = "done"; }); return;
+    }
+    const incompleteMailBody = m.channel === "mail" && (message.body_state === "truncated" || message.body_state === "unavailable" || message.body_truncated === true || typeof message.body !== "string");
+    const incompleteMailAttachments = m.channel === "mail" && message.has_attachments === true && (!Array.isArray(message.attachments) || !message.attachments.length);
+    if (incompleteMailBody || incompleteMailAttachments) {
+      const detail = await identity.getMessage(message.id);
+      if (detail.id !== message.id || (detail.threadId && detail.threadId !== m.conversation_id)) throw new Error("Companion mail detail does not match its source.");
+      message = { ...message };
+      if (incompleteMailBody) {
+        if (typeof detail.bodyText !== "string") throw new Error("Companion message body is incomplete.");
+        message.body = detail.bodyText; message.body_state = "complete"; message.body_truncated = false;
+        rawText = detail.bodyText;
+      }
+      if (incompleteMailAttachments && detail.attachmentMetadata?.length) {
+        message.attachments = detail.attachmentMetadata.map((attachment, index) => ({ ...attachment, source_message_id: message.id, index }));
+      }
     }
     let activation = journal.activations[scope];
     let body: string;
@@ -175,26 +286,35 @@ export function createCompanionReceiver(opts: {
         const trigger = triggers[0]!;
         if (m.phase === "initialization" && (message.id !== trigger.id || !sameAuthor(m.channel, author, trigger.author))) throw new Error("Companion initialization source is not its trigger.");
         if (snapshot.entries.some((entry) => entry.id === message.id && !sameAuthor(m.channel, author, entry.author))) throw new Error("Companion snapshot author does not match the received message.");
-        await checkSponsor(trigger.author, m.channel);
+        sponsorContactId = await checkSender(trigger.author, m.channel);
+        checkSponsor(trigger.author, sponsorContactId);
         reply = replyContext(snapshot.replyContext, m);
         if (m.channel === "mail" && reply.replyToMessageId !== trigger.id) throw new Error("Companion reply must reference the stored sponsor message.");
         reply.identityId = job.identityId;
         sources = snapshot.entries.map((entry) => entry.id);
         body = bounded(`${snapshot.text}\nHistory notices: ${JSON.stringify(snapshot.notices ?? [])}\nMessage admission: ${JSON.stringify(snapshot.entries.map((entry) => ({ id: entry.id, sender_access: entry.senderAccess })))}`);
-        activation = { state: "initialized", sources, triggerId: trigger.id, sponsor: trigger.author, reply };
+        activation = { state: "initialized", sources, triggerId: trigger.id, sponsor: trigger.author, sponsorContactId, reply };
         if (m.phase === "live" && !sources.includes(message.id)) {
           body += `\nCurrent message: ${JSON.stringify({ id: message.id, author, text: rawText, sender_access: message.sender_access, attachments: message.attachments ?? message.media ?? [] })}`;
           sources.push(message.id);
         }
       } else {
-        await checkSponsor(activation.sponsor, m.channel);
+        sponsorContactId = await checkSender(activation.sponsor, m.channel, activation.sponsorContactId);
+        checkSponsor(activation.sponsor, sponsorContactId);
+        if (activation.sponsorContactId !== sponsorContactId) {
+          activation.sponsorContactId = sponsorContactId;
+          await mutate((j) => { j.activations[scope]!.sponsorContactId = sponsorContactId; });
+        }
         if (m.phase === "initialization" && message.id !== activation.triggerId) throw new Error("Companion initialization source is not its trigger.");
         if (activation.sources.includes(message.id) || m.phase === "initialization") { await mutate((j) => { j.jobs[id]!.state = "done"; }); return; }
         reply = activation.reply;
         body = "";
       }
     } else {
-      try { await checkSender(author, m.channel); }
+      try {
+        sponsorContactId = await checkSender(author, m.channel, job.senderContactId);
+        await mutate((j) => { j.jobs[id]!.senderContactId = sponsorContactId; });
+      }
       catch (error) {
         if (!(error instanceof SenderNotPermitted)) throw error;
         await mutate((j) => { j.jobs[id]!.state = "done"; }); return;
@@ -230,7 +350,7 @@ export function createCompanionReceiver(opts: {
     const texts = await opts.submit(input) ?? [];
     await mutate((j) => {
       finishSources(j); if (j.context) delete j.context[scope];
-      Object.assign(j.jobs[id]!, { replies: texts, reply, sponsor: activation?.sponsor ?? author, state: "reply_pending" });
+      Object.assign(j.jobs[id]!, { replies: texts, reply, sponsor: activation?.sponsor ?? author, sponsorContactId, state: "reply_pending" });
     });
     await sendSaved();
   }
@@ -253,15 +373,15 @@ export function createCompanionReceiver(opts: {
           await mutate((j) => {
             const saved = j.jobs[id]!;
             if (saved.state === "submitting" || saved.state === "sending") saved.state = "paused";
-            else { saved.attempts = (saved.attempts ?? 0) + 1; saved.retryAt = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(saved.attempts, 6)); }
+            else {
+              saved.attempts = (saved.attempts ?? 0) + 1;
+              if (!retryableRead(error) && (saved.state === "reply_pending" || saved.attempts > 5)) saved.state = "paused";
+              else saved.retryAt = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(saved.attempts, 6));
+            }
             j.jobs[id]!.reason = error instanceof Error ? error.message : "Companion delivery failed.";
             if (j.activations[scope]?.state === "submitting") j.activations[scope]!.state = "paused";
           });
           opts.warn?.("Companion delivery retained for recovery; uncertain submissions are paused.");
-          if (!retries.has(path)) {
-            const timer = setTimeout(() => { retries.delete(path); void start().catch(() => {}); }, 60_000);
-            timer.unref(); retries.set(path, timer);
-          }
         }
       }
     }
@@ -278,7 +398,18 @@ export function createCompanionReceiver(opts: {
         });
         await drain();
       });
-    })().finally(() => { workers.delete(path); });
+    })().finally(async () => {
+      workers.delete(path);
+      const old = retries.get(path);
+      if (old) { clearTimeout(old); retries.delete(path); }
+      const jobs = Object.values((await read()).jobs);
+      const blocked = new Set(jobs.filter((j) => ["paused", "submitting", "sending"].includes(j.state)).map((j) => key(metadata(j.event), j.identityId)));
+      const due = jobs.filter((j) => ["pending", "reply_pending"].includes(j.state) && j.retryAt && !blocked.has(key(metadata(j.event), j.identityId))).map((j) => j.retryAt!);
+      if (due.length) {
+        const timer = setTimeout(() => { retries.delete(path); void start().catch(() => {}); }, Math.max(1, Math.min(...due) - Date.now()));
+        timer.unref(); retries.set(path, timer);
+      }
+    });
     workers.set(path, task);
     return task;
   }
@@ -295,8 +426,8 @@ export function createCompanionReceiver(opts: {
       bounded(JSON.stringify(event));
       const identityId = (await opts.runtime.getIdentity()).id;
       if (!identityId) throw new Error("Companion identity is unavailable.");
+      const receipt = hash(`${identityId}:${event.id}`);
       await mutate((j) => {
-        const receipt = hash(`${identityId}:${event.id}`);
         const previous = j.jobs[receipt];
         if (previous && ["scope_id", "conversation_id", "channel", "phase", "sequence", "activation_id"]
           .some((field) => previous.event.companion[field] !== event.companion[field])) {
@@ -304,8 +435,10 @@ export function createCompanionReceiver(opts: {
         }
         j.jobs[receipt] ??= { event: structuredClone(event), identityId, state: "pending" };
       });
+      if (!await tryApproval(receipt, (await read()).jobs[receipt]!)) await tryControl(receipt, (await read()).jobs[receipt]!);
       void start().then(() => start()).catch(() => opts.warn?.("Companion queue is unavailable."));
     },
+    reconsiderApprovals,
     async recover() {
       if (!Object.keys((await read()).jobs).length) return;
       await start();

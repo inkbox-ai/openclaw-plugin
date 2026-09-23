@@ -34,6 +34,9 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Add Auto/Mention group replies and Safe/Relaxed Companion responses to setup and account settings, including current email To addressing and durable background context.
 - Checkpoint completed replies before delivery, retry known pre-submission failures, and retain uncertain submissions or sends for inspection.
 - Use canonical reply-all for automatic email without rebuilding recipients.
+- Deliver native approval prompts immediately and accept the prompted group sender’s eligible reply while the original host turn is waiting; keep execution bound to its original run and conversation.
+- Hydrate incomplete Companion email bodies, retain compact quiet-group context with explicit retention notices, and keep local sponsor checks independent of live contact-service availability.
+- Make health registration idempotent across host plugin-discovery module reloads.
 
 ## [0.2.7] - 2026-07-29
 

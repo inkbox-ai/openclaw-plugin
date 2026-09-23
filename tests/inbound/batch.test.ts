@@ -234,4 +234,16 @@ describe("wrapInboundHandlersWithBatching", () => {
     expect(onIMessage).toHaveBeenCalledTimes(1);
     expect(onIMessage.mock.calls[0][0].data.message.content).toBe("first\nsecond");
   });
+  it("keeps group iMessage fragments separate by sender_number even when remote_number is shared", async () => {
+    const onIMessage = vi.fn();
+    const wrapped = wrapInboundHandlersWithBatching({ onIMessage }, { sms: { batchDelayMs: 100, maxMessages: 8, maxChars: 4000 } });
+    for (const [sender, content] of [["+15555550100", "first sender"], ["+15555550200", "second sender"]]) {
+      const message = imessageEvent("+15555550999", content!);
+      Object.assign(message.data.message, { sender_number: sender, conversation_id: "group-one" });
+      await wrapped.onIMessage!(message);
+    }
+    await vi.advanceTimersByTimeAsync(110);
+    expect(onIMessage).toHaveBeenCalledTimes(2);
+    expect(onIMessage.mock.calls.map(([value]) => value.data.message.content)).toEqual(["first sender", "second sender"]);
+  });
 });

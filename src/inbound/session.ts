@@ -1,5 +1,6 @@
 import { contextBuffer } from "./context-buffer.js";
-import { mentionsAgent, isLocalControl, sameAuthor } from "./reply-policy.js";
+import { ensureNativeApprovalContext, nativeApprovalScope, resolveNativeApproval, trackNativeApprovalTurn } from "./native-approvals.js";
+import { mentionsAgent, isLocalControl, sameAuthor, controlText } from "./reply-policy.js";
 import { createInkboxTextReplyCapture } from "../reply-capture.js";
 import { beginSilentSendCapture } from "../silent-send-capture.js";
 import { isInkboxSilentReply, transformInkboxReplyPayload } from "../silent-reply.js";
@@ -7,7 +8,7 @@ import { canonicalInkboxSessionOverride } from "../session-key.js";
 import { COMPANION_MAX_BYTES, createCompanionReceiver, type CompanionReply, type CompanionInput } from "./companion.js";
 import { a2aFailureShape, settleCaughtA2AFailure } from "../a2a-failure.js";
 import { INKBOX_HD_AUDIO_FORMAT, RealtimeCallAudio } from "../realtime-audio.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { verifyWebhook } from "@inkbox/sdk";
 import type {
   AgentIdentity,
@@ -136,6 +137,7 @@ type InkboxInboundTurn = {
   reaction?: boolean;
   commandAuthorized?: boolean;
   contextAcknowledged?: () => Promise<void>;
+  companionApprovalReady?: () => Promise<void>;
   mode: InboundMode;
   contactKey: string;
   contact?: ContactSummary;
@@ -221,6 +223,7 @@ type RealtimeCallMeta = {
 };
 
 export interface InkboxSessionBridgeOptions {
+  abortSignal?: AbortSignal;
   cfg: unknown;
   account: ResolvedInkboxAccount;
   runtime: InkboxRuntime;
@@ -1604,7 +1607,10 @@ class OutboundSendRejection extends Error {
 }
 
 function approvalBuffer(turn: InkboxInboundTurn, account: ResolvedInkboxAccount) {
-  return contextBuffer(JSON.stringify(["approvals", account.accountId, account.config.baseUrl ?? "", account.config.identity, turn.sessionKeyOverride ?? `${turn.mode}:${turn.conversationId ?? turn.contactKey}`]));
+  return contextBuffer(approvalScope(turn, account));
+}
+function approvalScope(turn: InkboxInboundTurn, account: ResolvedInkboxAccount) {
+  return nativeApprovalScope(account, turn.sessionKeyOverride ?? `${turn.mode}:${turn.conversationId ?? turn.contactKey}`);
 }
 
 async function acceptsApproval(turn: InkboxInboundTurn, account: ResolvedInkboxAccount): Promise<boolean> {
@@ -2467,7 +2473,7 @@ async function dispatchInboundTurn(
   const conversationKind = opts.turn.conversationKind ?? "direct";
   const channelThreadRouteId =
     opts.turn.conversationId
-      ? `${opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
+      ? `${opts.turn.mode === "email" ? "email" : opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
       : undefined;
   const conversationRouteId =
     conversationKind === "group"
@@ -2506,7 +2512,8 @@ async function dispatchInboundTurn(
     : opts.turn.remoteAddress ?? opts.turn.contactKey;
   const silentSendCapture = !opts.deliveryOverride && ["sms", "email", "imessage"].includes(opts.turn.mode)
     ? beginSilentSendCapture(effectiveSessionKey) : undefined;
-  if (opts.turn.companionReply && Buffer.byteLength(`${body}\n\n${silentSendCapture?.marker ?? ""}`) > COMPANION_MAX_BYTES) {
+  const approvalMarker = silentSendCapture?.marker ?? `[Inkbox turn correlation: ${randomUUID()}]`;
+  if (opts.turn.companionReply && Buffer.byteLength(`${body}\n\n${approvalMarker}`) > COMPANION_MAX_BYTES) {
     silentSendCapture?.finish();
     throw new Error("Companion initialization exceeds the host input limit.");
   }
@@ -2559,7 +2566,7 @@ async function dispatchInboundTurn(
     },
     message: {
       body,
-      bodyForAgent: silentSendCapture ? `${opts.turn.body}\n\n${silentSendCapture.marker}` : opts.turn.body,
+      bodyForAgent: ["sms", "email", "imessage"].includes(opts.turn.mode) ? `${opts.turn.body}\n\n${approvalMarker}` : opts.turn.body,
       rawBody: opts.turn.rawText ?? opts.turn.body,
       commandBody: opts.turn.commandAuthorized === false ? "" : opts.turn.rawText ?? opts.turn.body,
       envelopeFrom: opts.turn.fromLabel,
@@ -2626,7 +2633,6 @@ async function dispatchInboundTurn(
       }
       let messageId: string | undefined;
       try {
-        await rememberApprovals(opts.turn, opts.account, text);
         messageId = await deliverReply({
           turn: opts.turn,
           text,
@@ -2635,6 +2641,7 @@ async function dispatchInboundTurn(
           imessageTyping: opts.imessageTyping,
           logger: opts.logger,
         });
+        await rememberApprovals(opts.turn, opts.account, text);
         if (messageId) await opts.turn.companionRecordDelivery?.(messageId);
       } catch (error) {
         if (error instanceof OutboundSendRejection) {
@@ -2677,6 +2684,17 @@ async function dispatchInboundTurn(
     : undefined;
   silentSendCapture?.activate();
   let recordFailed = false;
+  const releaseApprovalTurn = trackNativeApprovalTurn(core, {
+    accountId: opts.account.accountId, scope: approvalScope(opts.turn, opts.account), author: opts.turn.remoteAddress ?? "",
+    channel: opts.turn.mode === "email" ? "mail" : opts.turn.mode, sessionKey: effectiveSessionKey,
+    to: smsReplyTarget, threadId: opts.turn.threadId, marker: approvalMarker,
+    deliver: async (text) => {
+      if (opts.turn.companionReply && opts.account.config.groupReplyMode === "mention") text += "\nInclude @agent before /approve when answering in mention mode.";
+      await opts.turn.companionValidateBeforeDispatch?.();
+      const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger });
+      if (messageId) await opts.turn.companionRecordDelivery?.(messageId);
+    }, ready: opts.turn.companionApprovalReady,
+  });
   try {
     await opts.turn.companionValidateBeforeDispatch?.();
     const result = await core.inbound.dispatchReply({
@@ -2709,6 +2727,7 @@ async function dispatchInboundTurn(
     }
     await opts.turn.contextAcknowledged?.();
   } finally {
+    releaseApprovalTurn();
     if (silentSendCapture) {
       const shape = silentSendCapture.shape();
       opts.logger?.info?.(`Inkbox silent send shape: bound=${shape.bound} batch=${shape.batch} attempts=${shape.attempts} accepted=${shape.accepted} invalid=${shape.invalid}`);
@@ -4511,6 +4530,10 @@ async function handleDeliveryFailure(
         }),
     ...extra?.turn,
     body: note.body,
+    rawText: note.body,
+    reaction: undefined,
+    commandAuthorized: false,
+    contextAcknowledged: undefined,
     messageId: `delivery-failure:${failure.eventType}:${failure.messageId ?? Date.now()}`,
     timestamp: parseTimestamp(failure.createdAt),
     raw: failure.raw,
@@ -4554,6 +4577,7 @@ async function wakeOnSendRejection(
 }
 
 export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): InkboxSessionBridge {
+  ensureNativeApprovalContext(opts.channelRuntime, opts.account.accountId, opts.abortSignal);
   const activeCalls = new Map<string, ActiveCall>();
   const callMetaById = new Map<string, Partial<InkboxInboundTurn> & { callId: string }>();
   const imessageTyping = createIMessageTypingPulse(opts.runtime, opts.logger);
@@ -5948,6 +5972,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       companionReply: structuredClone(input.reply),
       companionValidateBeforeDispatch: input.validateBeforeDispatch,
       companionRecordDelivery: input.recordDelivery,
+      companionApprovalReady: () => companion.reconsiderApprovals(),
       replyToId: input.reply.replyToMessageId ?? undefined,
       threadId: `${mode}:${input.reply.conversationId}`,
     };
@@ -5958,9 +5983,18 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     runtime: opts.runtime,
     warn: (message) => opts.logger?.warn?.(message),
     async submit(input) {
+      if (input.commandAuthorized && input.rawText.toLowerCase() === "/resume") {
+        await input.validateBeforeDispatch();
+        return ["Reopening a previous conversation with /resume is not supported by this OpenClaw channel. Use /new for a fresh conversation or /status for the current session."];
+      }
       const texts: string[] = [];
+      const turn = companionTurn(input);
+      if (input.commandAuthorized) {
+        const aliases: Record<string, string> = { "/clear": "/new", "/cancel": "/stop", "/health": "/status" };
+        turn.rawText = aliases[input.rawText.toLowerCase()] ?? input.rawText;
+      }
       await dispatchInboundTurn({
-        ...opts, activeCalls, turn: companionTurn(input),
+        ...opts, activeCalls, turn,
         deliveryOverride: { deliver: async (payload) => {
           const text = payloadText(payload).trim();
           if (text && !isInkboxSilentReply(text)) texts.push(text);
@@ -5970,22 +6004,36 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       return texts;
     },
     async canApprove(input) { return acceptsApproval(companionTurn(input), opts.account); },
+    async resolveApproval(event, key, beforeResolve) {
+      const channel = event.companion.channel;
+      const message = channel === "phone" ? event.data.text_message : event.data.message;
+      const author = channel === "mail" ? message.from_address : channel === "phone" ? message.sender_phone_number ?? message.remote_phone_number : message.sender_number ?? message.remote_number;
+      return resolveNativeApproval({ scope: nativeApprovalScope(opts.account, key), author, channel, accountId: opts.account.accountId },
+        controlText(String(channel === "phone" ? message.text ?? message.body ?? "" : channel === "imessage" ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
+    },
     async deliver(input, text, beforeSend) {
       const turn = companionTurn(input);
-      await rememberApprovals(turn, opts.account, text);
       if (opts.account.config.groupReplyMode === "mention" && /\/approve\s/.test(text)) text += "\nInclude @agent before /approve when answering in mention mode.";
-      return deliverReply({ turn, text, runtime: opts.runtime, activeCalls, logger: opts.logger, beforeSend });
+      const messageId = await deliverReply({ turn, text, runtime: opts.runtime, activeCalls, logger: opts.logger, beforeSend });
+      await rememberApprovals(turn, opts.account, text);
+      return messageId;
     },
   });
   async function ordinaryContext(turn: InkboxInboundTurn): Promise<boolean> {
     if (turn.conversationKind !== "group") return false;
-    const buffer = contextBuffer(JSON.stringify([opts.account.config.baseUrl ?? "", opts.account.accountId, opts.account.identity, turn.mode, turn.conversationId]));
+    const buffer = contextBuffer(JSON.stringify([opts.account.config.baseUrl ?? "", opts.account.accountId, opts.account.identity, turn.mode, turn.conversationId]), { retainLatest: true });
     const raw = turn.rawText ?? "";
+    if (await resolveNativeApproval({ scope: approvalScope(turn, opts.account), author: turn.remoteAddress ?? "", channel: turn.mode === "email" ? "mail" : turn.mode, accountId: opts.account.accountId }, raw, opts.cfg)) return true;
     const approval = /^\/approve(?:\s|$)/i.test(raw.trim());
     const allowedApproval = approval && await acceptsApproval(turn, opts.account);
     if ((approval && !allowedApproval) || (opts.account.config.groupReplyMode === "mention" && !isLocalControl(raw) &&
         !allowedApproval && !mentionsAgent(raw, opts.account.config.identity))) {
-      await buffer.append({ id: turn.messageId, body: turn.body });
+      const data = (turn.raw as any)?.data;
+      const message = data?.text_message ?? data?.message;
+      const context = { kind: turn.reaction ? "imessage_reaction" : turn.mode, author: turn.remoteAddress,
+        name: turn.fromLabel, timestamp: turn.timestamp, text: message?.text ?? message?.content ?? raw,
+        media: message?.media, reaction: turn.reaction ? data?.reaction : undefined };
+      await buffer.append({ id: turn.messageId, body: JSON.stringify(context) });
       return true;
     }
     const pending = await buffer.snapshot();

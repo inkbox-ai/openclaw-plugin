@@ -16,6 +16,7 @@ import {
   type ResolvedInkboxAccount,
 } from "./accounts.js";
 import { inkboxChannelConfigSchema } from "./config-schema.js";
+import { inkboxApprovalCapability } from "./inbound/native-approvals.js";
 import { startInkboxGatewayAccount } from "./gateway.js";
 import {
   normalizeInkboxTarget,
@@ -182,6 +183,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
       configPrefixes: ["channels.inkbox", "plugins.entries.inkbox.config"],
     },
     configSchema: inkboxChannelConfigSchema as any,
+    approvalCapability: inkboxApprovalCapability,
     setup: {
       applyAccountConfig: ({ cfg, accountId, input }: any) =>
         applyInkboxAccountConfig({

@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({ dir: "" }));
+const nativeGateway = vi.hoisted(() => ({ resolve: vi.fn() }));
+vi.mock("openclaw/plugin-sdk/approval-handler-runtime", async (original) => ({ ...await original<any>(), resolveApprovalOverGateway: nativeGateway.resolve }));
 vi.mock("../../src/state.js", async () => {
   const fs = await import("node:fs/promises");
   return { statePaths: () => ({ dir: state.dir }), ensureStateDir: () => fs.mkdir(state.dir, { recursive: true, mode: 0o700 }) };
@@ -23,6 +25,8 @@ import { handleInkboxWebhook } from "../../src/inbound/handler.js";
 import { createHmac } from "node:crypto";
 import { AgentIdentity, Inkbox } from "@inkbox/sdk";
 import companionFixture from "./fixtures/companion-v1.json";
+import { createChannelApprovalHandlerFromCapability } from "openclaw/plugin-sdk/approval-handler-runtime";
+import { inkboxApprovalCapability } from "../../src/inbound/native-approvals.js";
 
 function event(phase = "initialization", sequence = 1, channel = "mail", scope = "scope-one", activation = "activation-one") {
   const message = { sender_access: "direct", id: `source-${sequence}`, thread_id: "conversation-one", conversation_id: "conversation-one", body: "Sponsor follow-up", text: "Sponsor follow-up", content: "Native iMessage content", from_address: "sponsor@example.com", to_addresses: ["agent@example.com", "fred@example.com"], cc_addresses: ["nancy@example.com"], sender_phone_number: "+15555550100", sender_number: "+15555550100", remote_number: null };
@@ -53,10 +57,12 @@ function setup(channel = "mail", overrides: any = {}) {
   const runtime = { getClient: vi.fn(async () => ({ companion: api, contacts })), getIdentity: vi.fn(async () => identity) };
   const dispatchReply = vi.fn(async (_input: any) => { await _input.delivery.deliver({ text: "Group reply" }); return ({ dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 0 }, beforeAgentRunBlocked: false } }); });
   const channelRuntime = { inbound: { buildContext: vi.fn((v) => v), dispatchReply }, session: { recordInboundSession: vi.fn() }, reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() } };
+  const contexts = new Map<string, unknown>();
+  Object.assign(channelRuntime, { runtimeContexts: { get: ({ capability }: any) => contexts.get(capability), register: ({ capability, context }: any) => { contexts.set(capability, context); return { dispose: () => contexts.delete(capability) }; } } });
   const account: any = { accountId: "default", identity: "test-agent", config: { identity: "test-agent", allowedInboundContactIds: ["sponsor-contact"], ...overrides } };
   const makeBridge = () => createInkboxSessionBridge({ cfg: {}, account, runtime: runtime as any, channelRuntime });
   const bridge = makeBridge();
-  return { snapshot, api, identity, runtime, dispatchReply, channelRuntime, bridge, makeBridge, contacts, account };
+  return { snapshot, api, identity, runtime, dispatchReply, channelRuntime, bridge, makeBridge, contacts, account, contexts };
 }
 async function settle(bridge: ReturnType<typeof createInkboxSessionBridge>) {
   // Recovery joins the active worker; another pass drains arrivals during hydration.
@@ -68,10 +74,122 @@ async function journal() {
   const path = join(state.dir, name);
   return { path, value: JSON.parse(await readFile(path, "utf8")) };
 }
-beforeEach(async () => { state.dir = await mkdtemp(join(tmpdir(), "inkbox-companion-")); });
+beforeEach(async () => { nativeGateway.resolve.mockReset(); state.dir = await mkdtemp(join(tmpdir(), "inkbox-companion-")); });
 afterEach(async () => { vi.unstubAllGlobals(); await rm(state.dir, { recursive: true, force: true }); });
 
 describe("Companion host boundary", () => {
+  it.each([[false, "exec"], [true, "exec"], [false, "plugin"]] as const)("resolves a native approval while its original host turn is waiting (answer races prompt=%s, kind=%s)", async (race, kind) => {
+    const s = setup("phone", { groupReplyMode: "mention", companionResponseMode: "relaxed" });
+    const quiet = event("initialization", 1, "phone"); quiet.data.text_message!.text = "quiet sponsor";
+    await dispatchInbound(quiet, s.bridge.handlers); await settle(s.bridge);
+    const handler = await createChannelApprovalHandlerFromCapability({ capability: inkboxApprovalCapability, cfg: {}, channel: "inkbox", channelLabel: "Inkbox", accountId: "default", label: "native-contract", clientDisplayName: "Synthetic native approval", context: s.contexts.get("approval.native") });
+    expect(handler).not.toBeNull();
+    let releaseModel!: () => void; const decision = new Promise<void>((resolve) => { releaseModel = resolve; });
+    let releaseSend!: () => void; const sending = new Promise<void>((resolve) => { releaseSend = resolve; });
+    let promptStarted = false;
+    if (race) s.identity.sendText.mockImplementationOnce(async () => { promptStarted = true; await sending; return { id: "prompt" }; });
+    nativeGateway.resolve.mockImplementation(async ({ approvalId, decision }) => {
+      // Exercise the real native runtime's resolved-during-delivery queue as well.
+      await handler!.handleResolved({ id: approvalId, decision, resolvedAtMs: Date.now() } as any);
+      releaseModel();
+    });
+    const approvalId = `${kind === "plugin" ? "plugin:" : ""}11111111-1111-4111-8111-111111111111`;
+    s.dispatchReply.mockImplementationOnce(async (input) => {
+      await handler!.handleRequested({ id: approvalId, approvalKind: kind, createdAtMs: Date.now(), expiresAtMs: Date.now() + 60_000, request: { ...(kind === "exec" ? { command: "echo synthetic" } : { pluginId: "synthetic", title: "Approval required", description: "Synthetic operation", severity: "warning", allowedDecisions: ["allow-once", "deny"] }), sessionKey: input.routeSessionKey, turnSourceChannel: "inkbox", turnSourceAccountId: "default", turnSourceTo: input.ctxPayload.reply.to } } as any);
+      await decision;
+      await input.delivery.deliver({ text: "Approved task complete" });
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 1 }, beforeAgentRunBlocked: false } };
+    });
+    try {
+      const waking = event("live", 2, "phone"); Object.assign(waking.data.text_message!, { sender_phone_number: "+15555550200", sender_access: "sponsored", text: "@agent run it" });
+      await dispatchInbound(waking, s.bridge.handlers);
+      await vi.waitFor(() => expect(s.identity.sendText).toHaveBeenCalledTimes(1));
+      const sponsor = event("live", 3, "phone"); sponsor.data.text_message!.text = `@agent /approve ${approvalId} allow-once`;
+      await dispatchInbound(sponsor, s.bridge.handlers);
+      expect(nativeGateway.resolve).not.toHaveBeenCalled();
+      // Neither a replayed initializer nor a previously seeded history source is a fresh answer.
+      const lateInit = event("initialization", 1, "phone"); lateInit.id = "late-initializer";
+      Object.assign(lateInit.data.text_message!, { text: `@agent /approve ${approvalId} allow-once` });
+      await dispatchInbound(lateInit, s.bridge.handlers);
+      const historical = event("live", 5, "phone");
+      Object.assign(historical.data.text_message!, { id: "fred", sender_phone_number: "+15555550200", text: `@agent /approve ${approvalId} allow-once` });
+      await dispatchInbound(historical, s.bridge.handlers);
+      const bare = event("live", 6, "phone");
+      Object.assign(bare.data.text_message!, { sender_phone_number: "+15555550200", text: `/approve ${approvalId} allow-once` });
+      await dispatchInbound(bare, s.bridge.handlers);
+      s.account.config.companionResponseMode = "safe";
+      const sponsored = event("live", 7, "phone");
+      Object.assign(sponsored.data.text_message!, { sender_phone_number: "+15555550200", sender_access: "sponsored", text: `@agent /approve ${approvalId} allow-once` });
+      await dispatchInbound(sponsored, s.bridge.handlers);
+      expect(nativeGateway.resolve).not.toHaveBeenCalled();
+      s.account.config.companionResponseMode = "relaxed";
+      const answer = event("live", 8, "phone"); Object.assign(answer.data.text_message!, { sender_phone_number: "+15555550200", sender_access: "sponsored", text: `@agent /approve ${approvalId} allow-once` });
+      await dispatchInbound(answer, s.bridge.handlers);
+      if (race) { expect(promptStarted).toBe(true); expect(nativeGateway.resolve).not.toHaveBeenCalled(); releaseSend(); }
+      await vi.waitFor(() => expect(nativeGateway.resolve).toHaveBeenCalledTimes(1));
+      await settle(s.bridge);
+      expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+      expect(s.identity.sendText).toHaveBeenCalledTimes(2);
+      expect(s.identity.sendText).toHaveBeenLastCalledWith({ conversationId: "conversation-one", text: "Approved task complete" });
+      expect(nativeGateway.resolve).toHaveBeenCalledWith(expect.objectContaining({ approvalId, decision: "allow-once" }));
+      expect(nativeGateway.resolve.mock.calls[0]![0].resolveMethod).toBe(kind);
+    } finally { releaseSend(); releaseModel(); await handler!.stop(); }
+  });
+  it.each([["/clear", "/new"], ["/cancel", "/stop"], ["/health", "/status"]])("maps gated Companion %s to the native %s command", async (incoming, native) => {
+    const s = setup("phone", { groupReplyMode: "mention" });
+    const quiet = event("initialization", 1, "phone"); quiet.data.text_message!.text = "quiet sponsor";
+    await dispatchInbound(quiet, s.bridge.handlers); await settle(s.bridge);
+    const command = event("live", 2, "phone"); command.data.text_message!.text = `@agent ${incoming}`;
+    await dispatchInbound(command, s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(s.dispatchReply.mock.calls[0]![0].ctxPayload.message.commandBody).toBe(native);
+    expect(s.dispatchReply.mock.calls[0]![0].ctxPayload.extra.CommandAuthorized).toBe(true);
+  });
+  it("explains the unavailable historical-session picker without starting a model", async () => {
+    const s = setup("phone", { groupReplyMode: "mention" });
+    const quiet = event("initialization", 1, "phone"); quiet.data.text_message!.text = "quiet sponsor";
+    await dispatchInbound(quiet, s.bridge.handlers); await settle(s.bridge);
+    const command = event("live", 2, "phone"); command.data.text_message!.text = "@agent /resume";
+    await dispatchInbound(command, s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).not.toHaveBeenCalled();
+    expect(s.identity.sendText).toHaveBeenCalledWith({ conversationId: "conversation-one", text: expect.stringContaining("not supported by this OpenClaw channel") });
+  });
+
+  it("dispatches only an eligible sponsor stop while the original host turn is blocked", async () => {
+    const s = setup("phone", { groupReplyMode: "mention" });
+    const quiet = event("initialization", 1, "phone"); quiet.data.text_message!.text = "quiet sponsor";
+    await dispatchInbound(quiet, s.bridge.handlers); await settle(s.bridge);
+    let release!: () => void; const running = new Promise<void>((resolve) => { release = resolve; });
+    let generating = 0;
+    s.dispatchReply.mockImplementation(async (input) => {
+      if (input.ctxPayload.message.commandBody === "/stop") {
+        expect(input.ctxPayload.extra.CommandAuthorized).toBe(true);
+        await input.delivery.deliver({ text: "Stopped" }); release();
+      } else { generating++; await running; }
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 0 }, beforeAgentRunBlocked: false } };
+    });
+    try {
+      const waking = event("live", 2, "phone"); waking.data.text_message!.text = "@agent long task";
+      await dispatchInbound(waking, s.bridge.handlers);
+      await vi.waitFor(() => expect(generating).toBe(1));
+      for (const [index, changes] of [
+        { sender_phone_number: "+15555550200", text: "@agent /stop" },
+        { text: "/stop" },
+        { text: "@agent /stop extra" },
+        { text: "@agent /stop", sender_access: "sponsored" },
+      ].entries()) {
+        const denied = event("live", index + 3, "phone"); Object.assign(denied.data.text_message!, changes);
+        await dispatchInbound(denied, s.bridge.handlers);
+      }
+      expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+      const stop = event("live", 7, "phone"); stop.data.text_message!.text = "@agent /stop";
+      await dispatchInbound(stop, s.bridge.handlers);
+      expect(s.dispatchReply).toHaveBeenCalledTimes(2);
+      expect(generating).toBe(1);
+      expect(s.identity.sendText).toHaveBeenCalledWith({ conversationId: "conversation-one", text: "Stopped" });
+    } finally { release(); await settle(s.bridge); }
+  });
+
   it.each(["mail", "phone", "imessage"])("does not route %s group delivery failures into a private contact session", async (channel) => {
     const s = setup(channel);
     await dispatchInbound(event("initialization", 1, channel), s.bridge.handlers);
@@ -98,6 +216,36 @@ describe("Companion host boundary", () => {
     expect(s.identity.replyAllEmail).toHaveBeenLastCalledWith("source-1", { bodyText: "Group reply" });
   });
 
+  it("persists sponsor contact evidence and rechecks current local restrictions without live lookups", async () => {
+    const s = setup();
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    expect(s.contacts.lookup).toHaveBeenCalledTimes(1);
+    expect(Object.values((await journal()).value.activations)).toEqual([expect.objectContaining({ sponsorContactId: "sponsor-contact" })]);
+    s.contacts.lookup.mockRejectedValue(new Error("contact service unavailable"));
+    const restarted = s.makeBridge();
+    await dispatchInbound(event("live", 2), restarted.handlers); await settle(restarted);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(s.contacts.lookup).toHaveBeenCalledTimes(1);
+    s.account.config.allowedInboundContactIds = ["different-contact"];
+    await dispatchInbound(event("live", 3), restarted.handlers); await settle(restarted);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(s.identity.replyAllEmail).toHaveBeenCalledTimes(2);
+    expect(s.contacts.lookup).toHaveBeenCalledTimes(1);
+  });
+  it("checks changed local sponsor membership again before sending the saved reply", async () => {
+    const s = setup();
+    s.dispatchReply.mockImplementationOnce(async (input) => {
+      await input.delivery.deliver({ text: "Completed answer" });
+      s.account.config.allowedInboundContactIds = ["different-contact"];
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 1 }, beforeAgentRunBlocked: false } };
+    });
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(s.identity.replyAllEmail).not.toHaveBeenCalled();
+    expect(s.contacts.lookup).toHaveBeenCalledTimes(1);
+    expect(Object.values((await journal()).value.jobs)).toContainEqual(expect.objectContaining({ state: "paused", replies: ["Completed answer"] }));
+  });
+
   it("requires an initialization event's source to be the snapshot trigger", async () => {
     const s = setup();
     const received = event();
@@ -119,6 +267,18 @@ describe("Companion host boundary", () => {
     expect(s.dispatchReply).toHaveBeenCalledTimes(present ? 2 : 1);
     if (present) expect(s.dispatchReply.mock.calls[1]![0].ctxPayload.message.bodyForAgent).toContain("example.txt");
     else expect(Object.values((await journal()).value.jobs)).toContainEqual(expect.objectContaining({ state: "pending", reason: "Companion mail attachment references are incomplete." }));
+  });
+  it.each(["ordinary", "live"])("hydrates a truncated %s email before applying current addressing and dispatch", async (phase) => {
+    const s = setup("mail", { groupReplyMode: "mention" });
+    if (phase === "live") { await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge); s.dispatchReply.mockClear(); }
+    s.identity.getMessage.mockResolvedValue({ id: "source-2", threadId: "conversation-one", bodyText: "Full message: @agent this is the omitted question" } as any);
+    const received = event(phase, 2);
+    Object.assign(received.data.message!, { body_state: "truncated", body: "Preview only", to_addresses: ["other@example.com"], cc_addresses: ["agent@example.com"] });
+    await dispatchInbound(received, s.bridge.handlers); await settle(s.bridge);
+    expect(s.identity.getMessage).toHaveBeenCalledWith("source-2");
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(s.dispatchReply.mock.calls[0]![0].ctxPayload.message.bodyForAgent).toContain("the omitted question");
+    expect(s.dispatchReply.mock.calls[0]![0].ctxPayload.conversation.id).toBe("email:conversation-one");
   });
   it.each(["mail", "phone", "imessage"])("uses the packaged SDK to load all %s fixture pages before exactly one host input", async (channel) => {
     const s = setup(channel);
@@ -456,7 +616,7 @@ describe("Companion host boundary", () => {
     const s = setup(); let failed = false;
     s.runtime.getIdentity.mockImplementation(async () => {
       const record = await journal().catch(() => null);
-      if (!failed && record && Object.values(record.value.jobs).some((job: any) => job.state === "reply_pending")) { failed = true; throw new Error("identity unavailable before send"); }
+      if (!failed && record && Object.values(record.value.jobs).some((job: any) => job.state === "reply_pending")) { failed = true; throw Object.assign(new Error("identity unavailable before send"), { name: "InkboxConnectionError" }); }
       return s.identity;
     });
     await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
@@ -478,9 +638,9 @@ describe("Companion host boundary", () => {
     await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
   });
-  it("requires the current mention and prompted author for Companion native approvals", async () => {
+  it.each(["initialization", "ordinary"])("requires the current mention and prompted author for %s Companion native approvals", async (phase) => {
     const s = setup("phone", { groupReplyMode: "mention" });
-    const init = event("initialization", 1, "phone"); init.data.text_message!.text = "@agent work";
+    const init = event(phase, 1, "phone"); init.data.text_message!.text = "@agent work";
     s.dispatchReply.mockImplementationOnce(async (input) => {
       await input.delivery.deliver({ text: "Approval needed: /approve abc allow-once" });
       return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 1 }, beforeAgentRunBlocked: false } };
@@ -488,11 +648,11 @@ describe("Companion host boundary", () => {
     await dispatchInbound(init, s.bridge.handlers); await settle(s.bridge);
     expect(s.identity.sendText).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("Include @agent") }));
     for (const [sequence, sender, text, access] of [[2, "+15555550100", "/approve abc allow-once", "direct"], [3, "+15555550200", "@agent /approve abc allow-once", "direct"], [4, "+15555550100", "@agent /approve abc allow-once", "sponsored"]] as const) {
-      const next = event("live", sequence, "phone"); Object.assign(next.data.text_message!, { sender_phone_number: sender, text, sender_access: access });
+      const next = event(phase === "ordinary" ? "ordinary" : "live", sequence, "phone"); Object.assign(next.data.text_message!, { sender_phone_number: sender, text, sender_access: access });
       await dispatchInbound(next, s.bridge.handlers); await settle(s.bridge);
     }
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
-    const answer = event("live", 5, "phone"); answer.data.text_message!.text = "@agent /approve abc allow-once";
+    const answer = event(phase === "ordinary" ? "ordinary" : "live", 5, "phone"); answer.data.text_message!.text = "@agent /approve abc allow-once";
     await dispatchInbound(answer, s.bridge.handlers); await settle(s.bridge);
     expect(s.dispatchReply).toHaveBeenCalledTimes(2);
     expect(s.dispatchReply.mock.calls[1]![0].ctxPayload.message.commandBody).toBe("/approve abc allow-once");
@@ -505,6 +665,34 @@ describe("Companion host boundary", () => {
     expect(job.state).toBe("pending"); expect(s.dispatchReply).not.toHaveBeenCalled(); job.retryAt = 0;
     await writeFile(stored.path, JSON.stringify(stored.value)); await settle(s.makeBridge());
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("bounds permanent preparation failures without capping transient reads (transient=%s)", async (transient) => {
+    const s = setup();
+    s.api.loadInitialization.mockRejectedValue(Object.assign(new Error("snapshot unavailable"), transient ? { statusCode: 503 } : {}));
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const saved = await journal(); const job: any = Object.values(saved.value.jobs)[0]; job.retryAt = 0;
+      await writeFile(saved.path, JSON.stringify(saved.value)); await settle(s.makeBridge());
+    }
+    expect(s.api.loadInitialization).toHaveBeenCalledTimes(6);
+    expect(s.dispatchReply).not.toHaveBeenCalled();
+    expect(Object.values((await journal()).value.jobs)).toEqual([expect.objectContaining({ state: transient ? "pending" : "paused", attempts: 6 })]);
+  });
+
+  it("re-arms a future retry when a new receiver recovers the persisted journal", async () => {
+    const s = setup(); s.api.loadInitialization.mockRejectedValue(Object.assign(new Error("temporary read failure"), { statusCode: 503 }));
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    const saved = await journal(); const job: any = Object.values(saved.value.jobs)[0]; job.retryAt = Date.now() + 30_000;
+    await writeFile(saved.path, JSON.stringify(saved.value));
+    vi.resetModules();
+    const { createCompanionReceiver } = await import("../../src/inbound/companion.js");
+    const timer = vi.spyOn(globalThis, "setTimeout");
+    try {
+      await createCompanionReceiver({ accountId: "default", config: s.account.config, runtime: s.runtime as any, submit: vi.fn(), deliver: vi.fn() }).recover();
+      expect(timer.mock.calls.some(([, delay]) => typeof delay === "number" && delay > 25_000 && delay <= 30_000)).toBe(true);
+      expect(s.api.loadInitialization).toHaveBeenCalledTimes(1);
+    } finally { timer.mockRestore(); }
   });
 
 });

@@ -446,7 +446,9 @@ describe("outbound delivery-failure recovery — session routing", () => {
     const channelRuntime = createChannelRuntime("Here is the update.");
     const bridge = createBridge(runtime, channelRuntime);
 
-    await bridge.handlers.onText?.(inboundText("conv-9"));
+    const original = inboundText("conv-9");
+    original.data.text_message.text = "/new";
+    await bridge.handlers.onText?.(original);
 
     // The inbound turn + the woken recovery turn.
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2);
@@ -455,6 +457,11 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(body).toContain("message_blocked_spam_filter rule=emoji_overload");
     expect(body).toContain("SMS failure classification: FIRST SAFE RETRY REQUIRED");
     expect(body).not.toContain("NO_REPLY");
+    const recovered = channelRuntime.inbound.dispatchReply.mock.calls[1]![0].ctxPayload;
+    expect(body).toContain(recovered.message.rawBody);
+    expect(recovered.message.rawBody).not.toBe("/new");
+    expect(recovered.message.commandBody).not.toBe("/new");
+    expect(recovered.extra.CommandAuthorized).toBe(false);
     // The recovery resend actually went out.
     expect(sendText).toHaveBeenCalledTimes(2);
   });

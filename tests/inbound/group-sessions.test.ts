@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { AgentIdentity, Inkbox } from "@inkbox/sdk";
-import { mentionsAgent } from "../../src/inbound/reply-policy.js";
+import { controlText, mentionsAgent } from "../../src/inbound/reply-policy.js";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 const state = vi.hoisted(() => ({ dir: "" }));
 vi.mock("../../src/state.js", async () => {
@@ -83,6 +83,17 @@ describe("group conversation host routing", () => {
     expect(s.dispatchReply).toHaveBeenCalledTimes(2);
     expect(s.dispatchReply.mock.calls[1]![0].ctxPayload.message.commandBody).toBe("/approve abc allow-once");
   });
+  it("does not authorize an approval answer when sending its prompt failed", async () => {
+    const s = setup("mention");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent work"));
+    s.runtime.getIdentity.mockRejectedValueOnce(new Error("identity unavailable before sending"));
+    await expect(s.dispatchReply.mock.calls[0]![0].delivery.deliver({ text: "Approval required: /approve abc allow-once" })).rejects.toThrow("identity unavailable");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "/approve abc allow-once"));
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+  it("strips a case-insensitive configured handle before native command parsing", () => {
+    expect(controlText("@TEST-AGENT /approve abc allow-once", "Test-Agent")).toBe("/approve abc allow-once");
+  });
   it("fails closed for a known group without a conversation ID", async () => {
     const s = setup();
     await receive(s.bridge, "sms", event("sms", "+15555550100", "", "hello"));
@@ -94,6 +105,18 @@ describe("group conversation host routing", () => {
     const last = event("sms", "+15555550100", "group-one", "never mind");
     const batch = { ...first, data: { text_message: { ...first.data.text_message, text: "@agent earlier\nnever mind" } }, __batch: { fragments: [first, last] } };
     await receive(s.bridge, "sms", batch); expect(s.dispatchReply).not.toHaveBeenCalled();
+  });
+  it("retains compact recent quiet context with an explicit notice instead of rejecting busy groups", async () => {
+    const s = setup("mention");
+    for (const label of ["oldest", "middle", "newest"]) {
+      await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", `${label}: ${"x".repeat(45_000)}`));
+    }
+    expect(s.dispatchReply).not.toHaveBeenCalled();
+    await receive(s.makeBridge(), "sms", event("sms", "+15555550100", "group-one", "@agent recall context"));
+    const body = s.dispatchReply.mock.calls[0]![0].ctxPayload.message.bodyForAgent;
+    expect(body).toContain("older background message(s) were omitted");
+    expect(body).toContain("newest:"); expect(body).not.toContain("oldest:");
+    expect(body.match(/Group SMS response policy/g)).toHaveLength(1);
   });
   it.each(["@agent", "@AGENT!", "Hi @test-agent.", "(@agent)"])("recognizes a complete mention: %s", (text) => { expect(mentionsAgent(text, "test-agent")).toBe(true); });
   it.each(["@agent-other", "user@agent.example", "https://example.com/@agent", "www.example.com/@agent", "name+@agent", "hello agent"])("does not infer mentions from addresses or URLs: %s", (text) => { expect(mentionsAgent(text, "test-agent")).toBe(false); });

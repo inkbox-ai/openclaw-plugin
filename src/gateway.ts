@@ -183,6 +183,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
   let callWebsocketUrl: string | undefined;
   const bridge = createInkboxSessionBridge({
     cfg: ctx.cfg,
+    abortSignal: ctx.abortSignal,
     account,
     runtime,
     channelRuntime: ctx.channelRuntime,

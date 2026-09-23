@@ -99,6 +99,15 @@ describe("handleInkboxWebhook", () => {
     expect(acknowledgments).toBe(2);
   });
 
+  it("keeps ordinary request dedup when Companion metadata is explicitly null", async () => {
+    const onMail = vi.fn(); const onCompanion = vi.fn();
+    const options = { signingKey: "whsec_x", dedup: new RequestIdDedup(), handlers: { onMail, onCompanion } };
+    const body = JSON.stringify({ ...JSON.parse(mailBody), companion: null });
+    expect((await handleInkboxWebhook(body, baseHeaders, options)).status).toBe(200);
+    expect((await handleInkboxWebhook(body, baseHeaders, options)).body).toBe("dup");
+    expect(onMail).toHaveBeenCalledTimes(1); expect(onCompanion).not.toHaveBeenCalled();
+  });
+
   it("does not let an invalid signature poison dedup state", async () => {
     const dedup = new RequestIdDedup();
     const onMail = vi.fn();
@@ -235,6 +244,17 @@ describe("handleInkboxWebhook", () => {
     });
     expect(out.status).toBe(400);
     expect(onExternal).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("rejects non-Inkbox Companion payloads before external routing (signed=%s)", async (signed) => {
+    process.env.INKBOX_WEBHOOK_SECRET_GITHUB = "gh-secret";
+    const body = JSON.stringify({ ...JSON.parse(mailBody), companion: { phase: "ordinary" } });
+    const headers = signed ? { "x-hub-signature-256": `sha256=${createHmac("sha256", "gh-secret").update(body).digest("hex")}` } : {};
+    const onExternal = vi.fn(); const onMail = vi.fn(); const onCompanion = vi.fn();
+    const out = await handleInkboxWebhook(body, headers, { signingKey: "whsec_x", externalEvents: true, handlers: { onExternal, onMail, onCompanion } });
+    expect(out.status).toBe(401);
+    expect(onExternal).not.toHaveBeenCalled(); expect(onMail).not.toHaveBeenCalled(); expect(onCompanion).not.toHaveBeenCalled();
+    delete process.env.INKBOX_WEBHOOK_SECRET_GITHUB;
   });
 
   describe("third-party provider requests", () => {

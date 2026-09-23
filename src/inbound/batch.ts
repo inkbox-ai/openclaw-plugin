@@ -206,7 +206,7 @@ function imessageBatchKey(
   event: IMessageWebhookPayload,
 ): { key: string; remote: string; conversationId?: string } | undefined {
   const message = (event as any)?.data?.message;
-  const remote = message?.remote_number ?? message?.remoteNumber;
+  const remote = message?.sender_number ?? message?.senderNumber ?? message?.remote_number ?? message?.remoteNumber;
   if (typeof remote !== "string" || !remote.trim()) return undefined;
   const conversationIdRaw = message?.conversation_id ?? message?.conversationId;
   const conversationId =
@@ -221,8 +221,8 @@ function imessageBatchKey(
 }
 
 // iMessage users send fragment bursts just like SMS users. Shares the SMS
-// batch config (delay + caps); conversations are 1:1 so keying by
-// conversation + sender mirrors the SMS batcher without group concerns.
+// batch config (delay + caps); conversation + actual sender keeps fragments
+// from different group participants separate.
 export class IMessageBatcher {
   private pending = new Map<string, PendingIMessageBatch>();
 

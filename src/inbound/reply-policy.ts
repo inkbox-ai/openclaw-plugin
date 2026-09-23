@@ -17,12 +17,16 @@ export function sameAuthor(channel: string, left: string, right: string): boolea
 
 export function controlText(text: string, handle?: string): string {
   const [first, ...rest] = text.trim().split(/\s+/);
-  return ["@agent", `@${(handle ?? "").replace(/^@/, "")}`].includes(first?.toLowerCase().replace(/[,:]$/, ""))
+  return ["@agent", `@${(handle ?? "").replace(/^@/, "").toLowerCase()}`].includes(first?.toLowerCase().replace(/[,:]$/, ""))
     ? rest.join(" ") : text.trim();
 }
 
 export function isLocalControl(text: string): boolean {
   return /^\/(?:stop|abort|clear|new|reset|resume|status|help)(?:\s|$)/i.test(text.trim());
+}
+
+export function isCompanionControl(text: string): boolean {
+  return /^\/(?:clear|new|stop|cancel|resume|status|usage|health)$/i.test(text.trim());
 }
 
 export function companionWakes(config: Partial<InkboxPluginConfig>, message: any, channel: string, mailbox?: string): boolean {

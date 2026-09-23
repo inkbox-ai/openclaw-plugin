@@ -25,7 +25,9 @@ const HOST_SYMBOLS: Record<string, string[]> = {
     "createMessageReceiptFromOutboundResults",
     "defineChannelMessageAdapter",
   ],
-  "openclaw/plugin-sdk/health": ["registerHealthCheck"],
+  "openclaw/plugin-sdk/health": ["registerHealthCheck", "getHealthCheck"],
+  "openclaw/plugin-sdk/approval-handler-runtime": ["createChannelApprovalNativeRuntimeAdapter", "createChannelApprovalHandlerFromCapability", "resolveApprovalOverGateway"],
+  "openclaw/plugin-sdk/channel-runtime-context": ["registerChannelRuntimeContext"],
   "openclaw/plugin-sdk/inbound-envelope": [
     "resolveInboundRouteEnvelopeBuilderWithRuntime",
   ],

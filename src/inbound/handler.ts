@@ -63,6 +63,11 @@ export async function handleInkboxWebhook(
   opts: WebhookHandlerOptions,
 ): Promise<WebhookResponse> {
   const provider = matchProvider(headers);
+  // Companion is reserved for Inkbox-signed delivery, never the opt-in
+  // unverified or third-party event route.
+  if (provider?.name !== "inkbox" && parseJsonObject(bodyText)?.companion != null) {
+    return { status: 401, body: "Companion requires Inkbox authentication" };
+  }
   // Whether UNVERIFIED/UNKNOWN external payloads may wake the agent. Verified
   // registered third-party providers are NOT gated on this — configuring the
   // provider's secret is that source's opt-in.
