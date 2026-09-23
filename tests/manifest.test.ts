@@ -21,13 +21,16 @@ function collectRuntimeTools(registrationMode = "tool-discovery"): {
   toolNames: string[];
   optionalToolNames: string[];
   hookNames: string[];
+  commandHookNames: string[];
 } {
   const tools: string[] = [];
   const optionalTools: string[] = [];
   const hookNames: string[] = [];
+  const commandHookNames: string[] = [];
   const api = {
     registrationMode,
     registerChannel: vi.fn(),
+    registerHook(events: string[]) { commandHookNames.push(...events); },
     pluginConfig: {
       apiKey: "ApiKey_test",
       identity: "smoke-agent",
@@ -65,6 +68,7 @@ function collectRuntimeTools(registrationMode = "tool-discovery"): {
     toolNames: [...tools].sort(),
     optionalToolNames: [...optionalTools].sort(),
     hookNames: [...hookNames].sort(),
+    commandHookNames: [...commandHookNames].sort(),
   };
 }
 
@@ -82,6 +86,7 @@ describe("openclaw.plugin.json manifest parity", () => {
   });
 
   it.each(["full", "discovery", "tool-discovery"])("registers settlement hooks once in the host %s registry", (mode) => {
+    expect(collectRuntimeTools(mode).commandHookNames).toEqual(mode === "full" ? ["command:new", "command:reset"] : []);
     expect(collectRuntimeTools(mode).hookNames).toEqual([
       "after_tool_call",
       "after_tool_call",

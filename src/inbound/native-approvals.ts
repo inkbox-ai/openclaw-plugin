@@ -11,7 +11,7 @@ type ApprovalKind = "exec" | "plugin";
 type Decision = "allow-once" | "allow-always" | "deny";
 export type NativeApprovalOwner = { scope: string; author: string; channel: string; accountId: string };
 export type NativeApprovalBinding = NativeApprovalOwner & {
-  to: string; threadId?: string; sessionKey: string; marker: string; runId?: string;
+  to: string; threadId?: string; sessionKey: string; marker: string; runId?: string; modelStarted?: boolean; resetRequested?: boolean; resetCommitted?: boolean;
   deliver(text: string): Promise<void>;
   ready?(): Promise<void>;
 };
@@ -35,7 +35,7 @@ function find(params: { context?: unknown; request: any }): NativeApprovalBindin
   return request.runId ? bindings.find((binding) => binding.runId === request.runId) : (bindings.length === 1 ? bindings[0] : undefined);
 }
 export function ensureNativeApprovalContext(core: any, accountId: string, abortSignal?: AbortSignal): NativeContext | undefined {
-  if (!core?.runtimeContexts?.register || !core.runtimeContexts.get) return undefined;
+  if (abortSignal?.aborted || !core?.runtimeContexts?.register || !core.runtimeContexts.get) return undefined;
   const key = { channelId: "inkbox", accountId, capability };
   const old = core.runtimeContexts.get(key) as NativeContext | undefined;
   const context = old?.bindings instanceof Map ? old : { bindings: new Map<string, NativeApprovalBinding[]>(), accountId };
@@ -44,7 +44,9 @@ export function ensureNativeApprovalContext(core: any, accountId: string, abortS
   return context;
 }
 export function trackNativeApprovalTurn(core: any, binding: NativeApprovalBinding): () => void {
-  const context = ensureNativeApprovalContext(core, binding.accountId);
+  if (!["mail", "phone", "sms", "imessage"].includes(binding.channel)) return () => {};
+  // Account startup owns this context. A late dispatch must not recreate it after shutdown.
+  const context = core?.runtimeContexts?.get?.({ channelId: "inkbox", accountId: binding.accountId, capability }) as NativeContext | undefined;
   context?.bindings.set(binding.sessionKey, [...(context.bindings.get(binding.sessionKey) ?? []), binding]);
   return () => {
     if (!context) return;
@@ -53,10 +55,23 @@ export function trackNativeApprovalTurn(core: any, binding: NativeApprovalBindin
   };
 }
 export function bindNativeApprovalTurnToRun(core: any, accountIds: string[], event: { prompt?: string }, run: { sessionKey?: string; runId?: string }): void {
-  if (!run.sessionKey || !run.runId || typeof event.prompt !== "string") return;
+  if (!run.sessionKey || typeof event.prompt !== "string") return;
   for (const accountId of accountIds) {
     const context = core?.runtimeContexts?.get?.({ channelId: "inkbox", accountId, capability }) as NativeContext | undefined;
-    for (const binding of context?.bindings.get(run.sessionKey) ?? []) if (!binding.runId && event.prompt.includes(binding.marker)) binding.runId = run.runId;
+    for (const binding of context?.bindings.get(run.sessionKey) ?? []) if (!binding.runId && event.prompt.includes(binding.marker)) {
+      binding.modelStarted = true;
+      if (run.runId) binding.runId = run.runId;
+    }
+  }
+}
+/** The native command hook is emitted after an authorized text reset commits. */
+export function markNativeConversationReset(core: any, accountIds: string[], event: { type: string; action: string; sessionKey: string; context: Record<string, unknown> }): void {
+  if (event.type !== "command" || !["new", "reset"].includes(event.action) || event.context.commandSource !== "inkbox") return;
+  for (const accountId of accountIds) {
+    const context = core?.runtimeContexts?.get?.({ channelId: "inkbox", accountId, capability }) as NativeContext | undefined;
+    const binding = context?.bindings.get(event.sessionKey)?.find((entry) => entry.resetRequested && !entry.resetCommitted &&
+      typeof event.context.senderId === "string" && sameAuthor(entry.channel, entry.author, event.context.senderId));
+    if (binding) { binding.resetCommitted = true; return; }
   }
 }
 async function clear(entry: NativeEntry): Promise<void> {

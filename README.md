@@ -512,7 +512,9 @@ submissions or sends remain paused for inspection, never blindly replayed. This 
 at-least-once webhook delivery, not a guarantee of exactly-once model execution.
 Ordinary mention-mode background context retains compact sender/text/media entries
 up to 128 KiB; when older context is omitted, the next waking turn receives an
-explicit retention notice. Companion snapshots remain fail-closed at their size
+explicit retention notice. Status/stop/approval commands do not consume background
+context; an authorized, committed reset clears the captured context even if its
+acknowledgment cannot be delivered. Companion snapshots remain fail-closed at their size
 limit and are never silently truncated.
 
 ## Bundled Skills

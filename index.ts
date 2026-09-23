@@ -1,5 +1,5 @@
 import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "./src/silent-send-capture.js";
-import { bindNativeApprovalTurnToRun } from "./src/inbound/native-approvals.js";
+import { bindNativeApprovalTurnToRun, markNativeConversationReset } from "./src/inbound/native-approvals.js";
 import {
   defineChannelPluginEntry,
   type ChannelPlugin,
@@ -162,6 +162,11 @@ function registerInkboxTools(api: any): void {
 }
 
 function registerHostedCallSettlementHooks(api: any): void {
+  if (api.registrationMode === "full") {
+    api.registerHook(["command:new", "command:reset"], (event: any) => {
+      markNativeConversationReset(api.runtime?.channel, listInkboxAccountIds(api.runtime?.config?.current?.()), event);
+    }, { name: "inkbox-conversation-reset", description: "Clear captured group background context after an authorized session reset." });
+  }
   api.on("message_sending", (event: any, context: any) => {
     if (context.channelId !== "inkbox") return;
     api.logger?.info?.(

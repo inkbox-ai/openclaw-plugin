@@ -75,3 +75,25 @@ it.each([false, true])("claims a native approval once across concurrent answers 
     expect(state.resolve).toHaveBeenCalledTimes(1);
   } finally { release(); await handler!.stop(); }
 });
+
+it.each(["voice", "a2a", "external", "warmup"])("does not claim native approval delivery for a %s turn", async (channel) => {
+  const s = setup(); const release = trackNativeApprovalTurn(s.core, { ...s.binding, channel });
+  const handler = await createChannelApprovalHandlerFromCapability({ capability: inkboxApprovalCapability, cfg: {}, channel: "inkbox", channelLabel: "Inkbox", accountId: "default", label: "native-contract", clientDisplayName: "Synthetic", context: s.context });
+  try {
+    await handler!.handleRequested(request(s.binding.sessionKey));
+    expect(s.context.bindings.size).toBe(0);
+    expect(s.binding.deliver).not.toHaveBeenCalled();
+  } finally { release(); await handler!.stop(); }
+});
+it("does not recreate the account's native handler context after shutdown", () => {
+  const s = setup();
+  const register = vi.spyOn(s.core.runtimeContexts, "register");
+  s.controller.abort();
+  // The real lifecycle registration disposes this entry; emulate the registry notification.
+  s.core.runtimeContexts.register({ capability: "approval.native", context: undefined }); register.mockClear();
+  const release = trackNativeApprovalTurn(s.core, s.binding);
+  expect(register).not.toHaveBeenCalled();
+  expect(s.core.runtimeContexts.get({ capability: "approval.native" })).toBeUndefined();
+  expect(ensureNativeApprovalContext(s.core, "default", s.controller.signal)).toBeUndefined();
+  expect(register).not.toHaveBeenCalled(); release();
+});

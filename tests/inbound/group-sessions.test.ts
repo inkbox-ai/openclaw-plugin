@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { AgentIdentity, Inkbox } from "@inkbox/sdk";
+import { bindNativeApprovalTurnToRun, markNativeConversationReset } from "../../src/inbound/native-approvals.js";
 import { controlText, mentionsAgent } from "../../src/inbound/reply-policy.js";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 const state = vi.hoisted(() => ({ dir: "" }));
@@ -19,8 +20,12 @@ function setup(mode: "auto" | "mention" = "auto") {
     listTextConversations: vi.fn(async () => []), listIMessageConversations: vi.fn(async () => [{ id: "group-one", isGroup: true, participants: ["+15555550100", "+15555550200"] }]),
   };
   const runtime: any = { getIdentity: vi.fn(async () => identity), getClient: vi.fn(async () => ({ contacts: { lookup: vi.fn(async ({ phone }: any) => [{ id: `contact-${phone}`, name: phone }]) } })) };
-  const dispatchReply = vi.fn(async (_params: any) => ({ dispatched: true }));
-  const core = { routing: { resolveAgentRoute: vi.fn(resolveAgentRoute) }, inbound: { buildContext: vi.fn((v) => v), dispatchReply },
+  const dispatchReply = vi.fn(async (params: any) => {
+    if (!String(params.ctxPayload.message.commandBody).startsWith("/")) bindNativeApprovalTurnToRun(core, ["default"], { prompt: params.ctxPayload.message.bodyForAgent }, { sessionKey: params.routeSessionKey, runId: `run-${params.ctxPayload.messageId}` });
+    return { dispatched: true };
+  });
+  const contexts = new Map<string, unknown>();
+  const core = { runtimeContexts: { get: ({ capability }: any) => contexts.get(capability), register: ({ capability, context }: any) => { contexts.set(capability, context); return { dispose: () => contexts.delete(capability) }; } }, routing: { resolveAgentRoute: vi.fn(resolveAgentRoute) }, inbound: { buildContext: vi.fn((v) => v), dispatchReply },
     session: { recordInboundSession: vi.fn(), resolveStorePath: () => "test", readSessionUpdatedAt: () => undefined },
     reply: { resolveEnvelopeFormatOptions: () => ({}), formatAgentEnvelope: ({ body }: any) => body, dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
   };
@@ -64,6 +69,44 @@ describe("group conversation host routing", () => {
     await receive(s.bridge, "imessage", event("imessage", "+15555550100", "group-one", "@agent hi"));
     expect(s.dispatchReply.mock.calls[0]![0].ctxPayload.message.bodyForAgent).toContain("imessage_reaction");
   });
+  it.each(["/status", "/stop", "/health", "/cancel", "/resume"])("does not consume unseen background context for %s", async (command) => {
+    const s = setup("mention");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "background fact"));
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", command));
+    for (const [call] of s.dispatchReply.mock.calls) expect(call.ctxPayload.message.bodyForAgent).not.toContain("background fact");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent recall the fact"));
+    expect(s.dispatchReply.mock.calls.at(-1)![0].ctxPayload.message.bodyForAgent).toContain("background fact");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent next request"));
+    expect(s.dispatchReply.mock.calls.at(-1)![0].ctxPayload.message.bodyForAgent).not.toContain("background fact");
+  });
+  it.each(["observeOnly", "blocked", "not-dispatched"])("retains background context after %s host admission", async (outcome) => {
+    const s = setup("mention");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "background fact"));
+    s.dispatchReply.mockImplementationOnce(async (params) => {
+      bindNativeApprovalTurnToRun(s.core, ["default"], { prompt: params.ctxPayload.message.bodyForAgent }, { sessionKey: params.routeSessionKey, runId: "denied-run" });
+      return { dispatched: outcome !== "not-dispatched", admission: { kind: outcome === "observeOnly" ? "observeOnly" : "dispatch" }, dispatchResult: { beforeAgentRunBlocked: outcome === "blocked" } } as any;
+    });
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent first attempt"));
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent next request"));
+    expect(s.dispatchReply.mock.calls.at(-1)![0].ctxPayload.message.bodyForAgent).toContain("background fact");
+  });
+  it.each(["committed", "committed-reply-failed", "unauthorized", "failed"])("clears background only after a confirmed native reset (%s)", async (outcome) => {
+    const s = setup("mention");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "old background fact"));
+    s.dispatchReply.mockImplementationOnce(async (params) => {
+      expect(params.ctxPayload.message.commandBody).toBe("/new");
+      expect(params.ctxPayload.message.bodyForAgent).not.toContain("old background fact");
+      if (outcome === "failed") throw new Error("native reset failed");
+      if (outcome.startsWith("committed")) markNativeConversationReset(s.core, ["default"], { type: "command", action: "new", sessionKey: params.routeSessionKey, context: { commandSource: "inkbox", senderId: "+15555550100", sessionEntry: { sessionId: "new-session" } } });
+      if (outcome === "committed-reply-failed") throw new Error("reset acknowledgment send failed");
+      return { dispatched: true };
+    });
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "/clear")).catch((error) => { if (!outcome.includes("failed")) throw error; });
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent new request"));
+    const body = s.dispatchReply.mock.calls.at(-1)![0].ctxPayload.message.bodyForAgent;
+    if (outcome.startsWith("committed")) expect(body).not.toContain("old background fact"); else expect(body).toContain("old background fact");
+  });
+
   it("passes raw /stop through framing and keeps an earlier reply's original route", async () => {
     const s = setup("mention");
     await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent first"));
@@ -79,7 +122,7 @@ describe("group conversation host routing", () => {
     await s.dispatchReply.mock.calls[0]![0].delivery.deliver({ text: "Approval required: /approve abc allow-once" });
     await receive(s.bridge, "sms", event("sms", "+15555550200", "group-one", "/approve abc allow-once"));
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
-    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "/approve abc allow-once"));
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent /approve abc allow-once"));
     expect(s.dispatchReply).toHaveBeenCalledTimes(2);
     expect(s.dispatchReply.mock.calls[1]![0].ctxPayload.message.commandBody).toBe("/approve abc allow-once");
   });

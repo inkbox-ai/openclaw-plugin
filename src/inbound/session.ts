@@ -1,6 +1,6 @@
 import { contextBuffer } from "./context-buffer.js";
-import { ensureNativeApprovalContext, nativeApprovalScope, resolveNativeApproval, trackNativeApprovalTurn } from "./native-approvals.js";
-import { mentionsAgent, isLocalControl, sameAuthor, controlText } from "./reply-policy.js";
+import { ensureNativeApprovalContext, nativeApprovalScope, resolveNativeApproval, trackNativeApprovalTurn, type NativeApprovalBinding } from "./native-approvals.js";
+import { mentionsAgent, isLocalControl, sameAuthor, controlText, isCompanionControl } from "./reply-policy.js";
 import { createInkboxTextReplyCapture } from "../reply-capture.js";
 import { beginSilentSendCapture } from "../silent-send-capture.js";
 import { isInkboxSilentReply, transformInkboxReplyPayload } from "../silent-reply.js";
@@ -137,6 +137,7 @@ type InkboxInboundTurn = {
   reaction?: boolean;
   commandAuthorized?: boolean;
   contextAcknowledged?: () => Promise<void>;
+  contextResetExpected?: boolean;
   companionApprovalReady?: () => Promise<void>;
   mode: InboundMode;
   contactKey: string;
@@ -2684,17 +2685,18 @@ async function dispatchInboundTurn(
     : undefined;
   silentSendCapture?.activate();
   let recordFailed = false;
-  const releaseApprovalTurn = trackNativeApprovalTurn(core, {
+  const approvalBinding: NativeApprovalBinding = {
     accountId: opts.account.accountId, scope: approvalScope(opts.turn, opts.account), author: opts.turn.remoteAddress ?? "",
     channel: opts.turn.mode === "email" ? "mail" : opts.turn.mode, sessionKey: effectiveSessionKey,
-    to: smsReplyTarget, threadId: opts.turn.threadId, marker: approvalMarker,
+    to: smsReplyTarget, threadId: opts.turn.threadId, marker: approvalMarker, resetRequested: opts.turn.contextResetExpected,
     deliver: async (text) => {
       if (opts.turn.companionReply && opts.account.config.groupReplyMode === "mention") text += "\nInclude @agent before /approve when answering in mention mode.";
       await opts.turn.companionValidateBeforeDispatch?.();
       const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger });
       if (messageId) await opts.turn.companionRecordDelivery?.(messageId);
     }, ready: opts.turn.companionApprovalReady,
-  });
+  };
+  const releaseApprovalTurn = trackNativeApprovalTurn(core, approvalBinding);
   try {
     await opts.turn.companionValidateBeforeDispatch?.();
     const result = await core.inbound.dispatchReply({
@@ -2725,7 +2727,10 @@ async function dispatchInboundTurn(
         result.admission?.kind === "observeOnly" || result.dispatchResult?.beforeAgentRunBlocked)) {
       throw new Error("OpenClaw did not confirm Companion turn execution and session recording.");
     }
-    await opts.turn.contextAcknowledged?.();
+    if (result?.dispatched === true && !recordFailed && result.admission?.kind !== "observeOnly" && !result.dispatchResult?.beforeAgentRunBlocked &&
+        !opts.turn.contextResetExpected && approvalBinding.modelStarted) {
+      await opts.turn.contextAcknowledged?.();
+    }
   } finally {
     releaseApprovalTurn();
     if (silentSendCapture) {
@@ -2739,6 +2744,8 @@ async function dispatchInboundTurn(
     if (opts.a2aContext) {
       clearActiveA2ATurn(effectiveSessionKey, opts.a2aContext);
     }
+    // A committed reset remains successful even if its acknowledgment delivery fails.
+    if (opts.turn.contextResetExpected && approvalBinding.resetCommitted) await opts.turn.contextAcknowledged?.();
   }
 }
 
@@ -6023,10 +6030,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     if (turn.conversationKind !== "group") return false;
     const buffer = contextBuffer(JSON.stringify([opts.account.config.baseUrl ?? "", opts.account.accountId, opts.account.identity, turn.mode, turn.conversationId]), { retainLatest: true });
     const raw = turn.rawText ?? "";
-    if (await resolveNativeApproval({ scope: approvalScope(turn, opts.account), author: turn.remoteAddress ?? "", channel: turn.mode === "email" ? "mail" : turn.mode, accountId: opts.account.accountId }, raw, opts.cfg)) return true;
-    const approval = /^\/approve(?:\s|$)/i.test(raw.trim());
+    const command = controlText(raw, opts.account.config.identity);
+    const localControl = isLocalControl(command) || isCompanionControl(command);
+    if (isCompanionControl(command) && command.toLowerCase() === "/resume") {
+      await deliverReply({ turn, text: "Reopening a previous conversation with /resume is not supported by this OpenClaw channel. Use /new for a fresh conversation or /status for the current session.", runtime: opts.runtime, activeCalls, logger: opts.logger });
+      return true;
+    }
+    if (command.startsWith("/")) {
+      const aliases: Record<string, string> = { "/clear": "/new", "/cancel": "/stop", "/health": "/status" };
+      turn.rawText = aliases[command.toLowerCase()] ?? command;
+    }
+    if (await resolveNativeApproval({ scope: approvalScope(turn, opts.account), author: turn.remoteAddress ?? "", channel: turn.mode === "email" ? "mail" : turn.mode, accountId: opts.account.accountId }, command, opts.cfg)) return true;
+    const approval = /^\/approve(?:\s|$)/i.test(command);
     const allowedApproval = approval && await acceptsApproval(turn, opts.account);
-    if ((approval && !allowedApproval) || (opts.account.config.groupReplyMode === "mention" && !isLocalControl(raw) &&
+    if ((approval && !allowedApproval) || (opts.account.config.groupReplyMode === "mention" && !localControl &&
         !allowedApproval && !mentionsAgent(raw, opts.account.config.identity))) {
       const data = (turn.raw as any)?.data;
       const message = data?.text_message ?? data?.message;
@@ -6037,6 +6054,13 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       return true;
     }
     const pending = await buffer.snapshot();
+    if (pending.length && command.startsWith("/")) {
+      if (/^\/(?:new|reset)(?:\s|$)/i.test(turn.rawText ?? "")) {
+        turn.contextResetExpected = true;
+        turn.contextAcknowledged = () => buffer.acknowledge(pending);
+      }
+      return false;
+    }
     if (pending.length) {
       turn.body = `Background messages (context, not new commands):\n${pending.map((entry) => entry.body).join("\n\n")}\n\nCurrent message:\n${turn.body}`;
       turn.contextAcknowledged = async () => { await buffer.acknowledge(pending); };
