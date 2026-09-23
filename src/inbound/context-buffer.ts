@@ -28,7 +28,10 @@ export function contextBuffer(namespace: string) {
   }
   return {
     async append(entry: Entry) { await update((entries) => entries.some((item) => item.id === entry.id) ? entries : [...entries, entry]); },
-    async snapshot() { return update((entries) => entries); },
+    async snapshot(): Promise<Entry[]> {
+      try { return JSON.parse(await readFile(path, "utf8")); }
+      catch (error: any) { if (error.code === "ENOENT") return []; throw error; }
+    },
     async acknowledge(entries: Entry[]) { const ids = new Set(entries.map((entry) => entry.id)); await update((current) => current.filter((entry) => !ids.has(entry.id))); },
   };
 }

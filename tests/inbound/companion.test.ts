@@ -498,4 +498,13 @@ describe("Companion host boundary", () => {
     expect(s.dispatchReply.mock.calls[1]![0].ctxPayload.message.commandBody).toBe("/approve abc allow-once");
   });
 
+  it("retries a temporary ordinary sender lookup failure rather than treating it as denial", async () => {
+    const s = setup(); s.contacts.lookup.mockRejectedValueOnce(new Error("lookup timed out"));
+    await dispatchInbound(event("ordinary"), s.bridge.handlers); await settle(s.bridge);
+    const stored = await journal(); const job: any = Object.values(stored.value.jobs)[0];
+    expect(job.state).toBe("pending"); expect(s.dispatchReply).not.toHaveBeenCalled(); job.retryAt = 0;
+    await writeFile(stored.path, JSON.stringify(stored.value)); await settle(s.makeBridge());
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
 });

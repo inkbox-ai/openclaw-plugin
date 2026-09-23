@@ -57,4 +57,14 @@ describe("CI resilience contracts", () => {
     expect(source).toContain("CALL_ATTEMPTS = 1");
     expect(source).toContain("EMAIL_ATTEMPTS = 1");
   });
+  it("uses published SDK installs without references to an obsolete local build action", () => {
+    for (const name of workflows) {
+      const workflow = readFileSync(resolve(".github", "workflows", name), "utf8");
+      expect(workflow).not.toContain("./.github/actions/inkbox-sdk");
+      expect(workflow).not.toContain("INKBOX_SDK_PATH");
+      expect(workflow).not.toContain("INKBOX_PYTHON_SDK_PATH");
+      if (name.startsWith("live-")) expect(workflow).toContain("inkbox==0.7.6");
+    }
+  });
+
 });

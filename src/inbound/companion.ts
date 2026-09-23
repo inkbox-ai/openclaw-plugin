@@ -15,6 +15,7 @@ type Job = { event: Record<string, any>; identityId: string; state: "pending" | 
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
 export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void> };
+class SenderNotPermitted extends Error {}
 const retries = new Map<string, ReturnType<typeof setTimeout>>();
 const chains = new Map<string, Promise<unknown>>();
 const workers = new Map<string, Promise<void>>();
@@ -107,7 +108,7 @@ export function createCompanionReceiver(opts: {
     if (inbound?.length) {
       const client = await opts.runtime.getClient();
       const matches = await client.contacts.lookup(channel === "mail" ? { email: author } : { phone: author });
-      if (matches.length !== 1 || !inbound.includes(matches[0]!.id)) throw new Error("Companion sender is not locally permitted.");
+      if (matches.length !== 1 || !inbound.includes(matches[0]!.id)) throw new SenderNotPermitted("Companion sender is not locally permitted.");
     }
   }
   async function checkSponsor(author: string, channel: Channel) {
@@ -194,7 +195,10 @@ export function createCompanionReceiver(opts: {
       }
     } else {
       try { await checkSender(author, m.channel); }
-      catch { await mutate((j) => { j.jobs[id]!.state = "done"; }); return; }
+      catch (error) {
+        if (!(error instanceof SenderNotPermitted)) throw error;
+        await mutate((j) => { j.jobs[id]!.state = "done"; }); return;
+      }
       reply = { channel: m.channel, conversationId: m.conversation_id, identityId: job.identityId,
         ...(m.channel === "mail" ? { replyToMessageId: message.id } : {}) };
       body = "";

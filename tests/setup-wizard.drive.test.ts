@@ -404,4 +404,13 @@ describe("setup wizard end-to-end drive", () => {
     // The plugin config carries the minted agent-scoped key, not the admin key.
     expect(result.config?.apiKey).toBe("ApiKey_minted_agent");
   });
+  it("saves independent group and Companion response choices and keeps them when setup is rerun", async () => {
+    makeWorld();
+    const prompter = scriptedPrompter({ confirms: baseConfirms, asks: baseAsks, selects: [["reply in groups", "mention"], ["Companion mode", "relaxed"]] });
+    const result = await runSetupWizard({ prompter, env: { HOME: tempHome } as NodeJS.ProcessEnv });
+    expect(result.ok).toBe(true); expect(result.config).toMatchObject({ groupReplyMode: "mention", companionResponseMode: "relaxed" });
+    const kept = await runSetupWizard({ prompter: scriptedPrompter({ confirms: [["Reconfigure", false]] }), currentConfig: { channels: { inkbox: result.config } }, env: {} });
+    expect(kept.config).toMatchObject({ groupReplyMode: "mention", companionResponseMode: "relaxed" });
+  });
+
 });

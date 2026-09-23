@@ -57,9 +57,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: ./.github/actions/inkbox-sdk
       - uses: astral-sh/setup-uv@v7
-      - name: Install live-test deps (pinned SDK source + pytest)
+      - name: Install live-test deps (published SDK + pytest)
         run: |
           uv pip install --system inkbox==0.7.6 pytest
 

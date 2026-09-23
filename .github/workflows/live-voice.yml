@@ -75,9 +75,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: ./.github/actions/inkbox-sdk
       - uses: astral-sh/setup-uv@v7
-      - name: Install live-test deps (pinned SDK source + pytest + driver server)
+      - name: Install live-test deps (published SDK + pytest + driver server)
         # uvicorn[standard] (not bare uvicorn): the driver accepts a WebSocket
         # upgrade, which needs the websockets extra.
         run: |
