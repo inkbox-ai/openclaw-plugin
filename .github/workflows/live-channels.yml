@@ -153,6 +153,8 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          # Keep native error metadata in the existing private gateway log.
+          openclaw config set logging.consoleStyle json
           openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway to be ready (tunnel + webhooks)…"
@@ -177,7 +179,7 @@ jobs:
           AUT_WEBHOOK_URL: http://127.0.0.1:18789/inkbox/webhook
         run: |
           if [ "${{ matrix.mode }}" = "real" ]; then
-            LIVE_REAL_MODEL=1 python3 -m pytest tests/live -v --tb=short
+            LIVE_REAL_MODEL=1 python3 -m pytest tests/live -v --tb=short --maxfail=1
           else
             python3 -m pytest tests/live -v --tb=short
           fi
@@ -194,11 +196,14 @@ jobs:
 
           sys.path.insert(0, "tests/live")
           from test_cross_channel import _source_reply_shapes
+          from model_failure_diagnostics import read_native_model_failure_shapes
 
           log_path = Path(os.environ["GATEWAY_LOG"])
           log = log_path.read_text(errors="replace") if log_path.exists() else ""
           # Only fixed metadata; the host strips redundant subsystem prefixes.
           for shape in _source_reply_shapes(log):
+              print(shape)
+          for shape in read_native_model_failure_shapes(log_path):
               print(shape)
           PY
 
