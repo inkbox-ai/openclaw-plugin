@@ -6054,7 +6054,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       return true;
     }
     const pending = await buffer.snapshot();
-    if (pending.length && command.startsWith("/")) {
+    if (pending.length && (localControl || approval)) {
       if (/^\/(?:new|reset)(?:\s|$)/i.test(turn.rawText ?? "")) {
         turn.contextResetExpected = true;
         turn.contextAcknowledged = () => buffer.acknowledge(pending);

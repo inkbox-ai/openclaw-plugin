@@ -90,6 +90,19 @@ describe("group conversation host routing", () => {
     await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent next request"));
     expect(s.dispatchReply.mock.calls.at(-1)![0].ctxPayload.message.bodyForAgent).toContain("background fact");
   });
+  it.each(["/skill summarize", "/unrecognized summarize"])("includes quiet context when %s starts a model turn", async (command) => {
+    const s = setup("mention");
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "background fact"));
+    s.dispatchReply.mockImplementationOnce(async (params) => {
+      expect(params.ctxPayload.message.commandBody).toBe(command);
+      expect(params.ctxPayload.message.bodyForAgent).toContain("background fact");
+      bindNativeApprovalTurnToRun(s.core, ["default"], { prompt: params.ctxPayload.message.bodyForAgent }, { sessionKey: params.routeSessionKey, runId: "slash-model-run" });
+      return { dispatched: true };
+    });
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", `@agent ${command}`));
+    await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "@agent next request"));
+    expect(s.dispatchReply.mock.calls.at(-1)![0].ctxPayload.message.bodyForAgent).not.toContain("background fact");
+  });
   it.each(["committed", "committed-reply-failed", "unauthorized", "failed"])("clears background only after a confirmed native reset (%s)", async (outcome) => {
     const s = setup("mention");
     await receive(s.bridge, "sms", event("sms", "+15555550100", "group-one", "old background fact"));
