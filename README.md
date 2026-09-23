@@ -470,6 +470,10 @@ Unmentioned group messages and reactions are persisted as background context for
 the next waking turn, without model calls, tools, typing, or interrupting work.
 Ordinary local slash controls and native `/approve <id> <decision>` answers from
 the prompted sender remain available without a mention.
+Eligible ordinary messages reach OpenClaw immediately and follow its native
+queue/steering settings; the plugin does not replace that scheduler or force an
+abort-and-restart on every new message. Quiet messages never enter that queue.
+Companion model turns are processed serially within their conversation scope.
 
 Companion mode is enabled separately on the Inkbox identity by an administrator
 who selects a sponsor. Installing this plugin does not change that configuration.
