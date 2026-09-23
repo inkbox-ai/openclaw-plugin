@@ -67,7 +67,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Install live-test deps (pinned SDK source + pytest)
         run: |
-          uv pip install --system "$INKBOX_PYTHON_SDK_PATH" pytest
+          uv pip install --system inkbox==0.7.6 pytest
 
       - name: Build the plugin
         run: |

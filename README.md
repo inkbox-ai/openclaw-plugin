@@ -427,7 +427,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The plugin pins `@inkbox/sdk` 0.7.3.
+- The plugin pins `@inkbox/sdk` 0.7.6.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
@@ -448,30 +448,57 @@ Optional:
 
 Send and email-forward tools accept optional `completeSilently: true` when the send is the final requested action and no acknowledgment is wanted. Successful sends then end the turn without an extra source-channel reply. Leave it unset when more work or a reply remains; failed sends never silently complete.
 
-## Companion mode
+## Group replies and Companion mode
 
-Companion mode is configured on the Inkbox identity and remains off until an
-administrator enables it and selects a sponsor. Installing this plugin does not
-change that configuration.
+Group SMS and iMessage participants share a conversation session, including
+reactions. Different groups and direct conversations remain separate. Automatic
+email replies use the stored message's reply-all route, preserving visible To/CC
+and threading without adding BCC recipients or the agent itself. Explicit new-email
+tools still use the recipients you specify.
 
+The setup wizard exposes these independent choices for new or existing identities:
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `channels.inkbox.groupReplyMode` / `INKBOX_GROUP_REPLY_MODE` | `auto`, `mention` | `auto` |
+| `channels.inkbox.companionResponseMode` / `INKBOX_COMPANION_RESPONSE_MODE` | `safe`, `relaxed` | `safe` |
+
+Saved account settings override environment defaults. In mention mode, the current
+message must contain a complete, case-insensitive `@agent` or `@<agent-handle>`.
+Links, email addresses, previous messages, and older batched fragments do not count.
+Unmentioned group messages and reactions are persisted as background context for
+the next waking turn, without model calls, tools, typing, or interrupting work.
+Ordinary local slash controls and native `/approve <id> <decision>` answers from
+the prompted sender remain available without a mention.
+
+Companion mode is enabled separately on the Inkbox identity by an administrator
+who selects a sponsor. Installing this plugin does not change that configuration.
 Sponsored email, group MMS, and supported dedicated-line iMessage conversations
-receive one combined initialization input containing all available authorized
-history and the sponsor's message. Later messages wait for initialization to
-complete. Each conversation/cohort and activation has a separate OpenClaw session;
-ordinary tracked messages use a separate session without loading sponsored history.
-Replies retain the email parent and approved To/CC audience or the canonical text
-conversation. MMS chats with identical participants share one logical conversation.
+load the complete authorized initialization snapshot through the SDK, including
+later pages, notices, and attachment references. Environment, identity, channel,
+conversation scope, and activation isolate sessions. An activation is an access
+period, not an individual message; ordinary tracked messages remain separate.
 
-History loading and the combined input are bounded at 128 KiB. Oversized or incomplete inputs pause
-delivery without truncation. Local sender filters require the sponsor to be locally
-permitted; existing send restrictions and host tool approvals still apply.
+Safe mode wakes only for current messages with `sender_access: "direct"`.
+Sponsored messages and messages with missing or unknown access stay context-only.
+Relaxed mode may respond to any delivered sender. Admission metadata is not a
+statement of trust or permission to execute commands. In Companion email mention
+mode, the agent's actual mailbox in the current **To** list also counts as
+addressed; Cc-only messages do not. This never bypasses Safe mode.
 
-Jobs are saved before webhook acknowledgment under `~/.openclaw/inkbox/` in private
-`companion-*.json` journals. Pending work resumes at startup. A `paused` job includes
-a reason; resolve that cause before retrying it. If a host submission was interrupted,
-inspect the corresponding OpenClaw session before recovery. Never blindly reset a
-`submitting` or uncertain job: the host may already have acted. Webhook delivery is
-at least once, not a guarantee of exactly-once model execution.
+Companion controls require the current access/addressing gates and the sponsor.
+Native `/approve` answers additionally require the prompted sender (email matching
+is case-insensitive). In mention mode, include `@agent` before `/approve`.
+History never acts as a new command or approval. Later replies use the saved
+sponsor message for email or the canonical group conversation for texts; they do
+not reload activation history before every turn or send.
+
+Inputs are bounded at 128 KiB and are not silently truncated. Private journals in
+`~/.openclaw/inkbox/` persist receipts before acknowledgment and background context
+across restarts. Completed model replies are checkpointed before sending. Known
+pre-submission/pre-send failures retry with bounded backoff; uncertain host
+submissions or sends remain paused for inspection, never blindly replayed. This is
+at-least-once webhook delivery, not a guarantee of exactly-once model execution.
 
 ## Bundled Skills
 

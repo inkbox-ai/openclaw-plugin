@@ -139,7 +139,7 @@ export async function dispatchInbound(
     typeof (parsed as { event_type: unknown }).event_type === "string"
   ) {
     const eventType = (parsed as { event_type: string }).event_type;
-    if ("companion" in parsed && ["message.received", "text.received", "imessage.received"].includes(eventType)) {
+    if ("companion" in parsed && parsed.companion != null && ["message.received", "text.received", "imessage.received"].includes(eventType)) {
       if (!handlers.onCompanion) throw new Error("Companion mode requires a compatible receiver.");
       const kind = eventType === "message.received" ? "mail" : eventType === "text.received" ? "text" : "imessage";
       await handlers.onCompanion(parsed);

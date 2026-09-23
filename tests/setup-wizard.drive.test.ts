@@ -82,6 +82,7 @@ function scriptedPrompter(script: {
       selectsAsked.push(question);
       const hit = script.selects?.find(([match]) => question.includes(match));
       if (hit) return hit[1] as any;
+      if (question.includes("reply in groups") || question.includes("Companion mode")) return defaultValue as any;
       const legacy = script.confirms?.find(([match]) =>
         "Use OpenAI Realtime API for phone calls?".includes(match),
       );

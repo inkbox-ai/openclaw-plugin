@@ -199,6 +199,8 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
   if (value.voicemailDetection === "enabled" || value.voicemailDetection === "disabled") {
     out.voicemailDetection = value.voicemailDetection as OutboundVoicemailDetection;
   }
+  if (value.groupReplyMode === "auto" || value.groupReplyMode === "mention") out.groupReplyMode = value.groupReplyMode;
+  if (value.companionResponseMode === "safe" || value.companionResponseMode === "relaxed") out.companionResponseMode = value.companionResponseMode;
   if (typeof value.enabled === "boolean") {
     out.enabled = value.enabled;
   }
@@ -258,6 +260,8 @@ function envConfig(env: NodeJS.ProcessEnv | undefined): InkboxAccountConfig {
     identity: e.INKBOX_IDENTITY ?? e.INKBOX_AGENT_IDENTITY ?? e.INKBOX_AGENT_HANDLE,
     baseUrl: e.INKBOX_BASE_URL,
     signingKey: e.INKBOX_SIGNING_KEY,
+    groupReplyMode: e.INKBOX_GROUP_REPLY_MODE,
+    companionResponseMode: e.INKBOX_COMPANION_RESPONSE_MODE,
     tunnelName: e.INKBOX_TUNNEL_NAME,
     publicUrl: e.INKBOX_PUBLIC_URL,
     callWebsocketUrl: e.INKBOX_CALL_WEBSOCKET_URL,

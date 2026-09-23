@@ -61,13 +61,13 @@ jobs:
       - uses: ./.github/actions/inkbox-sdk
       - uses: astral-sh/setup-uv@v7
       - name: Install protocol driver from pinned SDK source
-        run: uv pip install --system "$INKBOX_PYTHON_SDK_PATH" pytest
+        run: uv pip install --system inkbox==0.7.6 pytest
 
       - name: Build plugin
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.3 openclaw@latest
+            @inkbox/sdk@0.7.6 openclaw@latest
           npm run build
 
       - name: Install the matching OpenClaw host

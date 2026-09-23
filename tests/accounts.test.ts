@@ -104,4 +104,11 @@ describe("inkbox account config", () => {
     expect(account.signingKey).toBe("sign_work");
     expect(account.config.includeContactMemories).toBe(false);
   });
+  it("resolves independent response modes from environment and preserves account overrides", () => {
+    const env = { INKBOX_GROUP_REPLY_MODE: "mention", INKBOX_COMPANION_RESPONSE_MODE: "relaxed" };
+    expect(resolveInkboxAccount({ env }).config).toMatchObject({ groupReplyMode: "mention", companionResponseMode: "relaxed" });
+    expect(resolveInkboxAccount({ env, cfg: { channels: { inkbox: { groupReplyMode: "auto", companionResponseMode: "safe" } } } }).config)
+      .toMatchObject({ groupReplyMode: "auto", companionResponseMode: "safe" });
+  });
+
 });

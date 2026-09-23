@@ -81,7 +81,7 @@ jobs:
         # uvicorn[standard] (not bare uvicorn): the driver accepts a WebSocket
         # upgrade, which needs the websockets extra.
         run: |
-          uv pip install --system "$INKBOX_PYTHON_SDK_PATH" pytest fastapi 'uvicorn[standard]'
+          uv pip install --system inkbox==0.7.6 pytest fastapi 'uvicorn[standard]'
 
       - name: Build the plugin
         run: |

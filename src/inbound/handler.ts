@@ -144,7 +144,7 @@ export async function handleInkboxWebhook(
       ? parsed.id.trim()
       : "";
   const dedupId = eventId || requestId;
-  const durableCompanion = "companion" in parsed &&
+  const durableCompanion = "companion" in parsed && parsed.companion != null &&
     ["message.received", "text.received", "imessage.received"].includes(String(parsed.event_type));
   if (!durableCompanion && opts.dedup && !opts.dedup.begin(dedupId)) {
     return { status: 200, body: "dup" };

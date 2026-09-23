@@ -56,7 +56,7 @@ function createRuntime(opts: { sendText?: any } = {}) {
       mailbox: { emailAddress: "smoke-agent@inkboxmail.com" },
       sendText,
       sendIMessage,
-      sendEmail,
+      replyAllEmail: sendEmail, sendEmail,
       sendIMessageTyping: vi.fn(async () => undefined),
       listTextConversations: vi.fn(async () => []),
     })),
@@ -309,11 +309,8 @@ describe("outbound delivery-failure recovery — session routing", () => {
       expect(body).toContain("Original email body.");
       expect(body).toContain("Email failure classification: REVIEW BEFORE RETRY");
       expect(body).toContain("NO_REPLY");
-      expect(sendEmail).toHaveBeenCalledWith({
-        to: ["kim@example.com"],
-        subject: "Re: Launch checklist",
+      expect(sendEmail).toHaveBeenCalledWith("mail-out-1", {
         bodyText: "Resending to a corrected address.",
-        inReplyToMessageId: "<mail-out-1@inkboxmail.com>",
       });
     },
   );

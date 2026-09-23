@@ -1,8 +1,10 @@
+import { contextBuffer } from "./context-buffer.js";
+import { mentionsAgent, isLocalControl, sameAuthor } from "./reply-policy.js";
 import { createInkboxTextReplyCapture } from "../reply-capture.js";
 import { beginSilentSendCapture } from "../silent-send-capture.js";
 import { isInkboxSilentReply, transformInkboxReplyPayload } from "../silent-reply.js";
 import { canonicalInkboxSessionOverride } from "../session-key.js";
-import { COMPANION_MAX_BYTES, createCompanionReceiver, type CompanionReply } from "./companion.js";
+import { COMPANION_MAX_BYTES, createCompanionReceiver, type CompanionReply, type CompanionInput } from "./companion.js";
 import { a2aFailureShape, settleCaughtA2AFailure } from "../a2a-failure.js";
 import { INKBOX_HD_AUDIO_FORMAT, RealtimeCallAudio } from "../realtime-audio.js";
 import { createHash } from "node:crypto";
@@ -129,6 +131,11 @@ type InkboxInboundTurn = {
   companionReply?: CompanionReply;
   companionValidateBeforeDispatch?: () => Promise<void>;
   companionRecordDelivery?: (messageId: string) => Promise<void>;
+  rawText?: string;
+  storedMessageId?: string;
+  reaction?: boolean;
+  commandAuthorized?: boolean;
+  contextAcknowledged?: () => Promise<void>;
   mode: InboundMode;
   contactKey: string;
   contact?: ContactSummary;
@@ -1349,7 +1356,8 @@ async function lookupImessageConversationSummary(
     return undefined;
   }
   try {
-    const convos = await (identity as any).listImessageConversations({
+    if (typeof identity.getIMessageConversation === "function") return await identity.getIMessageConversation(conversationId);
+    const convos = await identity.listIMessageConversations({
       limit: 200,
       offset: 0,
       includeGroups: true,
@@ -1595,6 +1603,24 @@ class OutboundSendRejection extends Error {
   }
 }
 
+function approvalBuffer(turn: InkboxInboundTurn, account: ResolvedInkboxAccount) {
+  return contextBuffer(JSON.stringify(["approvals", account.accountId, account.config.baseUrl ?? "", account.config.identity, turn.sessionKeyOverride ?? `${turn.mode}:${turn.conversationId ?? turn.contactKey}`]));
+}
+
+async function acceptsApproval(turn: InkboxInboundTurn, account: ResolvedInkboxAccount): Promise<boolean> {
+  const match = /^\/approve\s+(\S+)\s+/i.exec(turn.rawText?.trim() ?? "");
+  if (!match) return false;
+  const prompts = await approvalBuffer(turn, account).snapshot();
+  return prompts.some((entry) => entry.id === match[1] && sameAuthor(turn.mode === "email" ? "mail" : turn.mode, entry.body, turn.remoteAddress ?? ""));
+}
+
+async function rememberApprovals(turn: InkboxInboundTurn, account: ResolvedInkboxAccount, text: string): Promise<void> {
+  if (!turn.remoteAddress) return;
+  for (const match of text.matchAll(/\/approve\s+(\S+)\s+(?:allow|deny|once|always)/gi)) {
+    await approvalBuffer(turn, account).append({ id: match[1]!, body: turn.remoteAddress });
+  }
+}
+
 async function deliverReply(
   params: {
     turn: InkboxInboundTurn;
@@ -1603,6 +1629,7 @@ async function deliverReply(
     activeCalls: Map<string, ActiveCall>;
     imessageTyping?: IMessageTypingPulse;
     logger?: PluginLogger;
+    beforeSend?: () => Promise<void>;
   },
 ): Promise<string | undefined> {
   const text = params.text.trim();
@@ -1649,6 +1676,7 @@ async function deliverReply(
     // yet, released assignment, quota) surface as thrown API errors — tag them
     // so the delivery-failure loop can wake the agent to recover.
     try {
+      await params.beforeSend?.();
       const msg = await identity.sendIMessage({
         ...(conversationId ? { conversationId } : { to: params.turn.remoteAddress }),
         text,
@@ -1666,6 +1694,7 @@ async function deliverReply(
       throw new Error("Inkbox SMS reply missing remote phone number.");
     }
     try {
+      await params.beforeSend?.();
       const msg = await identity.sendText({
         ...(conversationId ? { conversationId } : { to: params.turn.remoteAddress }),
         text,
@@ -1676,38 +1705,12 @@ async function deliverReply(
     }
   }
 
-  if (!params.turn.remoteAddress && !params.turn.companionReply) {
-    throw new Error("Inkbox email reply missing remote email address.");
-  }
   const identity = await params.runtime.getIdentity();
-  const subject = params.turn.subject
-    ? params.turn.subject.toLowerCase().startsWith("re:")
-      ? params.turn.subject
-      : `Re: ${params.turn.subject}`
-    : "(no subject)";
+  const storedMessageId = params.turn.companionReply?.replyToMessageId ?? params.turn.storedMessageId;
+  if (!storedMessageId) throw new Error("Inkbox email reply requires its stored message ID.");
   try {
-    let parentMessageId = params.turn.replyToId;
-    const companion = params.turn.companionReply;
-    if (companion) {
-      if (!companion.replyToMessageId) throw new Error("Companion email parent is missing.");
-      const parent = await identity.getMessage(companion.replyToMessageId);
-      if (parent.id !== companion.replyToMessageId || parent.threadId !== companion.conversationId || !parent.messageId) {
-        throw new Error("Companion email parent does not match its conversation.");
-      }
-      const audience = (addresses: string[]) => JSON.stringify([...new Set(addresses.map((v) => v.trim().toLowerCase()))].sort());
-      const resolved = parent.replyAllRecipients;
-      if (!resolved || audience([...resolved.to, ...resolved.cc]) !== audience([...(companion.to ?? []), ...(companion.cc ?? [])])) {
-        throw new Error("Companion email reply audience has changed.");
-      }
-      parentMessageId = parent.messageId;
-    }
-    const msg = await identity.sendEmail({
-      to: params.turn.companionReply?.to ?? [params.turn.remoteAddress!],
-      ...(params.turn.companionReply ? { cc: params.turn.companionReply.cc } : {}),
-      subject,
-      bodyText: text,
-      inReplyToMessageId: parentMessageId,
-    });
+    await params.beforeSend?.();
+    const msg = await identity.replyAllEmail(storedMessageId, { bodyText: text });
     return msg.id;
   } catch (error) {
     throw new OutboundSendRejection("email", error);
@@ -2467,7 +2470,9 @@ async function dispatchInboundTurn(
       ? `${opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
       : undefined;
   const conversationRouteId =
-    opts.turn.contact?.id ?? channelThreadRouteId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
+    conversationKind === "group"
+      ? (channelThreadRouteId ?? opts.turn.sessionKeyOverride ?? opts.turn.contactKey)
+      : opts.turn.contact?.id ?? channelThreadRouteId ?? opts.turn.remoteAddress ?? opts.turn.contactKey;
   const { route, buildEnvelope } = resolveInboundRouteEnvelopeBuilderWithRuntime({
     cfg: opts.cfg as any,
     channel: "inkbox",
@@ -2513,7 +2518,7 @@ async function dispatchInboundTurn(
       timestamp,
       from: `inkbox:${opts.turn.mode}:${opts.turn.remoteAddress ?? opts.turn.contactKey}`,
     sender: {
-      id: opts.turn.contactKey,
+      id: opts.turn.remoteAddress ?? opts.turn.contactKey,
       name: opts.turn.contact?.name,
       displayLabel: opts.turn.fromLabel,
     },
@@ -2555,12 +2560,12 @@ async function dispatchInboundTurn(
     message: {
       body,
       bodyForAgent: silentSendCapture ? `${opts.turn.body}\n\n${silentSendCapture.marker}` : opts.turn.body,
-      rawBody: opts.turn.body,
-      commandBody: opts.turn.companionReply ? "" : opts.turn.body,
+      rawBody: opts.turn.rawText ?? opts.turn.body,
+      commandBody: opts.turn.commandAuthorized === false ? "" : opts.turn.rawText ?? opts.turn.body,
       envelopeFrom: opts.turn.fromLabel,
     },
     extra: {
-      CommandAuthorized: !opts.turn.companionReply,
+      CommandAuthorized: opts.turn.commandAuthorized ?? !opts.turn.companionReply,
       Provider: "inkbox",
       Surface: "inkbox",
       InkboxMode: opts.turn.mode,
@@ -2621,6 +2626,7 @@ async function dispatchInboundTurn(
       }
       let messageId: string | undefined;
       try {
+        await rememberApprovals(opts.turn, opts.account, text);
         messageId = await deliverReply({
           turn: opts.turn,
           text,
@@ -2701,6 +2707,7 @@ async function dispatchInboundTurn(
         result.admission?.kind === "observeOnly" || result.dispatchResult?.beforeAgentRunBlocked)) {
       throw new Error("OpenClaw did not confirm Companion turn execution and session recording.");
     }
+    await opts.turn.contextAcknowledged?.();
   } finally {
     if (silentSendCapture) {
       const shape = silentSendCapture.shape();
@@ -3537,6 +3544,8 @@ async function buildMailTurn(
     fromLabel: contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? from,
     remoteAddress: from,
     subject: message.subject ?? undefined,
+    storedMessageId: message.id,
+    rawText: inboundMailBody(message) || message.subject || "",
     body: [
       `[inkbox:email from=${from}${subjectPart} | ${renderContactMarker(contact, senderIdentity)}]`,
       renderContactMemories(account, contactMemories),
@@ -3544,7 +3553,7 @@ async function buildMailTurn(
       bodyText,
     ].filter(Boolean).join("\n"),
     messageId: message.message_id || message.id,
-    replyToId: message.message_id ?? undefined,
+    replyToId: message.id,
     threadId: message.thread_id ? `email:${message.thread_id}` : undefined,
     timestamp: parseTimestamp(message.created_at ?? event.timestamp),
     raw: event,
@@ -3569,6 +3578,8 @@ async function buildTextTurn(
     return null;
   }
   const rawText = message.text ?? "";
+  const fragments = (event as any).__batch?.fragments;
+  const latestText = fragments?.length ? fragments.at(-1).data.text_message.text ?? "" : rawText;
   if (isSmsControlWord(rawText)) {
     return null;
   }
@@ -3582,11 +3593,11 @@ async function buildTextTurn(
   const contacts = webhookContacts(event.data);
   const agentIdentities = webhookAgentIdentities(event.data);
   const summary = await lookupTextConversationSummary(identity, conversationId);
-  const participants = Array.isArray(summary?.participants)
-    ? summary.participants.filter((entry: unknown): entry is string => typeof entry === "string")
-    : [];
-  const isGroup = Boolean(summary?.isGroup) || participants.length > 1 ||
+  const participants: string[] = [...new Set([...(summary?.participants ?? []), ...((message as any).participants ?? [])]
+    .filter((entry: unknown): entry is string => typeof entry === "string"))];
+  const isGroup = Boolean(summary?.isGroup) || Boolean((message as any).is_group ?? (message as any).isGroup) || participants.length > 1 ||
     contacts.length > 1 || agentIdentities.length > 1;
+  if (isGroup && !conversationId) { logger?.warn?.("Group message has no conversation ID; no private session was used."); return null; }
   const contact = await lookupContact(runtime, "phone", remote);
   const contactMemories = normalizeContactMemories(
     selectPhoneWebhookContact(event.data, contact?.id)?.memories,
@@ -3621,7 +3632,8 @@ async function buildTextTurn(
     : `[inkbox:sms from=${remote} | ${renderContactMarker(contact, senderIdentity)}]`;
   return {
     mode: "sms",
-    contactKey,
+    rawText: latestText,
+    contactKey: isGroup && conversationId ? `sms:${conversationId}` : contactKey,
     contact,
     fromLabel: contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? remote,
     remoteAddress: remote,
@@ -3658,7 +3670,7 @@ async function buildIMessageTurn(
     return null;
   }
   const remote =
-    typeof message.remote_number === "string" ? message.remote_number.trim() : "";
+    typeof (message.sender_number ?? message.remote_number) === "string" ? (message.sender_number ?? message.remote_number)!.trim() : "";
   if (!remote) {
     return null;
   }
@@ -3687,6 +3699,7 @@ async function buildIMessageTurn(
     Boolean(summary?.isGroup) ||
     Boolean((message as any).is_group ?? (message as any).isGroup) ||
     participants.length > 1;
+  if (isGroup && !conversationId) { logger?.warn?.("Group message has no conversation ID; no private session was used."); return null; }
   const contact = await lookupContact(runtime, "phone", remote);
   const contactMemories = normalizeContactMemories(
     selectPhoneWebhookContact(event.data, contact?.id)?.memories,
@@ -3720,6 +3733,7 @@ async function buildIMessageTurn(
     : `[inkbox:imessage from=${remote}${conversationPart} | ${renderContactMarker(contact, senderIdentity)}]`;
   return {
     mode: "imessage",
+    rawText: (event as any).__batch?.fragments?.at(-1)?.data.message.content ?? message.content ?? "",
     // A group is one shared context for everyone in it, so the conversation -
     // not the sender - keys the chat. 1:1 keeps its per-contact key.
     contactKey: isGroup && conversationId ? `imessage:${conversationId}` : contactKey,
@@ -3742,12 +3756,7 @@ async function buildIMessageTurn(
   };
 }
 
-// Route an inbound tapback into the contact's session. Unlike SMS/email
-// there is no body — the signal is the reaction itself plus which message it
-// targets. The turn hands the agent the reaction and a response policy: a
-// "question" tapback usually wants a reply, the rest usually don't, so the
-// agent is told it may return NO_REPLY when no visible reply is warranted
-// (the same sentinel deliverReply already drops).
+// Tapbacks use the originating conversation, like messages.
 async function buildIMessageReactionTurn(
   runtime: InkboxRuntime,
   account: ResolvedInkboxAccount,
@@ -3772,6 +3781,11 @@ async function buildIMessageReactionTurn(
     typeof conversationIdRaw === "string" && conversationIdRaw.trim()
       ? conversationIdRaw.trim()
       : undefined;
+  const identity = await runtime.getIdentity();
+  const summary = await lookupImessageConversationSummary(identity, conversationId);
+  const participants = Array.isArray(summary?.participants) ? summary.participants : (reaction as any).participants ?? [];
+  const isGroup = Boolean(summary?.isGroup || (reaction as any).is_group || (reaction as any).isGroup || participants.length > 1);
+  if (isGroup && !conversationId) return null;
   const targetMessageId = escapeContactMemoryTokens(
     typeof reaction.target_message_id === "string" ? reaction.target_message_id.trim() : "",
   );
@@ -3808,12 +3822,14 @@ async function buildIMessageReactionTurn(
   ].join("\n");
   return {
     mode: "imessage",
-    contactKey,
+    contactKey: isGroup && conversationId ? `imessage:${conversationId}` : contactKey,
     contact,
     fromLabel: senderLabel,
     remoteAddress: remote,
     conversationId,
-    conversationKind: "direct",
+    conversationKind: isGroup ? "group" : "direct",
+    reaction: true, rawText: "",
+    conversationParticipants: participants,
     conversationLabel: senderLabel,
     body: [marker, renderContactMemories(account, contactMemories), policy]
       .filter(Boolean).join("\n"),
@@ -4399,7 +4415,7 @@ async function runRealtimeCallWebSocket(
 async function handleDeliveryFailure(
   opts: InkboxSessionBridgeOptions & { activeCalls: Map<string, ActiveCall> },
   failure: DeliveryFailure | null,
-  extra?: { chatId?: string; contact?: ContactSummary },
+  extra?: { chatId?: string; contact?: ContactSummary; turn?: InkboxInboundTurn },
 ): Promise<void> {
   if (!failure) {
     opts.logger?.info?.("Inkbox delivery-failure webhook ignored (no message payload).");
@@ -4469,6 +4485,10 @@ async function handleDeliveryFailure(
     return;
   }
   const recipientLabel = contact?.name ?? recipient ?? `conversation ${conversationId}`;
+  const failureIdentity = conversationId ? await opts.runtime.getIdentity() : undefined;
+  const summary = failure.channel === "sms" ? await lookupTextConversationSummary(failureIdentity, conversationId)
+    : failure.channel === "imessage" ? await lookupImessageConversationSummary(failureIdentity, conversationId) : undefined;
+  const failureIsGroup = Boolean(summary?.isGroup || (summary?.participants?.length ?? 0) > 1);
   const turn: InkboxInboundTurn = {
     mode: failure.channel,
     contactKey,
@@ -4478,16 +4498,18 @@ async function handleDeliveryFailure(
     ...(failure.channel === "email"
       ? {
           subject: failure.subject,
+          storedMessageId: failure.messageId,
           // Thread the retry under the message that bounced.
           replyToId: failure.rfcMessageId,
           threadId: failure.emailThreadId ? `email:${failure.emailThreadId}` : undefined,
         }
       : {
           conversationId,
-          conversationKind: "direct" as const,
+          conversationKind: failureIsGroup ? "group" as const : "direct" as const,
           conversationLabel: recipientLabel,
           threadId: conversationId ? `${failure.channel}:${conversationId}` : undefined,
         }),
+    ...extra?.turn,
     body: note.body,
     messageId: `delivery-failure:${failure.eventType}:${failure.messageId ?? Date.now()}`,
     timestamp: parseTimestamp(failure.createdAt),
@@ -4528,7 +4550,7 @@ async function wakeOnSendRejection(
     errorDetail: classified.errorDetail,
     raw: rejection.cause,
   };
-  await handleDeliveryFailure(opts, failure, { chatId: turn.contactKey, contact: turn.contact });
+  await handleDeliveryFailure(opts, failure, { chatId: turn.contactKey, contact: turn.contact, turn });
 }
 
 export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): InkboxSessionBridge {
@@ -5913,31 +5935,66 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   }
 
+  function companionTurn(input: CompanionInput): InkboxInboundTurn {
+    const mode = input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
+    return {
+      mode, contactKey: input.key, sessionKeyOverride: input.key,
+      conversationKind: "group", conversationLabel: "Inkbox Companion conversation",
+      conversationId: input.reply.conversationId,
+      fromLabel: input.author, remoteAddress: input.author, body: input.body,
+      rawText: input.rawText, commandAuthorized: input.commandAuthorized,
+      messageId: input.messageId, raw: input.event,
+      subject: input.channel === "mail" ? input.event.data?.message?.subject : undefined,
+      companionReply: structuredClone(input.reply),
+      companionValidateBeforeDispatch: input.validateBeforeDispatch,
+      companionRecordDelivery: input.recordDelivery,
+      replyToId: input.reply.replyToMessageId ?? undefined,
+      threadId: `${mode}:${input.reply.conversationId}`,
+    };
+  }
   const companion = createCompanionReceiver({
     accountId: opts.account.accountId,
     config: opts.account.config,
     runtime: opts.runtime,
     warn: (message) => opts.logger?.warn?.(message),
     async submit(input) {
-      const mode = input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
+      const texts: string[] = [];
       await dispatchInboundTurn({
-        ...opts, activeCalls,
-        turn: {
-          mode, contactKey: input.key, sessionKeyOverride: input.key,
-          conversationKind: "group", conversationLabel: "Inkbox Companion conversation",
-          conversationId: input.reply.conversationId,
-          fromLabel: "Inkbox Companion conversation", body: input.body,
-          messageId: input.messageId, raw: input.event,
-          subject: input.channel === "mail" ? input.event.data?.message?.subject : undefined,
-          companionReply: structuredClone(input.reply),
-          companionValidateBeforeDispatch: input.validateBeforeDispatch,
-          companionRecordDelivery: input.recordDelivery,
-          replyToId: input.reply.replyToMessageId ?? undefined,
-          threadId: `${mode}:${input.reply.conversationId}`,
-        },
+        ...opts, activeCalls, turn: companionTurn(input),
+        deliveryOverride: { deliver: async (payload) => {
+          const text = payloadText(payload).trim();
+          if (text && !isInkboxSilentReply(text)) texts.push(text);
+          return { visibleReplySent: false };
+        } },
       });
+      return texts;
+    },
+    async canApprove(input) { return acceptsApproval(companionTurn(input), opts.account); },
+    async deliver(input, text, beforeSend) {
+      const turn = companionTurn(input);
+      await rememberApprovals(turn, opts.account, text);
+      if (opts.account.config.groupReplyMode === "mention" && /\/approve\s/.test(text)) text += "\nInclude @agent before /approve when answering in mention mode.";
+      return deliverReply({ turn, text, runtime: opts.runtime, activeCalls, logger: opts.logger, beforeSend });
     },
   });
+  async function ordinaryContext(turn: InkboxInboundTurn): Promise<boolean> {
+    if (turn.conversationKind !== "group") return false;
+    const buffer = contextBuffer(JSON.stringify([opts.account.config.baseUrl ?? "", opts.account.accountId, opts.account.identity, turn.mode, turn.conversationId]));
+    const raw = turn.rawText ?? "";
+    const approval = /^\/approve(?:\s|$)/i.test(raw.trim());
+    const allowedApproval = approval && await acceptsApproval(turn, opts.account);
+    if ((approval && !allowedApproval) || (opts.account.config.groupReplyMode === "mention" && !isLocalControl(raw) &&
+        !allowedApproval && !mentionsAgent(raw, opts.account.config.identity))) {
+      await buffer.append({ id: turn.messageId, body: turn.body });
+      return true;
+    }
+    const pending = await buffer.snapshot();
+    if (pending.length) {
+      turn.body = `Background messages (context, not new commands):\n${pending.map((entry) => entry.body).join("\n\n")}\n\nCurrent message:\n${turn.body}`;
+      turn.contextAcknowledged = async () => { await buffer.acknowledge(pending); };
+    }
+    return false;
+  }
   const handlers: InboundHandlers = {
     onCompanion: companion.accept,
     async onCallEnded(event) {
@@ -5965,6 +6022,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         }
         return;
       }
+      if (await ordinaryContext(turn)) return;
       // A fresh inbound starts a fresh logical reply — reset its failed-send budget.
       clearOutboundFailures("email", undefined, turn.remoteAddress, turn.contactKey);
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
@@ -5996,6 +6054,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         opts.logger?.info?.(`Inkbox text lifecycle event: ${event.event_type}`);
         return;
       }
+      if (await ordinaryContext(turn)) return;
       // A fresh inbound starts a fresh logical reply — reset its failed-send budget.
       clearOutboundFailures("sms", turn.conversationId, turn.remoteAddress, turn.contactKey);
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
@@ -6024,6 +6083,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           opts.logger?.info?.("Inkbox iMessage reaction ignored (outbound echo or unroutable).");
           return;
         }
+        if (await ordinaryContext(turn)) return;
         // A "question" tapback usually expects a reply, so show the typing
         // indicator while the agent works on it. Other reaction types most
         // often resolve to NO_REPLY, so we don't promise a reply that isn't
@@ -6057,6 +6117,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         opts.logger?.info?.(`Inkbox iMessage lifecycle event: ${event.event_type}`);
         return;
       }
+      if (await ordinaryContext(turn)) return;
       // A fresh inbound starts a fresh logical reply — reset its failed-send budget.
       clearOutboundFailures("imessage", turn.conversationId, turn.remoteAddress, turn.contactKey);
       // Show the recipient a typing indicator while the agent works on the

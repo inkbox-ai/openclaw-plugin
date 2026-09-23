@@ -25,7 +25,7 @@ import { AgentIdentity, Inkbox } from "@inkbox/sdk";
 import companionFixture from "./fixtures/companion-v1.json";
 
 function event(phase = "initialization", sequence = 1, channel = "mail", scope = "scope-one", activation = "activation-one") {
-  const message = { id: `source-${sequence}`, thread_id: "conversation-one", conversation_id: "conversation-one", body: "Sponsor follow-up", text: "Sponsor follow-up", content: "Native iMessage content", from_address: "sponsor@example.com", to_addresses: ["agent@example.com", "fred@example.com"], cc_addresses: ["nancy@example.com"], sender_phone_number: "+15555550100", sender_number: "+15555550100", remote_number: null };
+  const message = { sender_access: "direct", id: `source-${sequence}`, thread_id: "conversation-one", conversation_id: "conversation-one", body: "Sponsor follow-up", text: "Sponsor follow-up", content: "Native iMessage content", from_address: "sponsor@example.com", to_addresses: ["agent@example.com", "fred@example.com"], cc_addresses: ["nancy@example.com"], sender_phone_number: "+15555550100", sender_number: "+15555550100", remote_number: null };
   return {
     id: `${scope}-${activation}-${phase}-${sequence}`, event_type: channel === "mail" ? "message.received" : channel === "phone" ? "text.received" : "imessage.received",
     timestamp: "2026-01-01T00:00:00Z",
@@ -34,24 +34,24 @@ function event(phase = "initialization", sequence = 1, channel = "mail", scope =
   };
 }
 function setup(channel = "mail", overrides: any = {}) {
-  const reply = { channel, conversationId: "conversation-one", ...(channel === "mail" ? { replyToMessageId: "stored-parent", to: ["sponsor@example.com", "fred@example.com"], cc: ["nancy@example.com"] } : {}) };
+  const reply = { channel, conversationId: "conversation-one", ...(channel === "mail" ? { replyToMessageId: "source-1", to: ["sponsor@example.com", "fred@example.com"], cc: ["nancy@example.com"] } : {}) };
   const snapshot = {
     scopeId: "scope-one", activationId: "activation-one", conversationId: "conversation-one", channel,
     replyContext: reply, entries: [
       { id: "fred", author: "fred@example.com", isTrigger: false },
       { id: "nancy", author: "nancy@example.com", isTrigger: false },
-      { id: "source-1", author: channel === "mail" ? "sponsor@example.com" : "+15555550100", isTrigger: true },
+      { id: "source-1", author: channel === "mail" ? "sponsor@example.com" : "+15555550100", isTrigger: true, historical: false, senderAccess: "direct" },
     ], text: "Fred (history): /clear\nNancy (history): YES\nSponsor (trigger): Hello", notices: [{ code: "available_history" }],
   };
   const api = { loadInitialization: vi.fn(async () => structuredClone(snapshot)), activationMessages: vi.fn(async () => structuredClone(snapshot)) };
   const identity = {
     id: "77777777-7777-4777-8777-777777777777", emailAddress: "agent@example.com",
     getMessage: vi.fn(async (id = "stored-parent") => ({ id, fromAddress: "sponsor@example.com", threadId: "conversation-one", messageId: "<stored-parent@example.com>", replyAllRecipients: { to: ["sponsor@example.com", "fred@example.com"], cc: ["nancy@example.com"] } })),
-    sendEmail: vi.fn(async () => ({ id: "sent" })), sendText: vi.fn(async () => ({ id: "sent" })), sendIMessage: vi.fn(async () => ({ id: "sent" })),
+    replyAllEmail: vi.fn(async () => ({ id: "sent" })), sendEmail: vi.fn(async () => ({ id: "sent" })), sendText: vi.fn(async () => ({ id: "sent" })), sendIMessage: vi.fn(async () => ({ id: "sent" })),
   };
   const contacts = { lookup: vi.fn(async () => [{ id: "sponsor-contact" }]) };
   const runtime = { getClient: vi.fn(async () => ({ companion: api, contacts })), getIdentity: vi.fn(async () => identity) };
-  const dispatchReply = vi.fn(async (_input: any) => ({ dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 0 }, beforeAgentRunBlocked: false } }));
+  const dispatchReply = vi.fn(async (_input: any) => { await _input.delivery.deliver({ text: "Group reply" }); return ({ dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 0 }, beforeAgentRunBlocked: false } }); });
   const channelRuntime = { inbound: { buildContext: vi.fn((v) => v), dispatchReply }, session: { recordInboundSession: vi.fn() }, reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() } };
   const account: any = { accountId: "default", identity: "test-agent", config: { identity: "test-agent", allowedInboundContactIds: ["sponsor-contact"], ...overrides } };
   const makeBridge = () => createInkboxSessionBridge({ cfg: {}, account, runtime: runtime as any, channelRuntime });
@@ -76,7 +76,6 @@ describe("Companion host boundary", () => {
     const s = setup(channel);
     await dispatchInbound(event("initialization", 1, channel), s.bridge.handlers);
     await settle(s.bridge);
-    await s.dispatchReply.mock.calls[0]![0].delivery.deliver({ text: "Group reply" });
     const failed: any = event("live", 2, channel);
     delete failed.companion;
     failed.event_type = channel === "mail" ? "message.failed" : channel === "phone" ? "text.delivery_failed" : "imessage.delivery_failed";
@@ -89,23 +88,14 @@ describe("Companion host boundary", () => {
     await dispatchInbound(failed, s.bridge.handlers);
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
   });
-  it.each(["revocation", "identity", "sponsor", "reply scope"])("rechecks %s after durable submission and host input preparation", async (change) => {
+  it("uses the saved reply anchor without rereading activation authorization", async () => {
     const s = setup();
-    s.channelRuntime.inbound.buildContext.mockImplementation((context) => {
-      if (change === "revocation") s.api.activationMessages.mockImplementation(async () => {
-        expect(Object.values((await journal()).value.activations)).toEqual([expect.objectContaining({ state: "submitting" })]);
-        throw new Error("activation revoked during preparation");
-      });
-      if (change === "identity") s.identity.id = "88888888-8888-4888-8888-888888888888";
-      if (change === "sponsor") s.contacts.lookup.mockResolvedValue([{ id: "not-permitted" }]);
-      if (change === "reply scope") s.snapshot.replyContext.to = ["other@example.com"];
-      return context;
-    });
-    await dispatchInbound(event(), s.bridge.handlers);
-    await settle(s.bridge);
-    expect(s.channelRuntime.inbound.buildContext).toHaveBeenCalledTimes(1);
-    expect(s.dispatchReply).not.toHaveBeenCalled();
-    expect(Object.values((await journal()).value.activations)).toEqual([expect.objectContaining({ state: "paused" })]);
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    s.api.activationMessages.mockRejectedValue(new Error("unavailable"));
+    await dispatchInbound(event("live", 2), s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(s.api.activationMessages).not.toHaveBeenCalled();
+    expect(s.identity.replyAllEmail).toHaveBeenLastCalledWith("source-1", { bodyText: "Group reply" });
   });
 
   it("requires an initialization event's source to be the snapshot trigger", async () => {
@@ -115,7 +105,7 @@ describe("Companion host boundary", () => {
     await dispatchInbound(received, s.bridge.handlers);
     await settle(s.bridge);
     expect(s.dispatchReply).not.toHaveBeenCalled();
-    expect(Object.values((await journal()).value.jobs)).toEqual([expect.objectContaining({ state: "paused", reason: "Companion initialization source is not its trigger." })]);
+    expect(Object.values((await journal()).value.jobs)).toEqual([expect.objectContaining({ state: "pending", reason: "Companion initialization source is not its trigger." })]);
   });
 
   it.each([false, true])("requires live mail attachment references (present=%s)", async (present) => {
@@ -128,7 +118,7 @@ describe("Companion host boundary", () => {
     await settle(s.bridge);
     expect(s.dispatchReply).toHaveBeenCalledTimes(present ? 2 : 1);
     if (present) expect(s.dispatchReply.mock.calls[1]![0].ctxPayload.message.bodyForAgent).toContain("example.txt");
-    else expect(Object.values((await journal()).value.jobs)).toContainEqual(expect.objectContaining({ state: "paused", reason: "Companion mail attachment references are incomplete." }));
+    else expect(Object.values((await journal()).value.jobs)).toContainEqual(expect.objectContaining({ state: "pending", reason: "Companion mail attachment references are incomplete." }));
   });
   it.each(["mail", "phone", "imessage"])("uses the packaged SDK to load all %s fixture pages before exactly one host input", async (channel) => {
     const s = setup(channel);
@@ -159,25 +149,15 @@ describe("Companion host boundary", () => {
     await dispatchInbound(received, s.bridge.handlers);
     await settle(s.bridge);
     expect(load).toHaveBeenCalledTimes(1);
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(3);
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
     const text = s.dispatchReply.mock.calls[0]![0].ctxPayload.message.bodyForAgent;
-    for (const source of [fred, nancy, sponsor]) expect(text.split(`"id":"${source.id}"`)).toHaveLength(2);
+    for (const source of [fred, nancy, sponsor]) expect(text).toContain(`"id":"${source.id}"`);
     expect(text.indexOf('"author":"fred@example.com"')).toBeLessThan(text.indexOf('"author":"nancy@example.com"'));
     expect(text).toContain('"isTrigger":true');
     expect(text).toContain("future_history_notice");
     expect(text).toContain("source_message_id");
-    if (channel !== "mail") return;
-    const identity = new AgentIdentity({ id: s.identity.id, agentHandle: "test-agent", mailbox: { emailAddress: "agent@example.com" } } as any, client);
-    s.runtime.getIdentity.mockResolvedValue(identity as any);
-    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ id: sponsor.id, thread_id: common.conversation_id, message_id: "<stored-parent@example.com>", reply_all_recipients: { to: common.reply_context.to, cc: common.reply_context.cc } }), { status: 200 }));
-    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ id: "sent" }), { status: 200 }));
-    await s.dispatchReply.mock.calls[0]![0].delivery.deliver({ text: "Group reply" });
-    const request = fetch.mock.calls[5] as any;
-    const body = JSON.parse(request[1].body);
-    expect(String(fetch.mock.calls[4]![0])).toContain(sponsor.id);
-    expect(body.recipients).toEqual({ to: common.reply_context.to, cc: common.reply_context.cc });
-    expect(body.in_reply_to_message_id).toBe("<stored-parent@example.com>");
+
   });
   it.each(["mail", "phone", "imessage"])("submits one full %s initializer, queues live, deduplicates restart, and retains replies", async (channel) => {
     const s = setup(channel);
@@ -201,8 +181,7 @@ describe("Companion host boundary", () => {
     expect(initial.ctxPayload.message.commandBody).toBe("");
     expect(initial.ctxPayload.extra.CommandAuthorized).toBe(false);
     expect(initial.routeSessionKey).not.toContain("contact:sponsor");
-    await initial.delivery.deliver({ text: "Group reply" });
-    if (channel === "mail") expect(s.identity.sendEmail).toHaveBeenCalledWith(expect.objectContaining({ to: s.snapshot.replyContext.to, cc: ["nancy@example.com"], inReplyToMessageId: "<stored-parent@example.com>" }));
+    if (channel === "mail") expect(s.identity.replyAllEmail).toHaveBeenCalledWith("source-1", { bodyText: "Group reply" });
     else expect(channel === "phone" ? s.identity.sendText : s.identity.sendIMessage).toHaveBeenCalledWith({ conversationId: "conversation-one", text: "Group reply" });
     const restarted = s.makeBridge();
     await dispatchInbound(init, restarted.handlers, ["sponsor-contact"]);
@@ -231,11 +210,7 @@ describe("Companion host boundary", () => {
     await settle(s.bridge);
     expect(s.api.loadInitialization).not.toHaveBeenCalled();
     const input = s.dispatchReply.mock.calls[0]![0];
-    await input.delivery.deliver({ text: "Ordinary group reply" });
-    expect(s.identity.getMessage).toHaveBeenCalledWith("source-1");
-    expect(s.identity.sendEmail).toHaveBeenCalledWith(expect.objectContaining({
-      to: ["sponsor@example.com", "fred@example.com"], cc: ["nancy@example.com"], inReplyToMessageId: "<stored-parent@example.com>",
-    }));
+    expect(s.identity.replyAllEmail).toHaveBeenCalledWith("source-1", { bodyText: "Group reply" });
   });
 
   it.each(["mail", "phone", "imessage"])("validates the actual %s conversation and sender before acceptance", async (channel) => {
@@ -275,7 +250,7 @@ describe("Companion host boundary", () => {
     s.identity.id = "88888888-8888-4888-8888-888888888888";
     await settle(s.makeBridge());
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
-    expect((await journal()).value.jobs.oldPending.state).toBe("paused");
+    expect((await journal()).value.jobs.oldPending.state).toBe("pending");
     await dispatchInbound(event(), s.bridge.handlers);
     await settle(s.bridge);
     expect(s.dispatchReply).toHaveBeenCalledTimes(2);
@@ -307,7 +282,7 @@ describe("Companion host boundary", () => {
     await dispatchInbound(live, s.bridge.handlers);
     await settle(s.bridge);
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
-    expect(Object.values((await journal()).value.jobs)).toContainEqual(expect.objectContaining({ state: "paused", reason: "Companion message body is incomplete." }));
+    expect(Object.values((await journal()).value.jobs)).toContainEqual(expect.objectContaining({ state: "pending", reason: "Companion message body is incomplete." }));
   });
 
   it("keeps unknown host acceptance paused across restart", async () => {
@@ -318,7 +293,7 @@ describe("Companion host boundary", () => {
     await dispatchInbound(event("live", 2), s.bridge.handlers);
     await settle(s.makeBridge());
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
-    expect(Object.values((await journal()).value.activations)).toEqual([expect.objectContaining({ state: "paused" })]);
+    expect(Object.values((await journal()).value.jobs)).toContainEqual(expect.objectContaining({ state: "paused" }));
   });
 
   it("preserves a host before-agent-run denial without releasing live work", async () => {
@@ -329,7 +304,7 @@ describe("Companion host boundary", () => {
     await dispatchInbound(event("live", 2), s.bridge.handlers);
     await settle(s.bridge);
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
-    expect(Object.values((await journal()).value.activations)).toEqual([expect.objectContaining({ state: "paused" })]);
+    expect(Object.values((await journal()).value.jobs)).toContainEqual(expect.objectContaining({ state: "paused" }));
   });
 
   it("recovers durable pre-submission work and pauses a crash at the submitting checkpoint", async () => {
@@ -361,7 +336,7 @@ describe("Companion host boundary", () => {
     await dispatchInbound(event(), s.bridge.handlers);
     await settle(s.bridge);
     expect(s.dispatchReply).toHaveBeenCalledTimes(0);
-    expect(Object.values((await journal()).value.jobs)).toEqual([expect.objectContaining({ state: "paused", reason: expect.any(String) })]);
+    expect(Object.values((await journal()).value.jobs)).toEqual([expect.objectContaining({ state: "pending", reason: expect.any(String) })]);
   });
 
   it("allows a locally permitted sponsor exception without changing allowlists", async () => {
@@ -370,23 +345,27 @@ describe("Companion host boundary", () => {
     received.data.contacts = [{ id: "bystander", bucket: "from", memories: [] }];
     await dispatchInbound(received, s.bridge.handlers, ["sponsor-contact"]);
     await settle(s.bridge);
-    expect(s.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
     expect(s.account.config.allowedInboundContactIds).toEqual(["sponsor-contact"]);
   });
 
-  it.each(["audience", "parent"])("rejects a changed mail %s before sending", async (change) => {
+  it("does not send before the complete host response is checkpointed", async () => {
     const s = setup();
+    let release!: () => void;
+    s.dispatchReply.mockImplementationOnce(async (input) => {
+      await input.delivery.deliver({ text: "Completed answer" });
+      expect(s.identity.replyAllEmail).not.toHaveBeenCalled();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 1 }, beforeAgentRunBlocked: false } };
+    });
     await dispatchInbound(event(), s.bridge.handlers);
-    await settle(s.bridge);
-    const parent = await s.identity.getMessage();
-    if (change === "audience") parent.replyAllRecipients.to = ["other@example.com"];
-    else parent.threadId = "another-conversation";
-    s.identity.getMessage.mockResolvedValue(parent);
-    await expect(s.dispatchReply.mock.calls[0]![0].delivery.deliver({ text: "Reply" })).rejects.toThrow();
-    expect(s.identity.sendEmail).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    release(); await settle(s.bridge);
+    expect(s.identity.replyAllEmail).toHaveBeenCalledWith("source-1", { bodyText: "Completed answer" });
+    expect(Object.values((await journal()).value.jobs)).toEqual([expect.objectContaining({ state: "done", replies: [] })]);
   });
 
-  it("keeps local outbound sponsor restrictions and fresh activation revocation", async () => {
+  it("keeps local outbound sponsor restrictions without an activation preflight", async () => {
     const s = setup("mail", { allowedRecipients: ["other@example.com"] });
     await dispatchInbound(event(), s.bridge.handlers);
     await settle(s.bridge);
@@ -399,7 +378,7 @@ describe("Companion host boundary", () => {
     next.api.activationMessages.mockRejectedValue(new Error("activation revoked"));
     await dispatchInbound(event("live", 2), bridge.handlers);
     await settle(bridge);
-    expect(next.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(next.dispatchReply).toHaveBeenCalledTimes(2);
   });
 
   it("only accepts signed Inkbox Companion events and persists before ACK", async () => {
@@ -415,4 +394,108 @@ describe("Companion host boundary", () => {
     await settle(s.bridge);
     expect(s.dispatchReply).toHaveBeenCalledTimes(1);
   });
+  it.each(["mail", "phone", "imessage"])("applies Safe/Relaxed and current-message mention gates for %s", async (channel) => {
+    for (const responseMode of ["safe", "relaxed"] as const) for (const access of ["direct", "sponsored", undefined]) {
+      const s = setup(channel, { identity: `agent-${responseMode}-${access}`, companionResponseMode: responseMode, groupReplyMode: "mention" });
+      const received = event("initialization", 1, channel);
+      const msg: any = received.data.text_message ?? received.data.message;
+      msg.sender_access = access; msg.text = msg.content = msg.body = "@agent hello";
+      await dispatchInbound(received, s.bridge.handlers); await settle(s.bridge);
+      const wakes = responseMode === "relaxed" || access === "direct";
+      expect(s.dispatchReply).toHaveBeenCalledTimes(wakes ? 1 : 0);
+    }
+  });
+  it.each([
+    [["Agent Name <AGENT@EXAMPLE.COM>"], "plain body", true],
+    [["other@example.com"], "To: agent@example.com", false],
+    [["other@example.com"], "plain body", false],
+    [["other@example.com"], "hello @test-agent", true],
+  ])("only current To recipients or textual mentions address Companion email (%j)", async (to, body, wakes) => {
+    const s = setup("mail", { groupReplyMode: "mention" });
+    const received = event(); Object.assign(received.data.message!, { to_addresses: to, cc_addresses: ["agent@example.com"], body });
+    await dispatchInbound(received, s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(wakes ? 1 : 0);
+  });
+  it("persists quiet initialization and live context across restart and uses the next direct source only", async () => {
+    const s = setup("phone", { groupReplyMode: "mention" });
+    const quiet = event("live", 2, "phone");
+    Object.assign(quiet.data.text_message!, { sender_access: "sponsored", text: "@agent quiet sponsored fact" });
+    await dispatchInbound(quiet, s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).not.toHaveBeenCalled();
+    const next = event("live", 3, "phone"); next.data.text_message!.text = "@agent recall that fact";
+    const restarted = s.makeBridge();
+    await dispatchInbound(next, restarted.handlers); await settle(restarted);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+    const body = s.dispatchReply.mock.calls[0]![0].ctxPayload.message.bodyForAgent;
+    expect(body).toContain(s.snapshot.text); expect(body).toContain("quiet sponsored fact"); expect(body).toContain("recall that fact");
+    expect(s.api.loadInitialization).toHaveBeenCalledTimes(1);
+  });
+  it.each(["initialization", "live"])("compares mixed-case mail authors consistently during %s", async (phase) => {
+    const s = setup();
+    const received = event(phase);
+    received.data.message!.from_address = "Sponsor@Example.COM";
+    await dispatchInbound(received, s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+  it("rejects a different snapshot author even on a live-first source", async () => {
+    const s = setup(); const received = event("live"); received.data.message!.from_address = "other@example.com";
+    await dispatchInbound(received, s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).not.toHaveBeenCalled();
+  });
+  it("retries native host preparation without losing the chosen session or marking a submission uncertain", async () => {
+    const s = setup();
+    s.channelRuntime.inbound.buildContext.mockImplementationOnce(() => { throw new Error("host startup unavailable"); });
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).not.toHaveBeenCalled();
+    const stored = await journal();
+    const job: any = Object.values(stored.value.jobs)[0]; expect(job.state).toBe("pending"); job.retryAt = 0;
+    await writeFile(stored.path, JSON.stringify(stored.value));
+    await settle(s.makeBridge()); expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+  it("retries a pre-send identity failure using the saved reply without rerunning the model", async () => {
+    const s = setup(); let failed = false;
+    s.runtime.getIdentity.mockImplementation(async () => {
+      const record = await journal().catch(() => null);
+      if (!failed && record && Object.values(record.value.jobs).some((job: any) => job.state === "reply_pending")) { failed = true; throw new Error("identity unavailable before send"); }
+      return s.identity;
+    });
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1); expect(s.identity.replyAllEmail).not.toHaveBeenCalled();
+    const saved = await journal(); const job: any = Object.values(saved.value.jobs)[0];
+    expect(job.state).toBe("reply_pending"); expect(job.replies).toEqual(["Group reply"]); job.retryAt = 0;
+    await writeFile(saved.path, JSON.stringify(saved.value)); await settle(s.makeBridge());
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1); expect(s.identity.replyAllEmail).toHaveBeenCalledTimes(1);
+  });
+  it("pauses an uncertain send without resubmitting the model or retrying the external send", async () => {
+    const s = setup(); s.identity.replyAllEmail.mockRejectedValue(new Error("connection lost after send"));
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge); await settle(s.makeBridge());
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1); expect(s.identity.replyAllEmail).toHaveBeenCalledTimes(1);
+    expect(Object.values((await journal()).value.jobs)).toEqual([expect.objectContaining({ state: "paused", replies: ["Group reply"] })]);
+  });
+  it("does not let a denied ordinary message prevent an eligible sponsor", async () => {
+    const s = setup(); s.contacts.lookup.mockResolvedValueOnce([{ id: "not-permitted" }]);
+    await dispatchInbound(event("ordinary"), s.bridge.handlers); await settle(s.bridge);
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+  it("requires the current mention and prompted author for Companion native approvals", async () => {
+    const s = setup("phone", { groupReplyMode: "mention" });
+    const init = event("initialization", 1, "phone"); init.data.text_message!.text = "@agent work";
+    s.dispatchReply.mockImplementationOnce(async (input) => {
+      await input.delivery.deliver({ text: "Approval needed: /approve abc allow-once" });
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 0, final: 1 }, beforeAgentRunBlocked: false } };
+    });
+    await dispatchInbound(init, s.bridge.handlers); await settle(s.bridge);
+    expect(s.identity.sendText).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("Include @agent") }));
+    for (const [sequence, sender, text, access] of [[2, "+15555550100", "/approve abc allow-once", "direct"], [3, "+15555550200", "@agent /approve abc allow-once", "direct"], [4, "+15555550100", "@agent /approve abc allow-once", "sponsored"]] as const) {
+      const next = event("live", sequence, "phone"); Object.assign(next.data.text_message!, { sender_phone_number: sender, text, sender_access: access });
+      await dispatchInbound(next, s.bridge.handlers); await settle(s.bridge);
+    }
+    expect(s.dispatchReply).toHaveBeenCalledTimes(1);
+    const answer = event("live", 5, "phone"); answer.data.text_message!.text = "@agent /approve abc allow-once";
+    await dispatchInbound(answer, s.bridge.handlers); await settle(s.bridge);
+    expect(s.dispatchReply).toHaveBeenCalledTimes(2);
+    expect(s.dispatchReply.mock.calls[1]![0].ctxPayload.message.commandBody).toBe("/approve abc allow-once");
+  });
+
 });

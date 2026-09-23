@@ -137,6 +137,7 @@ function createPrompter(params: {
     pause: vi.fn(async () => undefined),
     confirm,
     select: vi.fn(async (_question: string, _options: any[], defaultValue?: string) => {
+      if (_question.includes("reply in groups") || _question.includes("Companion mode")) return defaultValue as any;
       if (selections.length) return selections.shift() as any;
       // Preserve the legacy tests' yes/no realtime answer while exercising
       // the new native three-option selector.
@@ -475,6 +476,7 @@ describe("runSetupWizard", () => {
     expect(result.persisted).toBe(true);
     expect(persistConfig).toHaveBeenCalledWith(
       {
+        groupReplyMode: "auto", companionResponseMode: "safe",
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
@@ -1229,6 +1231,7 @@ describe("runSetupWizard", () => {
     expect(sdk.Inkbox).toHaveBeenCalledWith(inkboxClientOptions("ApiKey_new", undefined));
     expect(persistConfig).toHaveBeenCalledWith(
       {
+        groupReplyMode: "auto", companionResponseMode: "safe",
         apiKey: "ApiKey_new",
         identity: "smoke-agent",
         signingKey: "whsec_test",
@@ -1295,6 +1298,7 @@ describe("runSetupWizard", () => {
       ok: true,
       persisted: false,
       config: {
+        groupReplyMode: "auto", companionResponseMode: "safe",
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",

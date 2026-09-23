@@ -13,6 +13,8 @@ import type {
 
 // Shape of `plugins.entries.inkbox.config` after configSchema validation.
 export interface InkboxPluginConfig {
+  groupReplyMode?: "auto" | "mention";
+  companionResponseMode?: "safe" | "relaxed";
   apiKey: string;
   identity: string;
   baseUrl?: string;
@@ -170,7 +172,9 @@ export function createInkboxRuntime(
         const identity = await inkbox.getIdentity(cfg.identity!);
         return { inkbox, identity };
       })();
-      resolved = { key, promise };
+      const entry = { key, promise };
+      resolved = entry;
+      void promise.catch(() => { if (resolved === entry) resolved = null; });
     }
     return resolved.promise;
   }

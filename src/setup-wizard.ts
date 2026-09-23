@@ -43,6 +43,8 @@ import {
 } from "./voice-stack.js";
 
 export interface WizardConfig {
+  groupReplyMode?: "auto" | "mention";
+  companionResponseMode?: "safe" | "relaxed";
   apiKey: string;
   identity: string;
   signingKey?: string;
@@ -241,6 +243,8 @@ export function buildOpenClawConfigBatch(
       value: true,
     },
   ];
+  if (config.groupReplyMode) batch.push({ path: "channels.inkbox.groupReplyMode", value: config.groupReplyMode });
+  if (config.companionResponseMode) batch.push({ path: "channels.inkbox.companionResponseMode", value: config.companionResponseMode });
   if (config.signingKey) {
     batch.push({ path: "channels.inkbox.signingKey", value: config.signingKey });
   }
@@ -1713,6 +1717,8 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
         config: {
           apiKey: existingApiKey,
           identity: existingIdentity,
+          groupReplyMode: existingAccount.config.groupReplyMode,
+          companionResponseMode: existingAccount.config.companionResponseMode,
           ...(existingSigningKey ? { signingKey: existingSigningKey } : {}),
           ...(existingBaseUrl ? { baseUrl: existingBaseUrl } : {}),
           ...(existingAccount.config.voiceRealtime
@@ -2022,7 +2028,10 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   // Step 8 — persist the channel config in the active OpenClaw profile when
   // the CLI provided a config persister. Tests and direct library callers can
   // omit it and still receive the snippet.
+  const groupReplyMode = await selectOption({ prompter, message: "When should the agent reply in groups?", options: [{ value: "auto" as const, label: "Automatically, when appropriate" }, { value: "mention" as const, label: "Only when @agent or @handle is mentioned" }], initialValue: existingAccount.config.groupReplyMode ?? "auto" });
+  const companionResponseMode = await selectOption({ prompter, message: "Who can wake the agent in Companion mode?", options: [{ value: "safe" as const, label: "Safe — direct senders only" }, { value: "relaxed" as const, label: "Relaxed — direct and sponsored senders" }], initialValue: existingAccount.config.companionResponseMode ?? "safe" });
   const snippet: WizardConfig = {
+    groupReplyMode, companionResponseMode,
     apiKey: agentApiKey,
     identity: identityHandle,
     ...(signingKey ? { signingKey } : {}),

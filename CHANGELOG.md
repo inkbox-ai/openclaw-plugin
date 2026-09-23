@@ -29,7 +29,11 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Changed
 
-- Pin Inkbox SDK 0.7.3 for Companion mode snapshot loading and reply context.
+- Pin published Inkbox SDK 0.7.6 for per-message admission metadata and reply-all.
+- Keep group SMS, iMessage, reactions, and recovery in the originating conversation, with raw local controls and sender-bound native approvals.
+- Add Auto/Mention group replies and Safe/Relaxed Companion responses to setup and account settings, including current email To addressing and durable background context.
+- Checkpoint completed replies before delivery, retry known pre-submission failures, and retain uncertain submissions or sends for inspection.
+- Use canonical reply-all for automatic email without rebuilding recipients.
 
 ## [0.2.7] - 2026-07-29
 

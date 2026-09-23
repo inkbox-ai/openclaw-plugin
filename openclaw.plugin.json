@@ -150,6 +150,8 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "groupReplyMode": { "type": "string", "enum": ["auto", "mention"] },
+          "companionResponseMode": { "type": "string", "enum": ["safe", "relaxed"] },
           "includeContactMemories": {
             "type": "boolean"
           },
@@ -244,6 +246,8 @@
                   "type": "array",
                   "items": { "type": "string" }
                 },
+                "groupReplyMode": { "type": "string", "enum": ["auto", "mention"] },
+                "companionResponseMode": { "type": "string", "enum": ["safe", "relaxed"] },
                 "includeContactMemories": {
                   "type": "boolean"
                 },
@@ -441,6 +445,8 @@
         "items": { "type": "string" },
         "description": "Inbound contact-id allowlist. When set, webhook events whose remote contact id is not on this list are dropped (mail/text become no-ops, calls are rejected). Events with no contact resolution are also dropped."
       },
+      "groupReplyMode": { "type": "string", "enum": ["auto", "mention"] },
+      "companionResponseMode": { "type": "string", "enum": ["safe", "relaxed"] },
       "includeContactMemories": {
         "type": "boolean",
         "description": "Include memories from the matched webhook contact in inbound agent context. Defaults to true."
