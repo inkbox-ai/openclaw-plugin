@@ -122,6 +122,10 @@ def test_native_timeline_projects_only_fixed_preparation_stages(tmp_path):
     ]
     log = "\n".join(json.dumps(record, ensure_ascii=False) for record in records)
     assert native_timeline_shapes(log) == expected
+    for stage in ("runtime", "context-engine"):
+        assert native_timeline_shapes(json.dumps({**base, "attributes": {"stage": stage}})) == [
+            f"native_prepare failed={stage} name=Error kind=registry_retired"
+        ]
     path = tmp_path / "native-timeline.jsonl"
     path.write_text("private" * MAX_LOG_BYTES + "\n" + log)
     assert read_native_timeline_shapes(path) == expected

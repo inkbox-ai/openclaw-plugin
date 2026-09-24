@@ -31,6 +31,7 @@ ERROR_NAMES = frozenset({
     "PreparedModelRuntimePublicationSupersededError",
 })
 PREPARATION_STAGES = frozenset({
+    "runtime", "context-engine",
     "attempt.setup", "attempt.skills", "attempt.tool-base", "attempt.bootstrap",
     "attempt.bundle-tools", "attempt.tool-catalog", "attempt.system-prompt",
     "attempt.transcript-lifecycle", "attempt.session-runtime",
