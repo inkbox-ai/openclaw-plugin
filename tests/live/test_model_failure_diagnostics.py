@@ -104,6 +104,39 @@ def test_lane_classification_requires_native_logger_and_a_closed_class_name():
     ]
 
 
+def test_observed_empty_tool_guard_projects_only_fixed_reason_and_source_flags():
+    from model_failure_diagnostics import EMPTY_TOOLS_PREFIX, EMPTY_TOOLS_SUFFIX
+    examples = [
+        ("tools.allow: inkbox", "no registered tools matched", "reason=no_match global=true runtime=false other=false global_inkbox_only=true"),
+        ("tools.allow: private-tool; runtime toolsAllow: private-tool", "tools are disabled for this run", "reason=run_disabled global=true runtime=true other=false global_inkbox_only=false"),
+        ("agents.private-id.tools.allow: private-tool", "the selected model does not support tools", "reason=model_unsupported global=false runtime=false other=true global_inkbox_only=false"),
+    ]
+    for sources, reason, expected in examples:
+        error = f"{EMPTY_TOOLS_PREFIX}{sources}); {reason}{EMPTY_TOOLS_SUFFIX}"
+        record = {"level": "error", "message": "Embedded agent failed before reply: " + error}
+        shapes = native_model_failure_shapes(json.dumps(record))
+        assert shapes[-1] == "native_empty_tools " + expected
+        assert "private" not in " ".join(shapes)
+        for changed in ["quoted " + error, error + " private", error.replace(reason, "private-reason")]:
+            assert not any(shape.startswith("native_empty_tools") for shape in native_model_failure_shapes(json.dumps({**record, "message": "Embedded agent failed before reply: " + changed})))
+
+
+def test_native_catalog_and_factory_markers_require_exact_native_envelopes():
+    records = [
+        {"subsystem": "agent/embedded", "level": "info", "message": "code-mode: cataloged 54 tools behind exec/wait"},
+        {"subsystem": "agent/embedded", "level": "info", "message": "code-mode: cataloged 99999999 tools behind exec/wait"},
+        {"subsystem": "plugins", "level": "error", "message": "plugin tool failed (inkbox): private-path private-error"},
+        {"subsystem": "inkbox", "level": "error", "message": "plugin tool failed (inkbox): private"},
+        {"subsystem": "plugins", "level": "error", "message": "quoted plugin tool failed (inkbox): private"},
+        {"subsystem": "agent/embedded", "level": "info", "message": "code-mode: cataloged private tools behind exec/wait"},
+        {"subsystem": "plugins", "level": "info", "message": "plugin tool failed (inkbox): private"},
+    ]
+    assert native_model_failure_shapes("\n".join(map(json.dumps, records))) == [
+        "native_tool_catalog kind=code_mode count=54", "native_tool_catalog kind=code_mode count=9999",
+        "native_tool_factory inkbox_failed=true",
+    ]
+
+
 def test_native_timeline_projects_only_fixed_preparation_stages(tmp_path):
     base = {"schemaVersion": "openclaw.diagnostics.v1", "name": "agent.prepare", "phase": "agent.prepare",
             "type": "span.error", "attributes": {"stage": "attempt.session-runtime", "private": "secret"},

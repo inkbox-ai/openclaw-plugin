@@ -36,6 +36,31 @@ PREPARATION_STAGES = frozenset({
     "attempt.bundle-tools", "attempt.tool-catalog", "attempt.system-prompt",
     "attempt.transcript-lifecycle", "attempt.session-runtime",
 })
+EMPTY_TOOLS_PREFIX = "No callable tools remain after resolving explicit tool allowlist ("
+EMPTY_TOOLS_SUFFIX = ". Fix the allowlist or enable the plugin that registers the requested tool."
+
+
+def _empty_tools_shape(value: str) -> str | None:
+    """Classify the observed native guard without exposing requested tool names."""
+    if not value.startswith(EMPTY_TOOLS_PREFIX) or not value.endswith(EMPTY_TOOLS_SUFFIX):
+        return None
+    sources, separator, reason = value[len(EMPTY_TOOLS_PREFIX):-len(EMPTY_TOOLS_SUFFIX)].rpartition("); ")
+    reasons = {
+        "tools are disabled for this run": "run_disabled",
+        "no registered tools matched": "no_match",
+        "the selected model does not support tools": "model_unsupported",
+    }
+    if not separator or reason not in reasons:
+        return None
+    # Source labels are native constants; values and agent identifiers stay private.
+    entries = sources.split("; ")
+    global_present = any(entry.startswith("tools.allow: ") for entry in entries)
+    runtime_present = any(entry.startswith("runtime toolsAllow: ") for entry in entries)
+    other_present = any(not entry.startswith(("tools.allow: ", "runtime toolsAllow: ")) for entry in entries)
+    inkbox_only = "tools.allow: inkbox" in entries
+    return (f"native_empty_tools reason={reasons[reason]} global={str(global_present).lower()} "
+            f"runtime={str(runtime_present).lower()} other={str(other_present).lower()} "
+            f"global_inkbox_only={str(inkbox_only).lower()}")
 
 
 def _error_name(value: object) -> str:
@@ -101,12 +126,25 @@ def native_model_failure_shapes(log: str) -> list[str]:
             message = record.get("message")
             if isinstance(message, str) and message.startswith("Embedded agent failed before reply: "):
                 shapes.append("native_model_phase before_reply_failure=true")
-                kind = _native_error_kind(message.removeprefix("Embedded agent failed before reply: "))
+                error_text = message.removeprefix("Embedded agent failed before reply: ")
+                kind = _native_error_kind(error_text)
                 shapes.append(f"native_model_cause kind={kind}")
+                tool_shape = _empty_tools_shape(error_text)
+                if tool_shape:
+                    shapes.append(tool_shape)
         elif record.get("subsystem") == "diagnostic" and record.get("level") == "error":
             message = record.get("message")
             if isinstance(message, str) and message.startswith("lane task error: lane="):
                 shapes.append(f"native_lane_error name={_error_name(record.get('errorName'))}")
+        elif record.get("subsystem") == "agent/embedded" and record.get("level") == "info":
+            message = record.get("message")
+            match = re.fullmatch(r"code-mode: cataloged ([0-9]{1,8}) tools behind exec/wait", message) if isinstance(message, str) else None
+            if match:
+                shapes.append(f"native_tool_catalog kind=code_mode count={min(int(match[1]), 9999)}")
+        elif record.get("subsystem") == "plugins" and record.get("level") == "error":
+            message = record.get("message")
+            if isinstance(message, str) and message.startswith("plugin tool failed (inkbox): "):
+                shapes.append("native_tool_factory inkbox_failed=true")
     return shapes[-MAX_SHAPES:]
 
 
