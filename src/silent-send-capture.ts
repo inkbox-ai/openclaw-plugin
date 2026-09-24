@@ -20,6 +20,7 @@ type Capture = {
   invalid: boolean;
   invalidShape?: { reason: string; finalParam: string; tool: string };
   attempts: Map<string, Attempt>;
+  priorBatchCalls: Map<string, string>;
 };
 type Result = {
   terminate?: unknown;
@@ -72,6 +73,13 @@ function acceptedSendResult(value: unknown): boolean {
     receipt?.accepted === true && receipt.completeSilently === true;
 }
 
+function completedFinalBatch(capture: Capture): boolean {
+  const attempts = [...capture.attempts.values()];
+  return !capture.closed && capture.batchStarted && !capture.invalid &&
+    attempts.some((attempt) => !attempt.wrapper && attempt.accepted) &&
+    attempts.every((attempt) => attempt.accepted);
+}
+
 // This host-generated ID links nested lifecycle events to their transport call.
 // It is never evidence of API acceptance; both lifecycle results are required.
 function parentIdSegment(id: string): string {
@@ -105,20 +113,18 @@ function acceptedWrapper(
 export function beginSilentSendCapture(sessionKey: string) {
   const capture: Capture = {
     sessionKey, marker: `[Inkbox turn correlation: ${randomUUID()}]`,
-    closed: false, batchStarted: false, invalid: false, attempts: new Map(),
+    closed: false, batchStarted: false, invalid: false, attempts: new Map(), priorBatchCalls: new Map(),
   };
   return {
     marker: capture.marker,
     activate() { if (!capture.closed) captures.add(capture); },
+    completedSilently() { return completedFinalBatch(capture); },
     transform<T extends {
       text?: string; media?: unknown; mediaUrl?: string; mediaUrls?: string[]; isError?: boolean;
     }>(payload: T): T | null {
-      const attempts = [...capture.attempts.values()];
       // An entirely successful, explicitly final batch authorizes silence. Never
       // fabricate current-source delivery or hide other errors/attachments.
-      if (!capture.closed && capture.batchStarted && !capture.invalid &&
-          attempts.some((attempt) => !attempt.wrapper && attempt.accepted) &&
-          attempts.every((attempt) => attempt.accepted) &&
+      if (completedFinalBatch(capture) &&
           (!payload.isError || (payload.isError === true && payload.text === nativeEmptyReplyText)) &&
           !payload.media && !payload.mediaUrl && !payload.mediaUrls?.length) return null;
       return transformInkboxReplyPayload(payload);
@@ -149,6 +155,7 @@ export function recordSilentSendModelStarted(event: Event, context: Context): vo
     capture.batchStarted = true;
     capture.invalid = false;
     capture.invalidShape = undefined;
+    for (const [id, attempt] of capture.attempts) capture.priorBatchCalls.set(id, attempt.name);
     capture.attempts.clear();
   }
 }
@@ -156,8 +163,9 @@ export function recordSilentSendModelStarted(event: Event, context: Context): vo
 export function recordSilentSendBeforeToolCall(event: Event, context: Context): void {
   for (const capture of matching(event, context)) {
     const id = event.toolCallId ?? context.toolCallId;
-    if (!capture.batchStarted || !id || capture.attempts.has(id)) {
-      invalidate(capture, id && capture.attempts.has(id) ? "duplicate_before" : "before_lifecycle", event);
+    const duplicate = id && (capture.attempts.has(id) || capture.priorBatchCalls.has(id));
+    if (!capture.batchStarted || !id || duplicate) {
+      invalidate(capture, duplicate ? "duplicate_before" : "before_lifecycle", event);
       continue;
     }
     const name = event.toolName ?? "";
@@ -173,6 +181,10 @@ export function recordSilentSendAfterToolCall(event: Event, context: Context): v
   for (const capture of matching(event, context)) {
     const id = event.toolCallId ?? context.toolCallId;
     const attempt = id ? capture.attempts.get(id) : undefined;
+    // Native streamed-block delivery can delay a tool's end observer until
+    // after the next model call starts. Retire only IDs/names whose BEFORE was
+    // actually seen in this exact run; old results never prove a new final send.
+    if (!attempt && id && capture.priorBatchCalls.has(id) && capture.priorBatchCalls.get(id) === event.toolName) continue;
     const result = event.result as Result | undefined;
     if (!id || !attempt || attempt.name !== event.toolName || event.error ||
         result?.isError === true || result?.terminate !== true) {

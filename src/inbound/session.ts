@@ -2438,11 +2438,14 @@ async function dispatchInboundTurn(
     dispatchAbortSignal?: AbortSignal;
     onSessionKeyResolved?: (sessionKey: string) => void;
     shouldDeliverReply?: () => boolean;
+    onCompletedSilently?: () => void;
     replyCapture?: ReturnType<typeof createInkboxTextReplyCapture>;
     deliveryOverride?: {
-      deliver: (payload: unknown) => Promise<{ visibleReplySent?: boolean } | void>;
+      deliver: (payload: unknown, info?: { kind?: string }) => Promise<{
+        visibleReplySent?: boolean;
+        suppression?: { reason: "channel_transform" };
+      } | void>;
       onError?: (error: unknown) => void;
-      transformReplyPayload?: (payload: { text?: string; isError?: boolean }) => null;
     };
     replyOptionsOverride?: Record<string, unknown>;
     a2aContext?: ActiveA2ATurn;
@@ -2730,10 +2733,7 @@ async function dispatchInboundTurn(
       replyPipeline: {},
       dispatcherOptions: { transformReplyPayload: (payload: { text?: string; isError?: boolean }) => {
         if (opts.replyCapture) return opts.replyCapture.transformReplyPayload(payload);
-        const transformed = silentSendCapture ? silentSendCapture.transform(payload) : transformInkboxReplyPayload(payload);
-        if (transformed === null) return null;
-        const capture = opts.deliveryOverride?.transformReplyPayload;
-        return capture ? capture(transformed) : transformed;
+        return silentSendCapture ? silentSendCapture.transform(payload) : transformInkboxReplyPayload(payload);
       } },
       record: {
         onRecordError: (error: unknown) => {
@@ -2748,6 +2748,7 @@ async function dispatchInboundTurn(
         result.admission?.kind === "observeOnly" || result.dispatchResult?.beforeAgentRunBlocked)) {
       throw new Error("OpenClaw did not confirm Companion turn execution and session recording.");
     }
+    if (silentSendCapture?.completedSilently()) opts.onCompletedSilently?.();
     if (result?.dispatched === true && !recordFailed && result.admission?.kind !== "observeOnly" && !result.dispatchResult?.beforeAgentRunBlocked &&
         !opts.turn.contextResetExpected && approvalBinding.modelStarted) {
       await acknowledgeBackgroundContext();
@@ -6025,11 +6026,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         await input.validateBeforeDispatch();
         return ["Reopening a previous conversation with /resume is not supported by this OpenClaw channel. Use /new for a fresh conversation or /status for the current session."];
       }
-      const texts: string[] = [];
-      const collect = (payload: unknown) => {
-        const text = payloadText(payload).trim();
-        if (text && !isInkboxSilentReply(text)) texts.push(text);
-      };
+      const blocks: { text: string; isError: boolean }[] = [];
+      const finals: string[] = [];
+      let completedSilently = false;
       const turn = companionTurn(input);
       if (input.commandAuthorized) {
         const aliases: Record<string, string> = { "/clear": "/new", "/cancel": "/stop", "/health": "/status" };
@@ -6037,14 +6036,24 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       await dispatchInboundTurn({
         ...opts, activeCalls, turn,
+        replyOptionsOverride: { disableBlockStreaming: true },
+        onCompletedSilently: () => { completedSilently = true; },
         deliveryOverride: {
-          // Journal delivery happens after submission. Mark collection as an
-          // intentional channel transform, never as a failed visible send.
-          transformReplyPayload: (payload) => { collect(payload); return null; },
-          deliver: async (payload) => { collect(payload); return { visibleReplySent: false }; },
+          deliver: async (payload, info) => {
+            const text = payloadText(payload).trim();
+            if (text && !isInkboxSilentReply(text)) {
+              if (info?.kind === "block") {
+                blocks.push({ text, isError: Boolean(payload && typeof payload === "object" && (payload as { isError?: unknown }).isError === true) });
+              } else if (!info?.kind || info.kind === "final") finals.push(text);
+            }
+            // The journal owns the eventual send; collection is not visible delivery.
+            return { visibleReplySent: false, suppression: { reason: "channel_transform" } };
+          },
         },
       });
-      return texts;
+      // Older hosts can consume the final when completed blocks were emitted.
+      // A proven final send must not resurrect earlier progress as a new reply.
+      return finals.length ? finals : blocks.filter((block) => !completedSilently || block.isError).map((block) => block.text);
     },
     async canApprove(input) { return acceptsApproval(companionTurn(input), opts.account); },
     async resolveApproval(event, key, beforeResolve) {

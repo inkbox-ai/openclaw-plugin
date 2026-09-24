@@ -91,7 +91,8 @@ describe("Companion host boundary", () => {
       const native = await dispatchInboundMessageWithDispatcher({
         ctx: { Body: input.ctxPayload.message.bodyForAgent, From: "inkbox:email:sponsor@example.com", To: "email:conversation-one", OriginatingChannel: "inkbox", OriginatingTo: "email:conversation-one", Provider: "inkbox", Surface: "inkbox", ChatType: "group", WasMentioned: true, SessionKey: input.routeSessionKey, MessageSid: `native-companion-reply-${kind}`, CommandAuthorized: false },
         cfg: { session: { store: join(state.dir, "native-sessions.json") }, agents: { defaults: { workspace: state.dir } } },
-        dispatcherOptions: { ...input.dispatcherOptions, deliver: async (payload) => { immediateDelivery(payload); return input.delivery.deliver(payload); } },
+        dispatcherOptions: { ...input.dispatcherOptions, deliver: async (payload, info) => { immediateDelivery(payload); return input.delivery.deliver(payload, info); } },
+        replyOptions: input.replyOptions,
         replyResolver: async () => {
           const context = { sessionKey: input.routeSessionKey, runId: "owned-companion-run" };
           bindSilentSendCaptureToRun({ prompt: input.ctxPayload.message.bodyForAgent }, context);
@@ -110,9 +111,90 @@ describe("Companion host boundary", () => {
     try {
       await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
       expect(s.dispatchReply).toHaveBeenCalledOnce();
-      expect(immediateDelivery).not.toHaveBeenCalled();
+      expect(immediateDelivery).toHaveBeenCalledTimes(kind === "accepted" ? 0 : 1);
       expect(s.identity.replyAllEmail).toHaveBeenCalledTimes(kind === "accepted" ? 0 : 1);
       if (kind !== "accepted") expect(s.identity.replyAllEmail).toHaveBeenCalledWith("source-1", { bodyText: text });
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it.each([
+    { name: "matching block and final", blocks: [{ text: "One answer." }], final: { text: "One answer." }, expected: ["One answer."] },
+    { name: "combined final", blocks: [{ text: "First part." }, { text: "Second part." }], final: { text: "First part.\nSecond part." }, expected: ["First part.\nSecond part."] },
+    { name: "accepted final send", blocks: [{ text: "Preparing a reply." }], final: { text: "Finished." }, accepted: true, expected: [] },
+    { name: "accepted send with genuine final error", blocks: [{ text: "Preparing a reply." }], final: { text: "Provider request failed.", isError: true }, accepted: true, expected: ["Provider request failed."] },
+    { name: "accepted send with genuine block error", blocks: [{ text: "Preparing a reply." }, { text: "Provider request failed.", isError: true }], final: { text: "Finished." }, accepted: true, expected: ["Provider request failed."] },
+    { name: "failed final send", blocks: [{ text: "Preparing a reply." }], final: { text: "The send failed." }, failed: true, expected: ["The send failed."] },
+    { name: "unowned final send", blocks: [{ text: "Preparing a reply." }], final: { text: "One answer." }, unowned: true, expected: ["One answer."] },
+    { name: "tool output excluded", blocks: [{ text: "One answer." }], final: { text: "One answer." }, tool: { text: "Private tool output." }, expected: ["One answer."] },
+  ])("journals actual native Companion $name without repeating streamed output", async ({ name, blocks, final, accepted, failed, unowned, tool, expected }) => {
+    const s = setup();
+    vi.stubEnv("OPENCLAW_STATE_DIR", state.dir);
+    s.dispatchReply.mockImplementationOnce(async (input) => {
+      expect(input.replyOptions.disableBlockStreaming).toBe(true);
+      const native = await dispatchInboundMessageWithDispatcher({
+        ctx: { Body: input.ctxPayload.message.bodyForAgent, From: "inkbox:email:sponsor@example.com", To: "email:conversation-one", OriginatingChannel: "inkbox", OriginatingTo: "email:conversation-one", Provider: "inkbox", Surface: "inkbox", ChatType: "group", WasMentioned: true, SessionKey: input.routeSessionKey, MessageSid: `native-companion-block-reply-${name}`, CommandAuthorized: false },
+        cfg: { session: { store: join(state.dir, "native-sessions.json") }, agents: { defaults: { workspace: state.dir, blockStreamingDefault: "on", verboseDefault: "full" } } },
+        dispatcherOptions: { ...input.dispatcherOptions, deliver: input.delivery.deliver },
+        replyOptions: input.replyOptions,
+        replyResolver: async (_ctx, options) => {
+          expect(options?.disableBlockStreaming).toBe(true);
+          const context = { sessionKey: input.routeSessionKey, runId: "owned-companion-block-run" };
+          bindSilentSendCaptureToRun({ prompt: input.ctxPayload.message.bodyForAgent }, context);
+          recordSilentSendModelStarted({}, context);
+          // Completed CLI replies and older hosts can still emit blocks when
+          // incremental model streaming is disabled for this turn.
+          for (const block of blocks) await options?.onBlockReply?.(block);
+          if (tool) await options?.onToolResult?.(tool);
+          if (accepted || failed || unowned) {
+            const toolContext = unowned ? { ...context, runId: "unrelated-block-run" } : context;
+            const event = { toolName: "inkbox_send_sms", toolCallId: "companion-block-final-send", params: { completeSilently: true } };
+            recordSilentSendBeforeToolCall(event, toolContext);
+            recordSilentSendAfterToolCall({ ...event, result: failed ? { isError: true } : { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } } }, toolContext);
+          }
+          return final;
+        },
+      });
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: native };
+    });
+    try {
+      await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+      expect(s.dispatchReply).toHaveBeenCalledOnce();
+      expect(s.identity.replyAllEmail.mock.calls.map(([, payload]) => payload.bodyText)).toEqual(expected);
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it("retains completed blocks when an older host has already consumed the final", async () => {
+    const s = setup();
+    s.dispatchReply.mockImplementationOnce(async (input) => {
+      await input.delivery.deliver({ text: "First part." }, { kind: "block" });
+      await input.delivery.deliver({ text: "Second part." }, { kind: "block" });
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: { queuedFinal: false, counts: { tool: 0, block: 2, final: 0 }, beforeAgentRunBlocked: false } };
+    });
+    await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+    expect(s.identity.replyAllEmail.mock.calls.map(([, payload]) => payload.bodyText)).toEqual(["First part.", "Second part."]);
+  });
+  it("preserves the native required-reply policy for NO_REPLY without accepted-send proof", async () => {
+    const s = setup();
+    const expected: string[] = [];
+    vi.stubEnv("OPENCLAW_STATE_DIR", state.dir);
+    s.dispatchReply.mockImplementationOnce(async (input) => {
+      const options = {
+        ctx: { Body: input.ctxPayload.message.bodyForAgent, From: "inkbox:email:sponsor@example.com", To: "email:conversation-one", OriginatingChannel: "inkbox", OriginatingTo: "email:conversation-one", Provider: "inkbox", Surface: "inkbox", ChatType: "group", WasMentioned: true, SessionKey: input.routeSessionKey, MessageSid: "native-companion-no-reply", CommandAuthorized: false },
+        cfg: { session: { store: join(state.dir, "native-sessions.json") }, agents: { defaults: { workspace: state.dir } } },
+        replyOptions: input.replyOptions,
+        replyResolver: async () => ({ text: "NO_REPLY" }),
+      };
+      // Follow the installed host's policy, including its required-reply fallback
+      // when present, without imposing that policy on older supported hosts.
+      await dispatchInboundMessageWithDispatcher({
+        ...options, ctx: { ...options.ctx, SessionKey: `${input.routeSessionKey}:baseline`, MessageSid: "native-companion-no-reply-baseline" },
+        dispatcherOptions: { deliver: async (payload) => { if (payload.text) expected.push(payload.text); return { visibleReplySent: false, suppression: { reason: "channel_transform" } }; } },
+      });
+      const native = await dispatchInboundMessageWithDispatcher({ ...options, dispatcherOptions: { ...input.dispatcherOptions, deliver: input.delivery.deliver } });
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: native };
+    });
+    try {
+      await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+      expect(s.dispatchReply).toHaveBeenCalledOnce();
+      expect(s.identity.replyAllEmail.mock.calls.map(([, payload]) => payload.bodyText)).toEqual(expected);
     } finally { vi.unstubAllEnvs(); }
   });
   it.each(["phone", "imessage"])("preserves current %s mention provenance before native command normalization", async (channel) => {

@@ -50,11 +50,14 @@ describe("run-scoped explicit send completion", () => {
   });
   it("suppresses only after positively settled final actions and preserves errors/attachments", () => {
     const { capture } = begin();
+    expect(capture.completedSilently()).toBe(false);
     expect(capture.transform(reply)).toBe(reply);
     send();
+    expect(capture.completedSilently()).toBe(true);
     expect(capture.transform(reply)).toBeNull();
     for (const payload of [{ text: "error", isError: true }, { text: "attachment", mediaUrl: "https://example.com/a" }, { mediaUrls: ["https://example.com/a"] }, { media: { kind: "file" } }]) expect(capture.transform(payload)).toBe(payload);
     capture.finish(); expect(capture.transform(reply)).toBe(reply);
+    expect(capture.completedSilently()).toBe(false);
   });
   it("isolates overlapping runs in the same session", () => {
     const first = begin(); const second = begin("run-2");
@@ -123,6 +126,46 @@ describe("run-scoped explicit send completion", () => {
   it("clears prior batch completion when the model resumes", () => {
     const { capture } = begin(); send(); expect(capture.transform(reply)).toBeNull();
     recordSilentSendModelStarted({}, context); expect(capture.transform(reply)).toBe(reply);
+  });
+  it("keeps delayed prior-batch observers out of the current final-send proof", () => {
+    const { capture } = begin();
+    const prior = { toolName: "inkbox_whoami", toolCallId: "previous-model-read", params: {} };
+    recordSilentSendBeforeToolCall(prior, context);
+    recordSilentSendModelStarted({}, context);
+    send();
+    // Native streamed-block delivery can delay this observer until the next
+    // model has already executed its final send (actual host regression).
+    recordSilentSendAfterToolCall({ ...prior, result: { content: [] } }, context);
+    expect(capture.shape()).toMatchObject({ attempts: 1, accepted: 1, invalid: false });
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+  });
+  it("never carries prior-batch accepted sends into the current proof", () => {
+    const { capture } = begin(); send();
+    recordSilentSendModelStarted({}, context);
+    recordSilentSendAfterToolCall({ toolName: "inkbox_send_email", toolCallId: "send-1", params: { completeSilently: true }, result: { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } } }, context);
+    expect(capture.shape()).toMatchObject({ attempts: 0, accepted: 0, invalid: false });
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
+  it.each(["unknown", "different-name"])("still rejects %s prior-batch lookalikes", (kind) => {
+    const { capture } = begin();
+    recordSilentSendBeforeToolCall({ toolName: "inkbox_whoami", toolCallId: "previous" }, context);
+    recordSilentSendModelStarted({}, context); send();
+    recordSilentSendAfterToolCall({ toolName: kind === "unknown" ? "inkbox_whoami" : "inkbox_list_contacts", toolCallId: kind === "unknown" ? "unseen" : "previous", result: {} }, context);
+    expect(capture.shape().invalid).toBe(true);
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
+  it("fails closed if a new batch reuses a previous tool-call ID", () => {
+    const { capture } = begin(); send();
+    recordSilentSendModelStarted({}, context); send();
+    expect(capture.shape().invalid).toBe(true);
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
+  it("does not mistake an unseen nameless callback for a prior-batch call", () => {
+    const { capture } = begin(); send();
+    recordSilentSendAfterToolCall({ toolCallId: "unseen", result: {} }, context);
+    expect(capture.shape().invalid).toBe(true);
+    expect(capture.completedSilently()).toBe(false);
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
   });
   it("records only the first fixed invalidation shape, never parameter content", () => {
     const { capture } = begin();
