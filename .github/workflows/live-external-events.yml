@@ -42,13 +42,14 @@ concurrency:
 jobs:
   external-events:
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    # OpenClaw snapshots the linked package; test caches must not mutate it.
-    env:
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/python-pycache
-      PYTEST_ADDOPTS: '-o cache_dir="${{ runner.temp }}/pytest-cache"'
 
     steps:
       - uses: actions/checkout@v7
+      - name: Keep test caches outside the linked plugin
+        # OpenClaw snapshots the whole linked package during native cold-load.
+        run: |
+          echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/python-pycache" >> "$GITHUB_ENV"
+          echo "PYTEST_ADDOPTS=-o cache_dir=\"$RUNNER_TEMP/pytest-cache\"" >> "$GITHUB_ENV"
       - name: Set up env paths (gateway log)
         run: echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
 
