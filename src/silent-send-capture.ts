@@ -1,20 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { transformInkboxReplyPayload } from "./silent-reply.js";
 
-type Context = { sessionKey?: string; runId?: string; toolCallId?: string };
+type Context = { sessionKey?: string; sessionId?: string; runId?: string; toolCallId?: string };
 type Event = {
   runId?: string;
   toolCallId?: string;
   toolName?: string;
+  toolKind?: string;
+  toolInputKind?: string;
   params?: Record<string, unknown>;
   result?: unknown;
   error?: unknown;
 };
-type Attempt = { name: string; accepted: boolean; wrapper: boolean };
+type Attempt = { name: string; accepted: boolean; wrapper: boolean; nativeCode?: boolean };
 type Capture = {
   sessionKey: string;
   marker: string;
   runId?: string;
+  nativeSessionId?: string;
   closed: boolean;
   batchStarted: boolean;
   invalid: boolean;
@@ -31,6 +34,7 @@ type Result = {
   terminate?: unknown;
   isError?: unknown;
   details?: {
+    status?: unknown;
     inkboxSendCompletion?: { accepted?: unknown; completeSilently?: unknown };
     tool?: { name?: unknown };
     result?: unknown;
@@ -45,11 +49,14 @@ const sendTools = new Set([
   "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_forward_email",
 ]);
 const transportTools = new Set(["tool_call", "tool_search_code"]);
-// OpenClaw 2026.9.6's inner source-reply finalizer ignores intentional tool-batch
-// completion for cross-channel sends and emits this fixed error instead. There
-// is no public reason discriminator. Match exactly, only with independently
+// OpenClaw 2026.9.6's inner source/incomplete-turn finalizers can overlook
+// intentional cross-channel tool completion. Neither exposes a public reason
+// discriminator. Match only their two verified fixed errors, with independent
 // accepted final-send evidence below; changed wording and real errors stay visible.
-const nativeEmptyReplyText = "I finished the turn, but it did not produce a visible reply. Please try again, or start a new session if this keeps happening.";
+const nativeEmptyReplyTexts = new Set([
+  "I finished the turn, but it did not produce a visible reply. Please try again, or start a new session if this keeps happening.",
+  "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
+]);
 
 function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_before" | "nonfinal_before" | "missing_before" | "name_mismatch" | "tool_error" | "nonterminal_after" | "unaccepted_after", event: Event, context: Context): void {
   capture.invalid = true;
@@ -92,6 +99,24 @@ function matching(event: Event, context: Context): Capture[] {
   );
 }
 
+function isNativeCodeBefore(event: Event): boolean {
+  return event.toolName === "exec" && event.toolKind === "code_mode_exec" && event.toolInputKind === "javascript";
+}
+
+function matchingBefore(event: Event, context: Context): Capture[] {
+  const exact = matching(event, context);
+  if (exact.length || !isNativeCodeBefore(event) || !context.sessionKey ||
+      !context.runId || !context.sessionId?.trim() ||
+      (event.runId !== undefined && event.runId !== context.runId)) return exact;
+  // Native Code Mode's adapter uses the routed sandbox key for BEFORE, while
+  // before_agent_run, nested tools and AFTER use the canonical session key.
+  // Admit that alias only for this already prompt-bound run/native session;
+  // never infer ownership from a sender, a key suffix, or a tool name alone.
+  const owned = [...captures].filter((capture) => !capture.closed &&
+    capture.runId === context.runId && capture.nativeSessionId === context.sessionId);
+  return owned.length === 1 ? owned : [];
+}
+
 function acceptedSendResult(value: unknown): boolean {
   const result = value as Result | undefined;
   const receipt = result?.details?.inkboxSendCompletion;
@@ -130,6 +155,10 @@ function acceptedWrapper(
       result.details?.tool?.name === children[0][1].name &&
       acceptedSendResult(result.details?.result);
   }
+  // The public native BEFORE tag distinguishes JavaScript Code Mode from the
+  // unrelated shell tool also named exec. The native outer status must be
+  // completed: termination alone can accompany failed/refreshing execution.
+  if (attempt.nativeCode) return result.details?.status === "completed";
   // Code can return arbitrary JSON. Trust only observed child sends and the
   // host's terminal-batch flag, never a receipt returned by the code itself.
   return attempt.name === "tool_search_code";
@@ -151,7 +180,7 @@ export function beginSilentSendCapture(sessionKey: string) {
       // An entirely successful, explicitly final batch authorizes silence. Never
       // fabricate current-source delivery or hide other errors/attachments.
       if (completedFinalBatch(capture) &&
-          (!payload.isError || (payload.isError === true && payload.text === nativeEmptyReplyText)) &&
+          (!payload.isError || (payload.isError === true && typeof payload.text === "string" && nativeEmptyReplyTexts.has(payload.text))) &&
           !payload.media && !payload.mediaUrl && !payload.mediaUrls?.length) return null;
       return transformInkboxReplyPayload(payload);
     },
@@ -173,7 +202,10 @@ export function bindSilentSendCaptureToRun(event: { prompt?: string }, context: 
   if (!context.runId || !context.sessionKey || typeof event.prompt !== "string") return;
   for (const capture of captures) {
     if (!capture.closed && !capture.runId && capture.sessionKey === context.sessionKey &&
-        event.prompt.includes(capture.marker)) capture.runId = context.runId;
+        event.prompt.includes(capture.marker)) {
+      capture.runId = context.runId;
+      if (context.sessionId?.trim()) capture.nativeSessionId = context.sessionId;
+    }
   }
 }
 
@@ -192,7 +224,7 @@ export function recordSilentSendModelStarted(event: Event, context: Context): vo
 }
 
 export function recordSilentSendBeforeToolCall(event: Event, context: Context): void {
-  for (const capture of matching(event, context)) {
+  for (const capture of matchingBefore(event, context)) {
     capture.beforeCount += 1;
     const id = event.toolCallId ?? context.toolCallId;
     const duplicate = id && (capture.attempts.has(id) || capture.priorBatchCalls.has(id));
@@ -201,8 +233,9 @@ export function recordSilentSendBeforeToolCall(event: Event, context: Context): 
       continue;
     }
     const name = event.toolName ?? "";
-    const wrapper = transportTools.has(name);
-    capture.attempts.set(id, { name, wrapper, accepted: false });
+    const nativeCode = isNativeCodeBefore(event);
+    const wrapper = transportTools.has(name) || nativeCode;
+    capture.attempts.set(id, { name, wrapper, accepted: false, ...(nativeCode ? { nativeCode: true } : {}) });
     if (!wrapper && (!sendTools.has(name) || event.params?.completeSilently !== true)) {
       invalidate(capture, "nonfinal_before", event, context);
     }

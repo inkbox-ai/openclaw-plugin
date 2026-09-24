@@ -9,10 +9,14 @@ const nativeEmptyReply = {
   text: "I finished the turn, but it did not produce a visible reply. Please try again, or start a new session if this keeps happening.",
   isError: true,
 };
-function begin(runId = context.runId) {
+const nativeIncompleteReply = {
+  text: "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
+  isError: true,
+};
+function begin(runId = context.runId, nativeSessionId?: string) {
   const capture = beginSilentSendCapture(context.sessionKey);
   active.push(capture); capture.activate();
-  const ctx = { ...context, runId };
+  const ctx = { ...context, runId, ...(nativeSessionId ? { sessionId: nativeSessionId } : {}) };
   bindSilentSendCaptureToRun({ prompt: `Request\n${capture.marker}` }, ctx);
   recordSilentSendModelStarted({}, ctx);
   return { capture, ctx };
@@ -48,6 +52,7 @@ describe("native completed-run ownership of pre-execution failures", () => {
     expect(capture.shape().invalid).toBe(false);
     expect(capture.completedSilently()).toBe(true);
     expect(capture.transform(nativeEmptyReply)).toBeNull();
+    expect(capture.transform(nativeIncompleteReply)).toBeNull();
     const error = { text: "Provider failed", isError: true };
     expect(capture.transform(error)).toBe(error);
     recordSilentSendAfterToolCall({ toolName: "tool_describe", toolCallId: "describe-1", error: "duplicate late observer" }, context);
@@ -329,5 +334,79 @@ describe("deferred send transport wrappers", () => {
   });
   it("does not trust arbitrary code-returned receipts without observed sends", () => {
     expect(wrapped({ name: "tool_search_code", omitChild: true }).transform(reply)).toBe(reply);
+  });
+});
+
+describe("native Code Mode final-send transport", () => {
+  function nativeExec(options: {
+    kind?: string; inputKind?: string; status?: string; terminal?: boolean;
+    childParent?: string; childError?: boolean; omitChild?: boolean;
+    mixed?: boolean; outerError?: boolean; omitBefore?: boolean;
+    alias?: "owned" | "wrong-id" | "missing-id" | "wrong-run" | "untagged" | "unbound-id" | "conflicting-run";
+  } = {}) {
+    const { capture } = begin(context.runId, options.alias === "unbound-id" ? undefined : "native-session-1");
+    const outer = {
+      toolName: "exec", toolCallId: "call_exec|fc_exec",
+      toolKind: options.alias === "untagged" ? undefined : options.kind ?? "code_mode_exec",
+      toolInputKind: options.inputKind ?? "javascript",
+      ...(options.alias === "conflicting-run" ? { runId: "another-run" } : {}),
+      params: { title: "Send", code: "synthetic code" },
+    };
+    const beforeContext = options.alias ? {
+      ...context, sessionKey: "agent:main:inkbox:default:direct:sender",
+      sessionId: options.alias === "missing-id" ? undefined : options.alias === "wrong-id" ? "another-session" : "native-session-1",
+      runId: options.alias === "wrong-run" ? "another-run" : context.runId,
+    } : context;
+    if (!options.omitBefore) recordSilentSendBeforeToolCall(outer, beforeContext);
+    const child = {
+      toolName: "inkbox_send_email",
+      toolCallId: `tool_search_code:${options.childParent ?? "call_exec_fc_exec"}:inkbox_send_email:1`,
+      params: { completeSilently: true },
+    };
+    if (!options.omitChild) {
+      recordSilentSendBeforeToolCall(child, context);
+      recordSilentSendAfterToolCall({ ...child,
+        result: { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } },
+        ...(options.childError ? { error: "failed" } : {}),
+      }, context);
+    }
+    if (options.mixed) recordSilentSendBeforeToolCall({
+      toolName: "inkbox_whoami", toolCallId: "tool_search_code:call_exec_fc_exec:inkbox_whoami:2", params: {},
+    }, context);
+    recordSilentSendAfterToolCall({ toolName: outer.toolName, toolCallId: outer.toolCallId, params: outer.params,
+      result: { terminate: options.terminal !== false, details: { status: options.status ?? "completed" } },
+      ...(options.outerError ? { error: "failed" } : {}),
+    }, context);
+    return capture;
+  }
+  it("accepts only the native-tagged completed wrapper and independently accepted child", () => {
+    const capture = nativeExec();
+    expect(capture.shape()).toMatchObject({ attempts: 2, accepted: 2, invalid: false });
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+    const failure = { text: "genuine failure", isError: true };
+    expect(capture.transform(failure)).toBe(failure);
+  });
+  it("recognizes the native routed BEFORE alias only through the bound run and native session", () => {
+    const capture = nativeExec({ alias: "owned" });
+    expect(capture.shape()).toMatchObject({ attempts: 2, accepted: 2, invalid: false });
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+    expect(capture.transform(nativeIncompleteReply)).toBeNull();
+    for (const payload of [
+      { ...nativeIncompleteReply, text: `${nativeIncompleteReply.text} ` },
+      { ...nativeIncompleteReply, mediaUrl: "https://example.com/file" },
+    ]) expect(capture.transform(payload)).toBe(payload);
+  });
+  it.each([
+    { kind: "shell_exec" }, { inputKind: "unknown" }, { status: "failed" },
+    { status: "waiting" }, { terminal: false }, { childParent: "another_parent" },
+    { childError: true }, { omitChild: true }, { mixed: true }, { outerError: true },
+    { omitBefore: true },
+    { alias: "wrong-id" as const }, { alias: "missing-id" as const },
+    { alias: "wrong-run" as const }, { alias: "untagged" as const },
+    { alias: "unbound-id" as const }, { alias: "conflicting-run" as const },
+  ])("keeps unproved or mixed native execution visible: %j", (options) => {
+    const capture = nativeExec(options);
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+    expect(capture.transform(nativeIncompleteReply)).toBe(nativeIncompleteReply);
   });
 });
