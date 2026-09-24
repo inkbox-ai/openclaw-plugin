@@ -137,6 +137,69 @@ def test_native_catalog_and_factory_markers_require_exact_native_envelopes():
     ]
 
 
+def test_native_tool_assembly_diagnostics_project_counts_and_flags_only():
+    records = [
+        {"subsystem": "agent/embedded", "level": "info", "message": "code-mode diagnostic " + json.dumps({
+            "boundary": "activation", "runId": "private-run", "active": True, "toolsEnabled": True,
+            "rawRun": False, "toolsDisabled": False, "fallbackActive": False, "allowlist": "unset",
+        })},
+        {"subsystem": "agent/embedded", "level": "info", "message": "code-mode diagnostic " + json.dumps({
+            "boundary": "final-surface", "runId": "private-run", "catalogToolCount": 54,
+            "visibleToolNames": ["private-tool"], "fallbackActive": False,
+        })},
+        {"subsystem": "agents/tool-policy", "level": "debug", "message": "tool policy removed 55 tool(s) via tools.allow: private-tool",
+         "rule": "tools.allow", "removedToolCount": 55, "removedTools": ["inkbox_send_email", "private-tool"], "removedToolsTruncated": True},
+        {"subsystem": "plugins/tools", "level": "trace", "message": "[trace:plugin-tools] factory timings totalMs=12 factoryCount=64 shown=20 omitted=44 factories=private-owner names=[private-tool] result=single count=1 optional=false"},
+    ]
+    assert native_model_failure_shapes("\n".join(map(json.dumps, records))) == [
+        "native_tool_activation active=true enabled=true raw=false disabled=false fallback=false runtime_allowlist=unset",
+        "native_tool_surface count=54 fallback=false",
+        "native_tool_policy rule=global_allow removed=55 inkbox_removed=true truncated=true",
+        "native_tool_factories count=64",
+    ]
+    for field, value in [("subsystem", "inkbox"), ("level", "error")]:
+        assert native_model_failure_shapes("\n".join(json.dumps({**record, field: value}) for record in records)) == []
+
+
+def test_tool_assembly_diagnostics_fail_closed_on_unknown_types_and_bound_counts():
+    def code_mode(**fields):
+        return {"subsystem": "agent/embedded", "level": "info", "message": "code-mode diagnostic " + json.dumps(fields)}
+
+    records = [
+        code_mode(boundary="activation", active="private", toolsEnabled=["private"], rawRun=1,
+                  toolsDisabled=None, fallbackActive={}, allowlist=["private"]),
+        code_mode(boundary="final-surface", catalogToolCount=99999999, fallbackActive=True),
+        code_mode(boundary="final-surface", catalogToolCount=True),
+        code_mode(boundary="final-surface", catalogToolCount=-1),
+        {"subsystem": "agents/tool-policy", "level": "debug", "message": "tool policy removed private",
+         "rule": {"private": "tools.allow"}, "removedToolCount": "private", "removedTools": "private", "removedToolsTruncated": "true"},
+        code_mode(boundary="private", catalogToolCount=54),
+        {"subsystem": "agent/embedded", "level": "info", "message": "code-mode diagnostic [\"private\"]"},
+        {"subsystem": "agent/embedded", "level": "info", "message": "code-mode diagnostic {private"},
+        {"subsystem": "plugins/tools", "level": "trace", "message": "[trace:plugin-tools] factory timings totalMs=12 factoryCount=99999999 shown=20 omitted=44 factories=private"},
+    ]
+    shapes = native_model_failure_shapes("\n".join(map(json.dumps, records)))
+    assert shapes == [
+        "native_tool_activation active=unknown enabled=unknown raw=unknown disabled=unknown fallback=unknown runtime_allowlist=unknown",
+        "native_tool_surface count=9999 fallback=true",
+        "native_tool_surface count=unknown fallback=unknown",
+        "native_tool_surface count=unknown fallback=unknown",
+        "native_tool_policy rule=other removed=unknown inkbox_removed=unknown truncated=unknown",
+        "native_tool_factories count=9999",
+    ]
+    assert "private" not in " ".join(shapes)
+
+
+def test_truncated_tool_policy_names_cannot_prove_inkbox_was_not_removed():
+    base = {"subsystem": "agents/tool-policy", "level": "debug", "message": "tool policy removed 55 tool(s) via tools.allow: private",
+            "rule": "tools.allow", "removedToolCount": 55, "removedTools": ["private"]}
+    for truncated, expected in [(True, "unknown"), (None, "unknown"), (False, "false")]:
+        shapes = native_model_failure_shapes(json.dumps({**base, "removedToolsTruncated": truncated}))
+        assert f"inkbox_removed={expected}" in shapes[0]
+    shapes = native_model_failure_shapes(json.dumps({**base, "removedTools": [None], "removedToolsTruncated": False}))
+    assert "inkbox_removed=unknown" in shapes[0]
+
+
 def test_native_timeline_projects_only_fixed_preparation_stages(tmp_path):
     base = {"schemaVersion": "openclaw.diagnostics.v1", "name": "agent.prepare", "phase": "agent.prepare",
             "type": "span.error", "attributes": {"stage": "attempt.session-runtime", "private": "secret"},

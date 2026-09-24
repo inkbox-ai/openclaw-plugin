@@ -155,7 +155,7 @@ jobs:
         run: |
           # Keep native error metadata in the existing private gateway log.
           openclaw config set logging.consoleStyle json
-          OPENCLAW_DIAGNOSTICS=1 OPENCLAW_DIAGNOSTICS_TIMELINE_PATH="$RUNNER_TEMP/native-timeline.jsonl" openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
+          OPENCLAW_LOG_LEVEL=trace OPENCLAW_DEBUG_CODE_MODE=1 OPENCLAW_DIAGNOSTICS=1 OPENCLAW_DIAGNOSTICS_TIMELINE_PATH="$RUNNER_TEMP/native-timeline.jsonl" openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway to be ready (tunnel + webhooks)…"
           for i in $(seq 1 36); do      # up to ~180s

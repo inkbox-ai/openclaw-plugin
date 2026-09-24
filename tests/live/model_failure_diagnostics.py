@@ -40,6 +40,37 @@ EMPTY_TOOLS_PREFIX = "No callable tools remain after resolving explicit tool all
 EMPTY_TOOLS_SUFFIX = ". Fix the allowlist or enable the plugin that registers the requested tool."
 
 
+def _count(value: object) -> str:
+    return str(min(value, 9999)) if type(value) is int and value >= 0 else "unknown"
+
+
+def _flag(value: object) -> str:
+    return str(value).lower() if type(value) is bool else "unknown"
+
+
+def _code_mode_shape(message: object) -> str | None:
+    prefix = "code-mode diagnostic "
+    if not isinstance(message, str) or not message.startswith(prefix):
+        return None
+    try:
+        fields = json.loads(message[len(prefix):])
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(fields, dict):
+        return None
+    if fields.get("boundary") == "activation":
+        allowlist = fields.get("allowlist")
+        allowlist = allowlist if isinstance(allowlist, str) and allowlist in ("unset", "empty", "nonempty") else "unknown"
+        return (f"native_tool_activation active={_flag(fields.get('active'))} "
+                f"enabled={_flag(fields.get('toolsEnabled'))} raw={_flag(fields.get('rawRun'))} "
+                f"disabled={_flag(fields.get('toolsDisabled'))} fallback={_flag(fields.get('fallbackActive'))} "
+                f"runtime_allowlist={allowlist}")
+    if fields.get("boundary") == "final-surface":
+        return (f"native_tool_surface count={_count(fields.get('catalogToolCount'))} "
+                f"fallback={_flag(fields.get('fallbackActive'))}")
+    return None
+
+
 def _empty_tools_shape(value: str) -> str | None:
     """Classify the observed native guard without exposing requested tool names."""
     if not value.startswith(EMPTY_TOOLS_PREFIX) or not value.endswith(EMPTY_TOOLS_SUFFIX):
@@ -141,6 +172,29 @@ def native_model_failure_shapes(log: str) -> list[str]:
             match = re.fullmatch(r"code-mode: cataloged ([0-9]{1,8}) tools behind exec/wait", message) if isinstance(message, str) else None
             if match:
                 shapes.append(f"native_tool_catalog kind=code_mode count={min(int(match[1]), 9999)}")
+            code_mode = _code_mode_shape(message)
+            if code_mode:
+                shapes.append(code_mode)
+        elif record.get("subsystem") == "agents/tool-policy" and record.get("level") == "debug":
+            message = record.get("message")
+            if isinstance(message, str) and message.startswith("tool policy removed "):
+                rule = {"tools.allow": "global_allow", "tools.deny": "global_deny"}.get(
+                    record.get("rule") if isinstance(record.get("rule"), str) else "", "other"
+                )
+                removed = record.get("removedTools")
+                inkbox = None
+                if isinstance(removed, list):
+                    if any(isinstance(name, str) and name.startswith("inkbox_") for name in removed):
+                        inkbox = True
+                    elif record.get("removedToolsTruncated") is False and all(isinstance(name, str) for name in removed):
+                        inkbox = False
+                shapes.append(f"native_tool_policy rule={rule} removed={_count(record.get('removedToolCount'))} "
+                              f"inkbox_removed={_flag(inkbox)} truncated={_flag(record.get('removedToolsTruncated'))}")
+        elif record.get("subsystem") == "plugins/tools" and record.get("level") in ("trace", "warn"):
+            message = record.get("message")
+            match = re.match(r"^\[trace:plugin-tools\] factory timings totalMs=[0-9]+ factoryCount=([0-9]{1,8}) shown=[0-9]+ omitted=[0-9]+ factories=", message) if isinstance(message, str) else None
+            if match:
+                shapes.append(f"native_tool_factories count={min(int(match[1]), 9999)}")
         elif record.get("subsystem") == "plugins" and record.get("level") == "error":
             message = record.get("message")
             if isinstance(message, str) and message.startswith("plugin tool failed (inkbox): "):
