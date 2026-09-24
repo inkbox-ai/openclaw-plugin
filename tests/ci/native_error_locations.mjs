@@ -35,7 +35,7 @@ export function pluginLoadErrors(log) {
 export async function locatePluginLoadErrors({ executable, logPath, pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..") }) {
   try {
     const errors = pluginLoadErrors(await readLog(logPath));
-    if (!errors.length) return ["native_plugin_errors=no_records"];
+    if (!errors.length) return ["native_plugin_errors=no_records_in_tail"];
     const host = path.dirname(await fs.realpath(executable));
     const hostManifest = JSON.parse(await fs.readFile(path.join(host, "package.json"), "utf8"));
     const plugin = await fs.realpath(pluginRoot);
@@ -48,7 +48,7 @@ export async function locatePluginLoadErrors({ executable, logPath, pluginRoot =
       let found = 0;
       for (const frame of error.text.split("\n").slice(1, 81)) {
         if (!frame.trimStart().startsWith("at ")) continue;
-        const match = /(?:\(|\s)((?:file:\/\/\/|\/)[^()\r\n]+):([1-9]\d{0,6}):([1-9]\d{0,5})\)?$/.exec(frame);
+        const match = /(?:\(|\s)((?:file:\/\/\/|\/)[^()\r\n]+):([1-9]\d{0,6}):([1-9]\d{0,5})\)*$/.exec(frame);
         if (!match) continue;
         let filename;
         try {

@@ -42,6 +42,10 @@ concurrency:
 jobs:
   live:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    # OpenClaw snapshots the linked package; test caches must not mutate it.
+    env:
+      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/python-pycache
+      PYTEST_ADDOPTS: '-o cache_dir="${{ runner.temp }}/pytest-cache"'
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -155,7 +159,7 @@ jobs:
         run: |
           # Keep native error metadata in the existing private gateway log.
           openclaw config set logging.consoleStyle json
-          INKBOX_CI_NATIVE_HOST="$(command -v openclaw)" NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import=$GITHUB_WORKSPACE/tests/ci/native_tool_state.mjs" OPENCLAW_PLUGIN_LIFECYCLE_TRACE=1 OPENCLAW_LOG_LEVEL=trace OPENCLAW_DEBUG_CODE_MODE=1 OPENCLAW_DIAGNOSTICS=1 OPENCLAW_DIAGNOSTICS_TIMELINE_PATH="$RUNNER_TEMP/native-timeline.jsonl" openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
+          OPENCLAW_LOG_LEVEL=trace OPENCLAW_DEBUG_CODE_MODE=1 OPENCLAW_DIAGNOSTICS=1 OPENCLAW_DIAGNOSTICS_TIMELINE_PATH="$RUNNER_TEMP/native-timeline.jsonl" openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway to be ready (tunnel + webhooks)…"
           for i in $(seq 1 36); do      # up to ~180s

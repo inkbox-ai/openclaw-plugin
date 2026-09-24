@@ -51,9 +51,15 @@ describe("CI native error source candidates", () => {
       "native_plugin_error phase=register kind=host source=loader-known.mjs:1:3",
     ]);
     expect(shapes.join()).not.toMatch(/secret|private|escape|missing|\/|Function/);
+    // Native sdk/missing-dependency hints wrap the whole original stack in ().
+    await writeFile(logPath, JSON.stringify({subsystem: "plugins", level: "error", message: error + ")"}));
+    expect(await locatePluginLoadErrors({executable, logPath, pluginRoot: plugin})).toEqual(shapes);
     await writeFile(logPath, JSON.stringify({subsystem: "plugins", level: "error", message: error.split("\n")[0]}));
     expect(await locatePluginLoadErrors({executable, logPath, pluginRoot: plugin}))
       .toEqual(["native_plugin_error phase=register source=unavailable"]);
+    await writeFile(logPath, "");
+    expect(await locatePluginLoadErrors({executable, logPath, pluginRoot: plugin}))
+      .toEqual(["native_plugin_errors=no_records_in_tail"]);
   });
 
   it("only reads bounded native root error records, not prompt or subsystem prose", () => {

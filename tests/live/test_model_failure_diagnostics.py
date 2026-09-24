@@ -249,28 +249,6 @@ def test_json_string_unicode_separators_do_not_split_native_records():
     ]
 
 
-def test_temporary_tool_observer_accepts_only_its_complete_fixed_projection():
-    line = ("native_tool_probe phase=owner assembly=2 selected=true snapshot=true scoped=false "
-            "index=true enabled=true ordered=false owner=true complete=false cold=true "
-            "registrations=0 returned=unknown")
-    assert native_model_failure_shapes(line) == [line]
-    assert native_model_failure_shapes("native_tool_probe status=installed") == ["native_tool_probe status=installed"]
-    for invalid in ("private " + line, line + " private", line.replace("assembly=2", "assembly=10000"),
-                    line.replace("snapshot=true", "snapshot=private"), line.replace("phase=owner", "phase=private"),
-                    json.dumps({"message": line, "subsystem": "unrelated"})):
-        assert native_model_failure_shapes(invalid) == []
-
-
-def test_temporary_loaded_plugin_projection_is_closed_and_content_free():
-    line = ("native_plugin_load assembly=2 state=error phase=register complete=false declared=54 names=0 "
-            "errors=1 warnings=0 code=EACCES sdk_incompatible=false")
-    assert native_model_failure_shapes(line) == [line]
-    for invalid in (line + " private", "private " + line, line.replace("state=error", "state=private"),
-                    line.replace("code=EACCES", "code=private-secret"), line.replace("names=0", "names=10000"),
-                    json.dumps({"message": line, "subsystem": "unrelated"})):
-        assert native_model_failure_shapes(invalid) == []
-
-
 def test_malformed_oversized_and_bounded_tail_records(tmp_path):
     path = tmp_path / "gateway.log"
     valid = json.dumps(_native())

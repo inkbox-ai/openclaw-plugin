@@ -42,6 +42,10 @@ concurrency:
 jobs:
   external-events:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    # OpenClaw snapshots the linked package; test caches must not mutate it.
+    env:
+      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/python-pycache
+      PYTEST_ADDOPTS: '-o cache_dir="${{ runner.temp }}/pytest-cache"'
 
     steps:
       - uses: actions/checkout@v7
