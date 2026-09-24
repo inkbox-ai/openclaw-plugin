@@ -47,7 +47,9 @@ const nativeEmptyReplyText = "I finished the turn, but it did not produce a visi
 
 function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_before" | "nonfinal_before" | "missing_before" | "name_mismatch" | "tool_error" | "nonterminal_after" | "unaccepted_after", event: Event): void {
   capture.invalid = true;
-  const value = event.params?.completeSilently;
+  const params = event.toolName === "tool_call"
+    ? event.params?.args as Record<string, unknown> | undefined : event.params;
+  const value = params?.completeSilently;
   capture.invalidShape ??= {
     reason,
     finalParam: value === true ? "true" : value === false ? "false" : value === undefined ? "missing" : typeof value === "string" ? "string" : "other",

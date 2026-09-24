@@ -133,6 +133,14 @@ describe("run-scoped explicit send completion", () => {
     recordSilentSendModelStarted({}, context);
     expect(capture.shape().invalidShape).toBeUndefined();
   });
+  it.each([[true, "true"], ["private-body", "string"]])("classifies tool_call's nested final flag without logging its value", (value, finalParam) => {
+    const { capture } = begin();
+    const event = { toolName: "tool_call", toolCallId: "wrapper", params: { args: { completeSilently: value } } };
+    recordSilentSendBeforeToolCall(event, context);
+    recordSilentSendAfterToolCall(event, context);
+    expect(capture.shape().invalidShape).toEqual({ reason: "nonterminal_after", finalParam, tool: "transport" });
+    expect(JSON.stringify(capture.shape())).not.toContain("private-body");
+  });
   it("fails closed when the host omits the batch lifecycle hook", () => {
     const capture = beginSilentSendCapture(context.sessionKey); active.push(capture); capture.activate();
     bindSilentSendCaptureToRun({ prompt: capture.marker }, context);
