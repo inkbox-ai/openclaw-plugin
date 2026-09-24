@@ -146,7 +146,7 @@ jobs:
         run: |
           # Preserve structured native errors, never print the raw log in CI.
           openclaw config set logging.consoleStyle json
-          INKBOX_CI_NATIVE_HOST="$(command -v openclaw)" NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import=$GITHUB_WORKSPACE/tests/ci/native_tool_state.mjs" OPENCLAW_LOG_LEVEL=trace OPENCLAW_DEBUG_CODE_MODE=1 OPENCLAW_DIAGNOSTICS=1 OPENCLAW_DIAGNOSTICS_TIMELINE_PATH="$RUNNER_TEMP/native-timeline.jsonl" openclaw gateway run > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          INKBOX_CI_NATIVE_HOST="$(command -v openclaw)" NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import=$GITHUB_WORKSPACE/tests/ci/native_tool_state.mjs" OPENCLAW_PLUGIN_LIFECYCLE_TRACE=1 OPENCLAW_LOG_LEVEL=trace OPENCLAW_DEBUG_CODE_MODE=1 OPENCLAW_DIAGNOSTICS=1 OPENCLAW_DIAGNOSTICS_TIMELINE_PATH="$RUNNER_TEMP/native-timeline.jsonl" openclaw gateway run > "$RUNNER_TEMP/gateway.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           for _ in $(seq 1 36); do
             if openclaw health --json 2>/dev/null | jq -e \

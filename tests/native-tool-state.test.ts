@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
-import { instrumentToolState, projectToolState } from "./ci/native_tool_state.mjs";
+import { instrumentToolState, projectToolState, projectLoadedPlugin } from "./ci/native_tool_state.mjs";
 
 const KEY = Symbol.for("inkbox.ciNativeToolState.v1");
 const require = createRequire(import.meta.url);
@@ -16,7 +16,7 @@ const fixture = `function resolvePluginToolsFromRegistry(params, loadState) {
 \tconst findRuntimeOwner = (id) => runtimeRegistry.plugins.find(p => p.id === id);
 \tconst missingPluginIds = onlyPluginIds;
 \tif (missingPluginIds.length > 0) {
-\t\tfor (const id of missingPluginIds) toolOwners.set(id, {tools: runtimeRegistry.tools});
+\t\tfor (const id of missingPluginIds) toolOwners.set(id, {tools: runtimeRegistry.tools, registry: runtimeRegistry});
 \t}
 \tconst orderedManifests = loadState.loadOptions.manifestRegistry?.plugins ?? snapshot.plugins;
 \tconst tools = [];
@@ -31,6 +31,21 @@ const fixture = `function resolvePluginToolsFromRegistry(params, loadState) {
 }`;
 
 describe("temporary CI native tool-state observer", () => {
+  it("distinguishes absent, disabled and failed cold loads without exposing their error", () => {
+    const absent = projectLoadedPlugin(2, undefined, []);
+    expect(absent).toContain("state=absent phase=unknown complete=unknown");
+    expect(projectLoadedPlugin(2, {status: "disabled"}, [])).toContain("state=disabled");
+    const line = projectLoadedPlugin(2, {status: "error", failurePhase: "register", error: "private-key",
+      contracts: {tools: ["private-name"]}, toolNames: []}, [
+      {pluginId: "inkbox", level: "error", code: "sdk-incompatible", errorCode: "EACCES", message: "private-address"},
+      {pluginId: "other", level: "error", errorCode: "ENOENT"},
+    ], false);
+    expect(line).toBe("native_plugin_load assembly=2 state=error phase=register complete=false declared=1 names=0 errors=1 warnings=0 code=EACCES sdk_incompatible=true");
+    expect(line).not.toMatch(/private|address|name=/);
+    expect(projectLoadedPlugin(2, {status: "private", failurePhase: "private"}, [{pluginId: "inkbox", errorCode: "private"}]))
+      .toContain("state=unknown phase=unknown");
+  });
+
   it("projects only closed booleans and bounded counts", () => {
     const line = projectToolState("owner", 10000, {selected: true, registrations: 99999,
       complete: "private@example.com", returned: -1, path: "/private/config", owner: {secret: true}});

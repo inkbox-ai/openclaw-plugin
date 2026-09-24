@@ -1,14 +1,61 @@
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { candidateShapes, LIMITS, locateNativeErrors, nativeErrors, sourceTemplates } from "./ci/native_error_locations.mjs";
+import { candidateShapes, LIMITS, locateNativeErrors, nativeErrors, sourceTemplates, pluginLoadErrors, locatePluginLoadErrors } from "./ci/native_error_locations.mjs";
 
 const roots: string[] = [];
 const rootRecord = (message: string, extra = {}) => JSON.stringify({ level: "error", message: `Embedded agent failed before reply: ${message}`, ...extra });
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("CI native error source candidates", () => {
+  it("recognizes only exact native Inkbox loader errors", () => {
+    const record = {subsystem: "plugins", level: "error", message: "[plugins] inkbox failed during register from /private/path: TypeError: private-value"};
+    expect(pluginLoadErrors(JSON.stringify(record))).toEqual([{phase: "register", text: record.message}]);
+    for (const changed of [{subsystem: "user"}, {level: "info"}, {message: "user: " + record.message},
+      {message: record.message.replace("inkbox", "other")}, {message: record.message.replace("register", "private")},
+      {message: "x".repeat(LIMITS.recordBytes + 1)}]) {
+      expect(pluginLoadErrors(JSON.stringify({...record, ...changed}))).toEqual([]);
+    }
+  });
+
+  it("projects original loader stack locations only from existing trusted source files", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "native-plugin-error-"));
+    roots.push(root);
+    const host = path.join(root, "host");
+    const plugin = path.join(root, "plugin");
+    await mkdir(path.join(host, "dist"), {recursive: true});
+    await mkdir(path.join(plugin, "src"), {recursive: true});
+    await writeFile(path.join(host, "package.json"), JSON.stringify({name: "openclaw"}));
+    await writeFile(path.join(plugin, "package.json"), JSON.stringify({name: "@inkbox/inkbox"}));
+    const executable = path.join(host, "openclaw.mjs");
+    await writeFile(executable, "");
+    const hostFile = path.join(host, "dist", "loader-known.mjs");
+    const pluginFile = path.join(plugin, "src", "health.ts");
+    const outside = path.join(root, "secret.mjs");
+    await writeFile(hostFile, "export {};\n");
+    await writeFile(pluginFile, "export {};\n");
+    await writeFile(outside, "private\n");
+    await symlink(outside, path.join(plugin, "src", "escape.ts"));
+    const error = "[plugins] inkbox failed during register from /private/path: TypeError: private-key\n"
+      + `    at privateFunction (${outside}:1:2)\n`
+      + `    at privateFunction (${path.join(plugin, "src", "escape.ts")}:1:2)\n`
+      + `    at privateFunction (${path.join(host, "dist", "missing.mjs")}:1:2)\n`
+      + `    at privateFunction (file://${pluginFile}:1:2)\n`
+      + `    at privateFunction (${hostFile}:1:3)`;
+    const logPath = path.join(root, "gateway.log");
+    await writeFile(logPath, JSON.stringify({subsystem: "plugins", level: "error", message: error}));
+    const shapes = await locatePluginLoadErrors({executable, logPath, pluginRoot: plugin});
+    expect(shapes).toEqual([
+      "native_plugin_error phase=register kind=plugin source=health.ts:1:2",
+      "native_plugin_error phase=register kind=host source=loader-known.mjs:1:3",
+    ]);
+    expect(shapes.join()).not.toMatch(/secret|private|escape|missing|\/|Function/);
+    await writeFile(logPath, JSON.stringify({subsystem: "plugins", level: "error", message: error.split("\n")[0]}));
+    expect(await locatePluginLoadErrors({executable, logPath, pluginRoot: plugin}))
+      .toEqual(["native_plugin_error phase=register source=unavailable"]);
+  });
+
   it("only reads bounded native root error records, not prompt or subsystem prose", () => {
     const log = [rootRecord("native error"), rootRecord("private prompt", { subsystem: "agent/embedded" }),
       rootRecord("not an error", { level: "info" }), "malformed", "null", "[]", rootRecord("x".repeat(LIMITS.recordBytes)),

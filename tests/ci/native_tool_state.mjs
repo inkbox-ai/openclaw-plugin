@@ -12,6 +12,19 @@ const FLAGS = ["selected", "snapshot", "scoped", "index", "enabled", "ordered", 
 const COUNTS = ["registrations", "returned"];
 const bool = (value) => typeof value === "boolean" ? String(value) : "unknown";
 const count = (value) => Number.isSafeInteger(value) && value >= 0 ? String(Math.min(value, 9999)) : "unknown";
+const ERROR_CODES = new Set(["MODULE_NOT_FOUND", "ERR_MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_REQUIRE_ESM", "ENOENT", "ENOSPC", "EACCES", "EPERM", "OC_DOCTOR_DUPLICATE_CHECK"]);
+
+export function projectLoadedPlugin(ordinal, record, diagnostics, complete) {
+  const state = record == null ? "absent" : ["loaded", "disabled", "error"].includes(record.status) ? record.status : "unknown";
+  const phase = ["validation", "load", "register"].includes(record?.failurePhase) ? record.failurePhase : "unknown";
+  const relevant = Array.isArray(diagnostics) ? diagnostics.filter((entry) => entry?.pluginId === "inkbox") : [];
+  const code = relevant.find((entry) => ERROR_CODES.has(entry.errorCode))?.errorCode ?? "unknown";
+  return `native_plugin_load assembly=${count(ordinal)} state=${state} phase=${phase} complete=${bool(complete)} ` +
+    `declared=${count(record?.contracts?.tools?.length)} names=${count(record?.toolNames?.length)} ` +
+    `errors=${count(relevant.filter((entry) => entry.level === "error").length)} ` +
+    `warnings=${count(relevant.filter((entry) => entry.level === "warn").length)} code=${code} ` +
+    `sdk_incompatible=${relevant.some((entry) => entry.code === "sdk-incompatible")}`;
+}
 
 export function projectToolState(phase, ordinal, values) {
   if (!["owner", "loaded", "result"].includes(phase)) return undefined;
@@ -59,7 +72,10 @@ export function instrumentToolState(source) {
     ordered: orderedManifests.some((entry) => entry.id === "inkbox"),
     owner: toolOwners.has("inkbox"),
     cold: missingPluginIds.includes("inkbox"),
-    registrations: toolOwners.get("inkbox")?.tools.length
+    registrations: toolOwners.get("inkbox")?.tools.length,
+    record: toolOwners.get("inkbox")?.registry?.plugins?.find((entry) => entry.id === "inkbox"),
+    diagnostics: toolOwners.get("inkbox")?.registry?.diagnostics,
+    loadedComplete: getPluginInstance(toolOwners.get("inkbox")?.registry?.plugins?.find((entry) => entry.id === "inkbox"))?.toolRegistrationComplete
   }`;
   const result = `{ returned: tools.filter((tool) => typeof tool.name === "string" && tool.name.startsWith("inkbox_")).length }`;
   return source.replace(end, observation("result", result) + end)
@@ -88,6 +104,7 @@ export function installToolStateObserver(executable, write = (line) => process.s
         try {
           const line = projectToolState(phase, ordinal, values);
           if (line) safeWrite(line);
+          if (phase === "loaded") safeWrite(projectLoadedPlugin(ordinal, values?.record, values?.diagnostics, values?.loadedComplete));
         } catch { /* Never replace a native result or error. */ }
       },
     };

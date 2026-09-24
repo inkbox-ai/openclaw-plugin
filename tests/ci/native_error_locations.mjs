@@ -2,7 +2,7 @@
 // Never print an error, a template, a substitution, or a path from a log record.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
 export const LIMITS = Object.freeze({
@@ -16,6 +16,60 @@ export const LIMITS = Object.freeze({
 });
 const SOURCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:js|mjs)$/;
 const ERROR_PREFIX = "Embedded agent failed before reply: ";
+
+export function pluginLoadErrors(log) {
+  const errors = [];
+  for (const line of log.split("\n")) {
+    if (Buffer.byteLength(line) > LIMITS.recordBytes) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    if (record?.subsystem !== "plugins" || record.level !== "error" || typeof record.message !== "string") continue;
+    const match = /^\[plugins\] inkbox failed during (load|register) from /.exec(record.message);
+    if (match) errors.push({ phase: match[1], text: record.message });
+  }
+  return errors.slice(-LIMITS.records);
+}
+
+// Native lifecycle tracing preserves the original load Error.stack. Resolve
+// locations against actual installed source files; never print text or paths.
+export async function locatePluginLoadErrors({ executable, logPath, pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..") }) {
+  try {
+    const errors = pluginLoadErrors(await readLog(logPath));
+    if (!errors.length) return ["native_plugin_errors=no_records"];
+    const host = path.dirname(await fs.realpath(executable));
+    const hostManifest = JSON.parse(await fs.readFile(path.join(host, "package.json"), "utf8"));
+    const plugin = await fs.realpath(pluginRoot);
+    const pluginManifest = JSON.parse(await fs.readFile(path.join(plugin, "package.json"), "utf8"));
+    if (hostManifest.name !== "openclaw" || pluginManifest.name !== "@inkbox/inkbox") throw new Error();
+    const dist = await fs.realpath(path.join(host, "dist"));
+    if (dist !== path.join(host, "dist")) throw new Error();
+    const shapes = [];
+    for (const error of errors) {
+      let found = 0;
+      for (const frame of error.text.split("\n").slice(1, 81)) {
+        if (!frame.trimStart().startsWith("at ")) continue;
+        const match = /(?:\(|\s)((?:file:\/\/\/|\/)[^()\r\n]+):([1-9]\d{0,6}):([1-9]\d{0,5})\)?$/.exec(frame);
+        if (!match) continue;
+        let filename;
+        try {
+          const raw = match[1].startsWith("file:") ? fileURLToPath(match[1]) : match[1];
+          filename = await fs.realpath(raw);
+          if (!(await fs.stat(filename)).isFile()) continue;
+        } catch { continue; }
+        const basename = path.basename(filename);
+        if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:ts|js|mjs)$/.test(basename)) continue;
+        const relative = path.relative(plugin, filename);
+        const kind = path.dirname(filename) === dist ? "host"
+          : (relative === "index.ts" || relative === "dist/index.js" || relative.startsWith("src/") || relative.startsWith("dist/src/")) ? "plugin" : undefined;
+        if (!kind) continue;
+        shapes.push(`native_plugin_error phase=${error.phase} kind=${kind} source=${basename}:${match[2]}:${match[3]}`);
+        if (++found === 3) break;
+      }
+      if (!found) shapes.push(`native_plugin_error phase=${error.phase} source=unavailable`);
+    }
+    return [...new Set(shapes)].slice(-LIMITS.records);
+  } catch { return ["native_plugin_errors=unavailable"]; }
+}
 
 export function nativeErrors(log) {
   const errors = [];
@@ -144,4 +198,5 @@ export async function locateNativeErrors({ executable, logPath }) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   for (const shape of await locateNativeErrors({ executable: process.argv[2], logPath: process.argv[3] })) console.log(shape);
+  for (const shape of await locatePluginLoadErrors({ executable: process.argv[2], logPath: process.argv[3] })) console.log(shape);
 }

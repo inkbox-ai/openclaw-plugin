@@ -46,6 +46,14 @@ TOOL_PROBE = re.compile(
     ))
     + r" registrations=(?:[0-9]{1,4}|unknown) returned=(?:[0-9]{1,4}|unknown))"
 )
+PLUGIN_LOAD = re.compile(
+    r"native_plugin_load assembly=(?:[0-9]{1,4}|unknown) state=(?:loaded|disabled|error|absent|unknown) "
+    r"phase=(?:validation|load|register|unknown) complete=(?:true|false|unknown) "
+    r"declared=(?:[0-9]{1,4}|unknown) names=(?:[0-9]{1,4}|unknown) "
+    r"errors=(?:[0-9]{1,4}|unknown) warnings=(?:[0-9]{1,4}|unknown) "
+    r"code=(?:MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH_NOT_EXPORTED|ERR_REQUIRE_ESM|ENOENT|ENOSPC|EACCES|EPERM|OC_DOCTOR_DUPLICATE_CHECK|unknown) "
+    r"sdk_incompatible=(?:true|false)"
+)
 
 
 def _count(value: object) -> str:
@@ -137,7 +145,7 @@ def native_model_failure_shapes(log: str) -> list[str]:
     for line in log.split("\n"):
         if len(line.encode("utf-8")) > MAX_RECORD_BYTES:
             continue
-        if TOOL_PROBE.fullmatch(line):
+        if TOOL_PROBE.fullmatch(line) or PLUGIN_LOAD.fullmatch(line):
             shapes.append(line)
             continue
         try:
