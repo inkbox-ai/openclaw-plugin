@@ -38,6 +38,14 @@ PREPARATION_STAGES = frozenset({
 })
 EMPTY_TOOLS_PREFIX = "No callable tools remain after resolving explicit tool allowlist ("
 EMPTY_TOOLS_SUFFIX = ". Fix the allowlist or enable the plugin that registers the requested tool."
+TOOL_PROBE = re.compile(
+    r"native_tool_probe (?:status=(?:installed|unsupported|unavailable)|"
+    r"phase=(?:owner|loaded|result) assembly=(?:[0-9]{1,4}|unknown) "
+    + " ".join(rf"{key}=(?:true|false|unknown)" for key in (
+        "selected", "snapshot", "scoped", "index", "enabled", "ordered", "owner", "complete", "cold"
+    ))
+    + r" registrations=(?:[0-9]{1,4}|unknown) returned=(?:[0-9]{1,4}|unknown))"
+)
 
 
 def _count(value: object) -> str:
@@ -128,6 +136,9 @@ def native_model_failure_shapes(log: str) -> list[str]:
     shapes: list[str] = []
     for line in log.split("\n"):
         if len(line.encode("utf-8")) > MAX_RECORD_BYTES:
+            continue
+        if TOOL_PROBE.fullmatch(line):
+            shapes.append(line)
             continue
         try:
             record = json.loads(line)

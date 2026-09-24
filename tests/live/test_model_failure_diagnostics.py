@@ -249,6 +249,18 @@ def test_json_string_unicode_separators_do_not_split_native_records():
     ]
 
 
+def test_temporary_tool_observer_accepts_only_its_complete_fixed_projection():
+    line = ("native_tool_probe phase=owner assembly=2 selected=true snapshot=true scoped=false "
+            "index=true enabled=true ordered=false owner=true complete=false cold=true "
+            "registrations=0 returned=unknown")
+    assert native_model_failure_shapes(line) == [line]
+    assert native_model_failure_shapes("native_tool_probe status=installed") == ["native_tool_probe status=installed"]
+    for invalid in ("private " + line, line + " private", line.replace("assembly=2", "assembly=10000"),
+                    line.replace("snapshot=true", "snapshot=private"), line.replace("phase=owner", "phase=private"),
+                    json.dumps({"message": line, "subsystem": "unrelated"})):
+        assert native_model_failure_shapes(invalid) == []
+
+
 def test_malformed_oversized_and_bounded_tail_records(tmp_path):
     path = tmp_path / "gateway.log"
     valid = json.dumps(_native())
