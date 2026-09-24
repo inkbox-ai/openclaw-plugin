@@ -195,6 +195,12 @@ def native_model_failure_shapes(log: str) -> list[str]:
             match = re.match(r"^\[trace:plugin-tools\] factory timings totalMs=[0-9]+ factoryCount=([0-9]{1,8}) shown=[0-9]+ omitted=[0-9]+ factories=", message) if isinstance(message, str) else None
             if match:
                 shapes.append(f"native_tool_factories count={min(int(match[1]), 9999)}")
+        elif record.get("subsystem") == "tools" and record.get("level") == "warn":
+            message = record.get("message")
+            if (isinstance(message, str)
+                    and message.startswith("tools.allow allowlist contains unknown entries (")
+                    and message.endswith("). These entries won't match any tool unless the plugin is enabled.")):
+                shapes.append("native_tool_allowlist_unknown global=true plugin_only=true")
         elif record.get("subsystem") == "plugins" and record.get("level") == "error":
             message = record.get("message")
             if isinstance(message, str) and message.startswith("plugin tool failed (inkbox): "):

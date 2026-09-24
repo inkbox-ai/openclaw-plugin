@@ -200,6 +200,20 @@ def test_truncated_tool_policy_names_cannot_prove_inkbox_was_not_removed():
     assert "inkbox_removed=unknown" in shapes[0]
 
 
+def test_unknown_plugin_allowlist_warning_keeps_entry_names_private():
+    record = {"subsystem": "tools", "level": "warn", "message":
+              "tools.allow allowlist contains unknown entries (private-plugin). These entries won't match any tool unless the plugin is enabled."}
+    assert native_model_failure_shapes(json.dumps(record)) == [
+        "native_tool_allowlist_unknown global=true plugin_only=true"
+    ]
+    for changed in [
+        {"level": "info"}, {"subsystem": "inkbox"},
+        {"message": "quoted " + record["message"]},
+        {"message": record["message"] + " private"}, {"message": ["private"]},
+    ]:
+        assert native_model_failure_shapes(json.dumps({**record, **changed})) == []
+
+
 def test_native_timeline_projects_only_fixed_preparation_stages(tmp_path):
     base = {"schemaVersion": "openclaw.diagnostics.v1", "name": "agent.prepare", "phase": "agent.prepare",
             "type": "span.error", "attributes": {"stage": "attempt.session-runtime", "private": "secret"},
