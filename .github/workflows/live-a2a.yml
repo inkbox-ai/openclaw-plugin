@@ -146,7 +146,7 @@ jobs:
         run: |
           # Preserve structured native errors, never print the raw log in CI.
           openclaw config set logging.consoleStyle json
-          openclaw gateway run > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          OPENCLAW_DIAGNOSTICS=1 OPENCLAW_DIAGNOSTICS_TIMELINE_PATH="$RUNNER_TEMP/native-timeline.jsonl" openclaw gateway run > "$RUNNER_TEMP/gateway.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           for _ in $(seq 1 36); do
             if openclaw health --json 2>/dev/null | jq -e \
@@ -190,13 +190,15 @@ jobs:
 
           sys.path.insert(0, "tests/live")
           from a2a_driver import _a2a_failure_shapes
-          from model_failure_diagnostics import read_native_model_failure_shapes
+          from model_failure_diagnostics import read_native_model_failure_shapes, read_native_timeline_shapes
 
           log_path = Path(os.environ["RUNNER_TEMP"]) / "gateway.log"
           log = log_path.read_text(errors="replace") if log_path.exists() else ""
           for shape in _a2a_failure_shapes(log):
               print(shape)
           for shape in read_native_model_failure_shapes(log_path):
+              print(shape)
+          for shape in read_native_timeline_shapes(Path(os.environ["RUNNER_TEMP"]) / "native-timeline.jsonl"):
               print(shape)
           for name, marker in {
               "a2a_subscribed": "A2A events subscribed",

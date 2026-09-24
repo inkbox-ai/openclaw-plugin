@@ -24,6 +24,39 @@ TRANSPORT_RESPONSE = re.compile(
     r"^\[model-fetch\] response provider=\S+ api=\S+ model=\S+ "
     r"status=([1-5][0-9]{2})(?=\s|$)"
 )
+ERROR_NAMES = frozenset({
+    "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError",
+    "AggregateError", "AbortError", "FailoverError", "MissingAgentHarnessError",
+    "AgentHarnessSessionSupersededError", "CommandLaneTaskTimeoutError",
+    "PreparedModelRuntimePublicationSupersededError",
+})
+PREPARATION_STAGES = frozenset({
+    "attempt.setup", "attempt.skills", "attempt.tool-base", "attempt.bootstrap",
+    "attempt.bundle-tools", "attempt.tool-catalog", "attempt.system-prompt",
+    "attempt.transcript-lifecycle", "attempt.session-runtime",
+})
+
+
+def _error_name(value: object) -> str:
+    return value if isinstance(value, str) and value in ERROR_NAMES else "unknown"
+
+
+def _native_error_kind(value: object) -> str:
+    # Verified native source templates only; never expose the publication path.
+    if not isinstance(value, str):
+        return "unknown"
+    exact = {
+        "Agent session has no lifecycle-owned base stream.": "base_stream_owner_missing",
+        "Embedded stream has no lifecycle runtime owner.": "stream_owner_missing",
+        "Cannot prepare a retired plugin registry": "registry_retired",
+        "prepared model runtime publication was superseded": "model_publication_superseded",
+        "prepared model runtime publication was superseded without a current replacement refresh": "model_publication_superseded",
+    }
+    if value in exact:
+        return exact[value]
+    if value.startswith("prepared model runtime publication was superseded for "):
+        return "model_publication_superseded"
+    return "unknown"
 
 
 def _status(value: object) -> str:
@@ -67,10 +100,42 @@ def native_model_failure_shapes(log: str) -> list[str]:
             message = record.get("message")
             if isinstance(message, str) and message.startswith("Embedded agent failed before reply: "):
                 shapes.append("native_model_phase before_reply_failure=true")
+                kind = _native_error_kind(message.removeprefix("Embedded agent failed before reply: "))
+                shapes.append(f"native_model_cause kind={kind}")
+        elif record.get("subsystem") == "diagnostic" and record.get("level") == "error":
+            message = record.get("message")
+            if isinstance(message, str) and message.startswith("lane task error: lane="):
+                shapes.append(f"native_lane_error name={_error_name(record.get('errorName'))}")
     return shapes[-MAX_SHAPES:]
 
 
-def read_native_model_failure_shapes(path: Path) -> list[str]:
+def native_timeline_shapes(log: str) -> list[str]:
+    """Only fixed preparation stages from the host's supported native timeline."""
+    shapes: list[str] = []
+    for line in log.split("\n"):
+        if len(line.encode("utf-8")) > MAX_RECORD_BYTES:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(record, dict) or record.get("schemaVersion") != "openclaw.diagnostics.v1":
+            continue
+        if record.get("name") != "agent.prepare" or record.get("phase") != "agent.prepare":
+            continue
+        attributes = record.get("attributes")
+        stage = attributes.get("stage") if isinstance(attributes, dict) else None
+        stage = stage if isinstance(stage, str) and stage in PREPARATION_STAGES else "unknown"
+        if record.get("type") == "span.end":
+            shapes.append(f"native_prepare completed={stage}")
+        elif record.get("type") == "span.error":
+            name = _error_name(record.get("errorName"))
+            kind = _native_error_kind(record.get("errorMessage"))
+            shapes.append(f"native_prepare failed={stage} name={name} kind={kind}")
+    return shapes[-MAX_SHAPES:]
+
+
+def _read_shapes(path: Path, project, unavailable: str) -> list[str]:
     """Read only a bounded tail of the existing per-run gateway log."""
     try:
         with path.open("rb") as stream:
@@ -81,6 +146,14 @@ def read_native_model_failure_shapes(path: Path) -> list[str]:
         if offset:
             # Never interpret a record whose prefix fell outside the read bound.
             data = data.partition(b"\n")[2]
-        return native_model_failure_shapes(data.decode("utf-8", errors="replace"))
+        return project(data.decode("utf-8", errors="replace"))
     except OSError:
-        return ["native_model_diagnostics=unavailable"]
+        return [unavailable]
+
+
+def read_native_model_failure_shapes(path: Path) -> list[str]:
+    return _read_shapes(path, native_model_failure_shapes, "native_model_diagnostics=unavailable")
+
+
+def read_native_timeline_shapes(path: Path) -> list[str]:
+    return _read_shapes(path, native_timeline_shapes, "native_timeline_diagnostics=unavailable")
