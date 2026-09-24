@@ -1,4 +1,4 @@
-import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "./src/silent-send-capture.js";
+import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall, reconcileSilentSendAgentEnd } from "./src/silent-send-capture.js";
 import { bindNativeApprovalTurnToRun, markNativeConversationReset } from "./src/inbound/native-approvals.js";
 import {
   defineChannelPluginEntry,
@@ -196,6 +196,7 @@ function registerHostedCallSettlementHooks(api: any): void {
   });
   api.on("model_call_started", recordSilentSendModelStarted);
   api.on("after_tool_call", recordSilentSendAfterToolCall);
+  api.on("agent_end", reconcileSilentSendAgentEnd);
   api.on("after_tool_call", recordHostedSmsAfterToolCall);
   api.on("model_call_ended", recordHostedModelCallEnded);
 }

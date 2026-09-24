@@ -18,6 +18,8 @@ type Capture = {
   closed: boolean;
   batchStarted: boolean;
   invalid: boolean;
+  fatalInvalid: boolean;
+  missingBefore: Map<string, string>;
   invalidShape?: { reason: string; finalParam: string; tool: string };
   invalidOwner?: { tool: string; name: string; id: string; relationship: string; prior: string; alias: boolean; batch: number; before: number; hook: string };
   batchOrdinal: number;
@@ -51,6 +53,15 @@ const nativeEmptyReplyText = "I finished the turn, but it did not produce a visi
 
 function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_before" | "nonfinal_before" | "missing_before" | "name_mismatch" | "tool_error" | "nonterminal_after" | "unaccepted_after", event: Event, context: Context): void {
   capture.invalid = true;
+  const id = event.toolCallId ?? context.toolCallId;
+  // Schema/lookup failures never execute BEFORE. Keep them invalid until the
+  // exact run's completed native transcript proves an earlier model exchange.
+  if (reason === "missing_before" && typeof id === "string" && id &&
+      typeof event.toolName === "string" && event.toolName &&
+      (event.error || (event.result as Result | undefined)?.isError === true)) {
+    if (capture.missingBefore.has(id) && capture.missingBefore.get(id) !== event.toolName) capture.fatalInvalid = true;
+    capture.missingBefore.set(id, event.toolName);
+  } else capture.fatalInvalid = true;
   const params = event.toolName === "tool_call"
     ? event.params?.args as Record<string, unknown> | undefined : event.params;
   const value = params?.completeSilently;
@@ -59,7 +70,6 @@ function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_be
     finalParam: value === true ? "true" : value === false ? "false" : value === undefined ? "missing" : typeof value === "string" ? "string" : "other",
     tool: sendTools.has(event.toolName ?? "") ? "send" : transportTools.has(event.toolName ?? "") ? "transport" : "other",
   };
-  const id = event.toolCallId ?? context.toolCallId;
   const nativeTools = new Set(["tool_search", "tool_describe", "inkbox_whoami", "read", "exec", "message"]);
   const name = typeof event.toolName === "string" ? event.toolName : undefined;
   const prior = typeof id === "string" && capture.priorBatchCalls.has(id);
@@ -129,7 +139,7 @@ function acceptedWrapper(
 export function beginSilentSendCapture(sessionKey: string) {
   const capture: Capture = {
     sessionKey, marker: `[Inkbox turn correlation: ${randomUUID()}]`,
-    closed: false, batchStarted: false, invalid: false, attempts: new Map(), priorBatchCalls: new Map(), batchOrdinal: 0, beforeCount: 0,
+    closed: false, batchStarted: false, invalid: false, fatalInvalid: false, missingBefore: new Map(), attempts: new Map(), priorBatchCalls: new Map(), batchOrdinal: 0, beforeCount: 0,
   };
   return {
     marker: capture.marker,
@@ -171,6 +181,8 @@ export function recordSilentSendModelStarted(event: Event, context: Context): vo
   for (const capture of matching(event, context)) {
     capture.batchStarted = true;
     capture.invalid = false;
+    capture.fatalInvalid = false;
+    capture.missingBefore.clear();
     capture.invalidShape = undefined;
     capture.invalidOwner = undefined;
     capture.batchOrdinal += 1;
@@ -203,7 +215,8 @@ export function recordSilentSendAfterToolCall(event: Event, context: Context): v
     const attempt = id ? capture.attempts.get(id) : undefined;
     // Native streamed-block delivery can delay a tool's end observer until
     // after the next model call starts. Retire only IDs/names whose BEFORE was
-    // actually seen in this exact run; old results never prove a new final send.
+    // actually seen (or whose completed prior exchange was proved at agent_end)
+    // in this exact run; old results never prove a new final send.
     if (!attempt && id && capture.priorBatchCalls.has(id) && capture.priorBatchCalls.get(id) === event.toolName) continue;
     const result = event.result as Result | undefined;
     if (!id || !attempt || attempt.name !== event.toolName || event.error ||
@@ -217,5 +230,62 @@ export function recordSilentSendAfterToolCall(event: Event, context: Context): v
         acceptedSendResult(result);
     if (!accepted) invalidate(capture, "unaccepted_after", event, context);
     else attempt.accepted = true;
+  }
+}
+
+/** Synchronous public agent_end hook; no transcript I/O or model-text parsing. */
+export function reconcileSilentSendAgentEnd(event: { runId?: string; success?: boolean; messages?: unknown[] }, context: Context): void {
+  if (!event.runId || event.runId !== context.runId || event.success !== true || !Array.isArray(event.messages)) return;
+  const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const messages = event.messages.map(object);
+  for (const capture of matching(event, context)) {
+    if (capture.fatalInvalid || !capture.missingBefore.size || !capture.attempts.size ||
+        ![...capture.attempts.values()].every((attempt) => attempt.accepted)) continue;
+    const anchors = messages.flatMap((message, index) => {
+      if (message?.role !== "user") return [];
+      const texts = typeof message.content === "string" ? [message.content] : Array.isArray(message.content)
+        ? message.content.flatMap((block) => { const item = object(block); return item?.type === "text" && typeof item.text === "string" ? [item.text] : []; }) : [];
+      return texts.some((text) => text.includes(capture.marker)) ? [index] : [];
+    });
+    if (anchors.length !== 1 || messages.slice(anchors[0] + 1).some((message) => message?.role === "user")) continue;
+    const calls = new Map<string, Array<{ name: string; index: number }>>();
+    const results = new Map<string, Array<{ name: unknown; index: number; failed: boolean }>>();
+    let finalIndex = -1;
+    let malformed = false;
+    for (const [index, message] of messages.entries()) {
+      if (message?.role === "assistant") {
+        if (index > anchors[0]) finalIndex = index;
+        if (!Array.isArray(message.content)) { if (index > anchors[0]) malformed = true; continue; }
+        for (const block of message.content) {
+          const call = object(block);
+          if (call?.type !== "toolCall") continue;
+          if (typeof call.id !== "string" || !call.id || typeof call.name !== "string" || !call.name) { malformed = true; continue; }
+          const entries = calls.get(call.id) ?? [];
+          entries.push({ name: call.name, index }); calls.set(call.id, entries);
+        }
+      } else if (message?.role === "toolResult" && typeof message.toolCallId === "string") {
+        const entries = results.get(message.toolCallId) ?? [];
+        entries.push({ name: message.toolName, index, failed: message.isError === true }); results.set(message.toolCallId, entries);
+      }
+    }
+    const roots = [...calls].filter(([, entries]) => entries.some((entry) => entry.index === finalIndex));
+    if (malformed || finalIndex <= anchors[0] || !roots.length || roots.some(([id, entries]) =>
+      entries.length !== 1 || capture.attempts.get(id)?.name !== entries[0].name)) continue;
+    const rootIds = new Set(roots.map(([id]) => id));
+    if ([...capture.attempts].some(([id, attempt]) => !rootIds.has(id) && !roots.some(([rootId]) => {
+      if (!capture.attempts.get(rootId)?.wrapper || attempt.wrapper) return false;
+      const prefix = `tool_search_code:${parentIdSegment(rootId)}:${attempt.name}:`;
+      return id.startsWith(prefix) && /^[1-9]\d*$/.test(id.slice(prefix.length));
+    }))) continue;
+    if ([...capture.missingBefore].some(([id, name]) => {
+      const owned = calls.get(id); const settled = results.get(id);
+      return owned?.length !== 1 || settled?.length !== 1 || owned[0].name !== name || settled[0].name !== name ||
+        !settled[0].failed || owned[0].index <= anchors[0] || settled[0].index <= owned[0].index || settled[0].index >= finalIndex;
+    })) continue;
+    for (const [id, name] of capture.missingBefore) capture.priorBatchCalls.set(id, name);
+    capture.missingBefore.clear();
+    capture.invalid = false;
+    capture.invalidShape = undefined;
+    capture.invalidOwner = undefined;
   }
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { beginSilentSendCapture, bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "../src/silent-send-capture.js";
+import { beginSilentSendCapture, bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall, reconcileSilentSendAgentEnd } from "../src/silent-send-capture.js";
 
 const active: Array<ReturnType<typeof beginSilentSendCapture>> = [];
 afterEach(() => { for (const capture of active.splice(0)) capture.finish(); });
@@ -22,6 +22,80 @@ function send(ctx = context, extra: Record<string, unknown> = {}) {
   recordSilentSendBeforeToolCall(event, ctx);
   recordSilentSendAfterToolCall({ ...event, result: { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } }, ...extra }, ctx);
 }
+
+function failedDiscoveryHistory(marker: string) {
+  return [
+    { role: "user", content: [{ type: "text", text: `Request\n${marker}` }] },
+    { role: "assistant", content: [{ type: "toolCall", id: "describe-1", name: "tool_describe" }] },
+    { role: "toolResult", toolCallId: "describe-1", toolName: "tool_describe", isError: true },
+    { role: "assistant", content: [{ type: "toolCall", id: "send-1", name: "inkbox_send_email" }] },
+    { role: "toolResult", toolCallId: "send-1", toolName: "inkbox_send_email", isError: false },
+  ];
+}
+
+describe("native completed-run ownership of pre-execution failures", () => {
+  function delayedFailure(name = "tool_describe") {
+    const { capture } = begin();
+    recordSilentSendModelStarted({}, context);
+    send();
+    recordSilentSendAfterToolCall({ toolName: name, toolCallId: "describe-1", error: "synthetic pre-execution rejection" }, context);
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+    return capture;
+  }
+  it("retires only a failed earlier exchange proved by the current run's native messages", () => {
+    const capture = delayedFailure();
+    reconcileSilentSendAgentEnd({ runId: context.runId, success: true, messages: failedDiscoveryHistory(capture.marker) }, context);
+    expect(capture.shape().invalid).toBe(false);
+    expect(capture.completedSilently()).toBe(true);
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+    const error = { text: "Provider failed", isError: true };
+    expect(capture.transform(error)).toBe(error);
+    recordSilentSendAfterToolCall({ toolName: "tool_describe", toolCallId: "describe-1", error: "duplicate late observer" }, context);
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+    recordSilentSendAfterToolCall({ toolName: "unknown", toolCallId: "unknown", error: "new failure" }, context);
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
+  it("requires the same native ownership proof for a failed exec callback", () => {
+    const capture = delayedFailure("exec");
+    const messages: any[] = failedDiscoveryHistory(capture.marker);
+    messages[1].content[0].name = "exec";
+    messages[2].toolName = "exec";
+    reconcileSilentSendAgentEnd({ runId: context.runId, success: true, messages }, context);
+    expect(capture.shape().invalid).toBe(false);
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+  });
+  it.each(["wrong-run", "wrong-session", "failed-run", "missing-marker", "historic", "duplicate-id", "wrong-name", "missing-result", "successful-result", "same-batch", "unknown-final", "later-user"])("keeps %s evidence invalid", (variant) => {
+    const capture = delayedFailure();
+    const messages: any[] = failedDiscoveryHistory(capture.marker);
+    let ctx = context;
+    let runId = context.runId;
+    let success = true;
+    if (variant === "wrong-run") runId = "another-run";
+    if (variant === "wrong-session") ctx = { ...context, sessionKey: "another-session" };
+    if (variant === "failed-run") success = false;
+    if (variant === "missing-marker") messages[0].content = "other request";
+    if (variant === "historic") messages.splice(0, 0, ...messages.splice(1, 2));
+    if (variant === "duplicate-id") messages.splice(1, 0, structuredClone(messages[1]));
+    if (variant === "wrong-name") messages[2].toolName = "another_tool";
+    if (variant === "missing-result") messages.splice(2, 1);
+    if (variant === "successful-result") messages[2].isError = false;
+    if (variant === "same-batch") { messages[3].content.push(messages[1].content[0]); messages.splice(1, 1); }
+    if (variant === "unknown-final") messages[3].content.push({ type: "toolCall", id: "unknown-current", name: "exec" });
+    if (variant === "later-user") messages.splice(3, 0, { role: "user", content: "another request" });
+    reconcileSilentSendAgentEnd({ runId, success, messages }, ctx);
+    expect(capture.shape().invalid).toBe(true);
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
+  it.each(["tool-error", "missing-unknown", "nonfinal-before"])("preserves additional %s invalidation after the recoverable callback", (variant) => {
+    const capture = delayedFailure();
+    if (variant === "tool-error") recordSilentSendAfterToolCall({ toolName: "inkbox_send_email", toolCallId: "send-1", error: "failed" }, context);
+    if (variant === "missing-unknown") recordSilentSendAfterToolCall({ toolName: "exec", toolCallId: "unknown", error: "failed" }, context);
+    if (variant === "nonfinal-before") recordSilentSendBeforeToolCall({ toolName: "read", toolCallId: "read-1" }, context);
+    reconcileSilentSendAgentEnd({ runId: context.runId, success: true, messages: failedDiscoveryHistory(capture.marker) }, context);
+    expect(capture.shape().invalid).toBe(true);
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
+});
 
 describe("run-scoped explicit send completion", () => {
   it("shares exact-run capture evidence across host plugin module graphs", async () => {
@@ -236,6 +310,16 @@ describe("deferred send transport wrappers", () => {
   }
   it.each(["tool_call", "tool_search_code"])("settles successful %s only with independently accepted children", (name) => {
     expect(wrapped({ name }).transform(reply)).toBeNull();
+  });
+  it.each(["tool_call", "tool_search_code"])("reconciles an earlier failed exchange without promoting it into %s completion evidence", (name) => {
+    const capture = wrapped({ name });
+    recordSilentSendAfterToolCall({ toolName: "tool_describe", toolCallId: "describe-1", error: "schema rejection" }, context);
+    const messages: any[] = failedDiscoveryHistory(capture.marker);
+    messages[3].content[0] = { type: "toolCall", id: "outer", name };
+    messages[4] = { role: "toolResult", toolCallId: "outer", toolName: name, isError: false };
+    reconcileSilentSendAgentEnd({ runId: context.runId, success: true, messages }, context);
+    expect(capture.shape()).toMatchObject({ invalid: false, attempts: 2, accepted: 2 });
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
   });
   it.each([
     { childParent: "unrelated" }, { childError: true }, { outerError: true },

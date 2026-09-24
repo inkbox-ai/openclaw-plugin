@@ -90,6 +90,7 @@ describe("openclaw.plugin.json manifest parity", () => {
     expect(collectRuntimeTools(mode).hookNames).toEqual([
       "after_tool_call",
       "after_tool_call",
+      "agent_end",
       "before_agent_run",
       "before_tool_call",
       "message_sending",
