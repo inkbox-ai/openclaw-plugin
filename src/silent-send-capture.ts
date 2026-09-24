@@ -18,6 +18,7 @@ type Capture = {
   closed: boolean;
   batchStarted: boolean;
   invalid: boolean;
+  invalidShape?: { reason: string; finalParam: string; tool: string };
   attempts: Map<string, Attempt>;
 };
 type Result = {
@@ -38,6 +39,21 @@ const sendTools = new Set([
   "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_forward_email",
 ]);
 const transportTools = new Set(["tool_call", "tool_search_code"]);
+// OpenClaw 2026.9.6's inner source-reply finalizer ignores intentional tool-batch
+// completion for cross-channel sends and emits this fixed error instead. There
+// is no public reason discriminator. Match exactly, only with independently
+// accepted final-send evidence below; changed wording and real errors stay visible.
+const nativeEmptyReplyText = "I finished the turn, but it did not produce a visible reply. Please try again, or start a new session if this keeps happening.";
+
+function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_before" | "nonfinal_before" | "missing_before" | "name_mismatch" | "tool_error" | "nonterminal_after" | "unaccepted_after", event: Event): void {
+  capture.invalid = true;
+  const value = event.params?.completeSilently;
+  capture.invalidShape ??= {
+    reason,
+    finalParam: value === true ? "true" : value === false ? "false" : value === undefined ? "missing" : typeof value === "string" ? "string" : "other",
+    tool: sendTools.has(event.toolName ?? "") ? "send" : transportTools.has(event.toolName ?? "") ? "transport" : "other",
+  };
+}
 
 function matching(event: Event, context: Context): Capture[] {
   const runId = event.runId ?? context.runId;
@@ -96,11 +112,12 @@ export function beginSilentSendCapture(sessionKey: string) {
       text?: string; media?: unknown; mediaUrl?: string; mediaUrls?: string[]; isError?: boolean;
     }>(payload: T): T | null {
       const attempts = [...capture.attempts.values()];
-      // Preserve errors and attachments. No text matching or fabricated delivery:
-      // an entirely successful, explicitly final tool batch authorizes silence.
+      // An entirely successful, explicitly final batch authorizes silence. Never
+      // fabricate current-source delivery or hide other errors/attachments.
       if (!capture.closed && capture.batchStarted && !capture.invalid &&
           attempts.some((attempt) => !attempt.wrapper && attempt.accepted) &&
-          attempts.every((attempt) => attempt.accepted) && !payload.isError &&
+          attempts.every((attempt) => attempt.accepted) &&
+          (!payload.isError || (payload.isError === true && payload.text === nativeEmptyReplyText)) &&
           !payload.media && !payload.mediaUrl && !payload.mediaUrls?.length) return null;
       return transformInkboxReplyPayload(payload);
     },
@@ -110,6 +127,7 @@ export function beginSilentSendCapture(sessionKey: string) {
         attempts: capture.attempts.size,
         accepted: [...capture.attempts.values()].filter((attempt) => attempt.accepted).length,
         invalid: capture.invalid,
+        invalidShape: capture.invalidShape,
       };
     },
     finish() { capture.closed = true; captures.delete(capture); },
@@ -128,6 +146,7 @@ export function recordSilentSendModelStarted(event: Event, context: Context): vo
   for (const capture of matching(event, context)) {
     capture.batchStarted = true;
     capture.invalid = false;
+    capture.invalidShape = undefined;
     capture.attempts.clear();
   }
 }
@@ -136,14 +155,14 @@ export function recordSilentSendBeforeToolCall(event: Event, context: Context): 
   for (const capture of matching(event, context)) {
     const id = event.toolCallId ?? context.toolCallId;
     if (!capture.batchStarted || !id || capture.attempts.has(id)) {
-      capture.invalid = true;
+      invalidate(capture, id && capture.attempts.has(id) ? "duplicate_before" : "before_lifecycle", event);
       continue;
     }
     const name = event.toolName ?? "";
     const wrapper = transportTools.has(name);
     capture.attempts.set(id, { name, wrapper, accepted: false });
     if (!wrapper && (!sendTools.has(name) || event.params?.completeSilently !== true)) {
-      capture.invalid = true;
+      invalidate(capture, "nonfinal_before", event);
     }
   }
 }
@@ -155,14 +174,14 @@ export function recordSilentSendAfterToolCall(event: Event, context: Context): v
     const result = event.result as Result | undefined;
     if (!id || !attempt || attempt.name !== event.toolName || event.error ||
         result?.isError === true || result?.terminate !== true) {
-      capture.invalid = true;
+      invalidate(capture, !id || !attempt ? "missing_before" : attempt.name !== event.toolName ? "name_mismatch" : event.error || result?.isError === true ? "tool_error" : "nonterminal_after", event);
       continue;
     }
     const accepted = attempt.wrapper
       ? acceptedWrapper(capture, id, attempt, event, result)
       : sendTools.has(attempt.name) && event.params?.completeSilently === true &&
         acceptedSendResult(result);
-    if (!accepted) capture.invalid = true;
+    if (!accepted) invalidate(capture, "unaccepted_after", event);
     else attempt.accepted = true;
   }
 }

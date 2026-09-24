@@ -62,6 +62,7 @@ def _source_reply_shapes(log_text: str) -> list[str]:
         r"error=(?:true|false) status=(?:true|false) silent=(?:true|false)"
         r"|send tool shape: tool=(?:inkbox_send_sms|inkbox_send_email|message) chars=\d+"
         r"|silent send shape: bound=(?:true|false) batch=(?:true|false) attempts=\d+ accepted=\d+ invalid=(?:true|false)"
+        r"|silent send invalid: reason=(?:before_lifecycle|duplicate_before|nonfinal_before|missing_before|name_mismatch|tool_error|nonterminal_after|unaccepted_after) final_param=(?:true|false|missing|string|other) tool=(?:send|transport|other)\b"
         r"|routed send shape: channel=inkbox chars=\d+)",
         log_text,
     )

@@ -5,6 +5,10 @@ const active: Array<ReturnType<typeof beginSilentSendCapture>> = [];
 afterEach(() => { for (const capture of active.splice(0)) capture.finish(); });
 const context = { sessionKey: "agent:main:inkbox:direct:example", runId: "run-1" };
 const reply = { text: "A host fallback or normal source reply" };
+const nativeEmptyReply = {
+  text: "I finished the turn, but it did not produce a visible reply. Please try again, or start a new session if this keeps happening.",
+  isError: true,
+};
 function begin(runId = context.runId) {
   const capture = beginSilentSendCapture(context.sessionKey);
   active.push(capture); capture.activate();
@@ -58,6 +62,33 @@ describe("run-scoped explicit send completion", () => {
     expect(first.capture.transform(reply)).toBeNull();
     expect(second.capture.transform(reply)).toBe(reply);
   });
+  it("suppresses only the exact native empty-reply error after an entirely accepted final batch", () => {
+    const { capture } = begin();
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+    send();
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+    for (const payload of [
+      { ...nativeEmptyReply, text: `${nativeEmptyReply.text} Extra failure.` },
+      { ...nativeEmptyReply, text: "Provider request failed." },
+      { ...nativeEmptyReply, mediaUrl: "https://example.com/file" },
+      { ...nativeEmptyReply, mediaUrls: ["https://example.com/file"] },
+      { ...nativeEmptyReply, media: { kind: "file" } },
+    ]) expect(capture.transform(payload)).toBe(payload);
+    capture.finish();
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
+  it.each(["failed", "incomplete", "mixed", "unowned", "invalid"])("preserves the exact native error for %s evidence", (kind) => {
+    const { capture } = begin();
+    if (kind === "failed") send(context, { error: "rejected" });
+    else if (kind === "unowned") send({ ...context, runId: "another-run" });
+    else {
+      send();
+      if (kind === "mixed") recordSilentSendBeforeToolCall({ toolName: "inkbox_list_contacts", toolCallId: "read" }, context);
+      else if (kind === "incomplete") recordSilentSendBeforeToolCall({ toolName: "inkbox_send_sms", toolCallId: "pending", params: { completeSilently: true } }, context);
+      else recordSilentSendAfterToolCall({ toolName: "inkbox_send_email", toolCallId: "unknown" }, context);
+    }
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
   it("does not bind an unrelated prompt or an uncorrelated event", () => {
     const capture = beginSilentSendCapture(context.sessionKey); active.push(capture); capture.activate();
     bindSilentSendCaptureToRun({ prompt: "Unrelated request" }, context);
@@ -92,6 +123,15 @@ describe("run-scoped explicit send completion", () => {
   it("clears prior batch completion when the model resumes", () => {
     const { capture } = begin(); send(); expect(capture.transform(reply)).toBeNull();
     recordSilentSendModelStarted({}, context); expect(capture.transform(reply)).toBe(reply);
+  });
+  it("records only the first fixed invalidation shape, never parameter content", () => {
+    const { capture } = begin();
+    recordSilentSendAfterToolCall({ toolName: "private-tool", toolCallId: "private-id", params: { completeSilently: "private-body" } }, context);
+    send(context, { error: "private-error" });
+    expect(capture.shape().invalidShape).toEqual({ reason: "missing_before", finalParam: "string", tool: "other" });
+    expect(JSON.stringify(capture.shape())).not.toContain("private");
+    recordSilentSendModelStarted({}, context);
+    expect(capture.shape().invalidShape).toBeUndefined();
   });
   it("fails closed when the host omits the batch lifecycle hook", () => {
     const capture = beginSilentSendCapture(context.sessionKey); active.push(capture); capture.activate();

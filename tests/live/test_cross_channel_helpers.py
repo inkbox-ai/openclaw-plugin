@@ -171,10 +171,14 @@ def test_send_boundary_diagnostics_extract_only_allowlisted_metadata():
         "send tool shape: tool=untrusted-tool-name chars=5",
         '[inkbox] silent send shape: bound=true batch=true attempts=1 accepted=1 invalid=false private body',
         '{"message":"Inkbox silent send shape: bound=false batch=false attempts=0 accepted=0 invalid=false","secret":"private"}',
+        'Inkbox silent send invalid: reason=missing_before final_param=string tool=transport private-content',
+        'Inkbox silent send invalid: reason=private-error final_param=string tool=send',
+        'Inkbox silent send invalid: reason=tool_error final_param=private-content tool=send',
     ])
     assert cross._source_reply_shapes(log) == [
         "send tool shape: tool=inkbox_send_email chars=13",
         "routed send shape: channel=inkbox chars=102",
         "silent send shape: bound=true batch=true attempts=1 accepted=1 invalid=false",
         "silent send shape: bound=false batch=false attempts=0 accepted=0 invalid=false",
+        "silent send invalid: reason=missing_before final_param=string tool=transport",
     ]

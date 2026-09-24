@@ -28,7 +28,7 @@ describe("inkbox channel agent prompt", () => {
     );
     expect(rules?.join("\n")).toContain("never echo it");
     expect(rules?.join("\n")).toContain(
-      "NEVER call inkbox_send_email, inkbox_send_sms, or inkbox_send_imessage",
+      "without calling a same-channel send tool",
     );
     expect(rules?.join("\n")).toContain("include the literal requested values");
     expect(rules?.join("\n")).toContain(

@@ -2442,6 +2442,7 @@ async function dispatchInboundTurn(
     deliveryOverride?: {
       deliver: (payload: unknown) => Promise<{ visibleReplySent?: boolean } | void>;
       onError?: (error: unknown) => void;
+      transformReplyPayload?: (payload: { text?: string; isError?: boolean }) => null;
     };
     replyOptionsOverride?: Record<string, unknown>;
     a2aContext?: ActiveA2ATurn;
@@ -2517,7 +2518,7 @@ async function dispatchInboundTurn(
   const smsReplyTarget = opts.turn.conversationId
     ? `${opts.turn.mode === "email" ? "email" : conversationPrefix}:${opts.turn.conversationId}`
     : opts.turn.remoteAddress ?? opts.turn.contactKey;
-  const silentSendCapture = !opts.deliveryOverride && ["sms", "email", "imessage"].includes(opts.turn.mode)
+  const silentSendCapture = (!opts.deliveryOverride || opts.turn.companionReply) && ["sms", "email", "imessage"].includes(opts.turn.mode)
     ? beginSilentSendCapture(effectiveSessionKey) : undefined;
   const approvalMarker = silentSendCapture?.marker ?? `[Inkbox turn correlation: ${randomUUID()}]`;
   if (opts.turn.companionReply && Buffer.byteLength(`${body}\n\n${approvalMarker}`) > COMPANION_MAX_BYTES) {
@@ -2727,7 +2728,13 @@ async function dispatchInboundTurn(
       ...(replyOptions ? { replyOptions } : {}),
       delivery,
       replyPipeline: {},
-      dispatcherOptions: { transformReplyPayload: opts.replyCapture?.transformReplyPayload ?? silentSendCapture?.transform ?? transformInkboxReplyPayload },
+      dispatcherOptions: { transformReplyPayload: (payload: { text?: string; isError?: boolean }) => {
+        if (opts.replyCapture) return opts.replyCapture.transformReplyPayload(payload);
+        const transformed = silentSendCapture ? silentSendCapture.transform(payload) : transformInkboxReplyPayload(payload);
+        if (transformed === null) return null;
+        const capture = opts.deliveryOverride?.transformReplyPayload;
+        return capture ? capture(transformed) : transformed;
+      } },
       record: {
         onRecordError: (error: unknown) => {
           recordFailed = true;
@@ -2750,6 +2757,9 @@ async function dispatchInboundTurn(
     if (silentSendCapture) {
       const shape = silentSendCapture.shape();
       opts.logger?.info?.(`Inkbox silent send shape: bound=${shape.bound} batch=${shape.batch} attempts=${shape.attempts} accepted=${shape.accepted} invalid=${shape.invalid}`);
+      if (shape.invalidShape) {
+        opts.logger?.info?.(`Inkbox silent send invalid: reason=${shape.invalidShape.reason} final_param=${shape.invalidShape.finalParam} tool=${shape.invalidShape.tool}`);
+      }
       silentSendCapture.finish();
     }
     if (hostedSmsCapture && opts.hostedSmsSettlement) {
@@ -6016,6 +6026,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         return ["Reopening a previous conversation with /resume is not supported by this OpenClaw channel. Use /new for a fresh conversation or /status for the current session."];
       }
       const texts: string[] = [];
+      const collect = (payload: unknown) => {
+        const text = payloadText(payload).trim();
+        if (text && !isInkboxSilentReply(text)) texts.push(text);
+      };
       const turn = companionTurn(input);
       if (input.commandAuthorized) {
         const aliases: Record<string, string> = { "/clear": "/new", "/cancel": "/stop", "/health": "/status" };
@@ -6023,11 +6037,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       await dispatchInboundTurn({
         ...opts, activeCalls, turn,
-        deliveryOverride: { deliver: async (payload) => {
-          const text = payloadText(payload).trim();
-          if (text && !isInkboxSilentReply(text)) texts.push(text);
-          return { visibleReplySent: false };
-        } },
+        deliveryOverride: {
+          // Journal delivery happens after submission. Mark collection as an
+          // intentional channel transform, never as a failed visible send.
+          transformReplyPayload: (payload) => { collect(payload); return null; },
+          deliver: async (payload) => { collect(payload); return { visibleReplySent: false }; },
+        },
       });
       return texts;
     },

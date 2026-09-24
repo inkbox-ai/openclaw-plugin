@@ -27,6 +27,8 @@ import { AgentIdentity, Inkbox } from "@inkbox/sdk";
 import companionFixture from "./fixtures/companion-v1.json";
 import { createChannelApprovalHandlerFromCapability } from "openclaw/plugin-sdk/approval-handler-runtime";
 import { inkboxApprovalCapability } from "../../src/inbound/native-approvals.js";
+import { dispatchInboundMessageWithDispatcher } from "openclaw/plugin-sdk/reply-runtime";
+import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "../../src/silent-send-capture.js";
 
 function event(phase = "initialization", sequence = 1, channel = "mail", scope = "scope-one", activation = "activation-one") {
   const message = { sender_access: "direct", id: `source-${sequence}`, thread_id: "conversation-one", conversation_id: "conversation-one", body: "Sponsor follow-up", text: "Sponsor follow-up", content: "Native iMessage content", from_address: "sponsor@example.com", to_addresses: ["agent@example.com", "fred@example.com"], cc_addresses: ["nancy@example.com"], sender_phone_number: "+15555550100", sender_number: "+15555550100", remote_number: null };
@@ -78,6 +80,41 @@ beforeEach(async () => { nativeGateway.resolve.mockReset(); state.dir = await mk
 afterEach(async () => { vi.unstubAllGlobals(); await rm(state.dir, { recursive: true, force: true }); });
 
 describe("Companion host boundary", () => {
+  it.each(["normal", "accepted", "failed", "unowned", "error"])("captures actual native Companion %s output once without source fallback", async (kind) => {
+    const s = setup();
+    const text = ["accepted", "failed", "unowned"].includes(kind)
+      ? "I finished the turn, but it did not produce a visible reply. Please try again, or start a new session if this keeps happening."
+      : kind === "error" ? "Provider request failed." : "One Companion answer.";
+    const immediateDelivery = vi.fn();
+    vi.stubEnv("OPENCLAW_STATE_DIR", state.dir);
+    s.dispatchReply.mockImplementationOnce(async (input) => {
+      const native = await dispatchInboundMessageWithDispatcher({
+        ctx: { Body: input.ctxPayload.message.bodyForAgent, From: "inkbox:email:sponsor@example.com", To: "email:conversation-one", OriginatingChannel: "inkbox", OriginatingTo: "email:conversation-one", Provider: "inkbox", Surface: "inkbox", ChatType: "group", WasMentioned: true, SessionKey: input.routeSessionKey, MessageSid: `native-companion-reply-${kind}`, CommandAuthorized: false },
+        cfg: { session: { store: join(state.dir, "native-sessions.json") }, agents: { defaults: { workspace: state.dir } } },
+        dispatcherOptions: { ...input.dispatcherOptions, deliver: async (payload) => { immediateDelivery(payload); return input.delivery.deliver(payload); } },
+        replyResolver: async () => {
+          const context = { sessionKey: input.routeSessionKey, runId: "owned-companion-run" };
+          bindSilentSendCaptureToRun({ prompt: input.ctxPayload.message.bodyForAgent }, context);
+          recordSilentSendModelStarted({}, context);
+          if (["accepted", "failed", "unowned"].includes(kind)) {
+            const toolContext = kind === "unowned" ? { ...context, runId: "unrelated-run" } : context;
+            const event = { toolName: "inkbox_send_sms", toolCallId: "companion-final-send", params: { completeSilently: true } };
+            recordSilentSendBeforeToolCall(event, toolContext);
+            recordSilentSendAfterToolCall({ ...event, result: kind === "failed" ? { isError: true } : { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } } }, toolContext);
+          }
+          return { text, isError: kind !== "normal" };
+        },
+      });
+      return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: native };
+    });
+    try {
+      await dispatchInbound(event(), s.bridge.handlers); await settle(s.bridge);
+      expect(s.dispatchReply).toHaveBeenCalledOnce();
+      expect(immediateDelivery).not.toHaveBeenCalled();
+      expect(s.identity.replyAllEmail).toHaveBeenCalledTimes(kind === "accepted" ? 0 : 1);
+      if (kind !== "accepted") expect(s.identity.replyAllEmail).toHaveBeenCalledWith("source-1", { bodyText: text });
+    } finally { vi.unstubAllEnvs(); }
+  });
   it.each(["phone", "imessage"])("preserves current %s mention provenance before native command normalization", async (channel) => {
     const s = setup(channel);
     s.snapshot.text = "Historical sponsor: @agent previous request";

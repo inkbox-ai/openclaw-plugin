@@ -16,6 +16,7 @@ const require = createRequire(import.meta.url);
 const hostDist = dirname(dirname(require.resolve("openclaw/plugin-sdk/reply-runtime")));
 const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json"), "utf8")).version;
 const baselineWithoutFinalizer = hostVersion === "2026.5.27";
+const requiredSourceFinalizer = hostVersion.localeCompare("2026.9.6", undefined, { numeric: true }) >= 0;
 
 async function hostFunction(bundle: string, name: string, aliases: string[] = []): Promise<any> {
   const files = readdirSync(hostDist).filter((file) => [bundle, ...aliases].some((prefix) => file.startsWith(`${prefix}-`)) &&
@@ -150,6 +151,42 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         expect(result.counts.final).toBe(0);
       }
       else if (!reply) expect(result.noVisibleReplyFallbackDelivered).toBe(true);
+    } finally {
+      capture.finish();
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it.skipIf(!requiredSourceFinalizer).each([true, false])("handles the actual inner native empty-reply error with accepted final send=%s", async (accepted) => {
+    const buildEmptyReply = await hostFunction("commentary-progress-owner", "buildEmptyInteractiveReplyPayload");
+    // Use the native constructor, not a copied fixture: wording/metadata drift
+    // must fail this compatibility check rather than silently hide a new error.
+    const nativeFailure = buildEmptyReply({ completion: { outcome: "missing" } });
+    expect(nativeFailure).toMatchObject({ isError: true });
+    const directory = await mkdtemp(join(tmpdir(), "inkbox-inner-completion-"));
+    vi.stubEnv("OPENCLAW_STATE_DIR", directory);
+    const sessionKey = `agent:main:inkbox:direct:${randomUUID()}`;
+    const context = { sessionKey, runId: randomUUID() };
+    const capture = beginSilentSendCapture(sessionKey);
+    const deliver = vi.fn(async () => ({ visibleReplySent: true }));
+    capture.activate();
+    try {
+      bindSilentSendCaptureToRun({ prompt: capture.marker }, context);
+      recordSilentSendModelStarted({}, context);
+      const event = { toolName: "inkbox_send_email", toolCallId: "inner-final-send", params: { completeSilently: true } };
+      recordSilentSendBeforeToolCall(event, context);
+      recordSilentSendAfterToolCall({ ...event, result: accepted
+        ? { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } }
+        : { isError: true } }, context);
+      const result = await dispatchInboundMessageWithDispatcher({
+        ctx: { Body: "Send the email only.", From: "inkbox:sms:peer", To: "inkbox:sms:peer", OriginatingChannel: "inkbox", OriginatingTo: "inkbox:sms:peer", Provider: "inkbox", Surface: "inkbox", ChatType: "direct", SessionKey: sessionKey, MessageSid: randomUUID(), CommandAuthorized: true },
+        cfg: { session: { store: join(directory, "sessions.json") }, agents: { defaults: { workspace: directory } } },
+        dispatcherOptions: { deliver, transformReplyPayload: capture.transform },
+        replyResolver: async () => nativeFailure,
+      });
+      expect(deliver).toHaveBeenCalledTimes(accepted ? 0 : 1);
+      if (accepted) expect(result.counts.final).toBe(0);
+      else expect(deliver.mock.calls[0][0]).toMatchObject(nativeFailure);
     } finally {
       capture.finish();
       vi.unstubAllEnvs();
