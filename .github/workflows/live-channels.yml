@@ -208,6 +208,7 @@ jobs:
           for shape in read_native_timeline_shapes(Path(os.environ["RUNNER_TEMP"]) / "native-timeline.jsonl"):
               print(shape)
           PY
+          node tests/ci/native_error_locations.mjs "$(command -v openclaw)" "$GATEWAY_LOG"
 
       - name: Tear down (always)
         if: always()

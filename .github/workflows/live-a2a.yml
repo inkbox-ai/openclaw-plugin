@@ -226,6 +226,7 @@ jobs:
                   if isinstance(entry, dict)
               )))
           PY
+          node tests/ci/native_error_locations.mjs "$(command -v openclaw)" "$RUNNER_TEMP/gateway.log"
 
       - name: Stop gateway
         if: always()
