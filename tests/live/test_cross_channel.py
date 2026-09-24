@@ -63,6 +63,7 @@ def _source_reply_shapes(log_text: str) -> list[str]:
         r"|send tool shape: tool=(?:inkbox_send_sms|inkbox_send_email|message) chars=\d+"
         r"|silent send shape: bound=(?:true|false) batch=(?:true|false) attempts=\d+ accepted=\d+ invalid=(?:true|false)"
         r"|silent send invalid: reason=(?:before_lifecycle|duplicate_before|nonfinal_before|missing_before|name_mismatch|tool_error|nonterminal_after|unaccepted_after) final_param=(?:true|false|missing|string|other) tool=(?:send|transport|other)\b"
+        r"|silent send owner: tool=(?:tool_search|tool_describe|inkbox_whoami|read|exec|message|inkbox_other|other) name=(?:missing|nonstring|present|empty) id=(?:missing|nonstring|event_composite|event_plain|context_composite|context_plain) relationship=(?:same|different|event_only|context_only|neither) prior=(?:absent|same_name|different_name) alias=(?:true|false) batch=\d{1,4} before=\d{1,4} hook=batch_owner_v2\b"
         r"|routed send shape: channel=inkbox chars=\d+)",
         log_text,
     )

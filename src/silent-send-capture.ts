@@ -19,6 +19,9 @@ type Capture = {
   batchStarted: boolean;
   invalid: boolean;
   invalidShape?: { reason: string; finalParam: string; tool: string };
+  invalidOwner?: { tool: string; name: string; id: string; relationship: string; prior: string; alias: boolean; batch: number; before: number; hook: string };
+  batchOrdinal: number;
+  beforeCount: number;
   attempts: Map<string, Attempt>;
   priorBatchCalls: Map<string, string>;
 };
@@ -46,7 +49,7 @@ const transportTools = new Set(["tool_call", "tool_search_code"]);
 // accepted final-send evidence below; changed wording and real errors stay visible.
 const nativeEmptyReplyText = "I finished the turn, but it did not produce a visible reply. Please try again, or start a new session if this keeps happening.";
 
-function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_before" | "nonfinal_before" | "missing_before" | "name_mismatch" | "tool_error" | "nonterminal_after" | "unaccepted_after", event: Event): void {
+function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_before" | "nonfinal_before" | "missing_before" | "name_mismatch" | "tool_error" | "nonterminal_after" | "unaccepted_after", event: Event, context: Context): void {
   capture.invalid = true;
   const params = event.toolName === "tool_call"
     ? event.params?.args as Record<string, unknown> | undefined : event.params;
@@ -55,6 +58,19 @@ function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_be
     reason,
     finalParam: value === true ? "true" : value === false ? "false" : value === undefined ? "missing" : typeof value === "string" ? "string" : "other",
     tool: sendTools.has(event.toolName ?? "") ? "send" : transportTools.has(event.toolName ?? "") ? "transport" : "other",
+  };
+  const id = event.toolCallId ?? context.toolCallId;
+  const nativeTools = new Set(["tool_search", "tool_describe", "inkbox_whoami", "read", "exec", "message"]);
+  const name = typeof event.toolName === "string" ? event.toolName : undefined;
+  const prior = typeof id === "string" && capture.priorBatchCalls.has(id);
+  capture.invalidOwner ??= {
+    tool: name && nativeTools.has(name) ? name : name?.startsWith("inkbox_") ? "inkbox_other" : "other",
+    name: name === undefined ? event.toolName === undefined ? "missing" : "nonstring" : name ? "present" : "empty",
+    id: !id ? "missing" : typeof id !== "string" ? "nonstring" : `${event.toolCallId !== undefined ? "event" : "context"}_${id.includes("|") ? "composite" : "plain"}`,
+    relationship: event.toolCallId === undefined ? context.toolCallId === undefined ? "neither" : "context_only" : context.toolCallId === undefined ? "event_only" : event.toolCallId === context.toolCallId ? "same" : "different",
+    prior: !prior ? "absent" : capture.priorBatchCalls.get(id!) === name ? "same_name" : "different_name",
+    alias: typeof id === "string" && [...capture.priorBatchCalls.keys()].some((key) => typeof key === "string" && key !== id && key.split("|")[0] === id.split("|")[0]),
+    batch: Math.min(capture.batchOrdinal, 9999), before: Math.min(capture.beforeCount, 9999), hook: "batch_owner_v2",
   };
 }
 
@@ -113,7 +129,7 @@ function acceptedWrapper(
 export function beginSilentSendCapture(sessionKey: string) {
   const capture: Capture = {
     sessionKey, marker: `[Inkbox turn correlation: ${randomUUID()}]`,
-    closed: false, batchStarted: false, invalid: false, attempts: new Map(), priorBatchCalls: new Map(),
+    closed: false, batchStarted: false, invalid: false, attempts: new Map(), priorBatchCalls: new Map(), batchOrdinal: 0, beforeCount: 0,
   };
   return {
     marker: capture.marker,
@@ -136,6 +152,7 @@ export function beginSilentSendCapture(sessionKey: string) {
         accepted: [...capture.attempts.values()].filter((attempt) => attempt.accepted).length,
         invalid: capture.invalid,
         invalidShape: capture.invalidShape,
+        invalidOwner: capture.invalidOwner,
       };
     },
     finish() { capture.closed = true; captures.delete(capture); },
@@ -155,6 +172,8 @@ export function recordSilentSendModelStarted(event: Event, context: Context): vo
     capture.batchStarted = true;
     capture.invalid = false;
     capture.invalidShape = undefined;
+    capture.invalidOwner = undefined;
+    capture.batchOrdinal += 1;
     for (const [id, attempt] of capture.attempts) capture.priorBatchCalls.set(id, attempt.name);
     capture.attempts.clear();
   }
@@ -162,17 +181,18 @@ export function recordSilentSendModelStarted(event: Event, context: Context): vo
 
 export function recordSilentSendBeforeToolCall(event: Event, context: Context): void {
   for (const capture of matching(event, context)) {
+    capture.beforeCount += 1;
     const id = event.toolCallId ?? context.toolCallId;
     const duplicate = id && (capture.attempts.has(id) || capture.priorBatchCalls.has(id));
     if (!capture.batchStarted || !id || duplicate) {
-      invalidate(capture, duplicate ? "duplicate_before" : "before_lifecycle", event);
+      invalidate(capture, duplicate ? "duplicate_before" : "before_lifecycle", event, context);
       continue;
     }
     const name = event.toolName ?? "";
     const wrapper = transportTools.has(name);
     capture.attempts.set(id, { name, wrapper, accepted: false });
     if (!wrapper && (!sendTools.has(name) || event.params?.completeSilently !== true)) {
-      invalidate(capture, "nonfinal_before", event);
+      invalidate(capture, "nonfinal_before", event, context);
     }
   }
 }
@@ -188,14 +208,14 @@ export function recordSilentSendAfterToolCall(event: Event, context: Context): v
     const result = event.result as Result | undefined;
     if (!id || !attempt || attempt.name !== event.toolName || event.error ||
         result?.isError === true || result?.terminate !== true) {
-      invalidate(capture, !id || !attempt ? "missing_before" : attempt.name !== event.toolName ? "name_mismatch" : event.error || result?.isError === true ? "tool_error" : "nonterminal_after", event);
+      invalidate(capture, !id || !attempt ? "missing_before" : attempt.name !== event.toolName ? "name_mismatch" : event.error || result?.isError === true ? "tool_error" : "nonterminal_after", event, context);
       continue;
     }
     const accepted = attempt.wrapper
       ? acceptedWrapper(capture, id, attempt, event, result)
       : sendTools.has(attempt.name) && event.params?.completeSilently === true &&
         acceptedSendResult(result);
-    if (!accepted) invalidate(capture, "unaccepted_after", event);
+    if (!accepted) invalidate(capture, "unaccepted_after", event, context);
     else attempt.accepted = true;
   }
 }

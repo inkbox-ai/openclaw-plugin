@@ -176,6 +176,29 @@ describe("run-scoped explicit send completion", () => {
     recordSilentSendModelStarted({}, context);
     expect(capture.shape().invalidShape).toBeUndefined();
   });
+  it("diagnoses composite prior-call aliases without authorizing them or exposing IDs", () => {
+    const { capture } = begin();
+    recordSilentSendBeforeToolCall({ toolName: "inkbox_whoami", toolCallId: "private-call|private-first" }, context);
+    recordSilentSendModelStarted({}, context); send();
+    recordSilentSendAfterToolCall({ toolName: "inkbox_whoami", toolCallId: "private-call|private-second", params: { secret: "private-argument" } }, context);
+    expect(capture.shape().invalidOwner).toEqual({ tool: "inkbox_whoami", name: "present", id: "event_composite", relationship: "event_only", prior: "absent", alias: true, batch: 2, before: 2, hook: "batch_owner_v2" });
+    expect(JSON.stringify(capture.shape())).not.toContain("private");
+    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+  });
+  it.each([undefined, { secret: "private-tool" }])("bounds missing/nonstring name diagnostics and context-only IDs", (toolName) => {
+    const { capture } = begin(); send();
+    recordSilentSendAfterToolCall({ toolName: toolName as unknown as string, params: { secret: "private-argument" } }, { ...context, toolCallId: "private-id" });
+    expect(capture.shape().invalidOwner).toEqual({ tool: "other", name: toolName === undefined ? "missing" : "nonstring", id: "context_plain", relationship: "context_only", prior: "absent", alias: false, batch: 1, before: 1, hook: "batch_owner_v2" });
+    expect(JSON.stringify(capture.shape())).not.toContain("private");
+    expect(capture.completedSilently()).toBe(false);
+  });
+  it.each(["same", "different"])("reports only %s event/context ID relation", (relationship) => {
+    const { capture } = begin(); send();
+    recordSilentSendAfterToolCall({ toolCallId: "private-event" }, { ...context, toolCallId: relationship === "same" ? "private-event" : "private-context" });
+    expect(capture.shape().invalidOwner?.relationship).toBe(relationship);
+    expect(JSON.stringify(capture.shape())).not.toContain("private");
+    expect(capture.completedSilently()).toBe(false);
+  });
   it.each([[true, "true"], ["private-body", "string"]])("classifies tool_call's nested final flag without logging its value", (value, finalParam) => {
     const { capture } = begin();
     const event = { toolName: "tool_call", toolCallId: "wrapper", params: { args: { completeSilently: value } } };

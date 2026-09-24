@@ -182,3 +182,17 @@ def test_send_boundary_diagnostics_extract_only_allowlisted_metadata():
         "silent send shape: bound=false batch=false attempts=0 accepted=0 invalid=false",
         "silent send invalid: reason=missing_before final_param=string tool=transport",
     ]
+
+
+def test_capture_owner_diagnostics_are_closed_enums_and_bounded_counts():
+    valid = "silent send owner: tool=tool_search name=present id=event_composite relationship=event_only prior=absent alias=true batch=2 before=3 hook=batch_owner_v2"
+    records = [
+        "Inkbox " + valid + " private-id private-body",
+        valid.replace("tool=tool_search", "tool=private-tool"),
+        valid.replace("id=event_composite", "id=private-id"),
+        valid.replace("relationship=event_only", "relationship=private-id"),
+        valid.replace("batch=2", "batch=10000"),
+        valid.replace("before=3", "before=3private"),
+        valid.replace("hook=batch_owner_v2", "hook=private-module-path"),
+    ]
+    assert cross._source_reply_shapes("\n".join(records)) == [valid]

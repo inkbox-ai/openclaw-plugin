@@ -2761,6 +2761,10 @@ async function dispatchInboundTurn(
       if (shape.invalidShape) {
         opts.logger?.info?.(`Inkbox silent send invalid: reason=${shape.invalidShape.reason} final_param=${shape.invalidShape.finalParam} tool=${shape.invalidShape.tool}`);
       }
+      if (shape.invalidOwner) {
+        const owner = shape.invalidOwner;
+        opts.logger?.info?.(`Inkbox silent send owner: tool=${owner.tool} name=${owner.name} id=${owner.id} relationship=${owner.relationship} prior=${owner.prior} alias=${owner.alias} batch=${owner.batch} before=${owner.before} hook=${owner.hook}`);
+      }
       silentSendCapture.finish();
     }
     if (hostedSmsCapture && opts.hostedSmsSettlement) {
