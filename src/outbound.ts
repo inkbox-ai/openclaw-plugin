@@ -2,6 +2,7 @@ import { createInkboxRuntime } from "./client.js";
 import { checkOutboundRecipient } from "./allowlist.js";
 import { resolveInkboxAccount } from "./accounts.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "./message-limits.js";
+import { saveOutboundContext } from "./delivery-failure.js";
 
 export type InkboxTargetMode =
   | "email"
@@ -258,10 +259,24 @@ export async function sendInkboxChannelText(
       conversationId: target.value,
       text: params.text,
     });
+    saveOutboundContext({
+      messageId: msg.id,
+      channel: "sms",
+      chatId: target.value,
+      body: params.text,
+      conversationId: target.value,
+    });
     return { messageId: msg.id };
   }
   if (target.mode === "sms") {
     const msg = await identity.sendText({ to: target.value, text: params.text });
+    saveOutboundContext({
+      messageId: msg.id,
+      channel: "sms",
+      chatId: target.value,
+      recipient: target.value,
+      body: params.text,
+    });
     return { messageId: msg.id };
   }
   // Recipient-first channel: sends only work toward people already connected
@@ -272,21 +287,50 @@ export async function sendInkboxChannelText(
       conversationId: target.value,
       text: params.text,
     });
+    saveOutboundContext({
+      messageId: msg.id,
+      channel: "imessage",
+      chatId: target.value,
+      body: params.text,
+      conversationId: target.value,
+    });
     return { messageId: msg.id };
   }
   if (target.mode === "imessage") {
     const msg = await identity.sendIMessage({ to: target.value, text: params.text });
+    saveOutboundContext({
+      messageId: msg.id,
+      channel: "imessage",
+      chatId: target.value,
+      recipient: target.value,
+      body: params.text,
+      conversationId: msg.conversationId,
+    });
     return { messageId: msg.id };
   }
 
+  const subject = await resolveEmailReplySubject(identity, params);
   const msg = await identity.sendEmail({
     to: [target.value],
-    subject: await resolveEmailReplySubject(identity, params),
+    subject,
     bodyText: params.text,
     inReplyToMessageId:
       params.replyToId !== undefined && params.replyToId !== null
         ? String(params.replyToId)
         : undefined,
+  });
+  saveOutboundContext({
+    messageId: msg.id,
+    channel: "email",
+    chatId: target.value,
+    recipient: target.value,
+    body: params.text,
+    emailThreadId: normalizeEmailThreadId(params.threadId),
+    emailRfcMessageId:
+      params.replyToId !== undefined && params.replyToId !== null
+        ? String(params.replyToId)
+        : undefined,
+    emailSubject: subject,
   });
   return { messageId: msg.id };
 }

@@ -17,6 +17,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Inbound call routing and lifecycle subscriptions now follow the selected stack.
 - CI runs on Blacksmith and uses Node.js 24 for compatibility checks against the latest OpenClaw release.
 - Delivery-failure recovery now requires one safe retry only for the first retryable failure. If that retry also fails, another safe retry is optional and `[SILENT]` is available; terminal failures stop immediately, while unknown failures require a safety review. The existing three-send hard cap is unchanged.
+- Delivery-failure recovery now records context for each successful SMS, iMessage, and email send and correlates failure webhooks through it first, so a webhook that omits the recipient, conversation, or original body still wakes the right thread with the message that failed. Mirrors hermes-agent-plugin#60.
 - Hosted-call SMS follow-ups now use the call record's authoritative remote number, require tool-confirmed success, and allow one corrected retry after a recoverable content or policy rejection without falsely reporting terminal failures as complete.
 - Contact-rule tools are now read-only because agent-scoped identities cannot change mailbox or phone rules; make rule changes in the Inkbox Console.
 

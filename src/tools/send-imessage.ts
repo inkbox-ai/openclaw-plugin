@@ -4,6 +4,7 @@ import { runTool, toolError } from "../errors.js";
 import { sentToolText, silentSendCompletionParameter } from "./send-completion.js";
 import { checkOutboundRecipient } from "../allowlist.js";
 import { IMESSAGE_MAX_TEXT_CHARS, imessageTextTooLongMessage } from "../message-limits.js";
+import { saveOutboundContext } from "../delivery-failure.js";
 
 // Outbound iMessage — recipient-first channel: a person must have connected
 // to this identity through the Inkbox iMessage router and messaged it before
@@ -123,6 +124,14 @@ export function registerSendIMessage(
           ...(text ? { text } : {}),
           ...(mediaUrls?.length ? { mediaUrls } : {}),
           ...(params.sendStyle ? { sendStyle: params.sendStyle } : {}),
+        });
+        saveOutboundContext({
+          messageId: msg.id,
+          channel: "imessage",
+          chatId: conversationId || to || msg.conversationId || msg.id,
+          recipient: to || undefined,
+          body: text || "[media attachment]",
+          conversationId: conversationId || msg.conversationId,
         });
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
         return sentToolText(

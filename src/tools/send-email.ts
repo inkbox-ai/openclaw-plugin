@@ -3,6 +3,7 @@ import type { InkboxRuntime } from "../client.js";
 import { runTool, toolError } from "../errors.js";
 import { sentToolText, silentSendCompletionParameter } from "./send-completion.js";
 import { checkOutboundRecipients } from "../allowlist.js";
+import { saveOutboundContext } from "../delivery-failure.js";
 
 // Outbound email — the primary write path for the email channel.
 export function registerSendEmail(
@@ -52,6 +53,16 @@ export function registerSendEmail(
           cc: params.cc,
           bcc: params.bcc,
           inReplyToMessageId: params.inReplyToMessageId,
+        });
+        saveOutboundContext({
+          messageId: msg.id,
+          channel: "email",
+          chatId: params.to[0] || msg.id,
+          recipient: params.to[0],
+          body: params.bodyText ?? params.bodyHtml ?? "",
+          emailThreadId: msg.threadId,
+          emailRfcMessageId: params.inReplyToMessageId ?? msg.messageId,
+          emailSubject: params.subject,
         });
         return sentToolText(
           `Sent email id=${msg.id} to=${params.to.join(",")} subject="${params.subject}"`,
