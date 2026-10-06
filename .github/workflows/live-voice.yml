@@ -70,6 +70,8 @@ jobs:
           echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
           echo "DRIVER_LOG=$RUNNER_TEMP/driver.log" >> "$GITHUB_ENV"
           echo "DRIVER_STATE=$RUNNER_TEMP/driver_state.json" >> "$GITHUB_ENV"
+          echo "HOSTED_SMS_TEST_DIAGNOSTICS=$RUNNER_TEMP/hosted-sms-test.json" >> "$GITHUB_ENV"
+          echo "HOSTED_SMS_SDK_DIAGNOSTICS=$RUNNER_TEMP/hosted-sms-sdk.json" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v7
         with:
@@ -160,11 +162,24 @@ jobs:
             openclaw config set channels.inkbox.voiceRealtime.enabled false --strict-json
           fi
 
+      - name: Prepare the unchanged hosted spoken marker
+        if: matrix.scenario == 'outbound_hosted'
+        run: |
+          RUN_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          HOSTED_MARKER="$(python3 "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"
+          echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
+
       - name: Start gateway and wait for readiness
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
+          if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
+            # CI-only SDK observer; no product source or transport replacement.
+            NODE_OPTIONS="${NODE_OPTIONS:-} --import=$GITHUB_WORKSPACE/tests/live/hosted_sms_sdk_observer.mjs" \
+              openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
+          else
+            openclaw gateway run > "$GATEWAY_LOG" 2>&1 &
+          fi
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway (tunnel + webhooks)…"
           for i in $(seq 1 36); do
@@ -187,9 +202,7 @@ jobs:
             # follow-up. Hash the full run identity as three distinct everyday words;
             # conventional phonetic-alphabet terms were normalized into
             # alternate words or familiar phrases.
-            RUN_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            HOSTED_MARKER="$(python3 "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"
-            echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
+            HOSTED_MARKER="$HOSTED_POST_CALL_MARKER"
             export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $HOSTED_MARKER. Create one post-call action now. Set both the action title and the action details to this exact five-word phrase: Send SMS $HOSTED_MARKER. Wait for the action tool to succeed, then read the exact three-word SMS body back to me. Do not paraphrase, omit a word, or send the SMS during the call."
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
@@ -212,12 +225,14 @@ jobs:
           LIVE_VOICE_TIMEOUT: ${{ inputs.timeout_s || '220' }}
         run: |
           LIVE_REAL_MODEL=1 VOICE_DRIVER_STATE="$DRIVER_STATE" \
-            python3 -m pytest \
-              tests/live/test_voice_helpers.py tests/live/test_voice.py -v --tb=short
+            python3 tests/live/hosted_sms_diagnostics.py test \
+              tests/live/test_voice_helpers.py tests/live/test_hosted_sms_diagnostics.py tests/live/test_voice.py -v --tb=short
 
       - name: Report content-free failure state
         if: failure() || cancelled()
         run: |
+          python3 tests/live/hosted_sms_diagnostics.py report \
+            "$HOSTED_SMS_TEST_DIAGNOSTICS" "$HOSTED_SMS_SDK_DIAGNOSTICS.*"
           test -s "$GATEWAY_LOG" && echo "gateway_log=present" || echo "gateway_log=empty"
           test -s "$DRIVER_LOG" && echo "driver_log=present" || echo "driver_log=empty"
           python3 - <<'PY'
