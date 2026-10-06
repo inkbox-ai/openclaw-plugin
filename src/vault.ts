@@ -60,11 +60,13 @@ export function createVaultRuntime(runtime: InkboxRuntime, opts: VaultRuntimeOpt
       await permitted(secretId);
       const secret = await (await unlock(fingerprint)).getSecret(secretId);
       assertKey(fingerprint);
+      await permitted(secretId);
+      assertKey(fingerprint);
       if (expectedType && secret.secretType !== expectedType) throw new Error(`The requested secret is not ${expectedType}.`);
       const payload = { ...secret.payload } as Record<string, unknown>;
       if (secret.secretType === "login") { payload.has_totp = payload.totp != null; delete payload.totp; }
       return payload;
     },
-    async getTotpCode(secretId) { id(secretId); const fingerprint = selectedKey().fingerprint; await permitted(secretId); const result = await (await unlock(fingerprint)).getTotpCode(secretId); assertKey(fingerprint); return result; },
+    async getTotpCode(secretId) { id(secretId); const fingerprint = selectedKey().fingerprint; await permitted(secretId); const result = await (await unlock(fingerprint)).getTotpCode(secretId); assertKey(fingerprint); await permitted(secretId); assertKey(fingerprint); return result; },
   };
 }

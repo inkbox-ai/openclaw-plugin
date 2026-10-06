@@ -22,17 +22,20 @@ export function registerIMessageReads(api: any, runtime: InkboxRuntime, nativeEn
       const keys = [...(byMessage ? ["messageId"] : ["conversationId", "threadId"]), "limit", "cursor"];
       if (!params || typeof params !== "object" || Array.isArray(params) || Object.keys(params).some((key) => !keys.includes(key))) throw new Error("Invalid native thread arguments.");
       if (params.cursor !== undefined && (typeof params.cursor !== "string" || !params.cursor || params.cursor.length > 1024 || params.cursor.includes("\0"))) throw new Error("cursor must be 1–1024 characters without NUL.");
-      if (source?.replyToMessageId && source.companion) throw new Error("Use the supplied Companion history; native thread reads are unavailable in this turn.");
+      if (source?.companion) throw new Error("Use the supplied Companion history; native thread reads are unavailable in this turn.");
       if (params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 1 || params.limit > 100)) throw new Error("limit must be an integer from 1 to 100.");
       for (const key of byMessage ? ["messageId"] : ["conversationId", "threadId"]) if (typeof params[key] !== "string" || !params[key].trim()) throw new Error(`${key} is required.`);
       const identity = await runtime.getIdentity(), options = { limit: params.limit, cursor: params.cursor };
+      if (source) assertNativeSource(source, identity.id);
       if (source?.replyToMessageId) {
-        assertNativeSource(source, identity.id);
         const conversationId = byMessage ? (await identity.getIMessage(params.messageId)).conversationId : params.conversationId;
         if (conversationId !== source.conversationId) throw new Error("Native thread reads must stay in the active source conversation.");
         assertNativeSource(source, identity.id);
       }
-      return toolText(formatJson(await (byMessage ? identity.getIMessageThread(params.messageId, options) : identity.getIMessageConversationThread(params.conversationId, params.threadId, options))));
+      const result = await (byMessage ? identity.getIMessageThread(params.messageId, options) : identity.getIMessageConversationThread(params.conversationId, params.threadId, options));
+      if (!nativeEnabled()) throw new Error("Native iMessage replies and thread tools are disabled.");
+      if (source) assertNativeSource(source, identity.id);
+      return toolText(formatJson(result));
     }); },
     };
   }, { names: [byMessage ? "inkbox_get_imessage_thread" : "inkbox_get_imessage_conversation_thread"] });

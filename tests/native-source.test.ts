@@ -67,6 +67,24 @@ describe("immutable native reply source", () => {
     } finally { close(); }
     src.companion = false; expect((await conversation.execute("stale", { conversationId: "conversation", threadId: "opaque" })).isError).toBe(true); expect(identity.getIMessageConversationThread).not.toHaveBeenCalled();
   });
+  it("withholds a thread page if its native source closes during the final SDK await", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), hold = new Promise<void>((resolve) => { release = resolve; });
+    const src = source(), close = bindNativeSource("read-closing", src), tools: any[] = [];
+    const identity = { id: "identity", getIMessageConversationThread: vi.fn(async () => { entered(); await hold; return { text: "must-not-expose-history" }; }) };
+    registerIMessageReads({ registerTool: (value: any) => tools.push(typeof value === "function" ? value({ sessionKey: "read-closing" }) : value) }, { getIdentity: async () => identity } as any);
+    const pending = tools.find((tool) => tool.name === "inkbox_get_imessage_conversation_thread").execute("read", { conversationId: "conversation", threadId: "opaque" });
+    await started; close(); release(); const result = await pending;
+    expect(result.isError).toBe(true); expect(JSON.stringify(result)).not.toContain("must-not-expose-history");
+  });
+  it("does not let a Companion source on another channel expand iMessage history", async () => {
+    const src = { ...source(), companion: true, replyToMessageId: undefined }, close = bindNativeSource("companion-no-imessage-target", src), tools: any[] = [], getIdentity = vi.fn();
+    registerIMessageReads({ registerTool: (value: any) => tools.push(typeof value === "function" ? value({ sessionKey: "companion-no-imessage-target" }) : value) }, { getIdentity } as any);
+    try {
+      const result = await tools.find((tool) => tool.name === "inkbox_get_imessage_thread").execute("read", { messageId: "any" });
+      expect(result.isError).toBe(true); expect(getIdentity).not.toHaveBeenCalled();
+    } finally { close(); }
+  });
   it("preserves explicit null Slack source thread and refuses a model thread override", async () => {
     const src: NativeSource = { ...source(), replyToMessageId: undefined, slackRoute: { identityId: "identity", connectionId: "connection", conversationId: "CROOM", workspaceId: "TWORK", actorId: "USER", messageTs: "1.1", sourceEventId: "event", author: "TWORK:USER", threadTs: null, mentioned: true, addressed: true, direct: false, rawText: "ask", text: "ask" } };
     const close = bindNativeSource("slack", src), factories: any[] = [], sendMessage = vi.fn(async () => ({ id: "accepted", status: "sent" }));

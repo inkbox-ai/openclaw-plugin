@@ -23,7 +23,7 @@ describe("selective Vault read semantics", () => {
     expect(await f.helper.getSecret(secretId, "login")).toEqual({ username: "synthetic", password: "one", has_totp: true });
     f.getSecret.mockResolvedValue({ secretType: "login", payload: { password: "rotated" } } as any);
     expect(await f.helper.getSecret(secretId, "login")).toEqual({ password: "rotated", has_totp: false });
-    expect(f.vault.unlock).toHaveBeenCalledTimes(1); expect(f.getSecret).toHaveBeenCalledTimes(2); expect(f.vault.listAccessRules).toHaveBeenCalledTimes(2);
+    expect(f.vault.unlock).toHaveBeenCalledTimes(1); expect(f.getSecret).toHaveBeenCalledTimes(2); expect(f.vault.listAccessRules).toHaveBeenCalledTimes(4);
     f.vault.listAccessRules.mockResolvedValue([]);
     await expect(f.helper.getSecret(secretId)).rejects.toThrow("no longer has access"); expect(f.getSecret).toHaveBeenCalledTimes(2);
     await expect(f.helper.getTotpCode(secretId)).rejects.toThrow("no longer has access"); expect(f.getTotpCode).not.toHaveBeenCalled();
@@ -50,6 +50,13 @@ describe("selective Vault read semantics", () => {
     if (kind === "plaintext") f.getSecret.mockImplementation(async () => { vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", ""); return { secretType: "login", payload: { password: "must-not-return" } } as any; });
     else f.getTotpCode.mockImplementation(async () => { vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", "different-key"); return { code: "000001", secondsRemaining: 30 }; });
     await expect(kind === "plaintext" ? f.helper.getSecret(secretId) : f.helper.getTotpCode(secretId)).rejects.toThrow(/Vault is locked|key changed/);
+  });
+  it.each(["plaintext", "code"])("withholds %s if an administrative-key grant is revoked during the SDK read", async (kind) => {
+    vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", "local-key"); const f = fixture();
+    if (kind === "plaintext") f.getSecret.mockImplementation(async () => { f.vault.listAccessRules.mockResolvedValue([]); return { secretType: "login", payload: { password: "must-not-return" } } as any; });
+    else f.getTotpCode.mockImplementation(async () => { f.vault.listAccessRules.mockResolvedValue([]); return { code: "000001", secondsRemaining: 30 }; });
+    await expect(kind === "plaintext" ? f.helper.getSecret(secretId) : f.helper.getTotpCode(secretId)).rejects.toThrow("no longer has access");
+    expect(f.vault.listAccessRules).toHaveBeenCalledTimes(2);
   });
   it("retains explicit optional tool gates, including generic retrieval", () => {
     const f = fixture(), registrations: any[] = [];
