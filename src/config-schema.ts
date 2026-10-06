@@ -199,6 +199,8 @@ export const inkboxAccountConfigJsonSchema = {
       items: { type: "string" },
       description: "Inbound Inkbox contact-id allowlist.",
     },
+    slackEnabled: { type: "boolean", description: "Enable Inkbox Slack messaging after connecting a workspace." },
+    imessageThreadedReplies: { type: "boolean", description: "Opt in to source-targeted native iMessage replies and queued follow-ups." },
     groupReplyMode: { type: "string", enum: ["auto", "mention"], description: "Group replies: auto (default), or require @agent / @handle on the current message. Unmentioned messages remain context without running the model." },
     companionResponseMode: { type: "string", enum: ["safe", "relaxed"], description: "Companion replies: safe (default) requires direct sender access; relaxed can respond to sponsored senders. Independent of groupReplyMode." },
     includeContactMemories: {

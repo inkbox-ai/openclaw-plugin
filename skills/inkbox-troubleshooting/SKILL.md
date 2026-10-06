@@ -19,11 +19,11 @@ Use this skill when an Inkbox tool fails, the user asks why Inkbox is not workin
 | `sender_sms_pending` | The Inkbox phone number is still propagating to carriers. Retry later and verify `smsStatus`. |
 | `recipient_not_opted_in` | Ask the recipient to text `START` to the agent's Inkbox number, then retry. |
 | `recipient_opted_out` | The recipient texted `STOP`; they must text `START` again before SMS can be sent. |
-| `Vault is locked` | Export `INKBOX_VAULT_KEY=<the vault key>` in the shell launching this plugin's gateway process, or use the configured `vault.keyEnvVar`. |
+| `Vault is locked` | Export `INKBOX_OPENCLAW_VAULT_KEY=<the vault key>` in the shell launching this plugin's gateway process, or use the configured `vault.keyEnvVar`. |
 
 ## Vault unlock pattern
 
-Vault tools are optional and must be allowlisted before use. The plugin never persists the vault key. It reads the key once on first credential access from `INKBOX_VAULT_KEY`, or from the custom env var configured under `vault.keyEnvVar`.
+Vault tools are optional and must be allowlisted before use. The plugin never persists the vault key. It reads the key once on first credential access from `INKBOX_OPENCLAW_VAULT_KEY`, or from the custom env var configured under `vault.keyEnvVar`.
 
 If vault access fails, do not ask for the vault key in chat. Tell the operator which env var needs to be set in this plugin's gateway process.
 

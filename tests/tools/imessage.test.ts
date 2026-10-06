@@ -13,7 +13,8 @@ function createApi(): { api: any; tools: Map<string, RegisteredTool> } {
   const tools = new Map<string, RegisteredTool>();
   return {
     api: {
-      registerTool: (def: RegisteredTool) => {
+      registerTool: (definition: RegisteredTool | ((context: any) => RegisteredTool)) => {
+        const def = typeof definition === "function" ? definition({}) : definition;
         tools.set(def.name, def);
       },
     },

@@ -13,6 +13,8 @@ import type {
 
 // Shape of `plugins.entries.inkbox.config` after configSchema validation.
 export interface InkboxPluginConfig {
+  slackEnabled?: boolean;
+  imessageThreadedReplies?: boolean;
   groupReplyMode?: "auto" | "mention";
   companionResponseMode?: "safe" | "relaxed";
   apiKey: string;
@@ -141,6 +143,7 @@ export function createInkboxRuntime(
     const key = runtimeCacheKey(cfg);
     if (!resolved || resolved.key !== key) {
       const inkbox = new Inkbox(inkboxClientOptions(cfg.apiKey, cfg.baseUrl));
+      void inkbox.ready?.().catch(() => logger?.warn?.("SDK-wide Vault initialization failed; use the plugin-specific Vault key setting for lazy credential access."));
       const promise = (async () => {
         // Confirm the key shape before we go any further. Agent-scoped is the
         // expected mode; admin-scoped works for outbound but we surface a warning

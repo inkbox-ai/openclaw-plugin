@@ -1,3 +1,5 @@
+import { bindNativeSourceRun, guardNativeSourceTool } from "./src/native-source.js";
+import { bindNativeOwner, settleNativeOwner, guardRetiredNativeRun } from "./src/native-owner.js";
 import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall, reconcileSilentSendAgentEnd } from "./src/silent-send-capture.js";
 import { bindNativeApprovalTurnToRun, markNativeConversationReset } from "./src/inbound/native-approvals.js";
 import {
@@ -23,6 +25,7 @@ import { registerNoteTools } from "./src/tools/notes.js";
 import { registerContactRuleTools } from "./src/tools/contact-rules.js";
 import { registerIdentityAccessTools } from "./src/tools/access.js";
 import { registerVaultTools } from "./src/tools/vault.js";
+import { registerSlackTools } from "./src/tools/slack.js";
 import { registerWhoami } from "./src/tools/whoami.js";
 import { registerA2ATools } from "./src/tools/a2a.js";
 import { registerPlaceCall } from "./src/tools/place-call.js";
@@ -150,7 +153,7 @@ function registerInkboxTools(api: any): void {
   registerIdentityAccessTools(api, runtime);
 
   // Vault tools. All optional; user must opt in via tools.allow. Vault
-  // unlock key is read once on first use from $INKBOX_VAULT_KEY (or a
+  // unlock key is read once on first use from $INKBOX_OPENCLAW_VAULT_KEY (or a
   // custom env var when vault.keyEnvVar is configured).
   const vault = createVaultRuntime(runtime, {
     keyEnvVar: (cfg as any).vault?.keyEnvVar,
@@ -159,6 +162,7 @@ function registerInkboxTools(api: any): void {
 
   // Diagnostic / introspection tools.
   registerWhoami(api, runtime);
+  registerSlackTools(api, runtime, resolveCfg);
 }
 
 function registerHostedCallSettlementHooks(api: any): void {
@@ -173,13 +177,17 @@ function registerHostedCallSettlementHooks(api: any): void {
       `Inkbox routed send shape: channel=inkbox chars=${typeof event.content === "string" ? event.content.length : 0}`,
     );
   });
-  api.on("before_agent_run", (event: any, context: any) => {
+  api.on("before_agent_run", async (event: any, context: any) => {
+    await bindNativeOwner(event, context);
+    bindNativeSourceRun(event, context);
     bindNativeApprovalTurnToRun(api.runtime?.channel, listInkboxAccountIds(api.runtime?.config?.current?.()), event, context);
     bindHostedSmsCaptureToRun(event, context);
     bindSilentSendCaptureToRun(event, context);
     bindA2AProgressActivityToRun(event, context);
   });
   api.on("before_tool_call", async (event: any, context: any) => {
+    const sourceDecision = guardRetiredNativeRun(event, context) ?? guardNativeSourceTool(event, context);
+    if (sourceDecision) return sourceDecision;
     recordSilentSendBeforeToolCall(event, context);
     const decision = await recordHostedSmsBeforeToolCall(event, context);
     if (!decision?.block) {
@@ -197,6 +205,7 @@ function registerHostedCallSettlementHooks(api: any): void {
   api.on("model_call_started", recordSilentSendModelStarted);
   api.on("after_tool_call", recordSilentSendAfterToolCall);
   api.on("agent_end", reconcileSilentSendAgentEnd);
+  api.on("agent_end", settleNativeOwner);
   api.on("after_tool_call", recordHostedSmsAfterToolCall);
   api.on("model_call_ended", recordHostedModelCallEnded);
 }

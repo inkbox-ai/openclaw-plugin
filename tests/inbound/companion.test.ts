@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({ dir: "" }));
 const nativeGateway = vi.hoisted(() => ({ resolve: vi.fn() }));
@@ -76,8 +76,13 @@ async function journal() {
   const path = join(state.dir, name);
   return { path, value: JSON.parse(await readFile(path, "utf8")) };
 }
-beforeEach(async () => { nativeGateway.resolve.mockReset(); state.dir = await mkdtemp(join(tmpdir(), "inkbox-companion-")); });
-afterEach(async () => { vi.unstubAllGlobals(); await rm(state.dir, { recursive: true, force: true }); });
+// Current native SQLite/worker startup needs a bounded I/O budget under full-suite concurrency.
+vi.setConfig({ testTimeout: 30_000 });
+const caseDirectories: string[] = [];
+beforeEach(async () => { nativeGateway.resolve.mockReset(); state.dir = await mkdtemp(join(tmpdir(), "inkbox-companion-")); caseDirectories.push(state.dir); });
+afterEach(() => { vi.unstubAllGlobals(); });
+// Native SQLite stores live for the isolated worker, not one individual case.
+afterAll(async () => { await Promise.all(caseDirectories.map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 }))); });
 
 describe("Companion host boundary", () => {
   it.each(["normal", "accepted", "failed", "unowned", "error"])("captures actual native Companion %s output once without source fallback", async (kind) => {

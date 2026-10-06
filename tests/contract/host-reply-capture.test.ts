@@ -4,11 +4,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { dispatchInboundMessageWithDispatcher } from "openclaw/plugin-sdk/reply-runtime";
 import { createInkboxTextReplyCapture } from "../../src/reply-capture.js";
 import { sanitizeA2AProgressText } from "../../src/a2a-progress.js";
 
+// Current hosts cache a process-wide SQLite handle. Keep case directories alive
+// until the isolated test file exits; session keys/stores remain case-specific.
+const caseDirectories: string[] = [];
+afterAll(async () => { await Promise.all(caseDirectories.map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 }))); });
 const require = createRequire(import.meta.url);
 const dist = dirname(dirname(require.resolve("openclaw/plugin-sdk/reply-runtime")));
 const baseline = JSON.parse(readFileSync(join(dist, "..", "package.json"), "utf8")).version === "2026.5.27";
@@ -59,7 +63,7 @@ describe.skipIf(baseline)("actual host auxiliary progress dispatch", () => {
       }
     } finally {
       vi.unstubAllEnvs();
-      await rm(directory, { recursive: true, force: true });
+      caseDirectories.push(directory);
     }
   });
 });

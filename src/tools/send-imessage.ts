@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { activeNativeSource, assertNativeSource } from "../native-source.js";
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolError } from "../errors.js";
@@ -40,7 +42,9 @@ export function registerSendIMessage(
   runtime: InkboxRuntime,
   allowedRecipients?: string[],
 ): void {
-  api.registerTool({
+  api.registerTool((context: { sessionKey?: string }) => {
+    const source = activeNativeSource(context.sessionKey);
+    return {
     name: "inkbox_send_imessage",
     description:
       "Send an iMessage from the configured Inkbox identity. Recipient-first channel: a person must have connected via the Inkbox iMessage router and messaged this agent before outbound sends work, so prefer `conversationId` from an inbound message or `inkbox_list_imessage_conversations`.",
@@ -94,6 +98,7 @@ export function registerSendIMessage(
     }),
     async execute(_id: string, params: any) {
       return runTool(async () => {
+        if ("replyToMessageId" in params || "plainReplyFallback" in params) return toolError("Reply targeting and fallback are owned by the current source, not model arguments.");
         const text = typeof params.text === "string" ? params.text : "";
         const mediaUrls = Array.isArray(params.mediaUrls) ? params.mediaUrls : undefined;
         if (!text && !mediaUrls?.length) {
@@ -105,25 +110,34 @@ export function registerSendIMessage(
         const conversationId =
           typeof params.conversationId === "string" ? params.conversationId.trim() : "";
         const to = typeof params.to === "string" ? params.to.trim() : "";
-        if (Boolean(conversationId) === Boolean(to)) {
+        if (source?.replyToMessageId && (to || (conversationId && conversationId !== source.conversationId))) return toolError("A source-triggered answer must use its current iMessage conversation.");
+        if (!source?.replyToMessageId && Boolean(conversationId) === Boolean(to)) {
           return toolError("Specify exactly one of `to` or `conversationId`.");
         }
         if (to) {
           const block = checkOutboundRecipient(to, allowedRecipients);
           if (block) return toolError(block);
-        } else if (allowedRecipients?.length) {
+        } else if (!source?.replyToMessageId && allowedRecipients?.length) {
           return toolError(
             "`conversationId` sends cannot be checked against the local outbound recipient allowlist. Use an explicit `to` recipient or adjust the allowlist.",
           );
         }
 
         const identity = await runtime.getIdentity();
+        if (source?.replyToMessageId) {
+          await assertNativeSource(source, identity.id);
+          const block = checkOutboundRecipient(source.author, allowedRecipients);
+          if (block) return toolError(block);
+          await source.beforeSend(_id);
+        }
         const msg = await identity.sendIMessage({
-          ...(conversationId ? { conversationId } : { to }),
+          ...(source?.replyToMessageId ? { conversationId: source.conversationId, replyToMessageId: source.replyToMessageId, plainReplyFallback: true,
+            idempotencyKey: `openclaw:tool:${createHash("sha256").update(JSON.stringify([source.identityId, source.conversationId, source.replyToMessageId, _id, text, mediaUrls])).digest("hex")}` } : conversationId ? { conversationId } : { to }),
           ...(text ? { text } : {}),
           ...(mediaUrls?.length ? { mediaUrls } : {}),
           ...(params.sendStyle ? { sendStyle: params.sendStyle } : {}),
         });
+        if (source?.replyToMessageId) await source.afterSend(_id, msg.id);
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
         return sentToolText(
           `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} status=${msg.status ?? "unknown"}`,
@@ -131,5 +145,6 @@ export function registerSendIMessage(
         );
       });
     },
-  });
+    };
+  }, { names: ["inkbox_send_imessage"] });
 }

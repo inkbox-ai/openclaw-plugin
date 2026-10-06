@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { wrapToolWithBeforeToolCallHook } from "openclaw/plugin-sdk/agent-harness-runtime";
 import * as agentHarnessRuntime from "openclaw/plugin-sdk/agent-harness-runtime";
@@ -12,10 +12,17 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { beginSilentSendCapture, bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "../../src/silent-send-capture.js";
 
+// Current hosts cache a process-wide SQLite handle. Keep case directories alive
+// until the isolated test file exits; session keys/stores remain case-specific.
+const caseDirectories: string[] = [];
+afterAll(async () => { await Promise.all(caseDirectories.map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 }))); });
 const require = createRequire(import.meta.url);
 const hostDist = dirname(dirname(require.resolve("openclaw/plugin-sdk/reply-runtime")));
 const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json"), "utf8")).version;
 const baselineWithoutFinalizer = hostVersion === "2026.5.27";
+// Native worker startup/SQLite I/O can exceed Vitest's 5s default under full-suite concurrency.
+vi.setConfig({ testTimeout: 30_000 });
+const nativeToolCallPrefix = hostVersion.localeCompare("2026.9.8", undefined, { numeric: true }) >= 0 ? "tool_call" : "tool_search_code";
 const requiredSourceFinalizer = hostVersion.localeCompare("2026.9.6", undefined, { numeric: true }) >= 0;
 
 async function hostFunction(bundle: string, name: string, aliases: string[] = []): Promise<any> {
@@ -64,9 +71,9 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     const currentRegistry = await hostFunction("hook-runner-global", "getGlobalHookRunnerRegistry");
     const getRunner = await hostFunction("hook-runner-global", "getGlobalHookRunner");
     const priorRegistry = currentRegistry();
-    const catalogRef = (await hostFunction("local-model-lean", "createToolSearchCatalogRef"))();
-    const register = await hostFunction("local-model-lean", "registerHeadlessToolSearchCatalog");
-    const createControls = await hostFunction("local-model-lean", "createToolSearchTools");
+    const catalogRef = (await hostFunction("local-model-lean", "createToolSearchCatalogRef", ["tool-search"]))();
+    const register = await hostFunction("local-model-lean", "registerHeadlessToolSearchCatalog", ["tool-search"]);
+    const createControls = await hostFunction("local-model-lean", "createToolSearchTools", ["tool-search"]);
     const context = { sessionKey: `agent:main:inkbox:direct:${randomUUID()}`, runId: randomUUID() };
     const events: Array<{ toolName: string; toolCallId: string; runId: string }> = [];
     const receipt = { accepted: true, completeSilently: true };
@@ -98,7 +105,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
       expect(events.map((event) => event.toolName)).toEqual(["tool_call", "inkbox_send_email"]);
       expect(events.map((event) => event.runId)).toEqual([context.runId, context.runId]);
       expect(events[0].toolCallId).toBe("outer-send");
-      expect(events[1].toolCallId).toBe("tool_search_code:outer-send:inkbox_send_email:1");
+      expect(events[1].toolCallId).toBe(`${nativeToolCallPrefix}:outer-send:inkbox_send_email:1`);
       expect(result.terminate).toBe(succeeds ? true : undefined);
       expect(result.details.tool.name).toBe("inkbox_send_email");
       if (succeeds) expect(result.details.result).toMatchObject({ terminate: true, details: { inkboxSendCompletion: receipt } });
@@ -154,7 +161,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     } finally {
       capture.finish();
       vi.unstubAllEnvs();
-      await rm(directory, { recursive: true, force: true });
+      caseDirectories.push(directory);
     }
   });
   it.skipIf(!requiredSourceFinalizer).each([true, false])("handles the actual inner native empty-reply error with accepted final send=%s", async (accepted) => {
@@ -190,7 +197,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     } finally {
       capture.finish();
       vi.unstubAllEnvs();
-      await rm(directory, { recursive: true, force: true });
+      caseDirectories.push(directory);
     }
   });
   it("recognizes only entirely successful, explicitly terminating batches", async () => {

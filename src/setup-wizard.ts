@@ -6,6 +6,7 @@ import {
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED,
   AUTH_SUBTYPE_API_KEY_ADMIN_SCOPED,
 } from "@inkbox/sdk";
+import { configureSlack } from "./slack-setup.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -43,6 +44,7 @@ import {
 } from "./voice-stack.js";
 
 export interface WizardConfig {
+  slackEnabled?: boolean;
   groupReplyMode?: "auto" | "mention";
   companionResponseMode?: "safe" | "relaxed";
   apiKey: string;
@@ -2030,8 +2032,18 @@ export async function runSetupWizard(opts: WizardOptions): Promise<WizardResult>
   // omit it and still receive the snippet.
   const groupReplyMode = await selectOption({ prompter, message: "When should the agent reply in groups?", options: [{ value: "auto" as const, label: "Automatically, when appropriate" }, { value: "mention" as const, label: "Only when @agent or @handle is mentioned" }], initialValue: existingAccount.config.groupReplyMode ?? "auto" });
   const companionResponseMode = await selectOption({ prompter, message: "Who can wake the agent in Companion mode?", options: [{ value: "safe" as const, label: "Safe — direct senders only" }, { value: "relaxed" as const, label: "Relaxed — direct and sponsored senders" }], initialValue: existingAccount.config.companionResponseMode ?? "safe" });
+  const slackAbort = new AbortController();
+  const cancelSlack = () => slackAbort.abort();
+  process.once("SIGINT", cancelSlack);
+  let slackEnabled: boolean;
+  try {
+    slackEnabled = await configureSlack(agentClient, identity.id, existingAccount.config.slackEnabled ?? false, {
+      prompter, signal: slackAbort.signal, note: (message) => console.log(message),
+      installation: (url, expiresAt) => { console.log(`Open this private installation link in your browser: ${url}\nExpires: ${expiresAt.toISOString()}.`); },
+    });
+  } finally { process.removeListener("SIGINT", cancelSlack); }
   const snippet: WizardConfig = {
-    groupReplyMode, companionResponseMode,
+    groupReplyMode, companionResponseMode, slackEnabled,
     apiKey: agentApiKey,
     identity: identityHandle,
     ...(signingKey ? { signingKey } : {}),

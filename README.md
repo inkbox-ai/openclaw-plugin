@@ -260,7 +260,7 @@ openclaw config set tools.allow '[
 Add vault tools only when the identity has vault access and the gateway environment has the vault unlock key:
 
 ```bash
-export INKBOX_VAULT_KEY="..."
+export INKBOX_OPENCLAW_VAULT_KEY="..."
 openclaw config set tools.allow '[
   "inkbox",
   "inkbox_credentials_list",
@@ -345,6 +345,41 @@ While the agent composes a reply, the recipient sees a typing indicator — the 
 
 Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
+### Native iMessage replies (opt in)
+
+Set `channels.inkbox.imessageThreadedReplies: true` or `INKBOX_IMESSAGE_THREADED_REPLIES=1` and restart the gateway. The default is off. Source-triggered answers use that incoming message as `replyToMessageId`, with the API's `plainReplyFallback: true`; the plugin never issues a second plain send. Explicit reply tools cannot override the source or fallback. Proactive/cron messages have no inherited reply target.
+
+The durable receiver acknowledges incoming messages only after saving them. Same-sender, same-conversation, same-native-thread text bursts wait 750 ms of quiet (at most 2 seconds) and answer the first source. Media, reactions, controls, and Companion snapshots stay separate. Follow-ups wait for the current native dispatch, without interrupting it; OpenClaw still owns model execution, sessions, approvals, and configured scheduling. Voice sessions remain separate.
+
+Use `inkbox_get_imessage_thread` with a message ID or `inkbox_get_imessage_conversation_thread` with a conversation and opaque thread ID; follow `nextCursor`. Delivery-failure callbacks, including callbacks arriving before the send result or unmatched proactive failures, are context only in this mode—not instructions to resend.
+
+## Slack (opt in)
+
+Run `openclaw inkbox setup` and explicitly enable Slack. Setup can reuse a saved workspace or accept **masked** app-configuration credentials, prepare the identity's app asynchronously, hand off browser installation, and observe its connected state. The plugin does not retain the token pair or provision apps in the background. Preparation and installation waits are separately bounded/cancellable; an unknown app-creation outcome is never blindly retried. Alternatively connect the identity in the Inkbox Console first and set `channels.inkbox.slackEnabled: true` or `INKBOX_SLACK_ENABLED=1`, then restart.
+
+The same signed receiver handles Slack. Subscription reconciliation adds missing events to the current active URL without deleting unrelated events or receivers. `skipWebhookReconcile` remains supported. Disabling Slack gates events, recovered jobs, automatic replies, and its six tools:
+
+- `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`
+- `inkbox_slack_search`, `inkbox_slack_send_message`, `inkbox_slack_get_action`
+
+Search covers retained text, not arbitrary workspace files. Follow a returned cursor even after an empty page. Explicit sends require a stable idempotency key; inspect pending/unknown actions with `get_action` rather than repeating a send. Native channel targets use `slack:<connection UUID>:<Slack conversation ID>`, with a separate optional native thread timestamp.
+
+Ordinary DMs stay inline and mentions in channels can start native threads. Companion history/session scope spans the channel, while **each current message** owns its exact connection, channel, actor, and null-or-native-thread reply destination. Safe/Relaxed admission and Auto/Mention wake policy remain independent. Quiet context is durable and does not start a model, tool, or indicator. A mention can wake Companion without forcing a reply when the native room-event policy permits silence.
+
+Working indicators follow the **outgoing destination**: inline replies use eyes on the source; native subthreads use Slack processing/suspended/active state and never reaction fallbacks. Approval waits suspend the native thread. Overlapping work is aggregated, bounded status retries do not affect delivery, and shutdown/restart cleanup retains unresolved operations.
+
+Native Stop and slash controls require the active sender and exact current thread. Historical messages and display names never grant authority. Canonical authors use the sender's verified home-workspace/user pair. Local Slack person allowlists may also use an installation-workspace/user pair, but only in that verified installation; bare user IDs are not supported. Proactive local outbound allowlists use `slack:<connection UUID>:<conversation ID>`.
+
+### Durable recovery and upgrades
+
+Existing Companion journals remain readable. New records add optional source ownership, burst receipts, tool-send intents, and exact native run IDs; no existing receipt is discarded. Completed answers are saved before sending. Accepted/uncertain external sends and uncertain model submissions are never replayed automatically. Later work may progress once the old native run is positively terminal; restart recovery can request cancellation of that **exact** run and requires terminal evidence before releasing it. Legacy ambiguous jobs without provable ownership remain paused for inspection. Do not delete the journal to retry, or downgrade while unresolved new-format work remains. Disabling/re-enabling a feature preserves its receipts.
+
+### Vault key migration
+
+Metadata listing requires no unlock. The plugin now defaults to `INKBOX_OPENCLAW_VAULT_KEY`; `vault.keyEnvVar` still supports a custom variable. Move an existing SDK-wide `INKBOX_VAULT_KEY` to the plugin-specific variable to retain lazy unlock: the SDK itself eagerly processes its global variable, including an empty value. The plugin does not mutate process environment or SDK internals to suppress that behavior.
+
+Every plaintext or TOTP request rechecks the configured identity's access and fetches current secret data. Login results replace seed material with `has_totp`; request the current code separately. `inkbox_credentials_get_secret` adds individually selected `key_pair`/`other` access and retains login redaction. All Vault tools, including metadata and this generic reader, remain optional and must be enabled explicitly.
+
 ## CLI
 
 ```bash
@@ -414,7 +449,9 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `voiceRealtime.consultPolicy` | no | `substantive` | When realtime calls should consult the main OpenClaw agent. |
 | `voiceRealtime.providers.openai.apiKey` | no | - | OpenAI API key validated by setup and used for Realtime calls. |
 | `voiceRealtime.fallbackToInkboxSttTts` | no | `true` | Fall back to Inkbox STT/TTS when realtime is unavailable. |
-| `vault.keyEnvVar` | no | `INKBOX_VAULT_KEY` | Env var containing the vault unlock key. |
+| `slackEnabled` | no | `false` | Enable connected Slack messaging and six Slack tools. |
+| `imessageThreadedReplies` | no | `false` | Source-targeted native replies and durable follow-ups. |
+| `vault.keyEnvVar` | no | `INKBOX_OPENCLAW_VAULT_KEY` | Env var containing the vault unlock key. |
 
 ## Tools
 
@@ -444,7 +481,7 @@ Optional:
 - Notes: `inkbox_update_note`, `inkbox_delete_note`
 - Contact rules: `inkbox_list_mail_contact_rules`, `inkbox_list_phone_contact_rules`; manage changes in the Inkbox Console
 - Note access: `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access`
-- Vault: `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code`
+- Vault: `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_credentials_get_secret`, `inkbox_totp_code`
 - Diagnostic: `inkbox_whoami`
 
 Send and email-forward tools accept optional `completeSilently: true` when the send is the final requested action and no acknowledgment is wanted. Successful sends then end the turn without an extra source-channel reply. Leave it unset when more work or a reply remains; failed sends never silently complete.

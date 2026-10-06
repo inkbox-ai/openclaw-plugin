@@ -14,15 +14,16 @@ When an action requires plaintext credentials (a password, an API key, an SSH ke
 - `inkbox_credentials_get_login` — plaintext login (username + password + optional URL)
 - `inkbox_credentials_get_api_key` — plaintext API key
 - `inkbox_credentials_get_ssh_key` — plaintext SSH private key (+ public, fingerprint, passphrase)
+- `inkbox_credentials_get_secret` — one selected secret, including key pairs/other; optional separately
 - `inkbox_totp_code` — current TOTP code for a login that has TOTP configured
 
 ## Prerequisites
 
 - The vault must be initialized in the Inkbox Console.
-- The vault unlock key must be available in the `INKBOX_VAULT_KEY` env var (or a custom env var if `vault.keyEnvVar` is configured).
+- The vault unlock key must be available in the `INKBOX_OPENCLAW_VAULT_KEY` env var (or a custom env var if `vault.keyEnvVar` is configured).
 - The identity must have access grants to the secrets in question (admin-set via the Inkbox Console).
 
-If `INKBOX_VAULT_KEY` is not set, the very first credential tool call returns "Vault is locked." Direct the user to export the env var in the shell launching OpenClaw, then retry.
+Metadata listing works while locked. Reads refresh access and payloads on every call; login results expose `has_totp`, never a seed. If `INKBOX_OPENCLAW_VAULT_KEY` is not set, a plaintext/code tool call returns "Vault is locked." Direct the user to export the env var in the shell launching OpenClaw, then retry.
 
 ## Workflow
 
@@ -49,7 +50,7 @@ If `INKBOX_VAULT_KEY` is not set, the very first credential tool call returns "V
 
 | Error | Meaning |
 |---|---|
-| `Vault is locked. Set the INKBOX_VAULT_KEY...` | Env var missing — direct the user to set it. |
+| `Vault is locked. Set the INKBOX_OPENCLAW_VAULT_KEY...` | Env var missing — direct the user to set it. |
 | `404` on get_* | Wrong secret id, or this identity doesn't have access. |
 | `TypeError` on get_login/get_api_key/get_ssh_key | Caller picked the wrong typed getter for the secret's type. Re-list to see `secretType`. |
 

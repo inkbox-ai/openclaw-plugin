@@ -99,6 +99,7 @@ function eventFamilies(eventTypes: readonly string[]): Set<string> {
 // (tunnel vs publicUrl, or a new tunnel host), the route does not. Rows on
 // other paths belong to other consumers and are never touched.
 function isStalePluginSubscription(sub: WebhookSubscription, desired: DesiredSubscriptionSet): boolean {
+  if (eventFamilies(sub.eventTypes).size > 1) return false;
   if (sub.url === desired.url) return false;
   const desiredPath = urlPathname(desired.url);
   if (!desiredPath) return false;
@@ -153,8 +154,9 @@ export async function reconcileWebhookSubscription(
       ? { phoneNumberId: desired.phoneNumberId! }
       : { agentIdentityId: desired.agentIdentityId! };
 
-  const existing = await inkbox.webhooks.subscriptions.list(ownerFilter);
+  const existing = await inkbox.webhooks.subscriptions.list({ ...ownerFilter, scope: "identity" });
   const desiredFamilies = eventFamilies(desired.eventTypes);
+  const mergedEvents = (sub: WebhookSubscription) => [...new Set([...sub.eventTypes.filter((event) => !desiredFamilies.has(event.split(".", 1)[0]!)), ...desired.eventTypes])];
   const belongsToDesiredChannel = (sub: WebhookSubscription) =>
     [...eventFamilies(sub.eventTypes)].some((family) =>
       desiredFamilies.has(family),
@@ -168,10 +170,11 @@ export async function reconcileWebhookSubscription(
   const staleOurs = existing.filter((sub) => isStalePluginSubscription(sub, desired));
 
   if (match) {
-    const result = sameEventTypes(match.eventTypes, desired.eventTypes)
+    const result = sameEventTypes(match.eventTypes, mergedEvents(match))
       ? match
       : await inkbox.webhooks.subscriptions.update(match.id, {
-          eventTypes: [...desired.eventTypes],
+          scope: "identity",
+          eventTypes: mergedEvents(match),
         });
     for (const stale of staleOurs) {
       await deleteStaleSubscription(inkbox, stale, logger);
@@ -185,10 +188,11 @@ export async function reconcileWebhookSubscription(
     const [primary, ...extras] = staleOurs;
     try {
       const updated = await inkbox.webhooks.subscriptions.update(primary.id, {
+          scope: "identity",
         url: desired.url,
-        ...(sameEventTypes(primary.eventTypes, desired.eventTypes)
+        ...(sameEventTypes(primary.eventTypes, mergedEvents(primary))
           ? {}
-          : { eventTypes: [...desired.eventTypes] }),
+          : { eventTypes: mergedEvents(primary) }),
       });
       logger?.info?.(
         `Inkbox webhook subscription repointed from ${primary.url} to ${desired.url}`,
@@ -201,15 +205,16 @@ export async function reconcileWebhookSubscription(
       if (!isDuplicateUrl409(err)) throw err;
       // A concurrent activation already owns the desired URL — adopt that
       // row and drop our stale ones.
-      const refreshed = await inkbox.webhooks.subscriptions.list(ownerFilter);
+      const refreshed = await inkbox.webhooks.subscriptions.list({ ...ownerFilter, scope: "identity" });
       const raced = refreshed.find(
         (sub) => sub.url === desired.url && belongsToDesiredChannel(sub),
       );
       if (!raced) throw err;
-      const result = sameEventTypes(raced.eventTypes, desired.eventTypes)
+      const result = sameEventTypes(raced.eventTypes, mergedEvents(raced))
         ? raced
         : await inkbox.webhooks.subscriptions.update(raced.id, {
-            eventTypes: [...desired.eventTypes],
+          scope: "identity",
+            eventTypes: mergedEvents(raced),
           });
       for (const stale of staleOurs) {
         await deleteStaleSubscription(inkbox, stale, logger);
@@ -228,16 +233,17 @@ export async function reconcileWebhookSubscription(
     if (isDuplicateUrl409(err)) {
       // Concurrent activation created the row first; re-list and treat
       // as the create-result (PATCH event-types if they drift).
-      const refreshed = await inkbox.webhooks.subscriptions.list(ownerFilter);
+      const refreshed = await inkbox.webhooks.subscriptions.list({ ...ownerFilter, scope: "identity" });
       const racedMatch = refreshed.find(
         (sub) => sub.url === desired.url && belongsToDesiredChannel(sub),
       );
       if (racedMatch) {
-        if (sameEventTypes(racedMatch.eventTypes, desired.eventTypes)) {
+        if (sameEventTypes(racedMatch.eventTypes, mergedEvents(racedMatch))) {
           return racedMatch;
         }
         return inkbox.webhooks.subscriptions.update(racedMatch.id, {
-          eventTypes: [...desired.eventTypes],
+          scope: "identity",
+          eventTypes: mergedEvents(racedMatch),
         });
       }
       logger?.warn?.(

@@ -20,7 +20,7 @@ export interface InboundCallDecision {
 // keep the previous first-contact allowlist behavior.
 function resolveRemoteContactIds(
   parsed: any,
-  kind: "mail" | "text" | "imessage" | "call" | "call-ended",
+  kind: "slack" | "mail" | "text" | "imessage" | "call" | "call-ended",
 ): string[] {
   if (kind === "mail") {
     const contacts = parsed?.data?.contacts;
@@ -58,6 +58,7 @@ function isExplicitOutboundCallEnded(parsed: any): boolean {
 }
 
 export interface InboundHandlers {
+  onSlack?(event: Record<string, any>): Promise<void>;
   onCompanion?(event: Record<string, any>): Promise<void>;
   // Mail events fire-and-forget. Six event_types: message.received/sent/
   // forwarded/delivered/bounced/failed. Most workflows only care about
@@ -94,7 +95,7 @@ export interface InboundHandlers {
 }
 
 export interface DispatchResult {
-  kind: "mail" | "text" | "imessage" | "a2a" | "call-ended" | "call" | "external";
+  kind: "slack" | "mail" | "text" | "imessage" | "a2a" | "call-ended" | "call" | "external";
   // Only populated for kind="call". The handler builds the response body
   // from this.
   callDecision?: InboundCallDecision;
@@ -139,6 +140,10 @@ export async function dispatchInbound(
     typeof (parsed as { event_type: unknown }).event_type === "string"
   ) {
     const eventType = (parsed as { event_type: string }).event_type;
+    if (eventType.startsWith("slack.")) {
+      await handlers.onSlack?.(parsed as Record<string, any>);
+      return { kind: "slack" };
+    }
     if ("companion" in parsed && parsed.companion != null && ["message.received", "text.received", "imessage.received"].includes(eventType)) {
       if (!handlers.onCompanion) throw new Error("Companion mode requires a compatible receiver.");
       const kind = eventType === "message.received" ? "mail" : eventType === "text.received" ? "text" : "imessage";

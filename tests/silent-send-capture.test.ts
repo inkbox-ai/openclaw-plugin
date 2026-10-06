@@ -294,13 +294,13 @@ describe("run-scoped explicit send completion", () => {
 });
 
 describe("deferred send transport wrappers", () => {
-  function wrapped(options: { name?: string; childParent?: string; childError?: boolean; outerError?: boolean; outerTerminal?: boolean; omitChild?: boolean } = {}) {
+  function wrapped(options: { name?: string; childPrefix?: string; childParent?: string; childError?: boolean; outerError?: boolean; outerTerminal?: boolean; omitChild?: boolean } = {}) {
     const { capture } = begin();
     const name = options.name ?? "tool_call";
     const params = { id: "inkbox_send_email", args: { completeSilently: true } };
     recordSilentSendBeforeToolCall({ toolName: name, toolCallId: "outer", params }, context);
     const receipt = { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } };
-    const child = { toolName: "inkbox_send_email", toolCallId: `tool_search_code:${options.childParent ?? "outer"}:inkbox_send_email:1`, params: { completeSilently: true } };
+    const child = { toolName: "inkbox_send_email", toolCallId: `${options.childPrefix ?? "tool_search_code"}:${options.childParent ?? "outer"}:inkbox_send_email:1`, params: { completeSilently: true } };
     if (!options.omitChild) {
       recordSilentSendBeforeToolCall(child, context);
       recordSilentSendAfterToolCall({ ...child, result: receipt, ...(options.childError ? { error: "failed" } : {}) }, context);
@@ -315,6 +315,12 @@ describe("deferred send transport wrappers", () => {
   }
   it.each(["tool_call", "tool_search_code"])("settles successful %s only with independently accepted children", (name) => {
     expect(wrapped({ name }).transform(reply)).toBeNull();
+  });
+  it("accepts the current native tool_call child prefix with exact ownership", () => {
+    expect(wrapped({ childPrefix: "tool_call" }).transform(reply)).toBeNull();
+    expect(wrapped({ childPrefix: "tool_call", childParent: "another" }).transform(reply)).toBe(reply);
+    expect(wrapped({ name: "tool_search_code", childPrefix: "tool_call" }).transform(reply)).toBe(reply);
+    expect(wrapped({ childPrefix: "arbitrary" }).transform(reply)).toBe(reply);
   });
   it.each(["tool_call", "tool_search_code"])("reconciles an earlier failed exchange without promoting it into %s completion evidence", (name) => {
     const capture = wrapped({ name });

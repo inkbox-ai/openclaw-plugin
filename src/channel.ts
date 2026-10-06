@@ -27,10 +27,10 @@ import {
 const meta = {
   id: INKBOX_CHANNEL_ID,
   label: "Inkbox",
-  selectionLabel: "Inkbox (Email, SMS, iMessage, Voice)",
+  selectionLabel: "Inkbox (Email, SMS, iMessage, Slack, Voice)",
   docsPath: "/plugins/inkbox",
   docsLabel: "inkbox",
-  blurb: "Inkbox email, SMS, iMessage, and voice identities.",
+  blurb: "Inkbox email, SMS, iMessage, Slack, and voice identities.",
   order: 90,
   detailLabel: "Inkbox",
   aliases: ["email", "sms", "phone", "imessage"],
@@ -263,10 +263,10 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         resolveInkboxAccount({ cfg, accountId }).defaultTo,
     },
     messaging: {
-      targetPrefixes: ["inkbox", "email", "mailto", "sms", "text", "phone", "imessage", "conversation"],
+      targetPrefixes: ["inkbox", "email", "mailto", "sms", "text", "phone", "imessage", "slack", "conversation"],
       normalizeTarget: normalizeInkboxTarget,
       inferTargetChatType: ({ to }: { to: string }) =>
-        parseInkboxTarget(to)?.mode === "sms-conversation"
+        ["sms-conversation", "slack"].includes(parseInkboxTarget(to)?.mode ?? "")
           ? "group"
           : parseInkboxTarget(to)
             ? "direct"
@@ -288,10 +288,10 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         if (!parsed) {
           return null;
         }
-        const chatType = parsed.mode === "sms-conversation" ? "group" : "direct";
+        const chatType = ["sms-conversation", "slack"].includes(parsed.mode) ? "group" : "direct";
         const isIMessage =
           parsed.mode === "imessage" || parsed.mode === "imessage-conversation";
-        const targetValue = isIMessage ? `imessage:${parsed.value}` : parsed.value;
+        const targetValue = parsed.mode === "slack" ? `slack:${parsed.value}` : isIMessage ? `imessage:${parsed.value}` : parsed.value;
         const route = buildChannelOutboundSessionRoute({
           cfg,
           agentId,

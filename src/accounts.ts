@@ -199,6 +199,9 @@ function normalizeConfig(value: unknown): InkboxAccountConfig {
   if (value.voicemailDetection === "enabled" || value.voicemailDetection === "disabled") {
     out.voicemailDetection = value.voicemailDetection as OutboundVoicemailDetection;
   }
+  for (const flag of ["slackEnabled", "imessageThreadedReplies"] as const) {
+    if (typeof value[flag] === "boolean") out[flag] = value[flag];
+  }
   if (value.groupReplyMode === "auto" || value.groupReplyMode === "mention") out.groupReplyMode = value.groupReplyMode;
   if (value.companionResponseMode === "safe" || value.companionResponseMode === "relaxed") out.companionResponseMode = value.companionResponseMode;
   if (typeof value.enabled === "boolean") {
@@ -260,6 +263,8 @@ function envConfig(env: NodeJS.ProcessEnv | undefined): InkboxAccountConfig {
     identity: e.INKBOX_IDENTITY ?? e.INKBOX_AGENT_IDENTITY ?? e.INKBOX_AGENT_HANDLE,
     baseUrl: e.INKBOX_BASE_URL,
     signingKey: e.INKBOX_SIGNING_KEY,
+    slackEnabled: e.INKBOX_SLACK_ENABLED === undefined ? undefined : /^(1|true|yes|on)$/i.test(e.INKBOX_SLACK_ENABLED),
+    imessageThreadedReplies: e.INKBOX_IMESSAGE_THREADED_REPLIES === undefined ? undefined : /^(1|true|yes|on)$/i.test(e.INKBOX_IMESSAGE_THREADED_REPLIES),
     groupReplyMode: e.INKBOX_GROUP_REPLY_MODE,
     companionResponseMode: e.INKBOX_COMPANION_RESPONSE_MODE,
     tunnelName: e.INKBOX_TUNNEL_NAME,

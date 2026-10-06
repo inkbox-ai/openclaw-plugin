@@ -20,6 +20,21 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Hosted-call SMS follow-ups now use the call record's authoritative remote number, require tool-confirmed success, and allow one corrected retry after a recoverable content or policy rejection without falsely reporting terminal failures as complete.
 - Contact-rule tools are now read-only because agent-scoped identities cannot change mailbox or phone rules; make rule changes in the Inkbox Console.
 
+## [0.2.16]
+
+### Added
+
+- Opt-in Slack setup, signed events, six tools, channel-wide Companion history, exact-thread native controls, and destination-specific working indicators.
+- Opt-in source-targeted iMessage replies, durable noninterrupting follow-ups, bounded text bursts, and native thread reads.
+- Durable native run ownership and exact-run terminal fencing so uncertain sends remain unreplayed without permanently blocking safe later work.
+- Optional individual generic Vault secret retrieval, with login TOTP seed redaction.
+
+### Changed
+
+- Pin published Inkbox TypeScript SDK 0.7.14.
+- List Vault metadata while locked, refresh identity access and plaintext/code reads, and default lazy unlock to `INKBOX_OPENCLAW_VAULT_KEY` (custom variables remain supported).
+- Preserve existing voice, A2A, hosted-call SMS settlement, native approvals, and feature-off messaging behavior.
+
 ## [0.2.15]
 
 ### Added

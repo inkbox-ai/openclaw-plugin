@@ -1,3 +1,5 @@
+import { fenceNativeOwner } from "../native-owner.js";
+import { SLACK_EVENTS, type SlackRoute, ownSlackConnection } from "../slack.js";
 import { companionWakes, controlText, isCompanionControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
@@ -9,12 +11,12 @@ import type { CompanionChannel, CompanionMetadata, CompanionReplyContext } from 
 
 export const COMPANION_MAX_BYTES = 128 * 1024;
 type Channel = CompanionChannel;
-export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc"> & { to?: string[]; cc?: string[]; identityId?: string };
+export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc"> & { slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = CompanionMetadata;
-type Job = { event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { messageId?: string }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeToolSend(callId: string): Promise<void>; afterToolSend(callId: string, messageId: string): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -25,30 +27,30 @@ function retryableRead(error: unknown, depth = 0): boolean {
     ["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH"].includes(detail.code ?? "") ||
     (detail.cause !== error && retryableRead(detail.cause, depth + 1));
 }
-const retries = new Map<string, ReturnType<typeof setTimeout>>();
-const chains = new Map<string, Promise<unknown>>();
-const workers = new Map<string, Promise<void>>();
-const controls = new Set<string>();
+const registry = Symbol.for("inkbox.companion-coordinator.v2");
+type Coordinator = { retries: Map<string, ReturnType<typeof setTimeout>>; chains: Map<string, Promise<unknown>>; workers: Map<string, Promise<void>>; controls: Set<string> };
+const globalState = globalThis as typeof globalThis & { [registry]?: Coordinator };
+const { retries, chains, workers, controls } = globalState[registry] ??= { retries: new Map(), chains: new Map(), workers: new Map(), controls: new Set() };
 const lockOptions = { stale: 60_000, retries: { retries: 10, factor: 1.5, minTimeout: 20, maxTimeout: 1000 } };
 
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function email(value: string): string { return (value.match(/<([^<>]+)>/)?.[1] ?? value).trim().toLowerCase(); }
 function source(event: Record<string, any>, m: Metadata): { message: any; author: string } {
   const message = m.channel === "phone" ? event.data?.text_message : event.data?.message;
-  const author = m.channel === "mail" ? message?.from_address : m.channel === "phone"
+  const author = m.channel === "slack" ? message?.author : m.channel === "mail" ? message?.from_address : m.channel === "phone"
     ? message?.sender_phone_number ?? message?.remote_phone_number
     : message?.sender_number ?? message?.remote_number;
   if (typeof message?.id !== "string" || !message.id ||
       (m.channel === "mail" ? message.thread_id : message.conversation_id) !== m.conversation_id ||
       (message.direction && message.direction !== "inbound") || typeof author !== "string" ||
-      !(m.channel === "mail" ? /^[^\s@]+@[^\s@]+$/.test(email(author)) : /^\+[1-9]\d{6,14}$/.test(author))) {
+      !(m.channel === "slack" ? /^T[A-Z0-9]{1,63}:[UW][A-Z0-9]{1,63}$/.test(author) : m.channel === "mail" ? /^[^\s@]+@[^\s@]+$/.test(email(author)) : /^\+[1-9]\d{6,14}$/.test(author))) {
     throw new Error("Companion source conversation or sender is invalid.");
   }
   return { message, author: m.channel === "mail" ? email(author) : author };
 }
 function metadata(event: Record<string, any>): Metadata {
   const m = event.companion;
-  const expected = { "message.received": "mail", "text.received": "phone", "imessage.received": "imessage" }[event.event_type as string];
+  const expected = ([...SLACK_EVENTS, "slack.session_stopped"] as string[]).includes(event.event_type) ? "slack" : { "message.received": "mail", "text.received": "phone", "imessage.received": "imessage" }[event.event_type as string];
   if (!m || m.channel !== expected || !["ordinary", "initialization", "live"].includes(m.phase) ||
       !Number.isSafeInteger(m.sequence) || m.sequence < 1 ||
       ![m.scope_id, m.conversation_id].every((v) => typeof v === "string" && v.length > 0 && v.length <= 256) ||
@@ -63,6 +65,7 @@ function replyContext(raw: any, m: Metadata): CompanionReply {
     channel: raw?.channel, conversationId: raw?.conversationId ?? raw?.conversation_id,
     replyToMessageId: raw?.replyToMessageId ?? raw?.reply_to_message_id,
     to: raw?.to ?? [], cc: raw?.cc ?? [],
+    connectionId: raw?.connectionId ?? raw?.connection_id, slackConversationId: raw?.slackConversationId ?? raw?.slack_conversation_id, threadTs: raw?.threadTs ?? raw?.thread_ts ?? null,
   };
   if (reply.channel !== m.channel || reply.conversationId !== m.conversation_id ||
       (m.channel === "mail" && (!reply.replyToMessageId || !Array.isArray(reply.to) || !Array.isArray(reply.cc) ||
@@ -82,8 +85,12 @@ export function createCompanionReceiver(opts: {
   submit(input: CompanionInput): Promise<string[] | void>;
   canApprove?(input: CompanionInput): Promise<boolean>;
   resolveApproval?(event: Record<string, any>, key: string, beforeResolve: () => Promise<boolean>): Promise<boolean>;
+  signal?: AbortSignal;
+  activity?(event: Record<string, any>, phase: "accepted" | "completed" | "failed"): void;
   deliver(input: CompanionInput, text: string, beforeSend: () => Promise<void>): Promise<string | undefined>; warn?(message: string): void;
 }) {
+  let closed = false;
+  const stopped = () => closed || opts.signal?.aborted === true;
   const owner = hash(JSON.stringify([opts.accountId, opts.config.identity, opts.config.baseUrl ?? ""]));
   const path = join(statePaths().dir, `companion-${owner}.json`);
   async function read(): Promise<Journal> {
@@ -118,26 +125,71 @@ export function createCompanionReceiver(opts: {
     const inbound = opts.config.allowedInboundContactIds;
     if (inbound?.length && (!contactId || !inbound.includes(contactId))) throw new SenderNotPermitted("Companion sender is not locally permitted.");
   }
-  async function checkSender(author: string, channel: Channel, contactId?: string | null): Promise<string | null | undefined> {
+  async function checkSender(author: string, channel: Channel, contactId?: string | null, route?: SlackRoute): Promise<string | null | undefined> {
     if (opts.config.allowedInboundContactIds?.length && contactId === undefined) {
       const client = await opts.runtime.getClient();
-      const matches = await client.contacts.lookup(channel === "mail" ? { email: author } : { phone: author });
-      contactId = matches.length === 1 ? matches[0]!.id : null;
+      if (channel === "slack") {
+        const [workspaceId, userId] = author.split(":");
+        const contacts = await Promise.all(opts.config.allowedInboundContactIds.map((id) => client.contacts.get(id)));
+        const matches = contacts.filter((contact) => contact.slackAccounts?.some((account) => (account.workspaceId === workspaceId || account.workspaceId === route?.workspaceId) && account.userId === userId));
+        contactId = matches.length === 1 ? matches[0]!.id : null;
+      } else {
+        const matches = await client.contacts.lookup(channel === "mail" ? { email: author } : { phone: author });
+        contactId = matches.length === 1 ? matches[0]!.id : null;
+      }
     }
     checkInboundContact(contactId);
     return contactId;
   }
-  function checkSponsor(author: string, contactId: string | null | undefined) {
+  function checkSponsor(author: string, contactId: string | null | undefined, route?: SlackRoute) {
     checkInboundContact(contactId);
-    checkOutboundSponsor(author);
+    checkOutboundSponsor(author, route);
   }
-  function checkOutboundSponsor(author: string) {
+  function checkOutboundSponsor(author: string, route?: SlackRoute) {
     const outbound = opts.config.allowedRecipients;
-    if (outbound?.length && !outbound.some((v) => v.trim().toLowerCase() === author.trim().toLowerCase())) {
+    if (outbound?.length && !outbound.some((v) => [author, ...(route && /^T[A-Z0-9]+:[UW][A-Z0-9]+$/.test(author) ? [`${route.workspaceId}:${author.split(":")[1]}`] : [])].some((alias) => v.trim().toLowerCase() === alias.toLowerCase()))) {
       throw new Error("Companion sponsor is not on the outbound allowlist.");
     }
   }
   function key(m: Metadata, identityId: string) { return `companion:${owner}:${identityId}:${m.channel}:${hash(`${m.conversation_id}:${m.scope_id}`)}:${m.activation_id ? `activation:${hash(m.activation_id)}` : "ordinary"}`; }
+  function sameControlRoute(a: Job, b: Job) {
+    if (metadata(a.event).channel !== "slack") return true;
+    const left = a.event._openclawSlack?.route, right = b.event._openclawSlack?.route;
+    return left && right && left.connectionId === right.connectionId && left.conversationId === right.conversationId && left.threadTs === right.threadTs;
+  }
+  async function validateSlack(job: Job) {
+    if (metadata(job.event).channel !== "slack") return;
+    const route: SlackRoute | undefined = job.event._openclawSlack?.route;
+    if (!opts.config.slackEnabled || !route || route.identityId !== job.identityId) throw new Error("Slack reply source is no longer enabled.");
+    const client = await opts.runtime.getClient();
+    const connection = await ownSlackConnection(client, job.identityId, route.connectionId);
+    if (connection.workspaceId !== route.workspaceId) throw new Error("Slack workspace changed.");
+    const m = metadata(job.event);
+    if (m.phase !== "ordinary") {
+      const current = await client.companion.activationMessages(opts.config.identity!, m.activation_id!, { limit: 1 });
+      if (current.scopeId !== m.scope_id || current.activationId !== m.activation_id || current.channel !== "slack" || current.conversationId !== m.conversation_id || current.replyContext.connectionId !== route.connectionId || current.replyContext.slackConversationId !== route.conversationId) throw new Error("Slack Companion activation is no longer current.");
+    }
+  }
+  function toolSendCallbacks(id: string, validate: () => Promise<void>) {
+    return {
+      bindNativeOwner: async (sessionKey: string, runId: string) => { await mutate((j) => { j.jobs[id]!.nativeOwner = { sessionKey, runId }; }); },
+      nativeTerminal: async () => { await mutate((j) => { j.jobs[id]!.nativeComplete = true; }); },
+      beforeToolSend: async (callId: string) => {
+        await validate();
+        await mutate((journal) => {
+          const job = journal.jobs[id]!;
+          if (Object.values(job.toolSends ?? {}).some((send) => !send.messageId) || job.toolSends?.[callId]) throw new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
+          job.toolSends ??= {}; job.toolSends[callId] = {};
+        });
+      },
+      afterToolSend: async (callId: string, messageId: string) => { await mutate((journal) => {
+        const job = journal.jobs[id]!;
+        if (!job.toolSends?.[callId]) throw new Error("Native tool send has no durable intent.");
+        job.toolSends[callId]!.messageId = messageId;
+        job.outboundIds = [...new Set([...(job.outboundIds ?? []), messageId])];
+      }); },
+    };
+  }
   async function tryApproval(id: string, job: Job): Promise<boolean> {
     if (!opts.resolveApproval || job.state !== "pending") return false;
     const m = metadata(job.event);
@@ -149,9 +201,9 @@ export function createCompanionReceiver(opts: {
     try {
       const resolved = await opts.resolveApproval(job.event, key(m, job.identityId), async () => mutate((j) => {
         if (j.jobs[id]?.state !== "pending") return false;
-        const parent = Object.values(j.jobs).find((other) => other.state === "submitting" && other.sponsor && key(metadata(other.event), other.identityId) === key(m, job.identityId));
+        const parent = Object.values(j.jobs).find((other) => other.state === "submitting" && other.sponsor && sameControlRoute(other, job) && key(metadata(other.event), other.identityId) === key(m, job.identityId));
         if (!parent?.sponsor || parent.sources?.includes(message.id) || j.activations[key(m, job.identityId)]?.sources.includes(message.id)) return false;
-        checkSponsor(parent.sponsor, parent.sponsorContactId);
+        checkSponsor(parent.sponsor, parent.sponsorContactId, job.event._openclawSlack?.route);
         if (Object.entries(j.jobs).some(([otherId, other]) => otherId !== id && other.state === "done" && other.identityId === job.identityId && key(metadata(other.event), other.identityId) === key(m, job.identityId) && source(other.event, metadata(other.event)).message.id === message.id)) return false;
         j.jobs[id]!.state = "submitting"; claimed = true; return true;
       }));
@@ -170,13 +222,13 @@ export function createCompanionReceiver(opts: {
     if (m.phase === "initialization") return false;
     const { message, author } = source(job.event, m);
     const originalText = String(m.channel === "mail" ? message.body ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.content ?? message.text ?? "");
-    const raw = controlText(originalText, opts.config.identity);
+    const raw = m.channel === "slack" ? job.event._openclawSlack.rawText : controlText(originalText, opts.config.identity);
     if (!isCompanionControl(raw) || message.body_truncated || ["truncated", "unavailable"].includes(message.body_state)) return false;
     const identity = await opts.runtime.getIdentity();
     if (identity.id !== job.identityId || !companionWakes(opts.config, message, m.channel, identity.emailAddress ?? undefined)) return false;
     const scope = key(m, job.identityId);
     const journal = await read();
-    const parent = Object.values(journal.jobs).find((other) => other.state === "submitting" && other.sponsor && key(metadata(other.event), other.identityId) === scope);
+    const parent = Object.values(journal.jobs).find((other) => other.state === "submitting" && other.sponsor && sameControlRoute(other, job) && key(metadata(other.event), other.identityId) === scope);
     if (!parent?.sponsor || !parent.reply || !sameAuthor(m.channel, author, parent.sponsor) || parent.sources?.includes(message.id) || journal.activations[scope]?.sources.includes(message.id)) return false;
     if (Object.entries(journal.jobs).some(([otherId, other]) => otherId !== id && other.state === "done" && key(metadata(other.event), other.identityId) === scope && source(other.event, metadata(other.event)).message.id === message.id)) return false;
     const controlKey = `${path}:${id}`;
@@ -185,18 +237,19 @@ export function createCompanionReceiver(opts: {
     let claimed = false;
     try {
       if ((await read()).jobs[id]?.state !== "pending") return true;
-      checkSponsor(parent.sponsor, parent.sponsorContactId);
+      checkSponsor(parent.sponsor, parent.sponsorContactId, job.event._openclawSlack?.route);
       const input: CompanionInput = {
         key: scope, messageId: id, channel: m.channel, body: raw, rawText: raw, author,
-        wasMentioned: mentionsAgent(originalText, opts.config.identity),
+        wasMentioned: m.channel === "slack" ? message.mentioned === true : mentionsAgent(originalText, opts.config.identity),
         reply: structuredClone(parent.reply), event: job.event, commandAuthorized: true,
         validateBeforeDispatch: async () => {
-          checkSponsor(parent.sponsor!, parent.sponsorContactId);
+          checkSponsor(parent.sponsor!, parent.sponsorContactId, job.event._openclawSlack?.route);
           await mutate((j) => {
             if (!claimed && j.jobs[id]?.state !== "pending") throw new Error("Companion control was already claimed.");
             Object.assign(j.jobs[id]!, { state: "submitting", sponsor: parent.sponsor, sponsorContactId: parent.sponsorContactId }); claimed = true;
           });
         },
+        ...toolSendCallbacks(id, () => validateSlack(job)),
         recordDelivery: async (messageId) => { await mutate((j) => { j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), messageId])]; }); },
       };
       const texts = await opts.submit(input) ?? [];
@@ -224,25 +277,28 @@ export function createCompanionReceiver(opts: {
     const sourceMessage = source(job.event, m);
     let message = sourceMessage.message;
     const author = sourceMessage.author;
-    let rawText = String(m.channel === "imessage" ? message.content ?? message.text ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.body ?? "");
+    let rawText = String(m.channel === "slack" ? job.event._openclawSlack.rawText : m.channel === "imessage" ? message.content ?? message.text ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.body ?? "");
     const recordDelivery = async (messageId: string) => { await mutate((j) => { j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), messageId])]; }); };
     let sponsorContactId = job.sponsorContactId;
     const makeInput = (reply: CompanionReply, body = "", sponsor = author): CompanionInput => ({
       key: scope, messageId: id, channel: m.channel, body, reply, event: job.event, author,
       rawText: controlText(rawText, opts.config.identity),
-      wasMentioned: mentionsAgent(rawText, opts.config.identity),
+      wasMentioned: m.channel === "slack" ? message.mentioned === true : mentionsAgent(rawText, opts.config.identity),
       commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, sponsor) && isCompanionControl(controlText(rawText, opts.config.identity)),
       validateBeforeDispatch: async () => {
-        checkSponsor(sponsor, sponsorContactId);
-        await mutate((j) => { j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; });
-      }, recordDelivery,
+        checkSponsor(sponsor, sponsorContactId, job.event._openclawSlack?.route);
+        await validateSlack(job);
+        await mutate((j) => { if (!["pending", "submitting"].includes(j.jobs[id]!.state) || (j.jobs[id]!.state === "submitting" && j.jobs[id]!.nativeComplete)) throw new Error("The native job is no longer authorized to dispatch or deliver approval prompts."); j.jobs[id]!.nativeComplete = false; j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; });
+      }, recordDelivery, ...toolSendCallbacks(id, () => validateSlack(job)),
     });
     async function sendSaved() {
       const current = (await read()).jobs[id]!;
+      if (Object.values(current.toolSends ?? {}).some((send) => !send.messageId)) throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
       const input = makeInput(current.reply!);
       for (const text of current.replies ?? []) {
         const savedActivation = (await read()).activations[scope];
-        checkSponsor(current.sponsor ?? savedActivation?.sponsor ?? author, current.sponsorContactId ?? savedActivation?.sponsorContactId);
+        checkSponsor(current.sponsor ?? savedActivation?.sponsor ?? author, current.sponsorContactId ?? savedActivation?.sponsorContactId, job.event._openclawSlack?.route);
+        await validateSlack(job);
         const sent = await opts.deliver(input, text, async () => { await mutate((j) => { j.jobs[id]!.state = "sending"; }); });
         await mutate((j) => {
           if (sent) j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), sent])];
@@ -250,8 +306,9 @@ export function createCompanionReceiver(opts: {
         });
       }
       await mutate((j) => { j.jobs[id]!.state = "done"; });
+      opts.activity?.(job.event, "completed");
     }
-    if (job.state === "reply_pending") { await sendSaved(); return; }
+    if (job.state === "reply_pending") { opts.activity?.(job.event, "accepted"); await sendSaved(); return; }
     const journal = await read();
     if (Object.entries(journal.jobs).some(([otherId, other]) => otherId !== id && other.identityId === job.identityId &&
         ["done", "reply_pending"].includes(other.state) && key(metadata(other.event), other.identityId) === scope &&
@@ -284,13 +341,17 @@ export function createCompanionReceiver(opts: {
         if (!api?.loadInitialization || !opts.config.identity || !m.activation_id) throw new Error("Companion mode requires the current Inkbox SDK and identity.");
         const snapshot = await api.loadInitialization(opts.config.identity, m.activation_id, { maxBytes: COMPANION_MAX_BYTES });
         if (snapshot.scopeId !== m.scope_id || snapshot.activationId !== m.activation_id || snapshot.conversationId !== m.conversation_id || snapshot.channel !== m.channel) throw new Error("Companion snapshot scope mismatch.");
+        if (m.channel === "slack") {
+          const route: SlackRoute = job.event._openclawSlack.route;
+          for (const entry of snapshot.entries) if (entry.author === `${route.workspaceId}:${route.actorId}`) entry.author = route.author;
+        }
         const triggers = snapshot.entries.filter((entry) => entry.isTrigger);
         if (triggers.length !== 1 || triggers[0]!.historical !== false) throw new Error("Companion snapshot trigger is missing.");
         const trigger = triggers[0]!;
         if (m.phase === "initialization" && (message.id !== trigger.id || !sameAuthor(m.channel, author, trigger.author))) throw new Error("Companion initialization source is not its trigger.");
         if (snapshot.entries.some((entry) => entry.id === message.id && !sameAuthor(m.channel, author, entry.author))) throw new Error("Companion snapshot author does not match the received message.");
-        sponsorContactId = await checkSender(trigger.author, m.channel);
-        checkSponsor(trigger.author, sponsorContactId);
+        sponsorContactId = await checkSender(trigger.author, m.channel, undefined, job.event._openclawSlack?.route);
+        checkSponsor(trigger.author, sponsorContactId, job.event._openclawSlack?.route);
         reply = replyContext(snapshot.replyContext, m);
         if (m.channel === "mail" && reply.replyToMessageId !== trigger.id) throw new Error("Companion reply must reference the stored sponsor message.");
         reply.identityId = job.identityId;
@@ -302,8 +363,8 @@ export function createCompanionReceiver(opts: {
           sources.push(message.id);
         }
       } else {
-        sponsorContactId = await checkSender(activation.sponsor, m.channel, activation.sponsorContactId);
-        checkSponsor(activation.sponsor, sponsorContactId);
+        sponsorContactId = await checkSender(activation.sponsor, m.channel, activation.sponsorContactId, job.event._openclawSlack?.route);
+        checkSponsor(activation.sponsor, sponsorContactId, job.event._openclawSlack?.route);
         if (activation.sponsorContactId !== sponsorContactId) {
           activation.sponsorContactId = sponsorContactId;
           await mutate((j) => { j.activations[scope]!.sponsorContactId = sponsorContactId; });
@@ -315,7 +376,7 @@ export function createCompanionReceiver(opts: {
       }
     } else {
       try {
-        sponsorContactId = await checkSender(author, m.channel, job.senderContactId);
+        sponsorContactId = await checkSender(author, m.channel, job.senderContactId, job.event._openclawSlack?.route);
         await mutate((j) => { j.jobs[id]!.senderContactId = sponsorContactId; });
       }
       catch (error) {
@@ -325,6 +386,12 @@ export function createCompanionReceiver(opts: {
       reply = { channel: m.channel, conversationId: m.conversation_id, identityId: job.identityId,
         ...(m.channel === "mail" ? { replyToMessageId: message.id } : {}) };
       body = "";
+    }
+    if (m.channel === "imessage" && opts.config.imessageThreadedReplies) reply = { ...reply, replyToMessageId: job.event._openclawNativeIMessage?.replyToMessageId ?? message.id };
+    if (m.channel === "slack") {
+      const route: SlackRoute = job.event._openclawSlack.route;
+      if (m.phase !== "ordinary" && (reply.connectionId !== route.connectionId || reply.slackConversationId !== route.conversationId)) throw new Error("Slack reply scope changed.");
+      reply = { ...reply, connectionId: route.connectionId, slackConversationId: route.conversationId, threadTs: route.threadTs, slackRoute: route };
     }
     if (!body) {
       if (message.body_state === "truncated" || message.body_state === "unavailable" || message.body_truncated === true ||
@@ -350,20 +417,27 @@ export function createCompanionReceiver(opts: {
     }
     const pending = journal.context?.[scope] ?? [];
     input.body = bounded([...pending, body].join("\n\n"));
+    opts.activity?.(job.event, "accepted");
     const texts = await opts.submit(input) ?? [];
     await mutate((j) => {
       finishSources(j); if (j.context) delete j.context[scope];
-      Object.assign(j.jobs[id]!, { replies: texts, reply, sponsor: activation?.sponsor ?? author, sponsorContactId, state: "reply_pending" });
+      Object.assign(j.jobs[id]!, { replies: texts, reply, sponsor: activation?.sponsor ?? author, sponsorContactId, state: "reply_pending", nativeComplete: true });
     });
     await sendSaved();
   }
+  function enabled(job: Job) {
+    const m = metadata(job.event);
+    if (m.channel === "slack") return opts.config.slackEnabled === true;
+    if (m.channel === "imessage" && (job.nativeThreaded || job.event._openclawNativeIMessage || job.reply?.replyToMessageId)) return opts.config.imessageThreadedReplies === true;
+    return true;
+  }
   async function drain() {
-    while (true) {
+    while (!stopped()) {
       const journal = await read();
       const blocked = new Set(Object.values(journal.jobs)
-        .filter((j) => j.state === "paused" || j.state === "submitting" || j.state === "sending" || ((j.state === "pending" || j.state === "reply_pending") && (j.retryAt ?? 0) > Date.now()))
+        .filter((j) => (j.state === "paused" && !j.nativeComplete) || j.state === "submitting" || j.state === "sending" || ((j.state === "pending" || j.state === "reply_pending") && (j.retryAt ?? 0) > Date.now()))
         .map((j) => key(metadata(j.event), j.identityId)));
-      const jobs = Object.entries(journal.jobs).filter(([, j]) => (j.state === "pending" || j.state === "reply_pending") && (j.retryAt ?? 0) <= Date.now())
+      const jobs = Object.entries(journal.jobs).filter(([, j]) => enabled(j) && (j.state === "pending" || j.state === "reply_pending") && (j.retryAt ?? 0) <= Date.now())
         .filter(([, j]) => !blocked.has(key(metadata(j.event), j.identityId)))
         .sort(([, a], [, b]) => metadata(a.event).sequence - metadata(b.event).sequence);
       if (!jobs.length) return;
@@ -377,6 +451,7 @@ export function createCompanionReceiver(opts: {
             const saved = j.jobs[id]!;
             if (saved.state === "submitting" || saved.state === "sending") saved.state = "paused";
             else {
+              saved.nativeComplete = true;
               saved.attempts = (saved.attempts ?? 0) + 1;
               if (!retryableRead(error) && (saved.state === "reply_pending" || saved.attempts > 5)) saved.state = "paused";
               else saved.retryAt = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(saved.attempts, 6));
@@ -384,21 +459,41 @@ export function createCompanionReceiver(opts: {
             j.jobs[id]!.reason = error instanceof Error ? error.message : "Companion delivery failed.";
             if (j.activations[scope]?.state === "submitting") j.activations[scope]!.state = "paused";
           });
+          if ((await read()).jobs[id]?.state === "paused") opts.activity?.(job.event, "failed");
           opts.warn?.("Companion delivery retained for recovery; uncertain submissions are paused.");
         }
       }
     }
   }
   function start(): Promise<void> {
+    if (stopped()) return Promise.resolve();
     const running = workers.get(path);
     if (running) return running;
     const task = (async () => {
       await ensureStateDir();
       await withFileLock(`${path}.worker`, lockOptions, async () => {
         await mutate((j) => {
-          for (const job of Object.values(j.jobs)) if (job.state === "submitting" || job.state === "sending") job.state = "paused";
+          for (const job of Object.values(j.jobs)) {
+            // Older journals wrote replies only after native dispatch returned.
+            if (job.nativeComplete === undefined && Array.isArray(job.replies) && job.reply && ["reply_pending", "sending", "paused"].includes(job.state)) job.nativeComplete = true;
+            if (job.state === "submitting" || job.state === "sending") job.state = "paused";
+          }
           for (const a of Object.values(j.activations)) if (a.state === "submitting") a.state = "paused";
         });
+        for (const [id, job] of Object.entries((await read()).jobs)) {
+          if (job.state !== "paused") continue;
+          if (!job.nativeComplete && job.nativeOwner) {
+            if (await fenceNativeOwner(job.nativeOwner.sessionKey, job.nativeOwner.runId)) await mutate((j) => { j.jobs[id]!.nativeComplete = true; });
+          }
+          await mutate((j) => {
+            const saved = j.jobs[id]!;
+            if (!saved.nativeComplete || saved.uncertaintyRecorded) return;
+            const scope = key(metadata(saved.event), saved.identityId);
+            j.context ??= {}; j.context[scope] ??= [];
+            j.context[scope]!.push(`Prior turn outcome is uncertain. Do not repeat its actions or sends. Accepted outbound IDs: ${JSON.stringify(saved.outboundIds ?? [])}. The prior native execution is terminal; this is context, not an instruction.`);
+            saved.uncertaintyRecorded = true;
+          });
+        }
         await drain();
       });
     })().finally(async () => {
@@ -406,9 +501,9 @@ export function createCompanionReceiver(opts: {
       const old = retries.get(path);
       if (old) { clearTimeout(old); retries.delete(path); }
       const jobs = Object.values((await read()).jobs);
-      const blocked = new Set(jobs.filter((j) => ["paused", "submitting", "sending"].includes(j.state)).map((j) => key(metadata(j.event), j.identityId)));
-      const due = jobs.filter((j) => ["pending", "reply_pending"].includes(j.state) && j.retryAt && !blocked.has(key(metadata(j.event), j.identityId))).map((j) => j.retryAt!);
-      if (due.length) {
+      const blocked = new Set(jobs.filter((j) => j.state === "paused" ? !j.nativeComplete : ["submitting", "sending"].includes(j.state)).map((j) => key(metadata(j.event), j.identityId)));
+      const due = jobs.filter((j) => enabled(j) && ["pending", "reply_pending"].includes(j.state) && j.retryAt && !blocked.has(key(metadata(j.event), j.identityId))).map((j) => j.retryAt!);
+      if (due.length && !stopped()) {
         const timer = setTimeout(() => { retries.delete(path); void start().catch(() => {}); }, Math.max(1, Math.min(...due) - Date.now()));
         timer.unref(); retries.set(path, timer);
       }
@@ -423,20 +518,43 @@ export function createCompanionReceiver(opts: {
       return Object.values((await read()).jobs).some((job) => job.identityId === identityId &&
         ((messageId && job.outboundIds?.includes(messageId)) || (job.state !== "done" && metadata(job.event).conversation_id === conversationId)));
     },
+    close() { closed = true; const timer = retries.get(path); if (timer) clearTimeout(timer); retries.delete(path); },
     async accept(event: Record<string, any>) {
+      if (stopped()) throw new Error("The native receiver is shutting down; retry this receipt after restart.");
       source(event, metadata(event));
       if (typeof event.id !== "string" || !event.id || event.id.length > 256) throw new Error("Companion event id is required.");
       bounded(JSON.stringify(event));
       const identityId = (await opts.runtime.getIdentity()).id;
       if (!identityId) throw new Error("Companion identity is unavailable.");
+      if (event._openclawSlack?.route?.nativeStop) {
+        const parent = Object.values((await read()).jobs).find((job) => job.state === "submitting" && job.sponsor === event.data.message.author && sameControlRoute(job, { event } as Job));
+        if (!parent) return;
+        event.companion = { ...parent.event.companion, phase: parent.event.companion.phase === "ordinary" ? "ordinary" : "live", sequence: Date.now() };
+        event.data.message.conversation_id = event.companion.conversation_id;
+      }
       const receipt = hash(`${identityId}:${event.id}`);
       await mutate((j) => {
         const previous = j.jobs[receipt];
+        if (previous && (event._openclawNativeIMessage || (event._openclawSlack && event.companion.phase === "ordinary"))) event.companion.sequence = previous.event.companion.sequence;
         if (previous && ["scope_id", "conversation_id", "channel", "phase", "sequence", "activation_id"]
           .some((field) => previous.event.companion[field] !== event.companion[field])) {
           throw new Error("Companion event id has conflicting scope metadata.");
         }
-        j.jobs[receipt] ??= { event: structuredClone(event), identityId, state: "pending" };
+        if (previous) return;
+        const job: Job = { event: structuredClone(event), identityId, state: "pending", ...(event.companion.channel === "imessage" && opts.config.imessageThreadedReplies ? { nativeThreaded: true } : {}) };
+        j.jobs[receipt] = job;
+        if (event._openclawNativeIMessage?.burstable) {
+          const now = Date.now(), m = metadata(event), incoming = source(event, m);
+          const prior = Object.entries(j.jobs).reverse().find(([otherId, other]) => otherId !== receipt && key(metadata(other.event), identityId) === key(m, identityId) && !other.mergedInto);
+          if (prior && prior[1].state === "pending" && (prior[1].retryAt ?? 0) > now && prior[1].burstAt && now - prior[1].burstAt < 2000 && source(prior[1].event, metadata(prior[1].event)).author === incoming.author && prior[1].event._openclawNativeIMessage?.burstable) {
+            const message = prior[1].event.data.message;
+            message.content = `${message.content ?? message.text ?? ""}\n${incoming.message.content ?? incoming.message.text ?? ""}`;
+            message.text = message.content;
+            bounded(JSON.stringify(prior[1].event));
+            prior[1].retryAt = Math.min(now + 750, prior[1].burstAt! + 2000);
+            job.state = "done"; job.mergedInto = prior[0];
+          } else { job.burstAt = now; job.retryAt = now + 750; }
+        }
       });
       if (!await tryApproval(receipt, (await read()).jobs[receipt]!)) await tryControl(receipt, (await read()).jobs[receipt]!);
       void start().then(() => start()).catch(() => opts.warn?.("Companion queue is unavailable."));

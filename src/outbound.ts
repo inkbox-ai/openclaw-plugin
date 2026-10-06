@@ -1,9 +1,12 @@
+import { createHash, randomUUID } from "node:crypto";
+import { ownSlackConnection, slackText } from "./slack.js";
 import { createInkboxRuntime } from "./client.js";
 import { checkOutboundRecipient } from "./allowlist.js";
 import { resolveInkboxAccount } from "./accounts.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "./message-limits.js";
 
 export type InkboxTargetMode =
+  | "slack"
   | "email"
   | "sms"
   | "sms-conversation"
@@ -13,6 +16,8 @@ export type InkboxTargetMode =
 export interface ParsedInkboxTarget {
   mode: InkboxTargetMode;
   value: string;
+  connectionId?: string;
+  conversationId?: string;
 }
 
 export interface InkboxChannelSendParams {
@@ -54,6 +59,7 @@ export function normalizeInkboxTarget(raw: string): string | undefined {
   if (!trimmed) {
     return undefined;
   }
+  if (/^slack:/i.test(stripProviderPrefix(trimmed))) return parseInkboxTarget(trimmed) ? stripProviderPrefix(trimmed) : undefined;
   // iMessage targets keep their channel prefix: a stripped conversation UUID
   // is indistinguishable from an SMS conversation id, so normalizing it away
   // would re-route the send to the wrong channel.
@@ -70,6 +76,10 @@ export function parseInkboxTarget(raw: string): ParsedInkboxTarget | null {
     return null;
   }
   const withoutProvider = stripProviderPrefix(trimmed);
+  if (/^slack:/i.test(withoutProvider)) {
+    const match = /^slack:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([CGD][A-Z0-9]{1,63})$/i.exec(withoutProvider);
+    return match ? { mode: "slack", value: `${match[1]}:${match[2]}`, connectionId: match[1], conversationId: match[2] } : null;
+  }
   const normalized = stripKnownPrefix(trimmed);
   if (!normalized) {
     return null;
@@ -232,6 +242,21 @@ export async function sendInkboxChannelText(
     throw new Error(
       `Inkbox target must be an email address, E.164 phone number, or SMS conversation id (got ${JSON.stringify(params.to)}).`,
     );
+  }
+  if (target.mode === "slack") {
+    if (!account.config.slackEnabled) throw new Error("Slack is disabled.");
+    slackText(params.text);
+    const block = checkOutboundRecipient(`slack:${target.value}`, account.config.allowedRecipients);
+    if (block) throw new Error(block);
+    const runtime = createInkboxRuntime(account.config), client = await runtime.getClient(), identity = await runtime.getIdentity();
+    await ownSlackConnection(client, identity.id, target.connectionId!);
+    const threadTs = params.threadId == null ? null : String(params.threadId);
+    if (threadTs !== null && !/^\d{1,12}\.\d{1,6}$/.test(threadTs)) throw new Error("Invalid Slack thread timestamp.");
+    const operation = params.replyToId ?? randomUUID();
+    const idempotencyKey = `openclaw:channel:${createHash("sha256").update(JSON.stringify([identity.id, target.value, threadTs, operation, params.text])).digest("hex")}`;
+    const action = await client.slack.sendMessage(target.connectionId!, { conversationId: target.conversationId!, text: params.text, threadTs, idempotencyKey });
+    if (action.status !== "sent") throw new Error(`Slack action ${action.id} is ${action.status}; inspect the action rather than repeating the send.`);
+    return { messageId: action.id };
   }
   if (target.mode === "imessage" || target.mode === "imessage-conversation") {
     assertIMessageTextWithinLimit(params.text);

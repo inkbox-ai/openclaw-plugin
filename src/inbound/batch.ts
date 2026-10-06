@@ -20,6 +20,7 @@ export const DEFAULT_SMS_BATCH: SmsBatchConfig = {
 };
 
 export interface InboundBatchingConfig {
+  imessageThreadedReplies?: boolean;
   sms?: Partial<SmsBatchConfig>;
 }
 
@@ -346,7 +347,7 @@ export function wrapInboundHandlersWithBatching(
     };
   }
 
-  if (handlers.onIMessage) {
+  if (handlers.onIMessage && !cfg?.imessageThreadedReplies) {
     const userOnIMessage = handlers.onIMessage;
     const imessageBatcher = new IMessageBatcher(batchConfig, async (batched) => {
       await userOnIMessage(batched);

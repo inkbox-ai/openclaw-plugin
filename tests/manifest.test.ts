@@ -33,7 +33,7 @@ function collectRuntimeTools(registrationMode = "tool-discovery"): {
     registerHook(events: string[]) { commandHookNames.push(...events); },
     pluginConfig: {
       apiKey: "ApiKey_test",
-      identity: "smoke-agent",
+      identity: "smoke-agent", slackEnabled: true,
     },
     runtime: {
       config: { current: () => ({}) },
@@ -90,7 +90,7 @@ describe("openclaw.plugin.json manifest parity", () => {
     expect(collectRuntimeTools(mode).hookNames).toEqual([
       "after_tool_call",
       "after_tool_call",
-      "agent_end",
+      "agent_end", "agent_end",
       "before_agent_run",
       "before_tool_call",
       "message_sending",

@@ -7,6 +7,20 @@ import { formatWithHeader, formatJson } from "../format.js";
 // thread key — iMessage rides shared Inkbox-managed numbers, so there is no
 // local-number addressing and no group support.
 export function registerIMessageReads(api: any, runtime: InkboxRuntime): void {
+  for (const byMessage of [true, false]) api.registerTool({
+    name: byMessage ? "inkbox_get_imessage_thread" : "inkbox_get_imessage_conversation_thread",
+    description: "Read one native iMessage thread chronologically. Follow nextCursor without changing the opaque thread ID.",
+    parameters: Type.Object({
+      ...(byMessage ? { messageId: Type.String({ minLength: 1 }) } : { conversationId: Type.String({ minLength: 1 }), threadId: Type.String({ minLength: 1 }) }),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), cursor: Type.Optional(Type.String({ minLength: 1 })),
+    }, { additionalProperties: false }),
+    async execute(_id: string, params: any) { return runTool(async () => {
+      if (params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 1 || params.limit > 100)) throw new Error("limit must be an integer from 1 to 100.");
+      for (const key of byMessage ? ["messageId"] : ["conversationId", "threadId"]) if (typeof params[key] !== "string" || !params[key].trim()) throw new Error(`${key} is required.`);
+      const identity = await runtime.getIdentity(), options = { limit: params.limit, cursor: params.cursor };
+      return toolText(formatJson(await (byMessage ? identity.getIMessageThread(params.messageId, options) : identity.getIMessageConversationThread(params.conversationId, params.threadId, options))));
+    }); },
+  });
   api.registerTool({
     name: "inkbox_list_imessage_conversations",
     description:

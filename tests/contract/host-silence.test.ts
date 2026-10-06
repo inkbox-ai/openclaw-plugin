@@ -5,9 +5,13 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { createReplyDispatcher, dispatchInboundMessageWithDispatcher, SILENT_REPLY_TOKEN } from "openclaw/plugin-sdk/reply-runtime";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { transformInkboxReplyPayload, withInkboxGroupSilenceDefault } from "../../src/silent-reply.js";
 
+// Current hosts cache a process-wide SQLite handle. Keep case directories alive
+// until the isolated test file exits; session keys/stores remain case-specific.
+const caseDirectories: string[] = [];
+afterAll(async () => { await Promise.all(caseDirectories.map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 }))); });
 const require = createRequire(import.meta.url);
 const hostDist = dirname(dirname(require.resolve("openclaw/plugin-sdk/reply-runtime")));
 const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json"), "utf8")).version;
@@ -50,7 +54,7 @@ async function finishInvisibleReply(text: string, transformed = false, ambient =
     return { deliver, transform, result };
   } finally {
     vi.unstubAllEnvs();
-    await rm(directory, { recursive: true, force: true });
+    caseDirectories.push(directory);
   }
 }
 
@@ -69,6 +73,12 @@ describe("actual host intentional-silence contract", () => {
     expect(deliver).not.toHaveBeenCalled();
     expect(result.queuedFinal).toBe(false);
     expect(result.counts.final).toBe(0);
+    expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
+  });
+
+  it.skipIf(baselineWithoutFinalizer)("allows a Companion room event to settle silently after a current mention wakes it", async () => {
+    const { deliver, result } = await finishInvisibleReply("NO_REPLY", true, true, { eventKind: "room_event", wasMentioned: true });
+    expect(deliver).not.toHaveBeenCalled();
     expect(result.noVisibleReplyFallbackDelivered).toBeUndefined();
   });
 

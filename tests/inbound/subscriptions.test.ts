@@ -53,7 +53,7 @@ describe("reconcileWebhookSubscription", () => {
       eventTypes: MAIL_EVENT_TYPES,
     });
 
-    expect(list).toHaveBeenCalledWith({ mailboxId: "mb-1" });
+    expect(list).toHaveBeenCalledWith({ mailboxId: "mb-1", scope: "identity" });
     expect(create).toHaveBeenCalledWith({
       mailboxId: "mb-1",
       url: "https://example.com/inkbox/webhook",
@@ -74,7 +74,7 @@ describe("reconcileWebhookSubscription", () => {
       eventTypes: IMESSAGE_EVENT_TYPES,
     });
 
-    expect(list).toHaveBeenCalledWith({ agentIdentityId: "identity-1" });
+    expect(list).toHaveBeenCalledWith({ agentIdentityId: "identity-1", scope: "identity" });
     expect(create).toHaveBeenCalledWith({
       agentIdentityId: "identity-1",
       url: "https://example.com/inkbox/webhook",
@@ -159,6 +159,7 @@ describe("reconcileWebhookSubscription", () => {
     });
 
     expect(update).toHaveBeenCalledWith("sub-1", {
+      scope: "identity",
       eventTypes: [...MAIL_EVENT_TYPES],
     });
   });
@@ -212,6 +213,7 @@ describe("reconcileWebhookSubscription", () => {
     expect(create).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith("sub-stale", {
+      scope: "identity",
       url: "https://tunnel.example.com/inkbox/webhook",
     });
     expect(result?.url).toBe("https://tunnel.example.com/inkbox/webhook");
@@ -236,6 +238,7 @@ describe("reconcileWebhookSubscription", () => {
     });
 
     expect(update).toHaveBeenCalledWith("sub-stale", {
+      scope: "identity",
       url: "https://tunnel.example.com/inkbox/webhook",
       eventTypes: [...TEXT_EVENT_TYPES],
     });
@@ -295,6 +298,7 @@ describe("reconcileWebhookSubscription", () => {
     });
 
     expect(update).toHaveBeenCalledWith("sub-stale-a", {
+      scope: "identity",
       url: "https://tunnel.example.com/inkbox/webhook",
     });
     expect(del).toHaveBeenCalledWith("sub-stale-b");
@@ -332,6 +336,7 @@ describe("reconcileWebhookSubscription", () => {
 
     expect(update).toHaveBeenCalledTimes(1);
     expect(update).toHaveBeenCalledWith("sub-stale", {
+      scope: "identity",
       url: "https://tunnel.example.com/inkbox/webhook",
     });
     expect(del).not.toHaveBeenCalled();
@@ -478,5 +483,21 @@ describe("reconcileWebhookSubscription", () => {
         eventTypes: MAIL_EVENT_TYPES,
       } as any),
     ).rejects.toThrow();
+  });
+});
+
+
+describe("mixed identity subscription preservation", () => {
+  it("keeps Slack events while reconciling the A2A family at the same URL", async () => {
+    const mixed = makeSub({ id: "mixed", url: "https://example.com/inkbox/webhook", eventTypes: ["slack.channel_message_received", "a2a.task.created"] });
+    const { client, update } = makeClient({ list: vi.fn(async () => [mixed]) });
+    await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url: mixed.url, eventTypes: A2A_EVENT_TYPES });
+    expect(update).toHaveBeenCalledWith("mixed", { scope: "identity", eventTypes: ["slack.channel_message_received", ...A2A_EVENT_TYPES] });
+  });
+  it("does not repoint or delete another URL's mixed Slack receiver", async () => {
+    const mixed = makeSub({ id: "mixed", url: "https://old.example/inkbox/webhook", eventTypes: ["slack.channel_message_received", "a2a.task.created"] });
+    const { client, update, delete: remove, create } = makeClient({ list: vi.fn(async () => [mixed]) });
+    await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url: "https://new.example/inkbox/webhook", eventTypes: A2A_EVENT_TYPES });
+    expect(update).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled(); expect(create).toHaveBeenCalledTimes(1);
   });
 });

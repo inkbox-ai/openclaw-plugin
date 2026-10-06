@@ -13,6 +13,12 @@ export function registerVaultTools(
   runtime: InkboxRuntime,
   vault: VaultRuntime,
 ): void {
+  api.registerTool({
+    name: "inkbox_credentials_get_secret",
+    description: "Read one explicitly chosen secret, including key_pair and other. Login output never includes the TOTP seed. Optional: enable this tool separately.",
+    parameters: Type.Object({ secretId: Type.String({ format: "uuid" }) }, { additionalProperties: false }),
+    async execute(_id: string, params: any) { return runTool(async () => toolText(formatJson(await vault.getSecret(params.secretId)))); },
+  }, { optional: true });
   api.registerTool(
     {
       name: "inkbox_credentials_list",
@@ -34,34 +40,7 @@ export function registerVaultTools(
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
-          const creds = await vault.getCredentials();
-          // The SDK surface has typed convenience lists; fall back to
-          // creds.list() when no filter is set.
-          let items: any[];
-          switch (params.type) {
-            case "login":
-              items = creds.listLogins();
-              break;
-            case "api_key":
-              items = creds.listApiKeys();
-              break;
-            case "key_pair":
-              items = creds.listKeyPairs();
-              break;
-            case "ssh_key":
-              items = creds.listSshKeys();
-              break;
-            default:
-              items = creds.list();
-              break;
-          }
-          // Strip the decrypted payload so listing never leaks plaintext.
-          const safe = items.map((c) => ({
-            id: c.id,
-            name: c.name,
-            secretType: c.secretType,
-            description: c.description,
-          }));
+          const safe = await vault.list(params.type);
           return toolText(
             formatWithHeader(`Returned ${safe.length} credential(s).`, safe),
           );
@@ -81,8 +60,7 @@ export function registerVaultTools(
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
-          const creds = await vault.getCredentials();
-          const login = creds.getLogin(params.secretId);
+          const login = await vault.getSecret(params.secretId, "login");
           return toolText(formatJson(login));
         });
       },
@@ -100,8 +78,7 @@ export function registerVaultTools(
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
-          const creds = await vault.getCredentials();
-          const apiKey = creds.getApiKey(params.secretId);
+          const apiKey = await vault.getSecret(params.secretId, "api_key");
           return toolText(formatJson(apiKey));
         });
       },
@@ -119,8 +96,7 @@ export function registerVaultTools(
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
-          const creds = await vault.getCredentials();
-          const sshKey = creds.getSshKey(params.secretId);
+          const sshKey = await vault.getSecret(params.secretId, "ssh_key");
           return toolText(formatJson(sshKey));
         });
       },
@@ -140,10 +116,7 @@ export function registerVaultTools(
       }),
       async execute(_id: string, params: any) {
         return runTool(async () => {
-          // Ensure the vault is unlocked first — getTotpCode requires it.
-          await vault.getCredentials();
-          const identity = await runtime.getIdentity();
-          const code = await identity.getTotpCode(params.secretId);
+          const code = await vault.getTotpCode(params.secretId);
           return toolText(
             `TOTP code for secret ${params.secretId}: ${code.code} (expires in ${code.secondsRemaining}s)`,
           );

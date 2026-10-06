@@ -1,3 +1,9 @@
+import { trackNativeOwner } from "../native-owner.js";
+import { bindNativeSource, type NativeSource } from "../native-source.js";
+import { join } from "node:path";
+import { statePaths } from "../state.js";
+import { parseSlack, prepareSlackSource, ownSlackConnection, slackControlText, slackRouteKey, sendSlackReply, reconcileSlackSubscription, type SlackRoute } from "../slack.js";
+import { createSlackActivity } from "../slack-activity.js";
 import { contextBuffer } from "./context-buffer.js";
 import { ensureNativeApprovalContext, nativeApprovalScope, resolveNativeApproval, trackNativeApprovalTurn, type NativeApprovalBinding } from "./native-approvals.js";
 import { mentionsAgent, isLocalControl, sameAuthor, controlText, isCompanionControl } from "./reply-policy.js";
@@ -102,6 +108,7 @@ import { resolvePhoneVoiceStack, type PhoneVoiceStack } from "../voice-stack.js"
 type ChannelRuntime = any;
 
 type InboundMode =
+  | "slack"
   | "email"
   | "sms"
   | "imessage"
@@ -129,6 +136,12 @@ type WebhookMatchedContact = {
 };
 
 type InkboxInboundTurn = {
+  slackRoute?: SlackRoute;
+  activity?: (phase: "waiting" | "resumed") => void;
+  bindNativeOwner?: (sessionKey: string, runId: string) => Promise<void>;
+  nativeTerminal?: () => Promise<void>;
+  nativeSource?: NativeSource;
+  approvalRoute?: string;
   companionReply?: CompanionReply;
   companionValidateBeforeDispatch?: () => Promise<void>;
   companionRecordDelivery?: (messageId: string) => Promise<void>;
@@ -259,6 +272,7 @@ export interface ConfigureIdentityDeliveryOptions {
    * change it; they must already point at `webhookUrl`.
    */
   skipWebhookReconcile?: boolean;
+  slackEnabled?: boolean;
 }
 
 const DEFAULT_VOICE_TRANSCRIPT_COALESCE_MS = 1200;
@@ -1614,7 +1628,7 @@ function approvalBuffer(turn: InkboxInboundTurn, account: ResolvedInkboxAccount)
   return contextBuffer(approvalScope(turn, account));
 }
 function approvalScope(turn: InkboxInboundTurn, account: ResolvedInkboxAccount) {
-  return nativeApprovalScope(account, turn.sessionKeyOverride ?? `${turn.mode}:${turn.conversationId ?? turn.contactKey}`);
+  return nativeApprovalScope(account, (turn.approvalRoute ?? turn.sessionKeyOverride ?? `${turn.mode}:${turn.conversationId ?? turn.contactKey}`) + (turn.slackRoute ? `:source:${slackRouteKey(turn.slackRoute)}` : ""));
 }
 
 async function acceptsApproval(turn: InkboxInboundTurn, account: ResolvedInkboxAccount): Promise<boolean> {
@@ -1668,6 +1682,11 @@ async function deliverReply(
   if (params.turn.companionReply && (await params.runtime.getIdentity()).id !== params.turn.companionReply.identityId) {
     throw new Error("Companion reply identity has changed.");
   }
+  if (params.turn.mode === "slack") {
+    if (!params.turn.slackRoute) throw new Error("Slack reply has no bound source.");
+    await params.beforeSend?.();
+    return sendSlackReply(await params.runtime.getClient(), params.turn.slackRoute, text);
+  }
   if (params.turn.mode === "imessage") {
     // Length guard stays a plain throw before the send: an over-limit reply is
     // a local bug to surface, not a server delivery failure to recover from.
@@ -1690,6 +1709,8 @@ async function deliverReply(
       const msg = await identity.sendIMessage({
         ...(conversationId ? { conversationId } : { to: params.turn.remoteAddress }),
         text,
+        ...(params.turn.companionReply?.replyToMessageId ? { replyToMessageId: params.turn.companionReply.replyToMessageId, plainReplyFallback: true,
+          idempotencyKey: `openclaw:${createHash("sha256").update(JSON.stringify([params.turn.messageId, params.turn.companionReply.replyToMessageId, text])).digest("hex")}` } : {}),
       });
       return msg.id;
     } catch (error) {
@@ -2479,12 +2500,12 @@ async function dispatchInboundTurn(
   });
 
   const conversationKind = opts.turn.conversationKind ?? "direct";
-  const groupMessaging = conversationKind === "group" && ["sms", "imessage"].includes(opts.turn.mode);
-  const dispatchCfg = groupMessaging && opts.account.config.groupReplyMode !== "mention"
+  const groupMessaging = conversationKind === "group" && ["sms", "imessage", "slack"].includes(opts.turn.mode);
+  const dispatchCfg = groupMessaging && (opts.account.config.groupReplyMode !== "mention" || (opts.turn.mode === "slack" && (opts.turn.raw as any)?.companion?.phase !== "ordinary"))
     ? withInkboxGroupSilenceDefault(opts.cfg) : opts.cfg;
   const channelThreadRouteId =
     opts.turn.conversationId
-      ? `${opts.turn.mode === "email" ? "email" : opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
+      ? `${opts.turn.mode === "slack" ? "slack" : opts.turn.mode === "email" ? "email" : opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
       : undefined;
   const conversationRouteId =
     conversationKind === "group"
@@ -2517,13 +2538,15 @@ async function dispatchInboundTurn(
     timestamp,
     body: opts.turn.body,
   });
-  const conversationPrefix = opts.turn.mode === "imessage" ? "imessage" : "sms";
-  const smsReplyTarget = opts.turn.conversationId
+  const conversationPrefix = opts.turn.mode === "slack" ? "slack" : opts.turn.mode === "imessage" ? "imessage" : "sms";
+  const smsReplyTarget = opts.turn.slackRoute ? `slack:${opts.turn.slackRoute.connectionId}:${opts.turn.slackRoute.conversationId}` : opts.turn.conversationId
     ? `${opts.turn.mode === "email" ? "email" : conversationPrefix}:${opts.turn.conversationId}`
     : opts.turn.remoteAddress ?? opts.turn.contactKey;
-  const silentSendCapture = (!opts.deliveryOverride || opts.turn.companionReply) && ["sms", "email", "imessage"].includes(opts.turn.mode)
+  const silentSendCapture = (!opts.deliveryOverride || opts.turn.companionReply) && ["sms", "email", "imessage", "slack"].includes(opts.turn.mode)
     ? beginSilentSendCapture(effectiveSessionKey) : undefined;
-  const approvalMarker = silentSendCapture?.marker ?? `[Inkbox turn correlation: ${randomUUID()}]`;
+  const nativeOwner = opts.turn.bindNativeOwner && opts.turn.nativeTerminal ? trackNativeOwner(effectiveSessionKey, opts.turn.bindNativeOwner, opts.turn.nativeTerminal) : undefined;
+  if (opts.turn.nativeSource && nativeOwner) opts.turn.nativeSource.marker = nativeOwner.marker;
+  const approvalMarker = (silentSendCapture?.marker ?? `[Inkbox turn correlation: ${randomUUID()}]`) + (nativeOwner ? `\n${nativeOwner.marker}` : "");
   if (opts.turn.companionReply && Buffer.byteLength(`${body}\n\n${approvalMarker}`) > COMPANION_MAX_BYTES) {
     silentSendCapture?.finish();
     throw new Error("Companion initialization exceeds the host input limit.");
@@ -2578,7 +2601,7 @@ async function dispatchInboundTurn(
     message: {
       inboundEventKind: opts.turn.nativeEventKind,
       body,
-      bodyForAgent: ["sms", "email", "imessage"].includes(opts.turn.mode) ? `${opts.turn.body}\n\n${approvalMarker}` : opts.turn.body,
+      bodyForAgent: ["sms", "email", "imessage", "slack"].includes(opts.turn.mode) ? `${opts.turn.body}\n\n${approvalMarker}` : opts.turn.body,
       rawBody: opts.turn.rawText ?? opts.turn.body,
       commandBody: opts.turn.commandAuthorized === false ? "" : opts.turn.rawText ?? opts.turn.body,
       envelopeFrom: opts.turn.fromLabel,
@@ -2708,9 +2731,10 @@ async function dispatchInboundTurn(
       await opts.turn.companionValidateBeforeDispatch?.();
       const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger });
       if (messageId) await opts.turn.companionRecordDelivery?.(messageId);
-    }, ready: opts.turn.companionApprovalReady,
+    }, ready: opts.turn.companionApprovalReady, activity: opts.turn.activity,
   };
   const releaseApprovalTurn = trackNativeApprovalTurn(core, approvalBinding);
+  const releaseNativeSource = opts.turn.nativeSource ? bindNativeSource(effectiveSessionKey, opts.turn.nativeSource) : undefined;
   const acknowledgeBackgroundContext = async () => {
     try { await opts.turn.contextAcknowledged?.(); }
     catch { opts.logger?.warn?.("Inkbox background context could not be acknowledged; retaining it for the next model turn."); }
@@ -2754,6 +2778,8 @@ async function dispatchInboundTurn(
       await acknowledgeBackgroundContext();
     }
   } finally {
+    nativeOwner?.close();
+    releaseNativeSource?.();
     releaseApprovalTurn();
     if (silentSendCapture) {
       const shape = silentSendCapture.shape();
@@ -5612,6 +5638,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
 
   async function shutdownA2A(): Promise<void> {
+    companion.close();
+    await companion.idle();
+    await slackActivity.close();
     a2aShuttingDown = true;
     const runs = [...a2aRuns.values()].flatMap((taskRuns) => [...taskRuns]);
     for (const run of runs) run.controller.abort();
@@ -6003,12 +6032,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
 
   function companionTurn(input: CompanionInput): InkboxInboundTurn {
-    const mode = input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
+    const mode = input.channel === "slack" ? "slack" : input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
     return {
-      mode, contactKey: input.key, sessionKeyOverride: input.key,
+      bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal,
+      nativeSource: !input.commandAuthorized && (input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
+        identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
+        slackRoute: input.reply.slackRoute, author: input.author, closed: false, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend,
+      } : undefined,
+      slackRoute: input.reply.slackRoute,
+      activity: input.reply.slackRoute ? (phase) => slackActivity.notify(input.reply.slackRoute!, phase) : undefined,
+      mode, contactKey: input.key, approvalRoute: input.key, sessionKeyOverride: input.event._openclawNativeIMessage ? `native-imessage:${input.reply.identityId}:${input.reply.conversationId}` : input.key,
       conversationKind: "group", conversationLabel: "Inkbox Companion conversation",
       conversationId: input.reply.conversationId,
       fromLabel: input.author, remoteAddress: input.author, body: input.body,
+      reaction: input.event._openclawNativeIMessage?.reaction, nativeEventKind: input.channel === "slack" && input.event.companion.phase !== "ordinary" ? "room_event" : input.event._openclawNativeIMessage?.nativeEventKind,
       rawText: input.rawText, wasMentioned: input.wasMentioned, commandAuthorized: input.commandAuthorized,
       messageId: input.messageId, raw: input.event,
       subject: input.channel === "mail" ? input.event.data?.message?.subject : undefined,
@@ -6017,14 +6054,24 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       companionRecordDelivery: input.recordDelivery,
       companionApprovalReady: () => companion.reconsiderApprovals(),
       replyToId: input.reply.replyToMessageId ?? undefined,
-      threadId: `${mode}:${input.reply.conversationId}`,
+      threadId: input.reply.slackRoute ? input.reply.slackRoute.threadTs ?? undefined : `${mode}:${input.reply.conversationId}`,
     };
   }
+  const activityOwner = createHash("sha256").update(JSON.stringify([opts.account.accountId, opts.account.config.identity, opts.account.config.baseUrl])).digest("hex");
+  const slackActivity = createSlackActivity(async (route) => {
+    const client = await opts.runtime.getClient(), identity = await opts.runtime.getIdentity();
+    if (!route || identity.id !== route.identityId) throw new Error("Slack cleanup identity changed.");
+    await ownSlackConnection(client, identity.id, route.connectionId);
+    return client.slack;
+  }, join(statePaths().dir, `slack-activity-${activityOwner}.json`), (message) => opts.logger?.warn?.(message));
+  opts.abortSignal?.addEventListener("abort", () => { void slackActivity.close(); }, { once: true });
   const companion = createCompanionReceiver({
     accountId: opts.account.accountId,
     config: opts.account.config,
     runtime: opts.runtime,
     warn: (message) => opts.logger?.warn?.(message),
+    signal: opts.abortSignal,
+    activity: (event, phase) => { if (event._openclawSlack?.route) slackActivity.notify(event._openclawSlack.route, phase); },
     async submit(input) {
       if (input.commandAuthorized && input.rawText.toLowerCase() === "/resume") {
         await input.validateBeforeDispatch();
@@ -6040,7 +6087,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       await dispatchInboundTurn({
         ...opts, activeCalls, turn,
-        replyOptionsOverride: { disableBlockStreaming: true },
+        replyOptionsOverride: { disableBlockStreaming: true, abortSignal: opts.abortSignal },
         onCompletedSilently: () => { completedSilently = true; },
         deliveryOverride: {
           deliver: async (payload, info) => {
@@ -6063,9 +6110,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     async resolveApproval(event, key, beforeResolve) {
       const channel = event.companion.channel;
       const message = channel === "phone" ? event.data.text_message : event.data.message;
-      const author = channel === "mail" ? message.from_address : channel === "phone" ? message.sender_phone_number ?? message.remote_phone_number : message.sender_number ?? message.remote_number;
-      return resolveNativeApproval({ scope: nativeApprovalScope(opts.account, key), author, channel, accountId: opts.account.accountId },
-        controlText(String(channel === "phone" ? message.text ?? message.body ?? "" : channel === "imessage" ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
+      const author = channel === "slack" ? message.author : channel === "mail" ? message.from_address : channel === "phone" ? message.sender_phone_number ?? message.remote_phone_number : message.sender_number ?? message.remote_number;
+      return resolveNativeApproval({ scope: nativeApprovalScope(opts.account, key + (channel === "slack" ? `:source:${slackRouteKey(event._openclawSlack.route)}` : "")), author, channel, accountId: opts.account.accountId },
+        controlText(String(channel === "slack" ? event._openclawSlack.rawText : channel === "phone" ? message.text ?? message.body ?? "" : channel === "imessage" ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
     },
     async deliver(input, text, beforeSend) {
       const turn = companionTurn(input);
@@ -6118,7 +6165,39 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     return false;
   }
   const handlers: InboundHandlers = {
-    onCompanion: companion.accept,
+    async onCompanion(event) {
+      const normalized = structuredClone(event);
+      delete normalized._openclawNativeIMessage; delete normalized._openclawSlack;
+      const message = normalized.data?.message ?? normalized.data?.text_message;
+      if (message) { delete message._ordinaryAddressed; delete message._slackDirect; }
+      await companion.accept(normalized);
+    },
+    async onSlack(event) {
+      if (!opts.account.config.slackEnabled) return;
+      const identity = await opts.runtime.getIdentity();
+      const route = parseSlack(event, identity.id);
+      if (!route) return;
+      const client = await opts.runtime.getClient();
+      const connection = await ownSlackConnection(client, identity.id, route.connectionId);
+      if (connection.workspaceId !== route.workspaceId) throw new Error("Slack source workspace mismatch.");
+      const normalized = structuredClone(event);
+      delete normalized._openclawSlack;
+      let id = event.id, botUserId = connection.botUserId;
+      if (event.companion) {
+        const prepared = await prepareSlackSource(client, identity.id, normalized);
+        Object.assign(route, prepared.route); id = prepared.id; botUserId = prepared.botUserId;
+      } else {
+        const profile = await client.slack.getUser(route.connectionId, route.actorId);
+        if (profile?.id !== route.actorId || !/^T[A-Z0-9]{1,63}$/.test(String(profile?.team_id ?? ""))) throw new Error("Slack sender home workspace is unavailable.");
+        route.author = `${profile.team_id}:${route.actorId}`;
+        const scope = slackRouteKey(route);
+        normalized.companion = { channel: "slack", phase: "ordinary", sequence: Date.now(), scope_id: createHash("sha256").update(scope).digest("hex"), conversation_id: route.conversationId };
+      }
+      normalized._openclawSlack = { route, rawText: slackControlText(route, botUserId) };
+      normalized.data.message = { id, author: route.author, conversation_id: normalized.companion.conversation_id, direction: "inbound", body: route.text, text: route.text, sender_access: route.senderAccess ?? "direct", mentioned: route.mentioned || route.nativeStop,
+        _ordinaryAddressed: !event.companion && route.direct, _slackDirect: route.direct, attachments: event.data.event.files ?? [] };
+      await companion.accept(normalized);
+    },
     async onCallEnded(event) {
       await ingestHostedCallCompletion(event);
     },
@@ -6183,6 +6262,14 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     },
     async onIMessage(event) {
       if (event.event_type === "imessage.delivery_failed") {
+        if (opts.account.config.imessageThreadedReplies) {
+          const message = event.data?.message;
+          if (message?.conversation_id) await contextBuffer(JSON.stringify(["native-imessage-failures", opts.account.accountId, (await opts.runtime.getIdentity()).id, message.conversation_id])).append({
+            id: event.id, body: JSON.stringify({ type: "delivery_failure", messageId: message.id, notice: "Delivery outcome requires inspection. Do not repeat the send automatically." }),
+          });
+          opts.logger?.warn?.("iMessage delivery failure retained as context; source-targeted replies are never resent automatically.");
+          return;
+        }
         if (await companion.ownsDelivery(event.data?.message?.id, event.data?.message?.conversation_id)) {
           opts.logger?.warn?.("Companion iMessage reply delivery failed; no private contact turn was created.");
           return;
@@ -6203,6 +6290,15 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         );
         if (!turn) {
           opts.logger?.info?.("Inkbox iMessage reaction ignored (outbound echo or unroutable).");
+          return;
+        }
+        if (opts.account.config.imessageThreadedReplies && turn.conversationId && turn.replyToId) {
+          const normalized: any = structuredClone(event);
+          normalized.event_type = "imessage.received";
+          normalized.companion = { channel: "imessage", phase: "ordinary", sequence: Date.now(), scope_id: `${turn.conversationId}:${(event.data.reaction as any)?.thread_id ?? "main"}`, conversation_id: turn.conversationId };
+          normalized.data.message = { id: turn.messageId, conversation_id: turn.conversationId, sender_number: turn.remoteAddress, direction: "inbound", content: turn.body, sender_access: "direct", _ordinaryAddressed: turn.conversationKind !== "group" };
+          normalized._openclawNativeIMessage = { burstable: false, reaction: true, nativeEventKind: turn.nativeEventKind, replyToMessageId: turn.replyToId };
+          await companion.accept(normalized);
           return;
         }
         if (await ordinaryContext(turn)) return;
@@ -6237,6 +6333,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         // drifted subscription delivers) are logged without waking the agent,
         // matching the text-channel split.
         opts.logger?.info?.(`Inkbox iMessage lifecycle event: ${event.event_type}`);
+        return;
+      }
+      if (opts.account.config.imessageThreadedReplies) {
+        const normalized: any = structuredClone(event), message = normalized.data.message;
+        const scope = `${turn.conversationId}:${message.thread_id ?? "main"}`;
+        normalized.companion = { channel: "imessage", phase: "ordinary", sequence: Date.now(), scope_id: scope, conversation_id: turn.conversationId };
+        message.sender_access ??= "direct";
+        message._ordinaryAddressed = turn.conversationKind !== "group";
+        normalized._openclawNativeIMessage = { burstable: !message.media?.length && !message.attachments?.length && !/^\s*(?:@\S+\s+)?\//.test(message.content ?? message.text ?? "") };
+        const failures = contextBuffer(JSON.stringify(["native-imessage-failures", opts.account.accountId, (await opts.runtime.getIdentity()).id, turn.conversationId]));
+        const notices = await failures.snapshot();
+        if (notices.length) message.content = `${message.content ?? message.text ?? ""}\nDelivery notices (context only): ${notices.map((notice) => notice.body).join("\n")}`;
+        await companion.accept(normalized);
+        if (notices.length) await failures.acknowledge(notices);
         return;
       }
       if (await ordinaryContext(turn)) return;
@@ -6538,7 +6648,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     activeCalls,
     catchUpA2A,
     catchUpHostedCalls,
-    catchUpCompanion: companion.recover,
+    catchUpCompanion: async () => { await slackActivity.recover(); await companion.recover(); },
     shutdownA2A,
   };
 }
@@ -6557,6 +6667,7 @@ export async function configureInkboxIdentityDelivery(
     opts.runtime.getIdentity(),
     opts.runtime.getClient(),
   ]);
+  if (opts.slackEnabled) await reconcileSlackSubscription(inkbox, identity.id, opts.webhookUrl);
   const mailboxId = identity.mailbox?.id;
   if (mailboxId) {
     try {

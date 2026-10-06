@@ -231,6 +231,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
         voiceStack: account.config.voiceStack,
         logger: ctx.log,
         skipWebhookReconcile: skipWebhookReconcile(account),
+        slackEnabled: account.config.slackEnabled,
       });
       await bridge.catchUpA2A();
       await bridge.catchUpHostedCalls();
@@ -288,6 +289,7 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
     voiceStack: account.config.voiceStack,
     logger: ctx.log,
     skipWebhookReconcile: skipWebhookReconcile(account),
+        slackEnabled: account.config.slackEnabled,
   });
   await bridge.catchUpA2A();
   await bridge.catchUpHostedCalls();

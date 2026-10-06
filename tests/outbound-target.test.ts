@@ -85,6 +85,15 @@ describe("inkbox outbound target parsing", () => {
     expect(normalizeInkboxTarget("imessage:+14155550123")).toBe("imessage:+14155550123");
   });
 
+  it("preserves a connection-qualified Slack target without confusing phone or email routing", () => {
+    const connection = "550e8400-e29b-41d4-a716-446655440000";
+    const target = `slack:${connection}:CROOM`;
+    expect(normalizeInkboxTarget(`inkbox:${target}`)).toBe(target);
+    expect(parseInkboxTarget(target)).toEqual({ mode: "slack", value: `${connection}:CROOM`, connectionId: connection, conversationId: "CROOM" });
+    expect(parseInkboxTarget("slack:CROOM")).toBeNull();
+    expect(parseInkboxTarget(`${target}:123.456`)).toBeNull();
+  });
+
   it("advertises group chat support", () => {
     expect(inkboxPlugin.capabilities.chatTypes).toContain("group");
   });

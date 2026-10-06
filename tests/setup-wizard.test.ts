@@ -476,7 +476,7 @@ describe("runSetupWizard", () => {
     expect(result.persisted).toBe(true);
     expect(persistConfig).toHaveBeenCalledWith(
       {
-        groupReplyMode: "auto", companionResponseMode: "safe",
+        groupReplyMode: "auto", companionResponseMode: "safe", slackEnabled: false,
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",
@@ -1231,7 +1231,7 @@ describe("runSetupWizard", () => {
     expect(sdk.Inkbox).toHaveBeenCalledWith(inkboxClientOptions("ApiKey_new", undefined));
     expect(persistConfig).toHaveBeenCalledWith(
       {
-        groupReplyMode: "auto", companionResponseMode: "safe",
+        groupReplyMode: "auto", companionResponseMode: "safe", slackEnabled: false,
         apiKey: "ApiKey_new",
         identity: "smoke-agent",
         signingKey: "whsec_test",
@@ -1298,7 +1298,7 @@ describe("runSetupWizard", () => {
       ok: true,
       persisted: false,
       config: {
-        groupReplyMode: "auto", companionResponseMode: "safe",
+        groupReplyMode: "auto", companionResponseMode: "safe", slackEnabled: false,
         apiKey: "ApiKey_test",
         identity: "smoke-agent",
         signingKey: "whsec_test",

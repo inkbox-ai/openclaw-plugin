@@ -15,7 +15,7 @@ describe.each(cases)("$name explicit silent completion", ({ register, method, pa
   function harness(allowedRecipients?: string[]) {
     const send = vi.fn().mockResolvedValue({ id: "accepted-message", conversationId: "conversation", deliveryStatus: "queued" });
     let tool: any;
-    register({ registerTool: (value: any) => { tool = value; } }, {
+    register({ registerTool: (value: any) => { tool = typeof value === "function" ? value({}) : value; } }, {
       getIdentity: async () => ({ [method]: send }),
     } as any, allowedRecipients);
     return { tool, send };

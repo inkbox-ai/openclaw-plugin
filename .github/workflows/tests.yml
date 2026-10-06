@@ -39,6 +39,11 @@ jobs:
       - name: Run unit tests
         run: npm test
 
+      - name: Build and verify publishable native entry
+        run: |
+          npm run build
+          node tests/ci/verify_package.mjs
+
   # Contract suite + full typecheck against the LATEST OpenClaw host. This is
   # the lane that catches upstream interface drift (a moved plugin-sdk symbol,
   # a changed entry shape, a type break in the channel APIs) before it reaches

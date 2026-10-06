@@ -31,6 +31,15 @@
       "inkbox_list_imessage_assignments",
       "inkbox_list_imessage_conversations",
       "inkbox_get_imessage_conversation",
+      "inkbox_get_imessage_thread",
+      "inkbox_get_imessage_conversation_thread",
+      "inkbox_slack_list_connections",
+      "inkbox_slack_list_conversations",
+      "inkbox_slack_list_messages",
+      "inkbox_slack_search",
+      "inkbox_slack_send_message",
+      "inkbox_slack_get_action",
+      "inkbox_credentials_get_secret",
       "inkbox_send_imessage_reaction",
       "inkbox_mark_imessage_conversation_read",
       "inkbox_list_calls",
@@ -150,6 +159,8 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "slackEnabled": { "type": "boolean", "description": "Enable Inkbox Slack messaging after connecting a workspace." },
+          "imessageThreadedReplies": { "type": "boolean", "description": "Opt in to source-targeted native iMessage replies and queued follow-ups." },
           "groupReplyMode": { "type": "string", "enum": ["auto", "mention"] },
           "companionResponseMode": { "type": "string", "enum": ["safe", "relaxed"] },
           "includeContactMemories": {
@@ -246,6 +257,8 @@
                   "type": "array",
                   "items": { "type": "string" }
                 },
+                "slackEnabled": { "type": "boolean", "description": "Enable Inkbox Slack messaging after connecting a workspace." },
+                "imessageThreadedReplies": { "type": "boolean", "description": "Opt in to source-targeted native iMessage replies and queued follow-ups." },
                 "groupReplyMode": { "type": "string", "enum": ["auto", "mention"] },
                 "companionResponseMode": { "type": "string", "enum": ["safe", "relaxed"] },
                 "includeContactMemories": {
@@ -317,6 +330,7 @@
     "inkbox_mark_text_conversation_read": { "optional": true },
     "inkbox_imessage_triage_number": { "optional": true },
     "inkbox_list_imessage_assignments": { "optional": true },
+    "inkbox_credentials_get_secret": { "optional": true },
     "inkbox_send_imessage_reaction": { "optional": true },
     "inkbox_mark_imessage_conversation_read": { "optional": true },
     "inkbox_update_note": { "optional": true },
@@ -427,7 +441,7 @@
         "properties": {
           "keyEnvVar": {
             "type": "string",
-            "description": "Env var the vault unlock key is read from. Defaults to INKBOX_VAULT_KEY."
+            "description": "Env var the vault unlock key is read from. Defaults to INKBOX_OPENCLAW_VAULT_KEY."
           }
         }
       },
@@ -445,6 +459,8 @@
         "items": { "type": "string" },
         "description": "Inbound contact-id allowlist. When set, webhook events whose remote contact id is not on this list are dropped (mail/text become no-ops, calls are rejected). Events with no contact resolution are also dropped."
       },
+      "slackEnabled": { "type": "boolean", "description": "Enable Inkbox Slack messaging after connecting a workspace." },
+      "imessageThreadedReplies": { "type": "boolean", "description": "Opt in to source-targeted native iMessage replies and queued follow-ups." },
       "groupReplyMode": { "type": "string", "enum": ["auto", "mention"] },
       "companionResponseMode": { "type": "string", "enum": ["safe", "relaxed"] },
       "includeContactMemories": {
