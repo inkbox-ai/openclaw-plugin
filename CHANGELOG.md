@@ -36,6 +36,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Verify exact native iMessage source/backend support before targeted sends; source-owned Stop cancels captured pending followers without affecting later requests.
 - List Vault metadata while locked, refresh identity access and plaintext/code reads, and default lazy unlock to `INKBOX_OPENCLAW_VAULT_KEY` (custom variables remain supported).
 - Preserve existing voice, A2A, hosted-call SMS settlement, native approvals, and feature-off messaging behavior.
+- Retain native iMessage failed-output status and the original accepted route across callback-first delivery and restart; keep unmatched notices quiet and preserve accepted sends if optional metadata persistence fails.
 - Recognize current native Code Mode child-call ownership when honoring an accepted, explicitly silent cross-channel send.
 - Keep explicitly separate sends independent of source-answer receipts; preserve enabled cross-channel reads without expanding iMessage Companion history.
 - Avoid unengaged ordinary Slack threads, bind controls to the current actor, and recheck saved-answer authority after safe connection reads.

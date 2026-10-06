@@ -7,6 +7,7 @@ export type NativeSource = {
   validate(): Promise<void>;
   beforeSend(callId: string): Promise<void>;
   afterSend(callId: string, messageId: string, text?: string): Promise<void>;
+  recordIMessageAccepted?(message: any): Promise<void>;
 };
 const key = Symbol.for("inkbox.native-source.v1");
 const shared = globalThis as typeof globalThis & { [key]?: Map<string, NativeSource> };

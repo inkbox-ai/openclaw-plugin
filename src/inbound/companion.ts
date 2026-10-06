@@ -1,4 +1,5 @@
 import { createTerminalReceipts, type ReceiptIndex } from "./terminal-receipts.js";
+import { createIMessageOutcomes, imessageFailureNotice, type IMessageOutcomeRoute } from "./imessage-outcomes.js";
 import { fenceNativeOwner } from "../native-owner.js";
 import { SLACK_EVENTS, type SlackRoute, ownSlackConnection, slackAuthorAllowed } from "../slack.js";
 import { companionWakes, controlText, isCompanionControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
@@ -28,7 +29,7 @@ type Metadata = CompanionMetadata;
 type Job = { slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval"; messageId?: string; text?: string }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string): Promise<void>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string): Promise<void>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -160,6 +161,24 @@ export function createCompanionReceiver(opts: {
   }
   const receipts = createTerminalReceipts<Job>(`${path}.receipts`, receiptIndexes);
   async function readJob(id: string): Promise<Job | undefined> { return (await read()).jobs[id] ?? await receipts.event(id); }
+  const outcomes = (identityId: string) => createIMessageOutcomes(opts.accountId, opts.config.baseUrl, identityId);
+  function outcomeRoute(job: Job): IMessageOutcomeRoute | undefined {
+    const m = metadata(job.event);
+    if (m.channel !== "imessage") return;
+    const message = source(job.event, m).message;
+    return { scope: legacyKey(m.phase === "ordinary" ? { ...m, scope_id: m.conversation_id } : m, job.identityId), conversationId: m.conversation_id, sourceMessageIds: nativeSources(job.event),
+      replyToMessageId: message.reply_to_message_id ?? null, threadId: message.thread_id ?? null, threadRootMessageId: message.thread_root_message_id ?? null };
+  }
+  async function acceptedIMessage(id: string, message: any) {
+    try {
+      const job = await readJob(id), route = job && outcomeRoute(job);
+      if (job && route) await outcomes(job.identityId).accepted(message, route);
+    } catch { opts.warn?.("iMessage accepted; optional outcome correlation could not be saved. Do not resend."); }
+  }
+  async function deliveryJob(identityId: string, messageId: string): Promise<Job | undefined> {
+    return Object.values((await read()).jobs).find((job) => job.identityId === identityId && job.outboundIds?.includes(messageId))
+      ?? await receipts.lookup("deliveries", JSON.stringify([identityId, messageId]));
+  }
   async function completedSource(job: Job): Promise<Job | undefined> {
     const m = metadata(job.event), incoming = source(job.event, m), scope = key(m, job.identityId);
     const previous = Object.values((await read()).jobs).find((other) => other !== job && other.event.id !== job.event.id && other.identityId === job.identityId && other.state === "done" && key(metadata(other.event), other.identityId) === scope && source(other.event, metadata(other.event)).message.id === incoming.message.id)
@@ -445,6 +464,7 @@ export function createCompanionReceiver(opts: {
         },
         ...toolSendCallbacks(id, () => validateSlack(job)),
         recordDelivery: async (messageId) => { await mutate((j) => { j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), messageId])]; }, [id]); },
+        recordIMessageAccepted: (message) => acceptedIMessage(id, message),
       };
       const texts = await opts.submit(input) ?? [];
       await mutate((j) => { Object.assign(j.jobs[id]!, { replies: texts, reply: input.reply, sponsor: parent.sponsor, sponsorContactId: parent.sponsorContactId, state: "reply_pending", nativeComplete: true }); });
@@ -485,7 +505,7 @@ export function createCompanionReceiver(opts: {
         checkSponsor(sponsor, sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
         await mutate((j) => { if (stopped() || !enabled(j.jobs[id]!) || j.jobs[id]!.stoppedBy || !["pending", "submitting"].includes(j.jobs[id]!.state) || (j.jobs[id]!.state === "submitting" && j.jobs[id]!.nativeComplete)) throw new Error("The native job is no longer authorized to dispatch or deliver approval prompts."); j.jobs[id]!.nativeComplete = false; j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; }, [id]);
-      }, recordDelivery, ...toolSendCallbacks(id, () => validateSlack(job)),
+      }, recordDelivery, recordIMessageAccepted: (message) => acceptedIMessage(id, message), ...toolSendCallbacks(id, () => validateSlack(job)),
     });
     async function sendSaved() {
       const current = (await read()).jobs[id]!;
@@ -624,7 +644,15 @@ export function createCompanionReceiver(opts: {
       return;
     }
     const pending = journal.context?.[scope] ?? [];
-    input.body = bounded([...pending, body].join("\n\n"));
+    const failures = m.channel === "imessage" ? await outcomes(job.identityId).pending(scope).catch(() => { opts.warn?.("Retained iMessage delivery notices could not be read; they remain pending."); return []; }) : [];
+    const notices: string[] = [], included: typeof failures = [];
+    let inputBytes = Buffer.byteLength(bounded([...pending, body].join("\n\n")));
+    for (const failure of failures) {
+      const notice = imessageFailureNotice(failure), addedBytes = Buffer.byteLength(notice) + 2;
+      if (inputBytes + addedBytes > COMPANION_MAX_BYTES) continue;
+      notices.push(notice); included.push(failure); inputBytes += addedBytes;
+    }
+    input.body = [...pending, ...notices, body].join("\n\n");
     opts.activity?.(job.event, "accepted");
     const texts = await opts.submit(input) ?? [];
     await mutate((j) => {
@@ -632,6 +660,7 @@ export function createCompanionReceiver(opts: {
       finishSources(j); if (j.context) delete j.context[scope];
       Object.assign(j.jobs[id]!, { replies: texts, reply, sponsor: activation?.sponsor ?? author, sponsorContactId, state: "reply_pending", nativeComplete: true });
     });
+    if (included.length) await outcomes(job.identityId).acknowledge(included).catch(() => { opts.warn?.("iMessage delivery notice acknowledgment could not be saved; retained notices may repeat as context only."); });
     await sendSaved();
   }
   function enabled(job: Job) {
@@ -753,6 +782,24 @@ export function createCompanionReceiver(opts: {
     return task;
   }
   return {
+    async recordIMessageFailure(message: Record<string, any> | undefined): Promise<boolean> {
+      if (!message || typeof message.id !== "string" || !message.id) return opts.config.imessageThreadedReplies === true;
+      const identityId = (await opts.runtime.getIdentity()).id;
+      if (!identityId && !opts.config.imessageThreadedReplies) return false;
+      const store = outcomes(identityId);
+      const prior = await store.lookup(message.id);
+      // Existing accepted proof, including archived legacy records, outranks
+      // callback-supplied conversation and ancestry even after feature disable.
+      const original = await deliveryJob(identityId, message.id);
+      const route = original && outcomeRoute(original);
+      if (!opts.config.imessageThreadedReplies && !prior && !route) return false;
+      if (!prior?.route && route) await store.accepted({ id: message.id }, route);
+      const conversationId = typeof message.conversation_id === "string" && message.conversation_id ? message.conversation_id : undefined;
+      const fallback = conversationId ? { scope: legacyKey({ channel: "imessage", phase: "ordinary", sequence: 1, scope_id: conversationId, conversation_id: conversationId } as Metadata, identityId), conversationId,
+        replyToMessageId: null, threadId: null, threadRootMessageId: null } : undefined;
+      await store.failed(message.id, fallback);
+      return true;
+    },
     async ownsDelivery(messageId?: string, conversationId?: string | null) {
       if (!messageId && !conversationId) return false;
       const identityId = (await opts.runtime.getIdentity()).id;
@@ -878,6 +925,10 @@ export function createCompanionReceiver(opts: {
     },
     reconsiderApprovals,
     async recover() {
+      if (opts.config.imessageThreadedReplies) {
+        try { await outcomes((await opts.runtime.getIdentity()).id).recover(); }
+        catch { opts.warn?.("Retained iMessage outcome metadata could not be recovered; no sends were replayed."); }
+      }
       if (!Object.keys((await read()).jobs).length) return;
       await start();
     },

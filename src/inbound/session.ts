@@ -146,6 +146,7 @@ type InkboxInboundTurn = {
   companionReply?: CompanionReply;
   companionValidateBeforeDispatch?: () => Promise<void>;
   companionRecordDelivery?: (messageId: string) => Promise<void>;
+  recordIMessageAccepted?: (message: any) => Promise<void>;
   companionBeforeApprovalSend?: (approvalId: string) => Promise<void>;
   companionAfterApprovalSend?: (approvalId: string, messageId: string) => Promise<void>;
   rawText?: string;
@@ -1718,6 +1719,10 @@ async function deliverReply(
         ...(params.turn.companionReply?.replyToMessageId ? { replyToMessageId: params.turn.companionReply.replyToMessageId, plainReplyFallback: true,
           idempotencyKey: `openclaw:${createHash("sha256").update(JSON.stringify([params.turn.messageId, params.turn.companionReply.replyToMessageId, text])).digest("hex")}` } : {}),
       });
+      // The SDK accepted this send. Optional history/notice persistence must
+      // never relabel it as a rejection or cause a second send.
+      try { await params.turn.recordIMessageAccepted?.(msg); }
+      catch { params.logger?.warn?.("iMessage accepted; optional outcome correlation could not be saved. Do not resend."); }
       return msg.id;
     } catch (error) {
       throw new OutboundSendRejection("imessage", error);
@@ -6051,6 +6056,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       nativeSource: !input.commandAuthorized && (input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
         identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
         slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, validate: input.validateBeforeDispatch, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend,
+        recordIMessageAccepted: input.recordIMessageAccepted,
       } : undefined,
       slackRoute: input.reply.slackRoute,
       activity: input.reply.slackRoute ? (phase) => slackActivity.notify(input.reply.slackRoute!, phase) : undefined,
@@ -6065,6 +6071,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       companionReply: structuredClone(input.reply),
       companionValidateBeforeDispatch: input.validateBeforeDispatch,
       companionRecordDelivery: input.recordDelivery,
+      recordIMessageAccepted: input.recordIMessageAccepted,
       companionBeforeApprovalSend: input.beforeApprovalSend,
       companionAfterApprovalSend: input.afterApprovalSend,
       companionApprovalReady: () => companion.reconsiderApprovals(),
@@ -6278,11 +6285,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     },
     async onIMessage(event) {
       if (event.event_type === "imessage.delivery_failed") {
-        if (opts.account.config.imessageThreadedReplies) {
-          const message = event.data?.message;
-          if (message?.conversation_id) await contextBuffer(JSON.stringify(["native-imessage-failures", opts.account.accountId, (await opts.runtime.getIdentity()).id, message.conversation_id])).append({
-            id: event.id, body: JSON.stringify({ type: "delivery_failure", messageId: message.id, notice: "Delivery outcome requires inspection. Do not repeat the send automatically." }),
-          });
+        if (await companion.recordIMessageFailure(event.data?.message ?? undefined)) {
           opts.logger?.warn?.("iMessage delivery failure retained as context; source-targeted replies are never resent automatically.");
           return;
         }

@@ -151,6 +151,11 @@ export function registerSendIMessage(
           ...(mediaUrls?.length ? { mediaUrls } : {}),
           ...(params.sendStyle ? { sendStyle: params.sendStyle } : {}),
         });
+        // Only source-bound sends belong to this source's output history.
+        // Independent destinations stay separate and never suppress its answer.
+        if (bound && source?.replyToMessageId) {
+          try { await source.recordIMessageAccepted?.(msg); } catch { /* Accepted send; optional history failure is not permission to resend. */ }
+        }
         if (bound && source?.replyToMessageId) await source.afterSend(_id, msg.id, text);
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
         return sentToolText(
