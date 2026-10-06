@@ -48,6 +48,7 @@ GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
 # (no external-events pass-through on this gateway).
 SIGNING_KEY = os.environ.get("AUT_INKBOX_SIGNING_KEY", "")
 AUT_WEBHOOK_URL = os.environ.get("AUT_WEBHOOK_URL", "http://127.0.0.1:18789/inkbox/webhook")
+REQUIRE_CARRIER_INGRESS = os.environ.get("INKBOX_REQUIRE_CARRIER_INGRESS") == "1"
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY),
@@ -329,16 +330,11 @@ def _sign_inkbox_webhook(payload: bytes, request_id: str, timestamp: str, secret
 
 
 def _inject_inkbox_webhook(envelope: dict) -> int:
-    """POST a signed Inkbox-style webhook to the gateway's local listener.
+    """POST the original signed event to the preflight-verified live ingress."""
+    class ExactIngress(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+            return None  # A changed destination must not receive the signed event.
 
-    Returns the HTTP status. A ``404``/connection error is returned rather than
-    raised: the local ``/inkbox/webhook`` route only exists when the gateway
-    runs in publicUrl mode. This channels suite runs the gateway in TUNNEL mode
-    (so real inbound SMS reaches the AUT), where webhooks arrive over the tunnel
-    WS and there is no local HTTP route to inject at — the caller skips in that
-    case rather than false-red. The async carrier path is covered end-to-end by
-    the unit suite; the sync path is proven live by the internal-spam-block test.
-    """
     payload = json.dumps(envelope).encode()
     request_id = str(uuid.uuid4())
     timestamp = str(int(time.time()))
@@ -356,7 +352,7 @@ def _inject_inkbox_webhook(envelope: dict) -> int:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.build_opener(ExactIngress).open(req, timeout=15) as resp:
             return resp.status
     except urllib.error.HTTPError as exc:
         return exc.code
@@ -403,18 +399,19 @@ def _assert_internal_block_surfaced(log_offset: int, *, delivered_fallback: bool
 
 
 @real_only
-@pytest.mark.skipif(not SIGNING_KEY, reason="needs AUT_INKBOX_SIGNING_KEY to sign the fake webhook")
+@pytest.mark.skipif(not SIGNING_KEY and not REQUIRE_CARRIER_INGRESS, reason="needs AUT_INKBOX_SIGNING_KEY to sign the fake webhook")
 def test_sms_retry_after_carrier_delivery_failure(sms):
     """Inject a fake carrier delivery-failure webhook; expect a real follow-up.
 
     Simulates the async failure surface: the send was accepted, then the
     carrier flagged it (error 40002) and the server reported it via a
     ``text.delivery_failed`` webhook. The webhook is forged with the AUT's
-    own signing key and posted to the gateway's local webhook listener —
+    own signing key and posted to the gateway's verified tunnel listener —
     exactly how a real delivery would arrive through the tunnel. The
     plugin must wake the agent, and the agent must send a real follow-up
     SMS that reaches the remote.
     """
+    assert SIGNING_KEY, "carrier delivery-failure task requires its signing key"
     aut, remote = sms["aut"], sms["remote"]
     aut_phone = sms["aut_phone"]
     remote_phone, _remote_pid = _phone(remote)
@@ -474,14 +471,6 @@ def test_sms_retry_after_carrier_delivery_failure(sms):
         },
     }
     status = _inject_inkbox_webhook(envelope)
-    if status in (0, 404):
-        pytest.skip(
-            "no local Inkbox webhook route to inject at "
-            f"({AUT_WEBHOOK_URL} → {status or 'connection refused'}); the gateway "
-            "runs in tunnel mode here, so async delivery-failure webhooks arrive "
-            "over the tunnel, not a local HTTP port. Async recovery is covered by "
-            "the unit suite; the loop is proven live by the internal-spam-block test."
-        )
     assert status == 200, f"gateway rejected the forged delivery-failure webhook: {status}"
 
     # The agent must react with a real, delivered follow-up SMS.

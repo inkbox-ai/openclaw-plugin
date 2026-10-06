@@ -171,19 +171,27 @@ jobs:
           done
           echo "::error::gateway did not become ready"; exit 1
 
+      - name: Resolve owned carrier-test tunnel ingress
+        if: matrix.mode == 'real'
+        timeout-minutes: 2
+        env:
+          OPENCLAW_INKBOX_API_KEY: ${{ secrets.OPENCLAW_INKBOX_API_KEY }}
+          AUT_INKBOX_SIGNING_KEY: ${{ secrets.OPENCLAW_INKBOX_SIGNING_KEY }}
+        run: python3 tests/live/sms_ingress.py
+
       - name: Run live test (${{ matrix.mode }})
         env:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           OPENCLAW_INKBOX_API_KEY: ${{ secrets.OPENCLAW_INKBOX_API_KEY }}
           LIVE_EMAIL_TIMEOUT: ${{ inputs.timeout_s || '150' }}
           # The delivery-failure retry test forges a signed text.delivery_failed
-          # webhook and POSTs it at the gateway's local webhook route. It needs
+          # webhook and POSTs it through the verified owned tunnel ingress. It needs
           # the AUT org's signing key (the same secret the gateway verifies
           # webhooks with) re-exported under an AUT_* name the test reads.
           AUT_INKBOX_SIGNING_KEY: ${{ secrets.OPENCLAW_INKBOX_SIGNING_KEY }}
-          AUT_WEBHOOK_URL: http://127.0.0.1:18789/inkbox/webhook
         run: |
           if [ "${{ matrix.mode }}" = "real" ]; then
+            export AUT_WEBHOOK_URL="$(cat "$AUT_WEBHOOK_URL_FILE")"
             LIVE_REAL_MODEL=1 python3 -m pytest tests/live -v --tb=short --maxfail=1
           else
             python3 -m pytest tests/live -v --tb=short
