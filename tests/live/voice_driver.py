@@ -59,9 +59,9 @@ GREETING = os.environ.get("VOICE_DRIVER_GREETING", "Hello?")
 # "greeting over" — the first ask is simply allowed to land wherever it lands, and
 # _run_turn re-asks once the agent is actually idle.
 SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "5"))
-# Then give the agent a turn and hang up — a dropped WS does NOT end the call, so we
-# must send an explicit stop or the leg lingers until the server max-duration cap.
+# Bound the scripted turn; live tests can retain hangup ownership until cleanup.
 LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
+AUTO_STOP = os.environ.get("VOICE_DRIVER_AUTO_STOP") != "false"
 # Re-ask the question this often while the agent is idle. An ask the greeting
 # talked over is otherwise never repeated and the call idles out with the agent
 # still waiting for a request. 0 disables re-asking.
@@ -132,6 +132,8 @@ async def phone_media_ws(ws: WebSocket) -> None:
                 reasks += 1
         if answered.is_set() and ANSWER_SETTLE_S > 0:
             await asyncio.sleep(ANSWER_SETTLE_S)
+        if not AUTO_STOP:
+            return
         try:
             await ws.send_text(json.dumps({"event": "stop"}))
             log.info("sent stop (hangup)")

@@ -315,8 +315,97 @@ def test_live_workflow_uses_canonical_hosted_action_stimulus_and_test_owned_hang
         'word, or send the SMS during the call."'
     ) in workflow
     assert "send me one SMS containing exactly these words" not in workflow
-    assert "export VOICE_DRIVER_LISTEN=180" in workflow
+    driver_step = workflow.split("- name: Start voice driver and wait for its tunnel", 1)[1]
+    driver_step = driver_step.split("- name: Run voice test", 1)[0]
+    driver_env, driver_script = driver_step.split("run: |", 1)
+    assert 'VOICE_DRIVER_LISTEN: "180"' in driver_env
+    assert 'VOICE_DRIVER_AUTO_STOP: "false"' in driver_env
+    assert "export VOICE_DRIVER_LISTEN=" not in driver_script
+    assert "export VOICE_DRIVER_AUTO_STOP=" not in driver_script
     assert "export VOICE_DRIVER_ANSWER_SETTLE=4" in workflow
+
+
+@pytest.mark.parametrize("auto_stop,heard_answer", [(False, False), (False, True), (True, False)])
+def test_driver_retains_media_until_test_cleanup(monkeypatch, auto_stop, heard_answer):
+    import ast
+    import asyncio
+    import json
+    import logging
+
+    # Execute the actual WS handler without importing credential/tunnel startup
+    # dependencies; ordinary unit environments need no live API or web server.
+    driver_path = Path(__file__).with_name("voice_driver.py")
+    tree = ast.parse(driver_path.read_text(encoding="utf-8"))
+    handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
+                   and node.name == "phone_media_ws")
+    handler.decorator_list = []
+    namespace = {
+        "WebSocket": object,
+        "WebSocketState": SimpleNamespace(DISCONNECTED="disconnected"),
+        "json": json,
+        "log": logging.getLogger("voice-driver-test"),
+        "GREETING": "Hello?", "LINE": "Current request", "SPEAK_AFTER_S": 0,
+        "LISTEN_S": 100 if heard_answer else 0,
+        "REASK_EVERY_S": 0, "MAX_REASKS": 2, "QUIET_GAP_S": 6,
+        "ANSWER_SETTLE_S": 0, "AUTO_STOP": auto_stop,
+    }
+    exec(compile(ast.Module(body=[handler], type_ignores=[]), str(driver_path), "exec"), namespace)
+
+    async def scenario():
+        inbound = asyncio.Queue()
+        scripted = asyncio.Event()
+        sent = []
+        closed = False
+        turns = []
+        create_task = asyncio.create_task
+
+        def track_turn(coroutine):
+            task = create_task(coroutine)
+            turns.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_turn)
+
+        class Socket:
+            client_state = "connected"
+
+            async def accept(self, **_kwargs):
+                pass
+
+            async def send_text(self, value):
+                event = json.loads(value)
+                sent.append(event)
+                if event.get("delta") == "Current request":
+                    scripted.set()
+
+            async def receive_text(self):
+                return json.dumps(await inbound.get())
+
+            async def close(self):
+                nonlocal closed
+                closed = True
+
+        media = create_task(namespace["phone_media_ws"](Socket()))
+        try:
+            await inbound.put({"event": "start"})
+            await asyncio.wait_for(scripted.wait(), timeout=1)
+            if heard_answer:
+                await inbound.put({"event": "transcript", "is_final": True,
+                                   "text": "olivia@example.com"})
+            await asyncio.wait_for(turns[0], timeout=1)
+            assert [event for event in sent if event["event"] == "stop"] == (
+                [{"event": "stop"}] if auto_stop else []
+            )
+            assert not closed
+            assert not media.done(), "finishing the scripted turn must not close media"
+            await inbound.put({"event": "stop"})
+            await asyncio.wait_for(media, timeout=1)
+            assert closed
+        finally:
+            media.cancel()
+            await asyncio.gather(media, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
 def test_every_call_capable_live_ci_gateway_disables_voicemail_detection():
