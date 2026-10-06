@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { withFileLock } from "openclaw/plugin-sdk/file-lock";
+import { withFileLock } from "../file-lock.js";
 import { ensureStateDir, statePaths } from "../state.js";
 
 export type IMessageOutcomeRoute = {

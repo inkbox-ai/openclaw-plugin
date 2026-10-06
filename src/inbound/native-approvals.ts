@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { withFileLock } from "openclaw/plugin-sdk/file-lock";
+import { withFileLock } from "../file-lock.js";
 import { ensureStateDir, statePaths } from "../state.js";
 import { createChannelApprovalNativeRuntimeAdapter, resolveApprovalOverGateway, type ChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-runtime";
 import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";

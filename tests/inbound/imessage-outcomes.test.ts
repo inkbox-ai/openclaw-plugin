@@ -46,6 +46,11 @@ describe("native iMessage outcome correlation", () => {
     expect(imessageFailureNotice(notices[0]!)).toContain("Do not automatically resend");
     await restored.acknowledge(notices); await restored.failed(accepted.id); expect(await restored.pending(route.scope)).toEqual([]);
   });
+  it("serializes concurrent accepted and failed writes without losing monotonic status or revisions", async () => {
+    await Promise.all(Array.from({ length: 8 }, (_, index) => index % 2 ? store().accepted(accepted, route) : store().failed(accepted.id, { ...route, scope: "callback" })));
+    expect(await store().lookup(accepted.id)).toMatchObject({ revision: 8, failed: true, route });
+    expect(await store().pending("callback")).toEqual([]); expect(await store().pending(route.scope)).toHaveLength(1);
+  });
   it("retains callback-first without conversation and fills its route after acceptance and restart without clearing failure", async () => {
     await store().failed("early");
     expect(await store().lookup("early")).toMatchObject({ failed: true, messageId: "early" });

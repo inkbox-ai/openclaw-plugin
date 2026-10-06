@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
-import { withFileLock } from "openclaw/plugin-sdk/file-lock";
+import { withFileLock } from "../file-lock.js";
 import { ensureStateDir, statePaths } from "../state.js";
 
 type Entry = { id: string; body: string; omitted?: number };
