@@ -24,7 +24,7 @@ function nativeSources(event: Record<string, any>): string[] {
 type Channel = CompanionChannel;
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc"> & { slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = CompanionMetadata;
-type Job = { nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { messageId?: string; text?: string }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { messageId?: string; text?: string }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
 export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeToolSend(callId: string): Promise<void>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void> };
@@ -45,6 +45,39 @@ const { retries, chains, workers, controls } = globalState[registry] ??= { retri
 const lockOptions = { stale: 60_000, retries: { retries: 10, factor: 1.5, minTimeout: 20, maxTimeout: 1000 } };
 
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+function journalScope(m: Metadata, identityId: string, owner: string): string {
+  return `companion:${owner}:${identityId}:${m.channel}:${hash(`${m.conversation_id}:${m.scope_id}`)}:${m.activation_id ? `activation:${hash(m.activation_id)}` : "ordinary"}`;
+}
+function journalPath(accountId: string, config: Partial<InkboxPluginConfig>): string {
+  return join(statePaths().dir, `companion-${hash(JSON.stringify([accountId, config.identity, config.baseUrl ?? ""]))}.json`);
+}
+export async function readCompanionQueueSummary(accountId: string, config: Partial<InkboxPluginConfig>, identityId: string) {
+  const summary = { readable: true, pending: 0, savedAnswers: 0, active: 0, unconfirmed: 0, blockedConversations: 0, disabledRetained: 0, awaitingStopFence: 0 };
+  try {
+    const journal: Journal = JSON.parse(await readFile(journalPath(accountId, config), "utf8"));
+    if (!journal.jobs || typeof journal.jobs !== "object" || Array.isArray(journal.jobs)) throw new Error("Invalid journal");
+    const blocked = new Set<string>();
+    for (const job of Object.values(journal.jobs)) {
+      if (job.identityId !== identityId || job.state === "done") continue;
+      const m = metadata(job.event);
+      const enabled = m.channel === "slack" ? config.slackEnabled === true : m.channel === "imessage" && (job.nativeThreaded || job.event._openclawNativeIMessage || job.reply?.replyToMessageId) ? config.imessageThreadedReplies === true : true;
+      if (!enabled) { summary.disabledRetained++; continue; }
+      if (job.stopTargets) summary.awaitingStopFence++;
+      else if (job.state === "pending") summary.pending++;
+      else if (job.state === "reply_pending") summary.savedAnswers++;
+      else if (job.state === "submitting") summary.active++;
+      else if (["paused", "sending"].includes(job.state)) summary.unconfirmed++;
+      else throw new Error("Invalid journal state");
+      const normalized = m.channel === "imessage" && m.phase === "ordinary" && config.imessageThreadedReplies ? { ...m, scope_id: m.conversation_id } : m;
+      const scope = journalScope(normalized, identityId, hash(JSON.stringify([accountId, config.identity, config.baseUrl ?? ""])));
+      if ((job.state === "paused" && !job.nativeComplete) || ["submitting", "sending"].includes(job.state) || ["paused", "submitting"].includes(journal.activations?.[scope]?.state ?? "")) blocked.add(scope);
+    }
+    summary.blockedConversations = blocked.size;
+    return summary;
+  } catch (error: any) {
+    return error.code === "ENOENT" ? summary : { ...summary, readable: false };
+  }
+}
 function email(value: string): string { return (value.match(/<([^<>]+)>/)?.[1] ?? value).trim().toLowerCase(); }
 function source(event: Record<string, any>, m: Metadata): { message: any; author: string } {
   const message = m.channel === "phone" ? event.data?.text_message : event.data?.message;
@@ -103,7 +136,7 @@ export function createCompanionReceiver(opts: {
   let closed = false;
   const stopped = () => closed || opts.signal?.aborted === true;
   const owner = hash(JSON.stringify([opts.accountId, opts.config.identity, opts.config.baseUrl ?? ""]));
-  const path = join(statePaths().dir, `companion-${owner}.json`);
+  const path = journalPath(opts.accountId, opts.config);
   async function read(): Promise<Journal> {
     try { return JSON.parse(await readFile(path, "utf8")); }
     catch (error: any) { if (error.code === "ENOENT") return { jobs: {}, activations: {} }; throw error; }
@@ -162,7 +195,7 @@ export function createCompanionReceiver(opts: {
       throw new Error("Companion sponsor is not on the outbound allowlist.");
     }
   }
-  function legacyKey(m: Metadata, identityId: string) { return `companion:${owner}:${identityId}:${m.channel}:${hash(`${m.conversation_id}:${m.scope_id}`)}:${m.activation_id ? `activation:${hash(m.activation_id)}` : "ordinary"}`; }
+  function legacyKey(m: Metadata, identityId: string) { return journalScope(m, identityId, owner); }
   function key(m: Metadata, identityId: string) {
     // Native execution is conversation-wide even when inputs have different
     // ancestry. An uncertain thread must fence all successors in that session.
@@ -173,6 +206,33 @@ export function createCompanionReceiver(opts: {
     if (metadata(a.event).channel !== "slack") return true;
     const left = a.event._openclawSlack?.route, right = b.event._openclawSlack?.route;
     return left && right && left.connectionId === right.connectionId && left.conversationId === right.conversationId && left.threadTs === right.threadTs;
+  }
+  async function reconcileNativeStops() {
+    for (const [id, stop] of Object.entries((await read()).jobs)) {
+      if (!stop.stopTargets || stop.state === "done" || !enabled(stop)) continue;
+      const controlKey = `${path}:native-stop:${id}`;
+      if (controls.has(controlKey)) continue;
+      controls.add(controlKey);
+      try {
+        for (const targetId of stop.stopTargets) {
+          const target = (await read()).jobs[targetId];
+          if (!target || target.stoppedBy !== id || target.state === "done") continue;
+          if (!target.nativeComplete && target.nativeOwner && await fenceNativeOwner(target.nativeOwner.sessionKey, target.nativeOwner.runId)) {
+            await mutate((j) => { if (j.jobs[targetId]?.stoppedBy === id) j.jobs[targetId]!.nativeComplete = true; });
+          }
+          await mutate((j) => {
+            const current = j.jobs[targetId];
+            if (current?.stoppedBy === id && current.nativeComplete) current.state = "done";
+          });
+        }
+        await mutate((j) => {
+          const current = j.jobs[id]!;
+          if (current.stopTargets!.every((targetId) => j.jobs[targetId]?.state === "done")) {
+            current.state = "done"; current.nativeComplete = true;
+          }
+        });
+      } finally { controls.delete(controlKey); }
+    }
   }
   async function validateSlack(job: Job) {
     if (metadata(job.event).channel !== "slack") return;
@@ -189,13 +249,20 @@ export function createCompanionReceiver(opts: {
   }
   function toolSendCallbacks(id: string, validate: () => Promise<void>) {
     return {
-      bindNativeOwner: async (sessionKey: string, runId: string) => { await mutate((j) => { j.jobs[id]!.nativeOwner = { sessionKey, runId }; }); },
+      bindNativeOwner: async (sessionKey: string, runId: string) => {
+        const active = await mutate((j) => {
+          const job = j.jobs[id]!;
+          job.nativeOwner = { sessionKey, runId };
+          return !stopped() && !job.stoppedBy && job.state === "submitting" && !job.nativeComplete;
+        });
+        if (!active) throw new Error("The native source was stopped before its run could begin.");
+      },
       nativeTerminal: async () => { await mutate((j) => { j.jobs[id]!.nativeComplete = true; }); },
       beforeToolSend: async (callId: string) => {
         await validate();
         await mutate((journal) => {
           const job = journal.jobs[id]!;
-          if (stopped() || job.state !== "submitting" || job.nativeComplete) throw new Error("The native job is no longer active; its tool send is not authorized.");
+          if (stopped() || job.stoppedBy || job.state !== "submitting" || job.nativeComplete) throw new Error("The native job is no longer active; its tool send is not authorized.");
           if (Object.values(job.toolSends ?? {}).some((send) => !send.messageId) || job.toolSends?.[callId]) throw new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
           job.toolSends ??= {}; job.toolSends[callId] = {};
         });
@@ -286,6 +353,7 @@ export function createCompanionReceiver(opts: {
     for (const [id, job] of Object.entries((await read()).jobs)) if (job.state === "pending") await tryApproval(id, job);
   }
   async function processJob(id: string, job: Job) {
+    if (job.stoppedBy || job.stopTargets) return;
     if (!["pending", "reply_pending"].includes(job.state) || (await read()).jobs[id]?.state !== job.state) return;
     if (await tryApproval(id, job)) return;
     if ((await read()).jobs[id]?.state !== job.state) return;
@@ -307,14 +375,16 @@ export function createCompanionReceiver(opts: {
       validateBeforeDispatch: async () => {
         checkSponsor(sponsor, sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
-        await mutate((j) => { if (!["pending", "submitting"].includes(j.jobs[id]!.state) || (j.jobs[id]!.state === "submitting" && j.jobs[id]!.nativeComplete)) throw new Error("The native job is no longer authorized to dispatch or deliver approval prompts."); j.jobs[id]!.nativeComplete = false; j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; });
+        await mutate((j) => { if (j.jobs[id]!.stoppedBy || !["pending", "submitting"].includes(j.jobs[id]!.state) || (j.jobs[id]!.state === "submitting" && j.jobs[id]!.nativeComplete)) throw new Error("The native job is no longer authorized to dispatch or deliver approval prompts."); j.jobs[id]!.nativeComplete = false; j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; });
       }, recordDelivery, ...toolSendCallbacks(id, () => validateSlack(job)),
     });
     async function sendSaved() {
       const current = (await read()).jobs[id]!;
+      if (current.stoppedBy) return;
       if (Object.values(current.toolSends ?? {}).some((send) => !send.messageId)) throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
       const input = makeInput(current.reply!);
       for (const text of current.replies ?? []) {
+        if ((await read()).jobs[id]!.stoppedBy) return;
         // Only an exact accepted same-source send is delivery proof. Do not
         // suppress a different answer, an unknown result, or a legacy receipt.
         if (Object.values(current.toolSends ?? {}).some((send) => send.messageId && send.text === text)) {
@@ -324,10 +394,10 @@ export function createCompanionReceiver(opts: {
         const savedActivation = (await read()).activations[scope];
         checkSponsor(current.sponsor ?? savedActivation?.sponsor ?? author, current.sponsorContactId ?? savedActivation?.sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
-        const sent = await opts.deliver(input, text, async () => { await mutate((j) => { j.jobs[id]!.state = "sending"; }); });
+        const sent = await opts.deliver(input, text, async () => { await mutate((j) => { if (j.jobs[id]!.stoppedBy) throw new Error("The source turn was stopped before sending."); j.jobs[id]!.state = "sending"; }); });
         await mutate((j) => {
           if (sent) j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), sent])];
-          j.jobs[id]!.replies!.shift(); j.jobs[id]!.state = "reply_pending";
+          j.jobs[id]!.replies!.shift(); j.jobs[id]!.state = j.jobs[id]!.stoppedBy ? "done" : "reply_pending";
         });
       }
       await mutate((j) => { j.jobs[id]!.state = "done"; });
@@ -445,6 +515,7 @@ export function createCompanionReceiver(opts: {
     opts.activity?.(job.event, "accepted");
     const texts = await opts.submit(input) ?? [];
     await mutate((j) => {
+      if (j.jobs[id]!.stoppedBy) { j.jobs[id]!.state = "done"; j.jobs[id]!.nativeComplete = true; return; }
       finishSources(j); if (j.context) delete j.context[scope];
       Object.assign(j.jobs[id]!, { replies: texts, reply, sponsor: activation?.sponsor ?? author, sponsorContactId, state: "reply_pending", nativeComplete: true });
     });
@@ -458,6 +529,7 @@ export function createCompanionReceiver(opts: {
   }
   async function drain() {
     while (!stopped()) {
+      await reconcileNativeStops();
       const journal = await read();
       const ordered = Object.values(journal.jobs).sort((a, b) => metadata(a.event).sequence - metadata(b.event).sequence);
       const blocked = new Set(ordered.filter((j) => (j.state === "paused" && !j.nativeComplete) || j.state === "submitting" || j.state === "sending").map((j) => key(metadata(j.event), j.identityId)));
@@ -481,6 +553,7 @@ export function createCompanionReceiver(opts: {
           blocked.add(scope);
           await mutate((j) => {
             const saved = j.jobs[id]!;
+            if (saved.stoppedBy) { saved.state = saved.nativeComplete ? "done" : "paused"; return; }
             if (saved.state === "submitting" || saved.state === "sending") saved.state = "paused";
             else {
               saved.nativeComplete = true;
@@ -518,6 +591,7 @@ export function createCompanionReceiver(opts: {
           for (const a of Object.values(j.activations)) if (a.state === "submitting") a.state = "paused";
         });
         for (const [id, job] of Object.entries((await read()).jobs)) {
+          if (job.stoppedBy || job.stopTargets) continue;
           if (job.state !== "paused") continue;
           if (!job.nativeComplete && job.nativeOwner) {
             if (await fenceNativeOwner(job.nativeOwner.sessionKey, job.nativeOwner.runId)) await mutate((j) => { j.jobs[id]!.nativeComplete = true; });
@@ -563,6 +637,11 @@ export function createCompanionReceiver(opts: {
       bounded(JSON.stringify(event));
       const identityId = (await opts.runtime.getIdentity()).id;
       if (!identityId) throw new Error("Companion identity is unavailable.");
+      const m = metadata(event), incoming = source(event, m);
+      const nativeStop = opts.config.imessageThreadedReplies && event._openclawNativeIMessage && m.phase === "ordinary" && m.channel === "imessage" &&
+        ["/stop", "/cancel"].includes(controlText(String(incoming.message.content ?? incoming.message.text ?? ""), opts.config.identity).toLowerCase()) &&
+        companionWakes(opts.config, incoming.message, m.channel);
+      if (nativeStop) await checkSender(incoming.author, m.channel, incoming.message.sender_contact_id);
       if (event._openclawSlack?.route?.nativeStop) {
         const parent = Object.values((await read()).jobs).find((job) => job.state === "submitting" && job.sponsor === event.data.message.author && sameControlRoute(job, { event } as Job));
         if (!parent) return;
@@ -583,6 +662,20 @@ export function createCompanionReceiver(opts: {
         if (previous) return;
         const job: Job = { event: structuredClone(event), identityId, state: "pending", ...(event.companion.channel === "imessage" && opts.config.imessageThreadedReplies ? { nativeThreaded: true } : {}) };
         j.jobs[receipt] = job;
+        if (nativeStop) {
+          job.stopTargets = Object.entries(j.jobs).filter(([otherId, other]) => otherId !== receipt && !other.stopTargets && other.state !== "done" && other.identityId === identityId &&
+            key(metadata(other.event), identityId) === key(m, identityId) && sameAuthor(m.channel, source(other.event, metadata(other.event)).author, incoming.author)).map(([otherId]) => otherId);
+          job.state = job.stopTargets.length ? "paused" : "done";
+          job.nativeComplete = !job.stopTargets.length;
+          job.reason = "Stop applies only to its durably captured source turns.";
+          for (const targetId of job.stopTargets) {
+            const target = j.jobs[targetId]!;
+            target.stoppedBy = receipt;
+            target.reason = "Canceled by an accepted source-owned Stop.";
+            if (target.state === "pending" || target.state === "reply_pending") { target.state = "done"; target.nativeComplete = true; }
+          }
+          return;
+        }
         if (event._openclawNativeIMessage?.burstable) {
           job.event._openclawNativeIMessage.sourceMessageIds = [event.data.message.id];
           const now = Date.now(), m = metadata(event), incoming = source(event, m);
@@ -599,7 +692,8 @@ export function createCompanionReceiver(opts: {
           } else { job.burstAt = now; job.retryAt = now + 750; }
         }
       });
-      if (!await tryApproval(receipt, (await read()).jobs[receipt]!)) await tryControl(receipt, (await read()).jobs[receipt]!);
+      if ((await read()).jobs[receipt]!.stopTargets) await reconcileNativeStops();
+      else if (!await tryApproval(receipt, (await read()).jobs[receipt]!)) await tryControl(receipt, (await read()).jobs[receipt]!);
       void start().then(() => start()).catch(() => opts.warn?.("Companion queue is unavailable."));
     },
     reconsiderApprovals,

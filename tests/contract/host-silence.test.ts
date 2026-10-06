@@ -59,13 +59,14 @@ async function finishInvisibleReply(text: string, transformed = false, ambient =
 }
 
 describe("actual host intentional-silence contract", () => {
+  // First native dispatch initializes host workers and SQLite under parallel CI load.
   it.skipIf(baselineWithoutFinalizer)("reproduces fallback after a private sentinel is hidden only by the adapter", async () => {
     const { deliver, result } = await finishInvisibleReply("[SILENT]");
     expect(deliver).toHaveBeenCalledTimes(2);
     expect(deliver.mock.calls[0][0].text).toBe("[SILENT]");
     expect(deliver.mock.calls[1][0].text).not.toBe("[SILENT]");
     expect(result.noVisibleReplyFallbackDelivered).toBe(true);
-  });
+  }, 15_000);
 
   it.skipIf(baselineWithoutFinalizer)("does not manufacture a fallback when ambient group policy permits canonical silence", async () => {
     expect(SILENT_REPLY_TOKEN).toBe("NO_REPLY");

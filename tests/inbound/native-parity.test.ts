@@ -8,9 +8,9 @@ const gateway = vi.hoisted(() => ({ rpc: vi.fn() }));
 vi.mock("../../src/state.js", async () => ({ statePaths: () => ({ dir: state.dir }), ensureStateDir: async () => (await import("node:fs/promises")).mkdir(state.dir, { recursive: true }) }));
 vi.mock("openclaw/plugin-sdk/gateway-runtime", () => ({ callGatewayFromCli: gateway.rpc }));
 vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({ resolveInboundRouteEnvelopeBuilderWithRuntime: () => ({ route: { agentId: "main", accountId: "default", sessionKey: "native-session" }, buildEnvelope: ({ body }: any) => ({ storePath: "memory:test", body }) }) }));
-import { createCompanionReceiver } from "../../src/inbound/companion.js";
+import { createCompanionReceiver, readCompanionQueueSummary } from "../../src/inbound/companion.js";
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
-import { fenceNativeOwner } from "../../src/native-owner.js";
+import { bindNativeOwner, fenceNativeOwner, guardRetiredNativeRun, trackNativeOwner } from "../../src/native-owner.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
 const bridges: ReturnType<typeof createInkboxSessionBridge>[] = [];
 const identityId = "11111111-1111-4111-8111-111111111111", connectionId = "22222222-2222-4222-8222-222222222222";
@@ -22,6 +22,169 @@ function receiver(submit: any, deliver = vi.fn(async () => "sent"), threaded = t
   return createCompanionReceiver({ accountId: "default", config: { identity: "agent", imessageThreadedReplies: threaded }, runtime: { getIdentity: async () => ({ id: identityId }), getClient: async () => ({}) } as any, submit, deliver });
 }
 describe("durable noninterrupting native iMessage coordinator", () => {
+  it("blocks a late native owner that arrives after accepted Stop without inventing terminal proof", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    const model = vi.fn(), submit = vi.fn(async (input: any) => {
+      await input.validateBeforeDispatch();
+      if (input.reply.replyToMessageId === "late-owner") {
+        const owner = trackNativeOwner("late-session", input.bindNativeOwner, input.nativeTerminal);
+        try {
+          entered(); await held;
+          const decision = await bindNativeOwner({ prompt: owner.marker }, { sessionKey: "late-session", runId: "late-run" });
+          expect(decision?.outcome).toBe("block");
+          expect(guardRetiredNativeRun({}, { runId: "late-run" })?.block).toBe(true);
+          if (decision?.outcome === "block") throw new Error("native before-agent-run blocked");
+        } finally { owner.close(); }
+      }
+      model(); return [];
+    });
+    gateway.rpc.mockResolvedValue({ runId: "late-run", status: "timeout" });
+    const queue = receiver(submit);
+    await queue.accept(imessage("late-owner")); await started;
+    await queue.accept(imessage("late-stop", "/stop")); await queue.accept(imessage("fresh-after-stop"));
+    release(); await queue.idle();
+    const old = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "event-late-owner") as any;
+    expect(old.nativeOwner).toEqual({ sessionKey: "late-session", runId: "late-run" }); expect(old.nativeComplete).not.toBe(true);
+    expect(model).not.toHaveBeenCalled();
+    gateway.rpc.mockResolvedValue({ runId: "late-run", status: "ok", endedAt: 100 });
+    await queue.recover(); await queue.idle(); queue.close(); expect(model).toHaveBeenCalledTimes(1);
+  });
+  it("rejects a native approval prompt stopped while backend preflight is in flight", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    const contexts = new Map<string, any>(), sendIMessage = vi.fn();
+    const identity = { id: identityId, sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => { entered(); await held; return { conversationId: "conversation" }; }, getIMessageConversationThread() {} };
+    const dispatchReply = vi.fn(async (input: any) => {
+      const binding = contexts.get("approval.native").bindings.get(input.routeSessionKey)[0];
+      await binding.deliver("Approval requested"); return { dispatched: true };
+    });
+    const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config: { identity: "agent", imessageThreadedReplies: true } } as any, cfg: {}, runtime: { getIdentity: async () => identity, getClient: async () => ({}) } as any, channelRuntime: { runtimeContexts: { get: ({ capability }: any) => contexts.get(capability), register: ({ capability, context }: any) => { contexts.set(capability, context); return { dispose() {} }; } }, inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
+    bridges.push(bridge);
+    const nativeEvent = (id: string, content: string) => ({ id: `native-${id}`, event_type: "imessage.received", data: { message: { id, conversation_id: "conversation", sender_number: "+15555550100", remote_number: "+15555550100", direction: "inbound", content } } });
+    await dispatchInbound(nativeEvent("approval-owner", "question"), bridge.handlers); await started;
+    await dispatchInbound(nativeEvent("approval-stop", "/stop"), bridge.handlers);
+    release(); await bridge.catchUpCompanion();
+    expect(sendIMessage).not.toHaveBeenCalled(); expect(contexts.get("approval.native").bindings.size).toBe(0);
+  });
+  it.each(["supported", "foreign-source", "old-api"])("checks backend threading before automatic native delivery: %s", async (mode) => {
+    const sendIMessage = vi.fn(async () => ({ id: "sent" }));
+    const getIMessageThread = vi.fn(async () => { if (mode === "old-api") throw new Error("native endpoint absent"); return { conversationId: "conversation", messages: [{ text: "private-thread-history" }] }; });
+    const identity = { id: identityId, sendIMessage, getIMessage: vi.fn(async (id: string) => ({ id, conversationId: mode === "foreign-source" ? "other" : "conversation" })), getIMessageThread, getIMessageConversationThread() {} };
+    const dispatchReply = vi.fn(async (input: any) => { await input.delivery.deliver({ text: "answer" }, { kind: "final" }); return { dispatched: true }; });
+    const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config: { identity: "agent", imessageThreadedReplies: true } } as any, cfg: {}, runtime: { getIdentity: async () => identity, getClient: async () => ({}) } as any, channelRuntime: { inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
+    bridges.push(bridge);
+    await dispatchInbound(imessage("source"), bridge.handlers); await bridge.catchUpCompanion();
+    expect(dispatchReply).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(dispatchReply.mock.calls)).not.toContain("private-thread-history");
+    if (mode === "supported") {
+      expect(getIMessageThread).toHaveBeenCalledWith("source", { limit: 1 });
+      expect(sendIMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conversation", replyToMessageId: "source", plainReplyFallback: true }));
+    } else {
+      expect(sendIMessage).not.toHaveBeenCalled();
+      expect(Object.values((await readJournal()).jobs).some((job: any) => job.state === "sending")).toBe(false);
+    }
+  });
+  it("reports count-only queue uncertainty with conversation-wide fencing and disabled retention", async () => {
+    const config = { identity: "agent", imessageThreadedReplies: true };
+    const owner = createHash("sha256").update(JSON.stringify(["default", "agent", ""])).digest("hex");
+    const path = join(state.dir, `companion-${owner}.json`);
+    const job = (id: string, status: string, extra = {}) => ({ identityId, event: imessage(id, "private-content", id), state: status, nativeThreaded: true, ...extra });
+    await writeFile(path, JSON.stringify({ jobs: {
+      pending: job("pending", "pending"), saved: job("saved", "reply_pending"),
+      active: job("active", "submitting"), unknown: job("unknown", "paused"),
+      sendUnknown: job("send-unknown", "paused", { nativeComplete: true }),
+      stop: job("stop", "paused", { stopTargets: ["active"] }),
+      done: job("done", "done"), foreign: job("foreign", "paused", { identityId: "another-identity" }),
+    }, activations: {} }));
+    const summary = await readCompanionQueueSummary("default", config, identityId);
+    expect(summary).toEqual({ readable: true, pending: 1, savedAnswers: 1, active: 1, unconfirmed: 2, blockedConversations: 1, disabledRetained: 0, awaitingStopFence: 1 });
+    expect(JSON.stringify(summary)).not.toContain("private-content"); expect(JSON.stringify(summary)).not.toContain(identityId);
+    expect(await readCompanionQueueSummary("default", { ...config, imessageThreadedReplies: false }, identityId)).toMatchObject({ pending: 0, unconfirmed: 0, blockedConversations: 0, disabledRetained: 6 });
+    const activationJob = job("initialization", "pending", { nativeComplete: true });
+    Object.assign(activationJob.event.companion, { phase: "initialization", activation_id: "activation" });
+    const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+    const scope = `companion:${owner}:${identityId}:imessage:${digest("conversation:conversation:initialization")}:activation:${digest("activation")}`;
+    await writeFile(path, JSON.stringify({ jobs: { activation: activationJob }, activations: { [scope]: { state: "paused" } } }));
+    expect(await readCompanionQueueSummary("default", config, identityId)).toMatchObject({ pending: 1, active: 0, blockedConversations: 1 });
+    await writeFile(path, "invalid-json"); expect((await readCompanionQueueSummary("default", config, identityId)).readable).toBe(false);
+  });
+  it("stops the exact active native run and pre-Stop followers but preserves fresh later input", async () => {
+    let release!: () => void, entered!: () => void, first: any;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const submit = vi.fn(async (input: any) => {
+      await input.validateBeforeDispatch();
+      if (input.reply.replyToMessageId === "active") { first = input; await input.bindNativeOwner("native-conversation", "active-run"); entered(); await held; }
+      return [input.reply.replyToMessageId];
+    });
+    const deliver = vi.fn(async () => "sent"), queue = receiver(submit, deliver);
+    let fenced = false;
+    gateway.rpc.mockImplementation(async (method) => {
+      if (method === "chat.abort") { fenced = true; return { aborted: true }; }
+      return { runId: "active-run", status: fenced ? "ok" : "timeout", ...(fenced ? { endedAt: 100 } : {}) };
+    });
+    await queue.accept(imessage("active")); await started;
+    await queue.accept(imessage("queued"));
+    const stop = imessage("stop", "/stop"); await queue.accept(stop);
+    await expect(first.beforeToolSend("late-tool")).rejects.toThrow("no longer active");
+    await expect(first.validateBeforeDispatch()).rejects.toThrow("no longer authorized");
+    await queue.accept(imessage("fresh"));
+    release(); await queue.idle(); await queue.recover();
+    expect(submit.mock.calls.map(([input]) => input.reply.replyToMessageId)).toEqual(["active", "fresh"]);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(gateway.rpc).toHaveBeenCalledWith("chat.abort", expect.anything(), { sessionKey: "native-conversation", runId: "active-run" });
+    const calls = gateway.rpc.mock.calls.length;
+    await queue.accept(stop); await queue.idle(); queue.close();
+    expect(gateway.rpc).toHaveBeenCalledTimes(calls);
+    expect(Object.values((await readJournal()).jobs).every((job: any) => job.state === "done")).toBe(true);
+  });
+  it("retains immutable Stop targets across restart until positive fencing, without stopping later requests", async () => {
+    const submit = vi.fn(async (input: any) => {
+      await input.validateBeforeDispatch();
+      if (input.reply.replyToMessageId === "old") { await input.bindNativeOwner("native-conversation", "old-run"); throw new Error("unknown submission"); }
+      return ["fresh answer"];
+    });
+    const old = receiver(submit); gateway.rpc.mockResolvedValue({ runId: "old-run", status: "timeout" });
+    await old.accept(imessage("old")); await old.idle();
+    await old.accept(imessage("queued")); await old.idle();
+    const stop = imessage("stop", "/cancel"); await old.accept(stop); await old.idle();
+    await old.accept(imessage("fresh")); await old.idle(); old.close();
+    const current = receiver(submit); await current.recover();
+    expect(submit).toHaveBeenCalledTimes(1);
+    const pending = Object.values((await readJournal()).jobs) as any[];
+    expect(pending.find((job) => job.event.id === "event-queued").state).toBe("done");
+    expect(pending.find((job) => job.event.id === "event-fresh").state).toBe("pending");
+    gateway.rpc.mockResolvedValue({ runId: "old-run", status: "ok", endedAt: 100 });
+    await current.recover(); await current.idle();
+    expect(submit).toHaveBeenCalledTimes(2);
+    const calls = gateway.rpc.mock.calls.length;
+    await current.accept(stop); await current.idle(); current.close();
+    expect(gateway.rpc).toHaveBeenCalledTimes(calls);
+    expect(submit.mock.calls[1]![0].reply.replyToMessageId).toBe("fresh");
+  });
+  it("cancels only already accepted pending work from the same sender and conversation", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000), submit = vi.fn(async (_input: any) => []), queue = receiver(submit);
+    try {
+      const otherSender = imessage("other-sender", "later", "main", true);
+      otherSender.data.message.sender_number = "+15555550101";
+      const otherConversation = imessage("other-room", "elsewhere", "main", true);
+      otherConversation.companion.conversation_id = "other-conversation";
+      otherConversation.data.message.conversation_id = "other-conversation";
+      for (const event of [imessage("owned", "pending", "main", true), otherSender, otherConversation]) { await queue.accept(event); await queue.idle(); }
+      await queue.accept(imessage("stop", "/stop")); await queue.idle();
+      clock.mockReturnValue(2000); await queue.recover();
+      expect(submit.mock.calls.map(([input]) => input.reply.replyToMessageId).sort()).toEqual(["other-room", "other-sender"]);
+      expect(gateway.rpc).not.toHaveBeenCalled();
+    } finally { queue.close(); clock.mockRestore(); }
+  });
+  it("an idle Stop receipt cannot cancel a later request when delivered again", async () => {
+    const submit = vi.fn(async (_input: any) => []), queue = receiver(submit), stop = imessage("idle-stop", "/stop");
+    await queue.accept(stop); await queue.idle();
+    await queue.accept(imessage("fresh")); await queue.idle();
+    await queue.accept(stop); await queue.idle(); queue.close();
+    expect(submit).toHaveBeenCalledTimes(1); expect(gateway.rpc).not.toHaveBeenCalled();
+  });
   it("persists every receipt before ACK, coalesces one quiet burst and uses its first source", async () => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(1000), inputs: any[] = [];
     const queue = receiver(async (input: any) => { await input.validateBeforeDispatch(); inputs.push(input); return ["answer"]; });

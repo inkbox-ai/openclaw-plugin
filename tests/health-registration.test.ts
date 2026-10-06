@@ -13,11 +13,12 @@ describe("health registration across host module graphs", () => {
   it("does not disable plugin discovery when the host registry already owns its checks", async () => {
     const first = await import("../src/health.js");
     first.registerInkboxHealthChecks();
-    expect(registry.size).toBe(15);
+    expect(registry.size).toBe(18);
+    for (const id of ["inkbox/slack-readiness", "inkbox/imessage-threading-readiness", "inkbox/durable-queue"]) expect(registry.has(id)).toBe(true);
     vi.resetModules();
     const reloaded = await import("../src/health.js");
     expect(reloaded.registerInkboxHealthChecks).not.toBe(first.registerInkboxHealthChecks);
     expect(() => reloaded.registerInkboxHealthChecks()).not.toThrow();
-    expect(registry.size).toBe(15);
+    expect(registry.size).toBe(18);
   });
 });

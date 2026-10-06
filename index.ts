@@ -178,8 +178,9 @@ function registerHostedCallSettlementHooks(api: any): void {
     );
   });
   api.on("before_agent_run", async (event: any, context: any) => {
-    await bindNativeOwner(event, context);
     bindNativeSourceRun(event, context);
+    const ownerDecision = await bindNativeOwner(event, context);
+    if (ownerDecision) return ownerDecision;
     bindNativeApprovalTurnToRun(api.runtime?.channel, listInkboxAccountIds(api.runtime?.config?.current?.()), event, context);
     bindHostedSmsCaptureToRun(event, context);
     bindSilentSendCaptureToRun(event, context);

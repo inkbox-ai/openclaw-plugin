@@ -19,6 +19,10 @@ export function bindNativeSource(sessionKey: string, source: NativeSource): () =
 export function assertNativeSource(source: NativeSource, identityId: string): void {
   if (source.closed || source.identityId !== identityId) throw new Error("The native reply source is no longer active.");
 }
+export function revokeNativeSourceRun(sessionKey: string, runId: string): void {
+  const source = sources.get(sessionKey);
+  if (source?.runId === runId) source.closed = true;
+}
 
 export function bindNativeSourceRun(event: { prompt?: string }, context: { sessionKey?: string; runId?: string; sessionId?: string }) {
   const source = activeNativeSource(context.sessionKey);

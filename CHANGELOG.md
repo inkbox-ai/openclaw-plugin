@@ -28,10 +28,12 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Opt-in source-targeted iMessage replies, durable noninterrupting follow-ups, bounded text bursts, and native thread reads.
 - Durable native run ownership and exact-run terminal fencing so uncertain sends remain unreplayed without permanently blocking safe later work.
 - Optional individual generic Vault secret retrieval, with login TOTP seed redaction.
+- Native doctor checks for channel capability/readiness and content-free durable queue uncertainty.
 
 ### Changed
 
 - Pin published Inkbox TypeScript SDK 0.7.14.
+- Verify exact native iMessage source/backend support before targeted sends; source-owned Stop cancels captured pending followers without affecting later requests.
 - List Vault metadata while locked, refresh identity access and plaintext/code reads, and default lazy unlock to `INKBOX_OPENCLAW_VAULT_KEY` (custom variables remain supported).
 - Preserve existing voice, A2A, hosted-call SMS settlement, native approvals, and feature-off messaging behavior.
 

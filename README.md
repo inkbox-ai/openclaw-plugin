@@ -353,6 +353,10 @@ The durable receiver acknowledges incoming messages only after saving them. Same
 
 Use `inkbox_get_imessage_thread` with a message ID or `inkbox_get_imessage_conversation_thread` with a conversation and opaque thread ID; follow `nextCursor`. Delivery-failure callbacks, including callbacks arriving before the send result or unmatched proactive failures, are context only in this mode—not instructions to resend.
 
+Before either an explicit or automatic targeted send, the plugin rechecks the source message and reads one native-thread item to verify backend support and conversation ownership. This probe is not added to model history. Unsupported or unverifiable targets fail before recording send intent; there is no untargeted retry.
+
+An authorized `/stop` or `/cancel` silently cancels this sender's already-admitted work in the same iMessage conversation, including queued follow-ups. The active exact native run must terminate before later input proceeds; other conversations and voice consultations are unaffected. The Stop receipt survives restart, so replaying it cannot cancel work received afterward.
+
 ## Slack (opt in)
 
 Run `openclaw inkbox setup` and explicitly enable Slack. Setup can reuse a saved workspace or accept **masked** app-configuration credentials, prepare the identity's app asynchronously, hand off browser installation, and observe its connected state. The plugin does not retain the token pair or provision apps in the background. Preparation and installation waits are separately bounded/cancellable; an unknown app-creation outcome is never blindly retried. Alternatively connect the identity in the Inkbox Console first and set `channels.inkbox.slackEnabled: true` or `INKBOX_SLACK_ENABLED=1`, then restart.
@@ -373,6 +377,8 @@ Native Stop and slash controls require the active sender and exact current threa
 ### Durable recovery and upgrades
 
 Existing Companion journals remain readable. New records add optional source ownership, burst receipts, tool-send intents, and exact native run IDs; no existing receipt is discarded. Completed answers are saved before sending. Accepted/uncertain external sends and uncertain model submissions are never replayed automatically. Later work may progress once the old native run is positively terminal; restart recovery can request cancellation of that **exact** run and requires terminal evidence before releasing it. Legacy ambiguous jobs without provable ownership remain paused for inspection. Do not delete the journal to retry, or downgrade while unresolved new-format work remains. Disabling/re-enabling a feature preserves its receipts.
+
+`openclaw doctor` reports Slack connection/subscription readiness, disabled or unavailable native iMessage capability, and content-free durable queue counts. Pending inputs, saved answers, active runs, unconfirmed outcomes, pending Stop fences, and disabled retained work are distinct. SDK/API reachability and queue readiness do not prove a visible Slack indicator or delivery to an iMessage device.
 
 ### Vault key migration
 

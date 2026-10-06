@@ -23,9 +23,11 @@ const sdk = vi.hoisted(() => {
   const whoami = vi.fn();
   const getIdentity = vi.fn();
   const subscriptionsList = vi.fn();
+  const slack = { listConnections: vi.fn(), listConversations: vi.fn(), listMessages: vi.fn(), search: vi.fn(), sendMessage: vi.fn(), getAction: vi.fn() };
   const Inkbox = vi.fn(() => ({
     whoami,
     getIdentity,
+    slack,
     webhooks: { subscriptions: { list: subscriptionsList } },
   }));
   return {
@@ -34,6 +36,7 @@ const sdk = vi.hoisted(() => {
     whoami,
     getIdentity,
     subscriptionsList,
+    slack,
   };
 });
 
@@ -52,6 +55,7 @@ beforeEach(async () => {
   sdk.getIdentity.mockReset();
   sdk.subscriptionsList.mockReset();
   sdk.subscriptionsList.mockResolvedValue([]);
+  sdk.slack.listConnections.mockReset().mockResolvedValue({ connections: [] });
 });
 
 afterEach(async () => {
@@ -188,6 +192,38 @@ describe("assessIncomingCallRoute", () => {
 });
 
 describe("detectInkboxHealthFindings", () => {
+  it("distinguishes disabled features without calling their remote endpoints", async () => {
+    sdk.whoami.mockResolvedValue({}); sdk.getIdentity.mockResolvedValue({ id: "identity" });
+    const findings = await detectInkboxHealthFindings({ cfg: { channels: { inkbox: { apiKey: "ApiKey_test", identity: "agent" } } } as any }, {});
+    expect(findings.find((value) => value.checkId === "inkbox/slack-readiness")?.message).toContain("disabled");
+    expect(findings.find((value) => value.checkId === "inkbox/imessage-threading-readiness")?.message).toContain("disabled");
+    expect(sdk.slack.listConnections).not.toHaveBeenCalled();
+  });
+  it("does not confuse missing native SDK capability with verified backend support", async () => {
+    sdk.whoami.mockResolvedValue({}); sdk.getIdentity.mockResolvedValue({ id: "identity", imessageEnabled: true });
+    const ctx = { cfg: { channels: { inkbox: { apiKey: "ApiKey_test", identity: "agent", imessageThreadedReplies: true } } } as any };
+    const missing = (await detectInkboxHealthFindings(ctx, {})).find((value) => value.checkId === "inkbox/imessage-threading-readiness");
+    expect(missing?.severity).toBe("error"); expect(missing?.message).toContain("lacks");
+    sdk.getIdentity.mockResolvedValue({ id: "identity", imessageEnabled: true, sendIMessage() {}, getIMessage() {}, getIMessageThread() {}, getIMessageConversationThread() {} });
+    const capable = (await detectInkboxHealthFindings(ctx, {})).find((value) => value.checkId === "inkbox/imessage-threading-readiness");
+    expect(capable?.severity).toBe("info"); expect(capable?.message).toContain("verified against each exact source"); expect(capable?.message).toContain("does not prove device delivery");
+  });
+  it("requires an identity-owned connected Slack installation and all active subscription events", async () => {
+    sdk.whoami.mockResolvedValue({}); sdk.getIdentity.mockResolvedValue({ id: "identity" });
+    const ctx = { cfg: { channels: { inkbox: { apiKey: "ApiKey_test", identity: "agent", slackEnabled: true, publicUrl: "https://agent.example" } } } as any };
+    sdk.slack.listConnections.mockResolvedValue({ connections: [{ id: "connection", identityId: "foreign", status: "connected" }] });
+    const inspect = async () => (await detectInkboxHealthFindings(ctx, {})).find((value) => value.checkId === "inkbox/slack-readiness");
+    expect((await inspect())?.severity).toBe("warning");
+    sdk.slack.listConnections.mockResolvedValue({ connections: [{ id: "connection", identityId: "identity", status: "connected" }] });
+    const { SLACK_SUBSCRIPTION_EVENTS } = await import("../src/slack.js");
+    const { inkboxWebhookPath } = await import("../src/call-websocket.js");
+    sdk.subscriptionsList.mockResolvedValue([{ url: `https://agent.example${inkboxWebhookPath("default")}`, status: "active", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] }]);
+    expect((await inspect())?.severity).toBe("info");
+    sdk.subscriptionsList.mockResolvedValue([{ url: `https://agent.example${inkboxWebhookPath("default")}`, status: "disabled", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] }]);
+    expect((await inspect())?.severity).toBe("warning");
+    sdk.slack.listConnections.mockRejectedValue(new Error("secret connection contents must not escape"));
+    const failed = await inspect(); expect(failed?.severity).toBe("warning"); expect(failed?.message).not.toContain("secret");
+  });
   it("reports missing required config without calling the SDK", async () => {
     const findings = await detectInkboxHealthFindings(
       { cfg: { channels: { inkbox: {} } } as any },
@@ -241,6 +277,9 @@ describe("detectInkboxHealthFindings", () => {
       "inkbox/sms-not-ready",
       // The fixture phone has no incoming-call config wired.
       "inkbox/incoming-call-route",
+      "inkbox/slack-readiness",
+      "inkbox/imessage-threading-readiness",
+      "inkbox/durable-queue",
     ]);
     expect(sdk.Inkbox).toHaveBeenCalledWith(inkboxClientOptions("ApiKey_test", undefined));
     expect(sdk.getIdentity).toHaveBeenCalledWith("agent");

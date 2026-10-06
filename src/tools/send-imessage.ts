@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { activeNativeSource, assertNativeSource } from "../native-source.js";
+import { verifyNativeIMessageTarget } from "../imessage-threading.js";
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolError } from "../errors.js";
@@ -128,6 +129,8 @@ export function registerSendIMessage(
           await assertNativeSource(source, identity.id);
           const block = checkOutboundRecipient(source.author, allowedRecipients);
           if (block) return toolError(block);
+          await verifyNativeIMessageTarget(identity, source.conversationId, source.replyToMessageId);
+          assertNativeSource(source, identity.id);
           await source.beforeSend(_id);
           assertNativeSource(source, identity.id);
         }

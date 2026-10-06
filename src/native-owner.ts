@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { revokeNativeSourceRun } from "./native-source.js";
 
 type Owner = { sessionKey: string; marker: string; runId?: string; closed: boolean; bind(sessionKey: string, runId: string): Promise<void>; terminal(): Promise<void> };
 const registry = Symbol.for("inkbox.native-owner.v1");
@@ -19,8 +20,13 @@ export async function bindNativeOwner(event: { prompt?: string }, context: { ses
   if (!context.sessionKey || !context.runId || typeof event.prompt !== "string") return;
   for (const owner of owners) if (!owner.closed && !owner.runId && owner.sessionKey === context.sessionKey && event.prompt.includes(owner.marker)) {
     // Ownership must survive a restart before native model/tool execution begins.
-    await owner.bind(context.sessionKey, context.runId);
     owner.runId = context.runId;
+    try { await owner.bind(context.sessionKey, context.runId); }
+    catch {
+      retired.add(context.runId);
+      revokeNativeSourceRun(context.sessionKey, context.runId);
+      return { outcome: "block" as const, reason: "The source turn is no longer authorized to start. Its native ownership is retained for reconciliation." };
+    }
   }
 }
 export async function settleNativeOwner(_event: unknown, context: { sessionKey?: string; runId?: string }) {
@@ -29,6 +35,7 @@ export async function settleNativeOwner(_event: unknown, context: { sessionKey?:
 /** A timeout, missing run, or accepted abort alone is not terminal evidence. */
 export async function fenceNativeOwner(sessionKey: string, runId: string): Promise<boolean> {
   retired.add(runId);
+  revokeNativeSourceRun(sessionKey, runId);
   try {
     const { callGatewayFromCli } = await import("openclaw/plugin-sdk/gateway-runtime");
     const options = { timeout: "6000", json: true };

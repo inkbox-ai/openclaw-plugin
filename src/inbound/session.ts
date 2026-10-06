@@ -6,6 +6,7 @@ import { parseSlack, prepareSlackSource, ownSlackConnection, slackControlText, s
 import { createSlackActivity } from "../slack-activity.js";
 import { contextBuffer } from "./context-buffer.js";
 import { ensureNativeApprovalContext, nativeApprovalScope, resolveNativeApproval, trackNativeApprovalTurn, type NativeApprovalBinding } from "./native-approvals.js";
+import { verifyNativeIMessageTarget } from "../imessage-threading.js";
 import { mentionsAgent, isLocalControl, sameAuthor, controlText, isCompanionControl } from "./reply-policy.js";
 import { createInkboxTextReplyCapture } from "../reply-capture.js";
 import { beginSilentSendCapture } from "../silent-send-capture.js";
@@ -1705,6 +1706,10 @@ async function deliverReply(
     // yet, released assignment, quota) surface as thrown API errors — tag them
     // so the delivery-failure loop can wake the agent to recover.
     try {
+      if (params.turn.companionReply?.replyToMessageId) {
+        if (!conversationId) throw new Error("Native iMessage reply requires its source conversation.");
+        await verifyNativeIMessageTarget(identity, conversationId, params.turn.companionReply.replyToMessageId);
+      }
       await params.beforeSend?.();
       const msg = await identity.sendIMessage({
         ...(conversationId ? { conversationId } : { to: params.turn.remoteAddress }),
@@ -2729,7 +2734,7 @@ async function dispatchInboundTurn(
     deliver: async (text) => {
       if (opts.turn.companionReply && opts.account.config.groupReplyMode === "mention") text += "\nInclude @agent before /approve when answering in mention mode.";
       await opts.turn.companionValidateBeforeDispatch?.();
-      const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger });
+      const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger, beforeSend: opts.turn.companionValidateBeforeDispatch });
       if (messageId) await opts.turn.companionRecordDelivery?.(messageId);
     }, ready: opts.turn.companionApprovalReady, activity: opts.turn.activity,
   };

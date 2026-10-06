@@ -19,6 +19,9 @@ import {
 import { inkboxClientOptions } from "./sdk-options.js";
 import { readIdentityState, writeIdentityState } from "./state.js";
 import type { PhoneVoiceStack } from "./voice-stack.js";
+import { SLACK_SUBSCRIPTION_EVENTS } from "./slack.js";
+import { hasNativeIMessageCapability } from "./imessage-threading.js";
+import { readCompanionQueueSummary } from "./inbound/companion.js";
 
 const SOURCE = "@inkbox/inkbox";
 
@@ -38,6 +41,9 @@ const CHECKS = [
   "inkbox/webhook-subscription-mailbox",
   "inkbox/webhook-subscription-phone-text",
   "inkbox/incoming-call-route",
+  "inkbox/slack-readiness",
+  "inkbox/imessage-threading-readiness",
+  "inkbox/durable-queue",
 ] as const;
 
 type InkboxCheckId = (typeof CHECKS)[number];
@@ -58,6 +64,9 @@ const DESCRIPTIONS: Record<InkboxCheckId, string> = {
   "inkbox/webhook-subscription-mailbox": "Inkbox mailbox events are subscribed at the expected URL",
   "inkbox/webhook-subscription-phone-text": "Inkbox phone text events are subscribed at the expected URL",
   "inkbox/incoming-call-route": "Inkbox phone number has an incoming-call route configured",
+  "inkbox/slack-readiness": "Inkbox Slack capability, connection, and subscription readiness",
+  "inkbox/imessage-threading-readiness": "Inkbox native iMessage SDK capability and provisioning",
+  "inkbox/durable-queue": "Inkbox retained queue and native ownership uncertainty",
 };
 
 const OC_BASE = "oc://config/channels/inkbox";
@@ -237,6 +246,7 @@ export async function detectInkboxHealthFindings(
   }
 
   const client = new Inkbox(inkboxClientOptions(account.apiKey, account.baseUrl));
+  if (typeof client.ready === "function") void client.ready().catch(() => {});
 
   try {
     const info = await client.whoami();
@@ -522,6 +532,32 @@ export async function detectInkboxHealthFindings(
     }
   }
 
+  if (!account.config.slackEnabled) {
+    findings.push(finding("inkbox/slack-readiness", "info", "Inkbox Slack is disabled; remote readiness was not probed.", "channels.inkbox.slackEnabled", "Enable Slack through setup when wanted."));
+  } else if (!client.slack || !["listConnections", "listConversations", "listMessages", "search", "sendMessage", "getAction"].every((name) => typeof (client.slack as any)[name] === "function")) {
+    findings.push(finding("inkbox/slack-readiness", "error", "Slack is enabled, but the installed SDK lacks required Slack APIs.", "channels.inkbox.slackEnabled", "Reinstall a supported plugin package with its pinned SDK."));
+  } else {
+    try {
+      const connections = (await client.slack.listConnections(identity.id)).connections;
+      const owned = connections.filter((connection) => connection.identityId === identity.id && connection.status === "connected");
+      const ambiguous = owned.some((connection) => connections.filter((other) => other.id === connection.id).length !== 1);
+      const subscriptions = await client.webhooks.subscriptions.list({ agentIdentityId: identity.id });
+      const wired = Boolean(expectedUrl && subscriptions.some((sub) => sub.url === expectedUrl && sub.status === "active" && SLACK_SUBSCRIPTION_EVENTS.every((event) => sub.eventTypes.includes(event))));
+      const ready = owned.length > 0 && !ambiguous && wired;
+      findings.push(finding("inkbox/slack-readiness", ready ? "info" : "warning", `Slack: ${owned.length} connected identity-owned installations; subscription ${wired ? "ready" : "not ready"}${ambiguous ? "; ambiguous connection ownership" : ""}. Visible activity and delivery are not verified.`, "channels.inkbox.slackEnabled", ready ? "Use separate Slack UI acceptance to verify native indicators." : "Run setup to inspect the identity's installation and inbound subscription; do not create a duplicate blindly."));
+    } catch {
+      findings.push(finding("inkbox/slack-readiness", "warning", "Slack is enabled; remote connection or subscription readiness could not be verified.", "channels.inkbox.slackEnabled", "Check API availability and access, then rerun doctor; no provisioning was attempted."));
+    }
+  }
+  const threaded = account.config.imessageThreadedReplies === true;
+  const capable = hasNativeIMessageCapability(identity);
+  findings.push(finding("inkbox/imessage-threading-readiness", !threaded ? "info" : !capable ? "error" : !identity.imessageEnabled ? "warning" : "info",
+    !threaded ? "Native iMessage replies are disabled; remote threading was not probed." : !capable ? "Native iMessage replies are enabled, but the installed SDK lacks native reply/read APIs." : !identity.imessageEnabled ? "Native iMessage APIs are available, but iMessage is not enabled for this identity." : "Native iMessage SDK APIs are available. Backend thread support is verified against each exact source before sending; doctor does not prove device delivery.",
+    "channels.inkbox.imessageThreadedReplies", !capable && threaded ? "Reinstall a supported plugin package with its pinned SDK, or disable threaded replies." : "Keep receipt state intact; verify native threading separately on the receiving device."));
+  const queue = await readCompanionQueueSummary(account.accountId, account.config, identity.id);
+  findings.push(finding("inkbox/durable-queue", !queue.readable || queue.unconfirmed || queue.awaitingStopFence ? "warning" : "info",
+    queue.readable ? `Durable queue: ${queue.pending} pending; ${queue.savedAnswers} saved answers; ${queue.active} active; ${queue.unconfirmed} unconfirmed; ${queue.blockedConversations} active or unfenced scopes; ${queue.awaitingStopFence} pending Stop fences; ${queue.disabledRetained} retained while disabled.` : "Durable queue state is unreadable; readiness cannot be established.",
+    "channels.inkbox", "Retained uncertainty is not a receiver-liveness or delivery check. Do not delete receipts or blindly resend; progress requires exact native completion/fencing."));
   return findings;
 }
 
