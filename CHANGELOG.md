@@ -37,6 +37,9 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - List Vault metadata while locked, refresh identity access and plaintext/code reads, and default lazy unlock to `INKBOX_OPENCLAW_VAULT_KEY` (custom variables remain supported).
 - Preserve existing voice, A2A, hosted-call SMS settlement, native approvals, and feature-off messaging behavior.
 - Recognize current native Code Mode child-call ownership when honoring an accepted, explicitly silent cross-channel send.
+- Keep explicitly separate sends independent of source-answer receipts; preserve enabled cross-channel reads without expanding iMessage Companion history.
+- Avoid unengaged ordinary Slack threads, bind controls to the current actor, and recheck saved-answer authority after safe connection reads.
+- Preserve Slack setup settings when initial verification fails and check doctor readiness against the published SDK surface.
 
 ## [0.2.15]
 

@@ -534,7 +534,7 @@ export async function detectInkboxHealthFindings(
 
   if (!account.config.slackEnabled) {
     findings.push(finding("inkbox/slack-readiness", "info", "Inkbox Slack is disabled; remote readiness was not probed.", "channels.inkbox.slackEnabled", "Enable Slack through setup when wanted."));
-  } else if (!client.slack || !["listConnections", "listConversations", "listMessages", "search", "sendMessage", "getAction"].every((name) => typeof (client.slack as any)[name] === "function")) {
+  } else if (!client.slack || !["listConnections", "listConversations", "listMessages", "searchMessages", "sendMessage", "getAction"].every((name) => typeof (client.slack as any)[name] === "function")) {
     findings.push(finding("inkbox/slack-readiness", "error", "Slack is enabled, but the installed SDK lacks required Slack APIs.", "channels.inkbox.slackEnabled", "Reinstall a supported plugin package with its pinned SDK."));
   } else {
     try {

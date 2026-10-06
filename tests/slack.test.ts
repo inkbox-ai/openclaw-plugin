@@ -7,6 +7,7 @@ import { parseSlack, prepareSlackSource, reconcileSlackSubscription, sendSlackRe
 import { createSlackActivity } from "../src/slack-activity.js";
 import { configureSlack } from "../src/slack-setup.js";
 import { registerSlackTools } from "../src/tools/slack.js";
+import { bindNativeSource } from "../src/native-source.js";
 const identityId = "11111111-1111-4111-8111-111111111111", connectionId = "22222222-2222-4222-8222-222222222222", sourceId = "33333333-3333-4333-8333-333333333333";
 const connection = { id: connectionId, identityId, workspaceId: "TINSTALL", botUserId: "UBOT", status: "connected" };
 function event(extra: Record<string, any> = {}) { return { id: "event-1", event_type: "slack.mention_received", data: { identity_id: identityId, connection_id: connectionId, workspace_id: "TINSTALL", conversation_id: "CROOM", actor_id: "UPERSON", message_ts: "1770000000.000123", thread_ts: null, message_kinds: ["mention"], sender_access: "direct", event: { type: "message", text: "<@UBOT> Hello" }, actor_profile: { id: "UPERSON", team_id: "THOME" }, ...extra } }; }
@@ -36,6 +37,17 @@ describe("Slack signed source and published SDK contract", () => {
   it("revalidates the current connection workspace immediately before automatic sends", async () => {
     const sdk = client(); sdk.slack.listConnections.mockResolvedValue({ connections: [{ ...connection, workspaceId: "TOTHER" }] });
     await expect(sendSlackReply(sdk as any, parseSlack(event(), identityId)!, "answer")).rejects.toThrow("workspace changed"); expect(sdk.slack.sendMessage).not.toHaveBeenCalled();
+  });
+  it("checks send authority only after connection reads and before the irreversible send", async () => {
+    const sdk = client(), route = parseSlack(event(), identityId)!;
+    let allowed = true;
+    sdk.slack.listConnections.mockImplementation(async () => { allowed = false; return { connections: [connection] }; });
+    const checkpoint = vi.fn(async () => { if (!allowed) throw new Error("source stopped"); });
+    await expect(sendSlackReply(sdk as any, route, "answer", checkpoint)).rejects.toThrow("source stopped");
+    expect(checkpoint).toHaveBeenCalledOnce(); expect(sdk.slack.sendMessage).not.toHaveBeenCalled();
+    checkpoint.mockClear(); sdk.slack.listConnections.mockRejectedValue(new Error("read unavailable"));
+    await expect(sendSlackReply(sdk as any, route, "answer", checkpoint)).rejects.toThrow("read unavailable");
+    expect(checkpoint).not.toHaveBeenCalled(); expect(sdk.slack.sendMessage).not.toHaveBeenCalled();
   });
   it("adds only missing subscription events without replacing unrelated delivery", async () => {
     const update = vi.fn(), create = vi.fn();
@@ -85,6 +97,11 @@ describe("Slack activity destination policy", () => {
   });
 });
 describe("guided Slack setup", () => {
+  it.each(["whoami", "connections"])("preserves the existing enabled setting when initial %s verification fails", async (phase) => {
+    const sdk: any = { whoami: vi.fn(async () => { if (phase === "whoami") throw new Error("unavailable"); return { authType: "api_key", authSubtype: "api_key.admin_scoped" }; }), slack: { listConnections: vi.fn(async () => { throw new Error("unavailable"); }), startSetup: vi.fn() } };
+    for (const previous of [false, true]) expect(await configureSlack(sdk, identityId, previous, { prompter: { confirm: async () => true } as any, note: vi.fn(), installation: vi.fn() })).toBe(previous);
+    expect(sdk.slack.startSetup).not.toHaveBeenCalled();
+  });
   it("performs no provisioning without explicit enablement", async () => {
     const sdk: any = { whoami: vi.fn() };
     expect(await configureSlack(sdk, identityId, false, { prompter: { confirm: async () => false } as any, note: vi.fn(), installation: vi.fn() })).toBe(false);
@@ -109,6 +126,20 @@ describe("guided Slack setup", () => {
   });
 });
 describe("six opt-in Slack tools", () => {
+  it.each(["thome:uperson", "tinstall:uperson"])("keeps canonical and installation author allowlists consistent: %s", async (allowed) => {
+    const sdk = client(), factories: any[] = [], route = { ...parseSlack(event(), identityId)!, author: "THOME:UPERSON" };
+    const beforeSend = vi.fn(), afterSend = vi.fn();
+    const close = bindNativeSource("allowed-slack", { identityId, conversationId: route.conversationId, slackRoute: route, author: route.author, closed: false, validate: vi.fn(), beforeSend, afterSend });
+    try {
+      registerSlackTools({ registerTool: (factory: any) => factories.push(factory) }, { getIdentity: async () => ({ id: identityId }), getClient: async () => sdk } as any, () => ({ slackEnabled: true, allowedRecipients: [allowed] }));
+      const send = factories.map((factory) => factory({ sessionKey: "allowed-slack" })).find((tool) => tool.name === "inkbox_slack_send_message");
+      expect((await send.execute("answer", { connectionId, conversationId: "CROOM", text: "answer", idempotencyKey: "answer" })).isError).not.toBe(true);
+      expect(sdk.slack.sendMessage).toHaveBeenCalledOnce(); expect(beforeSend).toHaveBeenCalledOnce();
+      sdk.slack.listConnections.mockResolvedValue({ connections: [{ ...connection, workspaceId: "TFOREIGN" }] });
+      expect((await send.execute("changed", { connectionId, conversationId: "CROOM", text: "answer", idempotencyKey: "changed" })).isError).toBe(true);
+      expect(sdk.slack.sendMessage).toHaveBeenCalledOnce();
+    } finally { close(); }
+  });
   it("keeps exactly six names, validates args before API, and no arbitrary status/reaction tools", async () => {
     const factories: any[] = [], sdk = client();
     registerSlackTools({ registerTool: (factory: any) => factories.push(factory) }, { getClient: async () => sdk, getIdentity: async () => ({ id: identityId }) } as any, () => ({ slackEnabled: true }));

@@ -1,5 +1,5 @@
 import { fenceNativeOwner } from "../native-owner.js";
-import { SLACK_EVENTS, type SlackRoute, ownSlackConnection } from "../slack.js";
+import { SLACK_EVENTS, type SlackRoute, ownSlackConnection, slackAuthorAllowed } from "../slack.js";
 import { companionWakes, controlText, isCompanionControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
@@ -191,7 +191,7 @@ export function createCompanionReceiver(opts: {
   }
   function checkOutboundSponsor(author: string, route?: SlackRoute) {
     const outbound = opts.config.allowedRecipients;
-    if (outbound?.length && !outbound.some((v) => [author, ...(route && /^T[A-Z0-9]+:[UW][A-Z0-9]+$/.test(author) ? [`${route.workspaceId}:${author.split(":")[1]}`] : [])].some((alias) => v.trim().toLowerCase() === alias.toLowerCase()))) {
+    if (!slackAuthorAllowed(outbound, author, route)) {
       throw new Error("Companion sponsor is not on the outbound allowlist.");
     }
   }
@@ -201,6 +201,9 @@ export function createCompanionReceiver(opts: {
     // ancestry. An uncertain thread must fence all successors in that session.
     return legacyKey(m.channel === "imessage" && m.phase === "ordinary" && opts.config.imessageThreadedReplies
       ? { ...m, scope_id: m.conversation_id } : m, identityId);
+  }
+  function controlAuthor(job: Job): string {
+    return metadata(job.event).channel === "slack" ? job.event._openclawSlack?.route?.author ?? "" : job.sponsor ?? "";
   }
   function sameControlRoute(a: Job, b: Job) {
     if (metadata(a.event).channel !== "slack") return true;
@@ -315,7 +318,7 @@ export function createCompanionReceiver(opts: {
     const scope = key(m, job.identityId);
     const journal = await read();
     const parent = Object.values(journal.jobs).find((other) => other.state === "submitting" && other.sponsor && sameControlRoute(other, job) && key(metadata(other.event), other.identityId) === scope);
-    if (!parent?.sponsor || !parent.reply || !sameAuthor(m.channel, author, parent.sponsor) || parent.sources?.includes(message.id) || journal.activations[scope]?.sources.includes(message.id)) return false;
+    if (!parent?.sponsor || !parent.reply || !sameAuthor(m.channel, author, controlAuthor(parent)) || parent.sources?.includes(message.id) || journal.activations[scope]?.sources.includes(message.id)) return false;
     if (Object.entries(journal.jobs).some(([otherId, other]) => otherId !== id && other.state === "done" && key(metadata(other.event), other.identityId) === scope && source(other.event, metadata(other.event)).message.id === message.id)) return false;
     const controlKey = `${path}:${id}`;
     if (controls.has(controlKey)) return true;
@@ -371,7 +374,7 @@ export function createCompanionReceiver(opts: {
       key: scope, messageId: id, channel: m.channel, body, reply, event: job.event, author,
       rawText: controlText(rawText, opts.config.identity),
       wasMentioned: m.channel === "slack" ? message.mentioned === true : mentionsAgent(rawText, opts.config.identity),
-      commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, sponsor) && isCompanionControl(controlText(rawText, opts.config.identity)),
+      commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, m.channel === "slack" ? job.event._openclawSlack?.route?.author : sponsor) && isCompanionControl(controlText(rawText, opts.config.identity)),
       validateBeforeDispatch: async () => {
         checkSponsor(sponsor, sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
@@ -643,11 +646,23 @@ export function createCompanionReceiver(opts: {
         ["/stop", "/cancel"].includes(controlText(String(incoming.message.content ?? incoming.message.text ?? ""), opts.config.identity).toLowerCase()) &&
         companionWakes(opts.config, incoming.message, m.channel);
       if (nativeStop) await checkSender(incoming.author, m.channel, incoming.message.sender_contact_id);
+      let savedSlackStop: string | undefined;
       if (event._openclawSlack?.route?.nativeStop) {
-        const parent = Object.values((await read()).jobs).find((job) => job.state === "submitting" && job.sponsor === event.data.message.author && sameControlRoute(job, { event } as Job));
+        const prior = (await read()).jobs[hash(`${identityId}:${event.id}`)];
+        if (prior) {
+          if (!sameControlRoute(prior, { event } as Job) || controlAuthor(prior) !== event.data.message.author) throw new Error("Slack Stop receipt has conflicting source metadata.");
+          return;
+        }
+        const parent = Object.entries((await read()).jobs).find(([, job]) => (job.state === "submitting" || (job.nativeComplete && ["reply_pending", "sending"].includes(job.state))) && controlAuthor(job) === event.data.message.author && sameControlRoute(job, { event } as Job));
         if (!parent) return;
-        event.companion = { ...parent.event.companion, phase: parent.event.companion.phase === "ordinary" ? "ordinary" : "live", sequence: Date.now() };
+        if (parent[1].nativeComplete && parent[1].state !== "submitting") savedSlackStop = parent[0];
+        event.companion = { ...parent[1].event.companion, phase: parent[1].event.companion.phase === "ordinary" ? "ordinary" : "live", sequence: Date.now() };
         event.data.message.conversation_id = event.companion.conversation_id;
+      }
+      if (m.channel === "slack" && m.phase === "ordinary" && !event._openclawSlack?.route?.addressed && !event._openclawSlack?.route?.nativeStop) {
+        const scope = key(m, identityId);
+        const engaged = Object.values((await read()).jobs).some((job) => job.identityId === identityId && metadata(job.event).channel === "slack" && metadata(job.event).phase === "ordinary" && key(metadata(job.event), identityId) === scope && job.event._openclawSlack?.route?.addressed);
+        if (!engaged) return;
       }
       const receipt = hash(`${identityId}:${event.id}`);
       await mutate((j) => {
@@ -663,6 +678,17 @@ export function createCompanionReceiver(opts: {
         if (previous) return;
         const job: Job = { event: structuredClone(event), identityId, state: "pending", ...(event.companion.channel === "imessage" && opts.config.imessageThreadedReplies ? { nativeThreaded: true } : {}) };
         j.jobs[receipt] = job;
+        if (savedSlackStop) {
+          job.stopTargets = [savedSlackStop]; job.state = "done"; job.nativeComplete = true;
+          const target = j.jobs[savedSlackStop];
+          if (target?.nativeComplete && target.state === "reply_pending") {
+            target.stoppedBy = receipt; target.state = "done";
+            target.reason = "Stopped before the saved reply crossed its send boundary.";
+          }
+          // A crossed send boundary is not cancellation proof. Preserve its
+          // accepted or uncertain outcome on the original captured source.
+          return;
+        }
         if (nativeStop) {
           job.stopTargets = Object.entries(j.jobs).filter(([otherId, other]) => otherId !== receipt && !other.stopTargets && other.state !== "done" && other.identityId === identityId &&
             key(metadata(other.event), identityId) === key(m, identityId) && sameAuthor(m.channel, source(other.event, metadata(other.event)).author, incoming.author)).map(([otherId]) => otherId);

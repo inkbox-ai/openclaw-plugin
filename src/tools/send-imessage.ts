@@ -101,8 +101,8 @@ export function registerSendIMessage(
     async execute(_id: string, params: any) {
       return runTool(async () => {
         const validateSource = (identityId = source?.identityId) => {
-          if (!source?.replyToMessageId) return;
-          if (!threadedRepliesEnabled()) throw new Error("Native iMessage replies are disabled; this source-owned send cannot be downgraded or continued.");
+          if (!source) return;
+          if (source.replyToMessageId && !threadedRepliesEnabled()) throw new Error("Native iMessage replies are disabled; this source-owned send cannot be downgraded or continued.");
           assertNativeSource(source, identityId!);
         };
         validateSource();
@@ -118,37 +118,40 @@ export function registerSendIMessage(
         const conversationId =
           typeof params.conversationId === "string" ? params.conversationId.trim() : "";
         const to = typeof params.to === "string" ? params.to.trim() : "";
-        if (source?.replyToMessageId && (to || (conversationId && conversationId !== source.conversationId))) return toolError("A source-triggered answer must use its current iMessage conversation.");
-        if (!source?.replyToMessageId && Boolean(conversationId) === Boolean(to)) {
+        const bound = Boolean(source?.replyToMessageId && !to && (!conversationId || conversationId === source.conversationId));
+        if ((conversationId && to) || (!bound && !conversationId && !to)) {
           return toolError("Specify exactly one of `to` or `conversationId`.");
         }
         if (to) {
           const block = checkOutboundRecipient(to, allowedRecipients);
           if (block) return toolError(block);
-        } else if (!source?.replyToMessageId && allowedRecipients?.length) {
+        } else if (!bound && allowedRecipients?.length) {
           return toolError(
             "`conversationId` sends cannot be checked against the local outbound recipient allowlist. Use an explicit `to` recipient or adjust the allowlist.",
           );
         }
 
         const identity = await runtime.getIdentity();
-        if (source?.replyToMessageId) {
-          validateSource(identity.id);
+        validateSource(identity.id);
+        if (bound && source?.replyToMessageId) {
           const block = checkOutboundRecipient(source.author, allowedRecipients);
           if (block) return toolError(block);
           await verifyNativeIMessageTarget(identity, source.conversationId, source.replyToMessageId);
           validateSource(identity.id);
           await source.beforeSend(_id);
           validateSource(identity.id);
+        } else if (source) {
+          await source.validate();
+          validateSource(identity.id);
         }
         const msg = await identity.sendIMessage({
-          ...(source?.replyToMessageId ? { conversationId: source.conversationId, replyToMessageId: source.replyToMessageId, plainReplyFallback: true,
+          ...(bound && source?.replyToMessageId ? { conversationId: source.conversationId, replyToMessageId: source.replyToMessageId, plainReplyFallback: true,
             idempotencyKey: `openclaw:tool:${createHash("sha256").update(JSON.stringify([source.identityId, source.conversationId, source.replyToMessageId, _id, text, mediaUrls])).digest("hex")}` } : conversationId ? { conversationId } : { to }),
           ...(text ? { text } : {}),
           ...(mediaUrls?.length ? { mediaUrls } : {}),
           ...(params.sendStyle ? { sendStyle: params.sendStyle } : {}),
         });
-        if (source?.replyToMessageId) await source.afterSend(_id, msg.id, text);
+        if (bound && source?.replyToMessageId) await source.afterSend(_id, msg.id, text);
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
         return sentToolText(
           `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} status=${msg.status ?? "unknown"}`,

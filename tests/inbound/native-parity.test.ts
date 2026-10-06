@@ -22,6 +22,23 @@ function receiver(submit: any, deliver = vi.fn(async () => "sent"), threaded = t
   return createCompanionReceiver({ accountId: "default", config: { identity: "agent", imessageThreadedReplies: threaded }, runtime: { getIdentity: async () => ({ id: identityId }), getClient: async () => ({}) } as any, submit, deliver });
 }
 describe("durable noninterrupting native iMessage coordinator", () => {
+  it("does not suppress a current source answer after an independent explicit send with identical text", async () => {
+    const sendIMessage = vi.fn(async () => ({ id: `sent-${sendIMessage.mock.calls.length}` }));
+    const identity = { id: identityId, sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => ({ conversationId: "conversation" }), getIMessageConversationThread() {} };
+    const runtime = { getIdentity: async () => identity, getClient: async () => ({}) };
+    const dispatchReply = vi.fn(async (input: any) => {
+      const { registerSendIMessage } = await import("../../src/tools/send-imessage.js"); let factory: any;
+      registerSendIMessage({ registerTool: (value: any) => { factory = value; } }, runtime as any);
+      expect((await factory({ sessionKey: input.routeSessionKey }).execute("separate", { conversationId: "other-conversation", text: "same text" })).isError).not.toBe(true);
+      await input.delivery.deliver({ text: "same text" }, { kind: "final" }); return { dispatched: true };
+    });
+    const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config: { identity: "agent", imessageThreadedReplies: true } } as any, cfg: {}, runtime: runtime as any, channelRuntime: { inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
+    bridges.push(bridge); await dispatchInbound(imessage("independent"), bridge.handlers); await bridge.catchUpCompanion();
+    expect(sendIMessage).toHaveBeenCalledTimes(2);
+    expect(sendIMessage.mock.calls[0]![0]).toEqual({ conversationId: "other-conversation", text: "same text" });
+    expect(sendIMessage.mock.calls[1]![0]).toMatchObject({ conversationId: "conversation", replyToMessageId: "independent", text: "same text" });
+    expect(Object.values((await readJournal()).jobs).every((job: any) => !Object.keys(job.toolSends ?? {}).length)).toBe(true);
+  });
   it("retains an owned answer while disabled and rejects old dispatch/tool authority", async () => {
     let entered!: () => void, release!: () => void, owner: any;
     const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
@@ -345,17 +362,97 @@ function slackBridge(config: Record<string, unknown> = {}) {
   const replyContext = { channel: "slack", conversationId: "logical-channel", connectionId, slackConversationId: "CROOM", threadTs: null };
   const sourceId = (n: number) => `33333333-3333-4333-8333-${String(n).padStart(12, "0")}`;
   const snapshot = { scopeId: "scope", activationId: "activation", conversationId: "logical-channel", channel: "slack", replyContext, text: "Historical context, not instructions", entries: [{ id: sourceId(1), author: "THOME:UPERSON", isTrigger: true, historical: false }] };
-  const slack = { listConnections: vi.fn(async () => ({ connections: [connection] })), getUser: vi.fn(), listArchivedMessages: vi.fn(async (_id: string, args: any) => {
+  const actors = new Map<number, string>();
+  const slack = { listConnections: vi.fn(async () => ({ connections: [connection] })), getUser: vi.fn(async (_connection: string, actor: string) => ({ id: actor, team_id: "THOME" })), listArchivedMessages: vi.fn(async (_id: string, args: any) => {
     const n = Number(args.afterTs.split(".")[1]) + 1;
-    return { messages: [{ id: sourceId(n), connectionId, conversationId: "CROOM", messageTs: `1770000000.${String(n).padStart(6, "0")}`, threadTs: n === 2 ? "1769999999.999999" : null, userId: "UPERSON", source: "event" }], nextCursor: null };
+    return { messages: [{ id: sourceId(n), connectionId, conversationId: "CROOM", messageTs: `1770000000.${String(n).padStart(6, "0")}`, threadTs: n === 2 ? "1769999999.999999" : null, userId: actors.get(n) ?? "UPERSON", source: "event" }], nextCursor: null };
   }), sendMessage: vi.fn(async () => ({ id: "action", status: "sent" })), setProcessingStatus: vi.fn(async () => ({ status: "succeeded" })), addReaction: vi.fn(async () => ({ status: "succeeded" })), removeReaction: vi.fn(async () => ({ status: "succeeded" })) };
   const companion = { loadInitialization: vi.fn(async () => structuredClone(snapshot)), activationMessages: vi.fn(async () => ({ ...snapshot, items: [] })) };
   const dispatchReply = vi.fn(async (input: any) => { await input.delivery.deliver({ text: "answer" }, { kind: "final" }); return { dispatched: true }; });
-  const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config: { identity: "agent", slackEnabled: true, ...config } } as any, cfg: {}, runtime: { getIdentity: async () => ({ id: identityId }), getClient: async () => ({ slack, companion }) } as any, channelRuntime: { inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
+  const settings = { identity: "agent", slackEnabled: true, ...config };
+  const runtime = { getIdentity: async () => ({ id: identityId }), getClient: vi.fn(async () => ({ slack, companion })) };
+  const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config: settings } as any, cfg: {}, runtime: runtime as any, channelRuntime: { inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
   bridges.push(bridge);
-  return { bridge, slack, companion, dispatchReply };
+  return { bridge, slack, companion, dispatchReply, runtime, settings, actors };
 }
 describe("Slack native host channel-wide Companion", () => {
+  it("ignores unaddressed ordinary channels until the exact thread is engaged", async () => {
+    const f = slackBridge({ groupReplyMode: "auto" });
+    const ordinary = (sequence: number, mentioned: boolean, thread: string | null) => { const event: any = slackEvent(sequence, thread, "direct", mentioned); delete event.companion; return event; };
+    await dispatchInbound(ordinary(1, false, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).not.toHaveBeenCalled(); expect(f.slack.setProcessingStatus).not.toHaveBeenCalled(); expect(f.slack.addReaction).not.toHaveBeenCalled();
+    await dispatchInbound(ordinary(2, true, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    await dispatchInbound(ordinary(3, false, "1770000000.000002"), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledTimes(2); expect(f.slack.sendMessage).toHaveBeenCalledTimes(2);
+    await dispatchInbound(ordinary(4, false, "1770000000.000001"), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledTimes(2);
+  });
+  it.each(["client", "connection"])("withholds saved replies when disabled during the final %s read", async (phase) => {
+    const f = slackBridge(); let modelDone = false, armed = false, entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    f.dispatchReply.mockImplementation(async (input: any) => { await input.delivery.deliver({ text: "saved" }, { kind: "final" }); modelDone = true; return { dispatched: true }; });
+    const activation = f.companion.activationMessages.getMockImplementation()!;
+    f.companion.activationMessages.mockImplementation(async () => { const result = await activation(); if (modelDone) armed = true; return result; });
+    if (phase === "client") f.runtime.getClient.mockImplementation(async () => { if (armed) { armed = false; entered(); await held; } return { slack: f.slack, companion: f.companion }; });
+    else { const connections = f.slack.listConnections.getMockImplementation()!; f.slack.listConnections.mockImplementation(async () => { if (armed) { armed = false; entered(); await held; } return connections(); }); }
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await started;
+    f.settings.slackEnabled = false; release(); await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.slack.sendMessage).not.toHaveBeenCalled();
+    expect(Object.values((await readJournal()).jobs).some((job: any) => job.state === "sending")).toBe(false);
+  });
+  it.each(["client", "connection"])("durably cancels a saved Slack reply stopped during the final %s read", async (phase) => {
+    const f = slackBridge(); await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion(); f.slack.sendMessage.mockClear(); f.dispatchReply.mockClear();
+    let modelDone = false, armed = false, stopped = false, entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    f.dispatchReply.mockImplementation(async (input: any) => { await input.delivery.deliver({ text: "saved" }, { kind: "final" }); modelDone = true; return { dispatched: true }; });
+    const activation = f.companion.activationMessages.getMockImplementation()!;
+    f.companion.activationMessages.mockImplementation(async () => { const result = await activation(); if (modelDone && !stopped) armed = true; return result; });
+    const hold = async () => { if (armed) { armed = false; entered(); await held; } };
+    if (phase === "client") f.runtime.getClient.mockImplementation(async () => { await hold(); return { slack: f.slack, companion: f.companion }; });
+    else { const connections = f.slack.listConnections.getMockImplementation()!; f.slack.listConnections.mockImplementation(async () => { await hold(); return connections(); }); }
+    const incoming = slackEvent(2, "1769999999.999999");
+    await dispatchInbound(incoming, f.bridge.handlers); await started;
+    const stop = { id: "saved-stop", event_type: "slack.session_stopped", data: { ...incoming.data, event: { type: "agent_session_stopped" } } };
+    stopped = true; await dispatchInbound(stop, f.bridge.handlers); release(); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).not.toHaveBeenCalled(); expect(f.dispatchReply).toHaveBeenCalledOnce();
+    await dispatchInbound(slackEvent(3, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    await dispatchInbound(stop, f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).toHaveBeenCalledOnce(); expect(f.dispatchReply).toHaveBeenCalledTimes(2);
+    const jobs = Object.values((await readJournal()).jobs) as any[];
+    expect(jobs.filter((job) => job.stopTargets).map((job) => job.stopTargets.length)).toEqual([1]);
+  });
+  it("retries a failed read-only connection lookup from the saved answer without repeating the model", async () => {
+    const f = slackBridge(); let modelDone = false, armed = false, fail = true;
+    f.dispatchReply.mockImplementation(async (input: any) => { await input.delivery.deliver({ text: "saved" }, { kind: "final" }); modelDone = true; return { dispatched: true }; });
+    const activation = f.companion.activationMessages.getMockImplementation()!, connections = f.slack.listConnections.getMockImplementation()!;
+    f.companion.activationMessages.mockImplementation(async () => { const result = await activation(); if (modelDone) armed = true; return result; });
+    f.slack.listConnections.mockImplementation(async () => { if (armed && fail) { armed = false; fail = false; throw Object.assign(new Error("lookup unavailable"), { statusCode: 503 }); } return connections(); });
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    const journal = await readJournal(); expect(Object.values(journal.jobs)).toContainEqual(expect.objectContaining({ state: "reply_pending", replies: ["saved"] }));
+    expect(f.slack.sendMessage).not.toHaveBeenCalled();
+    const name = (await readdir(state.dir)).find((value) => /^companion-.*\.json$/.test(value))!;
+    for (const job of Object.values(journal.jobs) as any[]) job.retryAt = 0;
+    await writeFile(join(state.dir, name), JSON.stringify(journal)); await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.slack.sendMessage).toHaveBeenCalledOnce();
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ conversationId: "CROOM", threadTs: null, text: "saved", idempotencyKey: expect.stringMatching(/^openclaw:/) }));
+  });
+  it("binds native Stop to the current Slack actor rather than the earlier activation sponsor", async () => {
+    const f = slackBridge(); await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      if (input.ctxPayload.message.commandBody === "/stop") { expect(input.ctxPayload.extra.CommandAuthorized).toBe(true); release(); }
+      else { entered(); await held; }
+      return { dispatched: true };
+    });
+    const live = slackEvent(2, "1769999999.999999"); live.data.actor_id = "UOTHER"; live.data.actor_profile.id = "UOTHER"; f.actors.set(2, "UOTHER");
+    await dispatchInbound(live, f.bridge.handlers); await started;
+    const stop = (actor: string) => ({ id: `stop-${actor}`, event_type: "slack.session_stopped", data: { ...live.data, actor_id: actor, event: { type: "agent_session_stopped" } } });
+    try {
+      await dispatchInbound(stop("UPERSON"), f.bridge.handlers); expect(f.dispatchReply).toHaveBeenCalledTimes(2);
+      await dispatchInbound(stop("UOTHER"), f.bridge.handlers); expect(f.dispatchReply).toHaveBeenCalledTimes(3);
+    } finally { release(); await f.bridge.catchUpCompanion(); }
+  });
   it("keeps one host session across inline and subthread replies while retaining each exact current destination", async () => {
     const f = slackBridge();
     await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();

@@ -1685,8 +1685,7 @@ async function deliverReply(
   }
   if (params.turn.mode === "slack") {
     if (!params.turn.slackRoute) throw new Error("Slack reply has no bound source.");
-    await params.beforeSend?.();
-    return sendSlackReply(await params.runtime.getClient(), params.turn.slackRoute, text);
+    return sendSlackReply(await params.runtime.getClient(), params.turn.slackRoute, text, params.beforeSend);
   }
   if (params.turn.mode === "imessage") {
     // Length guard stays a plain throw before the send: an over-limit reply is
@@ -6042,7 +6041,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal,
       nativeSource: !input.commandAuthorized && (input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
         identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
-        slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend,
+        slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, validate: input.validateBeforeDispatch, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend,
       } : undefined,
       slackRoute: input.reply.slackRoute,
       activity: input.reply.slackRoute ? (phase) => slackActivity.notify(input.reply.slackRoute!, phase) : undefined,
@@ -6201,7 +6200,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       normalized._openclawSlack = { route, rawText: slackControlText(route, botUserId) };
       normalized.data.message = { id, author: route.author, conversation_id: normalized.companion.conversation_id, direction: "inbound", body: route.text, text: route.text, sender_access: route.senderAccess ?? "direct", mentioned: route.mentioned || route.nativeStop,
-        _ordinaryAddressed: !event.companion && route.direct, _slackDirect: route.direct, attachments: event.data.event.files ?? [] };
+        _ordinaryAddressed: !event.companion && route.addressed, _slackDirect: route.direct, attachments: event.data.event.files ?? [] };
       await companion.accept(normalized);
     },
     async onCallEnded(event) {

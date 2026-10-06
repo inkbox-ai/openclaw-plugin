@@ -3,7 +3,7 @@ import { Type, type TSchema } from "typebox";
 import type { InkboxPluginConfig, InkboxRuntime } from "../client.js";
 import { runTool, toolText } from "../errors.js";
 import { formatJson } from "../format.js";
-import { ownSlackConnection, slackText } from "../slack.js";
+import { ownSlackConnection, slackText, slackAuthorAllowed } from "../slack.js";
 
 const str = () => Type.String({ minLength: 1 });
 const page = () => ({ cursor: Type.Optional(str()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) });
@@ -36,7 +36,7 @@ export function registerSlackTools(api: any, runtime: InkboxRuntime, config: () 
           else if (typeof value !== "string" || !value.trim() || value.includes("\0")) throw new Error(`${key} must be a nonempty string without NUL characters.`);
         }
         const client = await runtime.getClient(), identity = await runtime.getIdentity();
-        if (args.connectionId) await ownSlackConnection(client, identity.id, args.connectionId);
+        const selectedConnection = args.connectionId ? await ownSlackConnection(client, identity.id, args.connectionId) : undefined;
         const options = { ...(args.cursor ? { cursor: args.cursor } : {}), ...(args.limit ? { limit: args.limit } : {}) };
         let result: unknown;
         switch (spec.name) {
@@ -47,12 +47,16 @@ export function registerSlackTools(api: any, runtime: InkboxRuntime, config: () 
           case "send_message": {
             slackText(args.text);
             if (!/^[A-Za-z0-9._:-]{1,128}$/.test(args.idempotencyKey)) throw new Error("Invalid Slack idempotencyKey.");
-            const route = source?.slackRoute;
-            if (route && (args.connectionId !== route.connectionId || args.conversationId !== route.conversationId || ("threadTs" in args && args.threadTs !== route.threadTs))) throw new Error("A source-triggered Slack answer must keep its exact connection, conversation, and thread.");
-            if (route) await assertNativeSource(source!, identity.id);
+            const current = source?.slackRoute;
+            const route = current && args.connectionId === current.connectionId && args.conversationId === current.conversationId && (!("threadTs" in args) || args.threadTs === current.threadTs) ? current : undefined;
+            if (route && selectedConnection?.workspaceId !== route.workspaceId) throw new Error("Slack source workspace changed.");
+            if (source) assertNativeSource(source, identity.id);
             const allowed = cfg.allowedRecipients;
-            if (allowed?.length && !allowed.includes(route ? source!.author : `slack:${args.connectionId}:${args.conversationId}`)) throw new Error("Slack conversation is not on the outbound allowlist.");
-            if (route) { await source!.beforeSend(_id); assertNativeSource(source!, identity.id); }
+            if (!slackAuthorAllowed(allowed, route ? source!.author : `slack:${args.connectionId}:${args.conversationId}`, route)) throw new Error("Slack conversation is not on the outbound allowlist.");
+            if (route) await source!.beforeSend(_id);
+            else if (source) await source.validate();
+            if (!config().slackEnabled) throw new Error("Slack is disabled.");
+            if (source) assertNativeSource(source, identity.id);
             const action = await client.slack.sendMessage(args.connectionId, { conversationId: args.conversationId, text: args.text, threadTs: route ? route.threadTs : args.threadTs, idempotencyKey: args.idempotencyKey });
             if (route && action.status === "sent") await source!.afterSend(_id, action.id, args.text);
             result = { ...action, ...(action.status !== "sent" ? { instruction: "Do not resend. Inspect this action with inkbox_slack_get_action." } : {}) }; break;

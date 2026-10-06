@@ -4,6 +4,7 @@ import type { SlackRoute } from "./slack.js";
 export type NativeSource = {
   identityId: string; conversationId: string; replyToMessageId?: string; slackRoute?: SlackRoute;
   author: string; companion?: boolean; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
+  validate(): Promise<void>;
   beforeSend(callId: string): Promise<void>;
   afterSend(callId: string, messageId: string, text?: string): Promise<void>;
 };

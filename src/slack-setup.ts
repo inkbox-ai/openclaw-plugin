@@ -55,10 +55,12 @@ export async function configureSlack(client: Inkbox, identityId: string, previou
       if (!await p.confirm("Enter a new credential pair?", false)) return;
     }
   }
+  let verified = false;
   try {
     const who = await client.whoami();
     if (who.authType !== "api_key" || (who.authSubtype !== "api_key.admin_scoped" && (who.authSubtype !== "api_key.agent_scoped.claimed" || who.scope !== `agent_identity:${identityId}`))) { ui.note("Slack requires a claimed identity and its agent key or a supported administrative key."); return previous; }
     let snapshot = await client.slack.listConnections(identityId);
+    verified = true;
     if (snapshot.connections.some((c) => c.identityId === identityId && c.status === "connected")) { ui.note("Slack is already connected for this identity."); return true; }
     if (!await p.confirm("Connect a Slack workspace now?", true)) return true;
     if (!snapshot.setup || snapshot.setup.status === "unavailable") { ui.note("Slack setup is unavailable. Check the Inkbox Console."); return true; }
@@ -96,6 +98,7 @@ export async function configureSlack(client: Inkbox, identityId: string, previou
     ui.note("Slack installation wait ended without a confirmed connection; rerun setup to continue.");
   } catch {
     ui.note("Slack setup could not complete. Existing channels are unchanged; check Slack setup before retrying.");
+    return verified ? true : previous;
   }
   return true;
 }

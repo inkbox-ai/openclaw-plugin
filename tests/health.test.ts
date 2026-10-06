@@ -23,7 +23,7 @@ const sdk = vi.hoisted(() => {
   const whoami = vi.fn();
   const getIdentity = vi.fn();
   const subscriptionsList = vi.fn();
-  const slack = { listConnections: vi.fn(), listConversations: vi.fn(), listMessages: vi.fn(), search: vi.fn(), sendMessage: vi.fn(), getAction: vi.fn() };
+  const slack = { listConnections: vi.fn(), listConversations: vi.fn(), listMessages: vi.fn(), searchMessages: vi.fn(), sendMessage: vi.fn(), getAction: vi.fn() };
   const Inkbox = vi.fn(() => ({
     whoami,
     getIdentity,
@@ -223,6 +223,15 @@ describe("detectInkboxHealthFindings", () => {
     expect((await inspect())?.severity).toBe("warning");
     sdk.slack.listConnections.mockRejectedValue(new Error("secret connection contents must not escape"));
     const failed = await inspect(); expect(failed?.severity).toBe("warning"); expect(failed?.message).not.toContain("secret");
+  });
+  it("recognizes the actual published Slack SDK surface before probing readiness", async () => {
+    const actual = await vi.importActual<typeof import("@inkbox/sdk")>("@inkbox/sdk");
+    const client = new actual.Inkbox({ apiKey: "synthetic-key", baseUrl: "https://sdk.test" });
+    const list = vi.spyOn(client.slack, "listConnections").mockResolvedValue({ connections: [] } as any);
+    sdk.whoami.mockResolvedValue({}); sdk.getIdentity.mockResolvedValue({ id: "identity" });
+    sdk.Inkbox.mockImplementationOnce(() => ({ whoami: sdk.whoami, getIdentity: sdk.getIdentity, slack: client.slack, webhooks: { subscriptions: { list: sdk.subscriptionsList } } }) as any);
+    const result = (await detectInkboxHealthFindings({ cfg: { channels: { inkbox: { apiKey: "ApiKey_test", identity: "agent", slackEnabled: true } } } as any }, {})).find((value) => value.checkId === "inkbox/slack-readiness");
+    expect(result?.severity).toBe("warning"); expect(result?.message).not.toContain("lacks required"); expect(list).toHaveBeenCalledWith("identity");
   });
   it("reports missing required config without calling the SDK", async () => {
     const findings = await detectInkboxHealthFindings(

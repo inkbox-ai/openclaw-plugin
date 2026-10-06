@@ -66,11 +66,16 @@ export async function reconcileSlackSubscription(client: Inkbox, identityId: str
 export function slackText(text: string): void {
   if (!text || [...text].length > 12_000 || text.includes("\0")) throw new Error("Slack text must be 1–12000 characters without NUL characters.");
 }
-export async function sendSlackReply(client: Inkbox, route: SlackRoute, text: string): Promise<string> {
+export function slackAuthorAllowed(allowed: readonly string[] | undefined, author: string, route?: SlackRoute): boolean {
+  const aliases = [author, ...(route && /^T[A-Z0-9]+:[UW][A-Z0-9]+$/.test(author) ? [`${route.workspaceId}:${author.split(":")[1]}`] : [])];
+  return !allowed?.length || allowed.some((value) => aliases.some((alias) => value.trim().toLowerCase() === alias.toLowerCase()));
+}
+export async function sendSlackReply(client: Inkbox, route: SlackRoute, text: string, beforeSend?: () => Promise<void>): Promise<string> {
   slackText(text);
   const connection = await ownSlackConnection(client, route.identityId, route.connectionId);
   if (connection.workspaceId !== route.workspaceId) throw new Error("Slack reply workspace changed.");
   const key = createHash("sha256").update(JSON.stringify([route.sourceEventId, slackRouteKey(route), text])).digest("hex");
+  await beforeSend?.();
   const action = await client.slack.sendMessage(route.connectionId, { conversationId: route.conversationId, threadTs: route.threadTs, text, idempotencyKey: `openclaw:${key}` });
   if (action.status !== "sent") throw new Error(`Slack action ${action.id} is ${action.status}; inspect it with inkbox_slack_get_action before deciding whether to send again.`);
   return action.id;
