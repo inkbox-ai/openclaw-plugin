@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+import stat
 import glob
 import itertools
 import os
@@ -12,17 +14,19 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-PHASES = {"observer", "case", "rows", "row", "tool", "sdk"}
+PHASES = {"observer", "case", "rows", "row", "tool", "sdk", "contact"}
 STATUSES = {"installed", "observed", "passed", "failed", "unavailable", "accepted", "rejected", "threw"}
 ENUMS = {
+    "tool_admission": {"unknown"}, "catalog_availability": {"unknown"},
+    "sdk_result": {"unknown"}, "model_completion": {"unknown"},
     "target_basis": {"request", "response", "unavailable"},
     "tool": {"send_sms", "send_imessage", "register_post_call_action", "edit_post_call_action", "delete_post_call_action", "other"},
     "tool_status": {"started", "succeeded", "failed", "other"},
     "terminal_relation": {"before", "at_or_after", "unavailable"},
     "error_code": {"none", "permission_denied", "not_found", "invalid_arguments", "already_started", "other"},
 }
-BOOLS = {"scope_verified", "has_more", "truncated", "created_time_present", "marker_matches", "target_known", "target_matches", "accepted_id_present", "same_id_as_prior", "id_tracking_available", "module_bound", "original_promise"}
-COUNTS = {"stream": 16, "count": 200, "distinct": 200, "ordinal": 128, "unique_accepted": 128}
+BOOLS = {"log_available", "scope_ambiguous", "test_marker_observed", "bridge_ready_observed", "hd_audio_observed", "bridge_closed_observed", "contact_completion_observed", "other_call_completion_observed", "scope_verified", "has_more", "truncated", "created_time_present", "marker_matches", "target_known", "target_matches", "accepted_id_present", "same_id_as_prior", "id_tracking_available", "module_bound", "original_promise"}
+COUNTS = {"list_completions": 8, "lookup_completions": 8, "stream": 16, "count": 200, "distinct": 200, "ordinal": 128, "unique_accepted": 128}
 
 
 def safe_record(value):
@@ -210,18 +214,115 @@ def read_bounded(scope, trace, *, timeout=8, command=None):
         trace.emit("observer", "unavailable")
 
 
+
+def install_contact_observer(module, scope):
+    """Capture only the exact original predicate's scope; never change its call."""
+    original = module._gateway_has_direct_contact_read
+
+    def observe(*args, **kwargs):
+        result = original(*args, **kwargs)
+        try:
+            call_id = args[1] if len(args) > 1 else kwargs.get("call_id")
+            call_id = str(call_id)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", call_id):
+                scope["ambiguous"] = True
+            elif scope.get("call_id", call_id) != call_id:
+                scope["ambiguous"] = True
+            else:
+                scope["call_id"] = call_id
+                if type(result) is bool:
+                    scope["test_marker_observed"] = result
+        except Exception:
+            scope["ambiguous"] = True
+        return result
+
+    module._gateway_has_direct_contact_read = observe
+    return lambda: setattr(module, "_gateway_has_direct_contact_read", original)
+
+
+def contact_message(line):
+    """Accept only the native channel logger's complete, anchored envelopes."""
+    if len(line.encode("utf-8")) > 32768:
+        return None
+    try:
+        row = json.loads(line)
+        if isinstance(row, dict) and row.get("subsystem") == "channels/inkbox" and row.get("level") == "info" and isinstance(row.get("message"), str):
+            return row["message"]
+        return None
+    except Exception:
+        # Native pretty/compact output strips the redundant leading 'Inkbox'.
+        clean = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        match = re.fullmatch(r"(?:(?:\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:\d{2})) )?\[inkbox\] (.+)", clean)
+        return match[1] if match else None
+
+
+def read_contact_log(scope, trace, path=None):
+    """Failure-only bounded file read; no runtime/API/config/session access."""
+    fields = dict(tool_admission="unknown", catalog_availability="unknown", sdk_result="unknown", model_completion="unknown")
+    try:
+        call_id = scope.get("call_id")
+        if scope.get("ambiguous") or not isinstance(call_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", call_id):
+            raise ValueError()
+        fd = os.open(path or os.environ["GATEWAY_LOG"], os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError()
+            start = max(0, info.st_size - 2 * 1024 * 1024)
+            stream.seek(start)
+            raw = stream.read(2 * 1024 * 1024)
+        if start:
+            raw = raw.partition(b"\n")[2]
+        # Only physical LF records: Unicode separators inside messages cannot
+        # promote a fragment of another subsystem's text into a new envelope.
+        lines = [line.decode("utf-8", errors="replace").removesuffix("\r") for line in raw.split(b"\n")]
+        fields.update(log_available=True, scope_verified=True, scope_ambiguous=False,
+                      truncated=start > 0 or len(lines) > 8192,
+                      bridge_ready_observed=False, hd_audio_observed=False, bridge_closed_observed=False,
+                      contact_completion_observed=False, other_call_completion_observed=False,
+                      list_completions=0, lookup_completions=0)
+        if type(scope.get("test_marker_observed")) is bool:
+            fields["test_marker_observed"] = scope["test_marker_observed"]
+        for line in lines[-8192:]:
+            message = contact_message(line)
+            if message is None:
+                continue
+            message = re.sub(r"^Inkbox ", "", message)
+            marker = re.fullmatch(r"realtime direct contact read inkbox_(list_contacts|lookup_contact) for call_id=([A-Za-z0-9_-]{1,128})", message)
+            if marker:
+                if marker[2] != call_id:
+                    fields["other_call_completion_observed"] = True
+                else:
+                    fields["contact_completion_observed"] = True
+                    key = "list_completions" if marker[1] == "list_contacts" else "lookup_completions"
+                    fields[key] = min(8, fields[key] + 1)
+                continue
+            if re.fullmatch(r"realtime bridge ready: call_id=" + re.escape(call_id) + r" provider=[A-Za-z0-9_-]+", message):
+                fields["bridge_ready_observed"] = True
+            if message == f"realtime audio negotiated: call_id={call_id} format=pcm_s16le_16000":
+                fields["hd_audio_observed"] = True
+            if re.fullmatch(r"realtime bridge closed: call_id=" + re.escape(call_id) + r" reason=(?:completed|error)", message):
+                fields["bridge_closed_observed"] = True
+        # Observed means a supported current-call envelope, never model success.
+        observed = any(fields[key] for key in ("bridge_ready_observed", "hd_audio_observed", "bridge_closed_observed", "contact_completion_observed"))
+        trace.emit("contact", "observed" if observed else "unavailable", **fields)
+    except Exception:
+        fields.setdefault("scope_ambiguous", scope.get("ambiguous") is True)
+        trace.emit("contact", "unavailable", **fields)
+
 def run_tests(args):
     import pytest
 
     class Observer:
         @pytest.hookimpl(hookwrapper=True)
         def pytest_runtest_call(self, item):
-            if item.name != "test_outbound_call_hosted_and_settles_sms_once":
+            contact = item.name == "test_outbound_call_realtime_direct_contact_lookup"
+            if not contact and item.name != "test_outbound_call_hosted_and_settles_sms_once":
                 yield
                 return
             trace, scope, restore = Trace(os.environ.get("HOSTED_SMS_TEST_DIAGNOSTICS")), {}, None
             try:
-                restore = install_test_observers(item.module, scope)
+                restore = (install_contact_observer if contact else install_test_observers)(item.module, scope)
                 trace.emit("observer", "installed")
             except Exception:
                 trace.emit("observer", "unavailable")
@@ -231,7 +332,10 @@ def run_tests(args):
                     restore()
                 trace.emit("case", "failed" if outcome.excinfo else "passed")
                 if outcome.excinfo:
-                    read_bounded(scope, trace)
+                    if contact:
+                        read_contact_log(scope, trace)
+                    else:
+                        read_bounded(scope, trace)
             except Exception:
                 trace.emit("observer", "unavailable")
             finally:

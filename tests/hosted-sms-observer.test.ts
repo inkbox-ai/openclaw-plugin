@@ -122,4 +122,38 @@ describe("CI-only SDK observer", () => {
       expect(stdout).toContain("two actual native-loaded module graphs observed");
     } finally { await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 }); }
   }, 65_000);
+
+  it("projects the actual native channel logger without exposing call identifiers", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "inkbox-contact-log-contract-"));
+    try {
+      const callId = "00000000-0000-0000-0000-000000000001";
+      for (const style of ["compact", "pretty", "json"]) {
+        const config = join(dir, `${style}.json`);
+        await writeFile(config, JSON.stringify({ logging: { level: "silent", consoleLevel: "info", consoleStyle: style } }));
+        const env = { PATH: process.env.PATH!, LANG: "C.UTF-8", NO_COLOR: "1", OPENCLAW_STATE_DIR: dir,
+          OPENCLAW_CONFIG_PATH: config, XDG_STATE_HOME: join(dir, "xdg"), XDG_CACHE_HOME: join(dir, "cache"), TMPDIR: dir };
+        const code = `import { createSubsystemLogger } from "openclaw/plugin-sdk/logging-core";
+          const log = createSubsystemLogger("channels").child("inkbox");
+          log.info("Inkbox realtime bridge ready: call_id=${callId} provider=openai");
+          log.info("Inkbox realtime audio negotiated: call_id=${callId} format=pcm_s16le_16000");
+          log.info("Inkbox realtime direct contact read inkbox_list_contacts for call_id=${callId}");
+          log.info("Inkbox realtime bridge closed: call_id=${callId} reason=completed");`;
+        const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", code], {
+          cwd: process.cwd(), env, timeout: 30_000, maxBuffer: 64_000,
+        });
+        const path = join(dir, `${style}.log`);
+        await writeFile(path, stdout);
+        const python = `import sys,json;sys.path.insert(0,"tests/live");import hosted_sms_diagnostics as o;t=o.Trace();o.read_contact_log({"call_id":sys.argv[1]},t,sys.argv[2]);print(json.dumps(t.records))`;
+        const projected = await promisify(execFile)("python3", ["-c", python, callId, path], {
+          cwd: process.cwd(), env, timeout: 10_000, maxBuffer: 8_000,
+        });
+        expect(JSON.parse(projected.stdout)).toEqual([expect.objectContaining({ phase: "contact", status: "observed",
+          bridge_ready_observed: true, hd_audio_observed: true, bridge_closed_observed: true,
+          contact_completion_observed: true, list_completions: 1, tool_admission: "unknown",
+          catalog_availability: "unknown", sdk_result: "unknown", model_completion: "unknown" })]);
+        expect(projected.stdout).not.toContain(callId);
+      }
+    } finally { await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 }); }
+  }, 100_000);
+
 });

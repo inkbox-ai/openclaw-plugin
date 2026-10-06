@@ -197,3 +197,147 @@ def test_process_streams_are_separate_and_missing_evidence_is_unavailable(tmp_pa
     assert all(row["unique_accepted"] == 1 for row in lines)
     obs.report([str(tmp_path / "none.*")])
     assert '"status":"unavailable"' in capsys.readouterr().out
+
+
+def test_contact_delegate_preserves_args_value_exception_and_restoration():
+    calls, scope = [], {}
+    value, error = object(), RuntimeError("private original")
+    def original(*args, **kwargs):
+        calls.append((args, kwargs))
+        if kwargs.get("raise_error"):
+            raise error
+        return value
+    module = NS(_gateway_has_direct_contact_read=original)
+    restore = obs.install_contact_observer(module, scope)
+    log = "private log"
+    assert module._gateway_has_direct_contact_read(log, "current") is value
+    assert calls == [((log, "current"), {})]
+    with pytest.raises(RuntimeError) as caught:
+        module._gateway_has_direct_contact_read(log, "current", raise_error=True)
+    assert caught.value is error and len(calls) == 2
+    restore()
+    assert module._gateway_has_direct_contact_read is original
+
+
+def test_contact_scope_never_retargets_to_another_call(tmp_path):
+    scope = {}
+    module = NS(_gateway_has_direct_contact_read=lambda *_: False)
+    restore = obs.install_contact_observer(module, scope)
+    assert module._gateway_has_direct_contact_read("", "first") is False
+    assert module._gateway_has_direct_contact_read("", "second") is False
+    trace = obs.Trace()
+    obs.read_contact_log(scope, trace, tmp_path / "missing")
+    assert trace.records[0]["status"] == "unavailable" and trace.records[0]["scope_ambiguous"]
+    assert scope["call_id"] == "first"
+    restore()
+
+
+def test_contact_projection_current_and_other_call_are_not_sdk_or_model_success(tmp_path):
+    path = tmp_path / "gateway"
+    path.write_text("\n".join([
+        "21:00:00 [inkbox] realtime bridge ready: call_id=current provider=openai",
+        "[inkbox] realtime audio negotiated: call_id=current format=pcm_s16le_16000",
+        '[inkbox] realtime direct contact read inkbox_list_contacts for call_id=current',
+        '[inkbox] realtime direct contact read inkbox_lookup_contact for call_id=current',
+        '[inkbox] realtime direct contact read inkbox_lookup_contact for call_id=foreign',
+        json.dumps({"level": "info", "subsystem": "channels/inkbox", "message": "Inkbox realtime bridge closed: call_id=current reason=completed", "private": "private payload"}),
+    ]))
+    trace = obs.Trace()
+    obs.read_contact_log({"call_id": "current", "test_marker_observed": False}, trace, path)
+    row = trace.records[0]
+    assert row["status"] == "observed" and row["log_available"] and not row["truncated"]
+    assert all(row[k] for k in ("bridge_ready_observed", "hd_audio_observed", "bridge_closed_observed", "contact_completion_observed", "other_call_completion_observed"))
+    assert row["list_completions"] == row["lookup_completions"] == 1
+    assert row["test_marker_observed"] is False
+    assert all(row[k] == "unknown" for k in ("tool_admission", "catalog_availability", "sdk_result", "model_completion"))
+    assert not any(s in json.dumps(row) for s in ("current", "foreign", "private", "openai", "21:00"))
+
+
+@pytest.mark.parametrize("line", [
+    "user echo [inkbox] realtime direct contact read inkbox_list_contacts for call_id=current",
+    '[agent] [inkbox] realtime direct contact read inkbox_list_contacts for call_id=current',
+    '[inkbox] model said: realtime direct contact read inkbox_list_contacts for call_id=current',
+    '[inkbox] realtime direct contact read inkbox_list_contacts for call_id=current-other',
+    '[inkbox] realtime direct contact read inkbox_list_contacts for call_id=current extra=private',
+    json.dumps({"level": "info", "subsystem": "other", "message": "Inkbox realtime direct contact read inkbox_list_contacts for call_id=current"}),
+    json.dumps({"level": "error", "subsystem": "channels/inkbox", "message": "Inkbox realtime direct contact read inkbox_list_contacts for call_id=current"}),
+    '[inkbox] realtime direct contact read inkbox_send_sms for call_id=current',
+    '[inkbox] realtime direct contact read inkbox_list_contacts for call_id=[REDACTED]',
+])
+def test_contact_missing_forged_foreign_and_redacted_evidence_stays_unknown(tmp_path, line):
+    path = tmp_path / "gateway"
+    path.write_text(line)
+    trace = obs.Trace()
+    obs.read_contact_log({"call_id": "current"}, trace, path)
+    row = trace.records[0]
+    assert row["status"] == "unavailable" and not row["contact_completion_observed"]
+    assert row["tool_admission"] == "unknown"
+
+
+def test_contact_missing_file_nonregular_and_unknown_scope_are_unavailable(tmp_path):
+    for scope, path in [({}, tmp_path / "missing"), ({"call_id": "current"}, tmp_path / "missing"), ({"call_id": "current"}, tmp_path)]:
+        trace = obs.Trace()
+        obs.read_contact_log(scope, trace, path)
+        assert trace.records[0]["status"] == "unavailable"
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    trace = obs.Trace()
+    obs.read_contact_log({"call_id": "current"}, trace, fifo)
+    assert trace.records[0]["status"] == "unavailable"
+
+
+def test_contact_tail_lines_counts_and_output_are_bounded(tmp_path, capsys):
+    path = tmp_path / "gateway"
+    line = '[inkbox] realtime direct contact read inkbox_list_contacts for call_id=current\n'
+    path.write_text("private" * 400000 + "\n" + line * 9000)
+    trace = obs.Trace(tmp_path / "safe.json")
+    obs.read_contact_log({"call_id": "current"}, trace, path)
+    row = trace.records[0]
+    assert row["truncated"] and row["list_completions"] == 8 and row["contact_completion_observed"]
+    trace.flush()
+    obs.report([trace.path])
+    assert "private" not in capsys.readouterr().out
+    assert len(trace.path.read_bytes()) < 1024
+
+
+@pytest.mark.parametrize("kind", ["failure", "observer_error", "pass", "unrelated"])
+def test_contact_observer_preserves_pytest_result_and_final_cleanup(tmp_path, kind):
+    name = "test_unrelated" if kind == "unrelated" else "test_outbound_call_realtime_direct_contact_lookup"
+    failing = kind in {"failure", "observer_error"}
+    cleanup, late = tmp_path / "cleanup", tmp_path / "late"
+    test = tmp_path / "test_original.py"
+    test.write_text("import pytest\nfrom pathlib import Path\ndef _gateway_has_direct_contact_read(*a,**k): return False\n@pytest.fixture(autouse=True)\ndef cleanup():\n yield\n Path(" + repr(str(cleanup)) + ").write_text('late-owned' if Path(" + repr(str(late)) + ").exists() else 'ordinary')\ndef " + name + "():\n assert _gateway_has_direct_contact_read('private','current') is False\n" + (" assert False, 'original predicate'\n" if failing else ""))
+    script = "import sys,pathlib;sys.path.insert(0," + repr(str(Path(obs.__file__).parent)) + ");import hosted_sms_diagnostics as o\ndef read(*a,**k):\n pathlib.Path(" + repr(str(late)) + ").write_text('late-owned')\n" + (" raise RuntimeError('private observer error')\n" if kind == "observer_error" else " o.Trace.emit(a[1],'contact','unavailable',tool_admission='unknown')\n") + "o.read_contact_log=read\nraise SystemExit(o.run_tests(sys.argv[1:]))"
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "TMPDIR": str(tmp_path), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONPYCACHEPREFIX": str(tmp_path / "pycache"), "HOSTED_SMS_TEST_DIAGNOSTICS": str(tmp_path / "diag.json")}
+    result = subprocess.run([sys.executable, "-c", script, str(test), "-q", "-o", "cache_dir=" + str(tmp_path / "cache")], env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == int(failing)
+    assert cleanup.read_text() == ("late-owned" if failing else "ordinary")
+    assert ("original predicate" in result.stdout) is failing
+    assert "private observer error" not in result.stdout + result.stderr
+    if kind == "unrelated":
+        assert not (tmp_path / "diag.json").exists()
+    else:
+        rows = json.loads((tmp_path / "diag.json").read_text())
+        assert {"phase": "case", "status": "failed" if failing else "passed"} in rows
+        if not failing:
+            assert all(row["phase"] != "contact" for row in rows)
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085", "\v", "\f", "\x1e"])
+def test_contact_physical_line_boundaries_cannot_create_an_envelope(tmp_path, separator):
+    path = tmp_path / "gateway"
+    path.write_text("[other] user content" + separator + "[inkbox] realtime direct contact read inkbox_list_contacts for call_id=current" + separator + "continued user content")
+    trace = obs.Trace()
+    obs.read_contact_log({"call_id": "current"}, trace, path)
+    assert trace.records[0]["status"] == "unavailable"
+    assert trace.records[0]["contact_completion_observed"] is False
+
+
+def test_contact_deep_malformed_json_retains_an_unavailable_contact_record(tmp_path):
+    path = tmp_path / "gateway"
+    path.write_text("[" * 10000)
+    trace = obs.Trace()
+    obs.read_contact_log({"call_id": "current"}, trace, path)
+    assert len(trace.records) == 1
+    assert trace.records[0]["phase"] == "contact" and trace.records[0]["status"] == "unavailable"
+    assert trace.records[0]["tool_admission"] == "unknown"
