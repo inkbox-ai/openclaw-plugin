@@ -343,10 +343,11 @@ describe("deferred send transport wrappers", () => {
   });
 });
 
-describe("native Code Mode final-send transport", () => {
+describe.each(["tool_search_code", "tool_call"])("native Code Mode final-send transport (%s child IDs)", (childPrefix) => {
   function nativeExec(options: {
     kind?: string; inputKind?: string; status?: string; terminal?: boolean;
     childParent?: string; childError?: boolean; omitChild?: boolean;
+    childName?: string; childOrdinal?: string; childRunId?: string; childTerminal?: boolean;
     mixed?: boolean; outerError?: boolean; omitBefore?: boolean;
     alias?: "owned" | "wrong-id" | "missing-id" | "wrong-run" | "untagged" | "unbound-id" | "conflicting-run";
   } = {}) {
@@ -366,18 +367,19 @@ describe("native Code Mode final-send transport", () => {
     if (!options.omitBefore) recordSilentSendBeforeToolCall(outer, beforeContext);
     const child = {
       toolName: "inkbox_send_email",
-      toolCallId: `tool_search_code:${options.childParent ?? "call_exec_fc_exec"}:inkbox_send_email:1`,
+      toolCallId: `${childPrefix}:${options.childParent ?? "call_exec_fc_exec"}:${options.childName ?? "inkbox_send_email"}:${options.childOrdinal ?? "1"}`,
       params: { completeSilently: true },
     };
     if (!options.omitChild) {
-      recordSilentSendBeforeToolCall(child, context);
+      const childContext = { ...context, runId: options.childRunId ?? context.runId };
+      recordSilentSendBeforeToolCall(child, childContext);
       recordSilentSendAfterToolCall({ ...child,
-        result: { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } },
+        result: { terminate: options.childTerminal !== false, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } },
         ...(options.childError ? { error: "failed" } : {}),
-      }, context);
+      }, childContext);
     }
     if (options.mixed) recordSilentSendBeforeToolCall({
-      toolName: "inkbox_whoami", toolCallId: "tool_search_code:call_exec_fc_exec:inkbox_whoami:2", params: {},
+      toolName: "inkbox_whoami", toolCallId: `${childPrefix}:call_exec_fc_exec:inkbox_whoami:2`, params: {},
     }, context);
     recordSilentSendAfterToolCall({ toolName: outer.toolName, toolCallId: outer.toolCallId, params: outer.params,
       result: { terminate: options.terminal !== false, details: { status: options.status ?? "completed" } },
@@ -402,10 +404,22 @@ describe("native Code Mode final-send transport", () => {
       { ...nativeIncompleteReply, mediaUrl: "https://example.com/file" },
     ]) expect(capture.transform(payload)).toBe(payload);
   });
+  it("retains exact native child ownership when reconciling an earlier failed exchange", () => {
+    const capture = nativeExec();
+    recordSilentSendAfterToolCall({ toolName: "tool_describe", toolCallId: "describe-1", error: "schema rejection" }, context);
+    const messages: any[] = failedDiscoveryHistory(capture.marker);
+    messages[3].content[0] = { type: "toolCall", id: "call_exec|fc_exec", name: "exec" };
+    messages[4] = { role: "toolResult", toolCallId: "call_exec|fc_exec", toolName: "exec", isError: false };
+    reconcileSilentSendAgentEnd({ runId: context.runId, success: true, messages }, context);
+    expect(capture.shape()).toMatchObject({ invalid: false, attempts: 2, accepted: 2 });
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+  });
   it.each([
     { kind: "shell_exec" }, { inputKind: "unknown" }, { status: "failed" },
     { status: "waiting" }, { terminal: false }, { childParent: "another_parent" },
     { childError: true }, { omitChild: true }, { mixed: true }, { outerError: true },
+    { childName: "inkbox_send_sms" }, { childOrdinal: "0" }, { childOrdinal: "01" },
+    { childOrdinal: "1:extra" }, { childRunId: "another-run" }, { childTerminal: false },
     { omitBefore: true },
     { alias: "wrong-id" as const }, { alias: "missing-id" as const },
     { alias: "wrong-run" as const }, { alias: "untagged" as const },

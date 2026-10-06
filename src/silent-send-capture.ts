@@ -137,10 +137,11 @@ function parentIdSegment(id: string): string {
   return id.trim().replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 120) || "call";
 }
 
-function linkedNativeChild(id: string, parent: string, childName: string, wrapperName: string): boolean {
-  // Older hosts used the Code Mode prefix for both transports; current hosts
-  // give tool_call its own prefix. Keep exact parent/name/ordinal ownership.
-  return ["tool_search_code", ...(wrapperName === "tool_call" ? ["tool_call"] : [])].some((transport) => {
+function linkedNativeChild(id: string, parent: string, childName: string, wrapper: Attempt): boolean {
+  // Current ToolSearchRuntime uses tool_call for both direct and native Code
+  // Mode children. exec is eligible only after its native BEFORE tags prove
+  // JavaScript Code Mode, never from the shell tool's shared name alone.
+  return ["tool_search_code", ...(wrapper.name === "tool_call" || wrapper.nativeCode === true ? ["tool_call"] : [])].some((transport) => {
     const prefix = `${transport}:${parentIdSegment(parent)}:${childName}:`;
     return id.startsWith(prefix) && /^[1-9]\d*$/.test(id.slice(prefix.length));
   });
@@ -154,7 +155,7 @@ function acceptedWrapper(
   if (wrappers.filter(([key]) => parentIdSegment(key) === parent).length !== 1) return false;
   const children = [...capture.attempts].filter(([key, child]) => {
     if (child.wrapper || !sendTools.has(child.name)) return false;
-    return linkedNativeChild(key, id, child.name, attempt.name);
+    return linkedNativeChild(key, id, child.name, attempt);
   });
   if (!children.length || children.some(([, child]) => !child.accepted)) return false;
   if (attempt.name === "tool_call") {
@@ -315,7 +316,7 @@ export function reconcileSilentSendAgentEnd(event: { runId?: string; success?: b
     const rootIds = new Set(roots.map(([id]) => id));
     if ([...capture.attempts].some(([id, attempt]) => !rootIds.has(id) && !roots.some(([rootId]) => {
       if (!capture.attempts.get(rootId)?.wrapper || attempt.wrapper) return false;
-      return linkedNativeChild(id, rootId, attempt.name, capture.attempts.get(rootId)!.name);
+      return linkedNativeChild(id, rootId, attempt.name, capture.attempts.get(rootId)!);
     }))) continue;
     if ([...capture.missingBefore].some(([id, name]) => {
       const owned = calls.get(id); const settled = results.get(id);
