@@ -349,7 +349,7 @@ Once someone is connected over iMessage, the agent can also place and receive **
 
 Set `channels.inkbox.imessageThreadedReplies: true` or `INKBOX_IMESSAGE_THREADED_REPLIES=1` and restart the gateway. The default is off. Source-triggered answers use that incoming message as `replyToMessageId`, with the API's `plainReplyFallback: true`; the plugin never issues a second plain send. Explicit reply tools cannot override the source or fallback. Proactive/cron messages have no inherited reply target.
 
-The durable receiver acknowledges incoming messages only after saving them. Same-sender, same-conversation, same-native-thread text bursts wait 750 ms of quiet (at most 2 seconds) and answer the first source. Media, reactions, controls, and Companion snapshots stay separate. Follow-ups wait for the current native dispatch, without interrupting it; OpenClaw still owns model execution, sessions, approvals, and configured scheduling. Voice sessions remain separate.
+The durable receiver acknowledges incoming messages only after saving them. Same-sender, same-conversation, same-native-thread text bursts wait 750 ms of quiet (at most 2 seconds), cap at eight sources/4,000 characters, require identical parent/thread/root ancestry, and answer the first source. Queue ownership and uncertainty fencing remain conversation-wide across those native threads. Media, reactions, controls, and Companion snapshots stay separate. Follow-ups wait for the current native dispatch, without interrupting it; OpenClaw still owns model execution, sessions, approvals, and configured scheduling. Voice sessions remain separate.
 
 Use `inkbox_get_imessage_thread` with a message ID or `inkbox_get_imessage_conversation_thread` with a conversation and opaque thread ID; follow `nextCursor`. Delivery-failure callbacks, including callbacks arriving before the send result or unmatched proactive failures, are context only in this mode—not instructions to resend.
 
@@ -378,7 +378,7 @@ Existing Companion journals remain readable. New records add optional source own
 
 Metadata listing requires no unlock. The plugin now defaults to `INKBOX_OPENCLAW_VAULT_KEY`; `vault.keyEnvVar` still supports a custom variable. Move an existing SDK-wide `INKBOX_VAULT_KEY` to the plugin-specific variable to retain lazy unlock: the SDK itself eagerly processes its global variable, including an empty value. The plugin does not mutate process environment or SDK internals to suppress that behavior.
 
-Every plaintext or TOTP request rechecks the configured identity's access and fetches current secret data. Login results replace seed material with `has_totp`; request the current code separately. `inkbox_credentials_get_secret` adds individually selected `key_pair`/`other` access and retains login redaction. All Vault tools, including metadata and this generic reader, remain optional and must be enabled explicitly.
+Every plaintext or TOTP request requires the current local key, rechecks the configured identity's access, and fetches current secret data. Removing or changing the key invalidates cached unlock state; an in-flight result is withheld if its key is revoked. Login results replace seed material with `has_totp`; request the current code separately. `inkbox_credentials_get_secret` adds individually selected `key_pair`/`other` access and retains login redaction. All Vault tools, including metadata and this generic reader, remain optional and must be enabled explicitly.
 
 ## CLI
 

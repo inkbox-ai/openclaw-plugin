@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 const state = vi.hoisted(() => ({ dir: "" }));
 const gateway = vi.hoisted(() => ({ rpc: vi.fn() }));
 vi.mock("../../src/state.js", async () => ({ statePaths: () => ({ dir: state.dir }), ensureStateDir: async () => (await import("node:fs/promises")).mkdir(state.dir, { recursive: true }) }));
@@ -34,6 +35,67 @@ describe("durable noninterrupting native iMessage coordinator", () => {
       expect(inputs).toHaveLength(1); expect(inputs[0].body).toContain("one\\ntwo"); expect(inputs[0].reply.replyToMessageId).toBe("first");
       await queue.accept(imessage("second", "two", "main", true)); await queue.idle(); expect(inputs).toHaveLength(1);
     } finally { clock.mockRestore(); }
+  });
+  it.each(["reply_to_message_id", "thread_id", "thread_root_message_id"])("does not merge different %s ancestry into one source", async (field) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000), submit = vi.fn(async (_input: any) => ["answer"]), queue = receiver(submit);
+    try {
+      const first = imessage("first", "one", "main", true), second = imessage("second", "two", "main", true);
+      Object.assign(first.data.message, { [field]: "one" }); Object.assign(second.data.message, { [field]: "two" });
+      await queue.accept(first); await queue.idle(); await queue.accept(second); await queue.idle(); clock.mockReturnValue(1800); await queue.recover();
+      expect(submit).toHaveBeenCalledTimes(2); expect(submit.mock.calls.map(([input]) => input.reply.replyToMessageId)).toEqual(["first", "second"]);
+    } finally { queue.close(); clock.mockRestore(); }
+  });
+  it("caps one text burst at eight ordered sources and retains every receipt", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000), submit = vi.fn(async (_input: any) => ["answer"]), queue = receiver(submit);
+    try {
+      for (let i = 1; i <= 9; i++) { await queue.accept(imessage(`source-${i}`, `text-${i}`, "main", true)); await queue.idle(); }
+      expect(Object.keys((await readJournal()).jobs)).toHaveLength(9); clock.mockReturnValue(1800); await queue.recover();
+      expect(submit).toHaveBeenCalledTimes(2);
+      expect(submit.mock.calls[0]![0].event._openclawNativeIMessage.sourceMessageIds).toEqual(Array.from({ length: 8 }, (_, i) => `source-${i + 1}`));
+      expect(submit.mock.calls[1]![0].reply.replyToMessageId).toBe("source-9");
+    } finally { queue.close(); clock.mockRestore(); }
+  });
+  it("keeps a full 4000-character burst separate and does not delay its ready head behind a later burst", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000), submit = vi.fn(async (_input: any) => ["answer"]), queue = receiver(submit);
+    try {
+      await queue.accept(imessage("first", "a".repeat(4000), "main", true)); await queue.idle(); clock.mockReturnValue(1400);
+      await queue.accept(imessage("second", "b", "main", true)); await queue.idle(); clock.mockReturnValue(1800); await queue.recover();
+      expect(submit).toHaveBeenCalledTimes(1); expect(submit.mock.calls[0]![0].reply.replyToMessageId).toBe("first");
+      clock.mockReturnValue(2200); await queue.recover(); expect(submit).toHaveBeenCalledTimes(2);
+    } finally { queue.close(); clock.mockRestore(); }
+  });
+  it("fences an uncertain legacy thread before admitting another thread in the same native session", async () => {
+    const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); if (submit.mock.calls.length === 1) { await input.bindNativeOwner("native-conversation", "old-run"); throw new Error("submission uncertain"); } return ["fresh"]; });
+    const queue = receiver(submit); gateway.rpc.mockResolvedValue({ runId: "old-run", status: "timeout" });
+    await queue.accept(imessage("first", "one", "thread-a")); await queue.idle();
+    await queue.accept(imessage("second", "two", "thread-b")); await queue.idle(); await queue.recover();
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(Object.values((await readJournal()).jobs)).toContainEqual(expect.objectContaining({ state: "pending", event: expect.objectContaining({ id: "event-second" }) }));
+    gateway.rpc.mockResolvedValue({ runId: "old-run", status: "ok", endedAt: 10 }); await queue.recover(); await queue.idle(); queue.close();
+    expect(submit).toHaveBeenCalledTimes(2); expect(submit.mock.calls[1]![0].body).toContain("Do not repeat");
+  });
+  it("preserves legacy ancestry-scoped context and deduplicates a normalized restart receipt", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000), submit = vi.fn(async (_input: any) => ["answer"]), old = receiver(submit);
+    try {
+      const event = imessage("legacy", "pending", "old-thread", true); await old.accept(event); await old.idle(); old.close();
+      const name = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name))!, owner = name.slice("companion-".length, -".json".length);
+      const journal = await readJournal(), scope = createHash("sha256").update(`${event.companion.conversation_id}:${event.companion.scope_id}`).digest("hex");
+      journal.context = { [`companion:${owner}:${identityId}:imessage:${scope}:ordinary`]: ["Legacy quiet context"] }; await writeFile(join(state.dir, name), JSON.stringify(journal));
+      const current = receiver(submit), duplicate = structuredClone(event); duplicate.companion.scope_id = "conversation"; duplicate.companion.sequence = 4000;
+      await current.accept(duplicate); await current.idle(); clock.mockReturnValue(2000); await current.recover(); current.close();
+      expect(submit).toHaveBeenCalledTimes(1); expect(submit.mock.calls[0]![0].body).toContain("Legacy quiet context"); expect(Object.keys((await readJournal()).jobs)).toHaveLength(1);
+    } finally { old.close(); clock.mockRestore(); }
+  });
+  it.each(["same answer", "different answer"])("suppresses only a proven accepted explicit same-source answer (%s)", async (final) => {
+    const deliver = vi.fn(async () => "automatic"), submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); await input.beforeToolSend("explicit"); await input.afterToolSend("explicit", "accepted", "same answer"); return [final]; });
+    const queue = receiver(submit, deliver); await queue.accept(imessage("first")); await queue.idle(); queue.close();
+    expect(deliver).toHaveBeenCalledTimes(final === "same answer" ? 0 : 1);
+    expect(Object.values((await readJournal()).jobs)).toContainEqual(expect.objectContaining({ state: "done", outboundIds: expect.arrayContaining(["accepted"]) }));
+  });
+  it("rejects durable tool intents once native completion is recorded", async () => {
+    const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); await input.nativeTerminal(); await expect(input.beforeToolSend("late")).rejects.toThrow("no longer active"); return []; });
+    const queue = receiver(submit); await queue.accept(imessage("first")); await queue.idle(); queue.close();
+    expect(Object.values((await readJournal()).jobs).every((job: any) => !job.toolSends)).toBe(true);
   });
   it("queues a follow-up without interrupting its active native run", async () => {
     let release!: () => void, started!: () => void;

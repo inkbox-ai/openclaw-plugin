@@ -10,13 +10,24 @@ import { withFileLock } from "openclaw/plugin-sdk/file-lock";
 import type { CompanionChannel, CompanionMetadata, CompanionReplyContext } from "@inkbox/sdk";
 
 export const COMPANION_MAX_BYTES = 128 * 1024;
+const NATIVE_BURST_MAX_SOURCES = 8, NATIVE_BURST_MAX_CHARS = 4000;
+function nativeAncestry(event: Record<string, any>): unknown[] {
+  const message = event.data?.message ?? {};
+  return [message.reply_to_message_id ?? null, message.thread_id ?? null, message.thread_root_message_id ?? null];
+}
+function sameNativeAncestry(left: Record<string, any>, right: Record<string, any>): boolean {
+  return JSON.stringify(nativeAncestry(left)) === JSON.stringify(nativeAncestry(right));
+}
+function nativeSources(event: Record<string, any>): string[] {
+  return event._openclawNativeIMessage?.sourceMessageIds ?? [event.data.message.id];
+}
 type Channel = CompanionChannel;
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc"> & { slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = CompanionMetadata;
-type Job = { nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { messageId?: string }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { messageId?: string; text?: string }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeToolSend(callId: string): Promise<void>; afterToolSend(callId: string, messageId: string): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeToolSend(callId: string): Promise<void>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -151,7 +162,13 @@ export function createCompanionReceiver(opts: {
       throw new Error("Companion sponsor is not on the outbound allowlist.");
     }
   }
-  function key(m: Metadata, identityId: string) { return `companion:${owner}:${identityId}:${m.channel}:${hash(`${m.conversation_id}:${m.scope_id}`)}:${m.activation_id ? `activation:${hash(m.activation_id)}` : "ordinary"}`; }
+  function legacyKey(m: Metadata, identityId: string) { return `companion:${owner}:${identityId}:${m.channel}:${hash(`${m.conversation_id}:${m.scope_id}`)}:${m.activation_id ? `activation:${hash(m.activation_id)}` : "ordinary"}`; }
+  function key(m: Metadata, identityId: string) {
+    // Native execution is conversation-wide even when inputs have different
+    // ancestry. An uncertain thread must fence all successors in that session.
+    return legacyKey(m.channel === "imessage" && m.phase === "ordinary" && opts.config.imessageThreadedReplies
+      ? { ...m, scope_id: m.conversation_id } : m, identityId);
+  }
   function sameControlRoute(a: Job, b: Job) {
     if (metadata(a.event).channel !== "slack") return true;
     const left = a.event._openclawSlack?.route, right = b.event._openclawSlack?.route;
@@ -178,14 +195,16 @@ export function createCompanionReceiver(opts: {
         await validate();
         await mutate((journal) => {
           const job = journal.jobs[id]!;
+          if (stopped() || job.state !== "submitting" || job.nativeComplete) throw new Error("The native job is no longer active; its tool send is not authorized.");
           if (Object.values(job.toolSends ?? {}).some((send) => !send.messageId) || job.toolSends?.[callId]) throw new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
           job.toolSends ??= {}; job.toolSends[callId] = {};
         });
       },
-      afterToolSend: async (callId: string, messageId: string) => { await mutate((journal) => {
+      afterToolSend: async (callId: string, messageId: string, text?: string) => { await mutate((journal) => {
         const job = journal.jobs[id]!;
         if (!job.toolSends?.[callId]) throw new Error("Native tool send has no durable intent.");
         job.toolSends[callId]!.messageId = messageId;
+        if (text !== undefined) job.toolSends[callId]!.text = text;
         job.outboundIds = [...new Set([...(job.outboundIds ?? []), messageId])];
       }); },
     };
@@ -296,6 +315,12 @@ export function createCompanionReceiver(opts: {
       if (Object.values(current.toolSends ?? {}).some((send) => !send.messageId)) throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
       const input = makeInput(current.reply!);
       for (const text of current.replies ?? []) {
+        // Only an exact accepted same-source send is delivery proof. Do not
+        // suppress a different answer, an unknown result, or a legacy receipt.
+        if (Object.values(current.toolSends ?? {}).some((send) => send.messageId && send.text === text)) {
+          await mutate((j) => { j.jobs[id]!.replies!.shift(); });
+          continue;
+        }
         const savedActivation = (await read()).activations[scope];
         checkSponsor(current.sponsor ?? savedActivation?.sponsor ?? author, current.sponsorContactId ?? savedActivation?.sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
@@ -333,7 +358,7 @@ export function createCompanionReceiver(opts: {
     let activation = journal.activations[scope];
     let body: string;
     let reply: CompanionReply;
-    let sources = [message.id];
+    let sources = job.event._openclawNativeIMessage ? nativeSources(job.event) : [message.id];
     if (m.phase !== "ordinary") {
       if (activation?.state === "paused" || activation?.state === "submitting") throw new Error("Companion host submission is paused for reconciliation.");
       if (!activation) {
@@ -434,9 +459,16 @@ export function createCompanionReceiver(opts: {
   async function drain() {
     while (!stopped()) {
       const journal = await read();
-      const blocked = new Set(Object.values(journal.jobs)
-        .filter((j) => (j.state === "paused" && !j.nativeComplete) || j.state === "submitting" || j.state === "sending" || ((j.state === "pending" || j.state === "reply_pending") && (j.retryAt ?? 0) > Date.now()))
-        .map((j) => key(metadata(j.event), j.identityId)));
+      const ordered = Object.values(journal.jobs).sort((a, b) => metadata(a.event).sequence - metadata(b.event).sequence);
+      const blocked = new Set(ordered.filter((j) => (j.state === "paused" && !j.nativeComplete) || j.state === "submitting" || j.state === "sending").map((j) => key(metadata(j.event), j.identityId)));
+      const heads = new Set<string>();
+      for (const job of ordered) {
+        if (!enabled(job) || !["pending", "reply_pending"].includes(job.state)) continue;
+        const scope = key(metadata(job.event), job.identityId);
+        if (heads.has(scope)) continue;
+        heads.add(scope);
+        if ((job.retryAt ?? 0) > Date.now()) blocked.add(scope);
+      }
       const jobs = Object.entries(journal.jobs).filter(([, j]) => enabled(j) && (j.state === "pending" || j.state === "reply_pending") && (j.retryAt ?? 0) <= Date.now())
         .filter(([, j]) => !blocked.has(key(metadata(j.event), j.identityId)))
         .sort(([, a], [, b]) => metadata(a.event).sequence - metadata(b.event).sequence);
@@ -474,6 +506,11 @@ export function createCompanionReceiver(opts: {
       await withFileLock(`${path}.worker`, lockOptions, async () => {
         await mutate((j) => {
           for (const job of Object.values(j.jobs)) {
+            const m = metadata(job.event), previousScope = legacyKey(m, job.identityId), currentScope = key(m, job.identityId);
+            if (previousScope !== currentScope && j.context?.[previousScope]) {
+              j.context[currentScope] = [...new Set([...(j.context[currentScope] ?? []), ...j.context[previousScope]!])];
+              delete j.context[previousScope];
+            }
             // Older journals wrote replies only after native dispatch returned.
             if (job.nativeComplete === undefined && Array.isArray(job.replies) && job.reply && ["reply_pending", "sending", "paused"].includes(job.state)) job.nativeComplete = true;
             if (job.state === "submitting" || job.state === "sending") job.state = "paused";
@@ -536,7 +573,10 @@ export function createCompanionReceiver(opts: {
       await mutate((j) => {
         const previous = j.jobs[receipt];
         if (previous && (event._openclawNativeIMessage || (event._openclawSlack && event.companion.phase === "ordinary"))) event.companion.sequence = previous.event.companion.sequence;
-        if (previous && ["scope_id", "conversation_id", "channel", "phase", "sequence", "activation_id"]
+        const sameNativeConversation = previous && event._openclawNativeIMessage && previous.event._openclawNativeIMessage &&
+          key(metadata(previous.event), identityId) === key(metadata(event), identityId);
+        if (sameNativeConversation && (!sameNativeAncestry(previous.event, event) || previous.event.data.message.id !== event.data.message.id || source(previous.event, metadata(previous.event)).author !== source(event, metadata(event)).author)) throw new Error("Native event id has conflicting source metadata.");
+        if (previous && [...(sameNativeConversation ? [] : ["scope_id"]), "conversation_id", "channel", "phase", "sequence", "activation_id"]
           .some((field) => previous.event.companion[field] !== event.companion[field])) {
           throw new Error("Companion event id has conflicting scope metadata.");
         }
@@ -544,11 +584,14 @@ export function createCompanionReceiver(opts: {
         const job: Job = { event: structuredClone(event), identityId, state: "pending", ...(event.companion.channel === "imessage" && opts.config.imessageThreadedReplies ? { nativeThreaded: true } : {}) };
         j.jobs[receipt] = job;
         if (event._openclawNativeIMessage?.burstable) {
+          job.event._openclawNativeIMessage.sourceMessageIds = [event.data.message.id];
           const now = Date.now(), m = metadata(event), incoming = source(event, m);
           const prior = Object.entries(j.jobs).reverse().find(([otherId, other]) => otherId !== receipt && key(metadata(other.event), identityId) === key(m, identityId) && !other.mergedInto);
-          if (prior && prior[1].state === "pending" && (prior[1].retryAt ?? 0) > now && prior[1].burstAt && now - prior[1].burstAt < 2000 && source(prior[1].event, metadata(prior[1].event)).author === incoming.author && prior[1].event._openclawNativeIMessage?.burstable) {
+          const combined = prior ? `${prior[1].event.data.message.content ?? prior[1].event.data.message.text ?? ""}\n${incoming.message.content ?? incoming.message.text ?? ""}` : "";
+          if (prior && prior[1].state === "pending" && (prior[1].retryAt ?? 0) > now && prior[1].burstAt && now - prior[1].burstAt < 2000 && source(prior[1].event, metadata(prior[1].event)).author === incoming.author && prior[1].event._openclawNativeIMessage?.burstable && sameNativeAncestry(prior[1].event, event) && nativeSources(prior[1].event).length < NATIVE_BURST_MAX_SOURCES && [...combined].length <= NATIVE_BURST_MAX_CHARS) {
             const message = prior[1].event.data.message;
-            message.content = `${message.content ?? message.text ?? ""}\n${incoming.message.content ?? incoming.message.text ?? ""}`;
+            prior[1].event._openclawNativeIMessage.sourceMessageIds = [...nativeSources(prior[1].event), incoming.message.id];
+            message.content = combined;
             message.text = message.content;
             bounded(JSON.stringify(prior[1].event));
             prior[1].retryAt = Math.min(now + 750, prior[1].burstAt! + 2000);

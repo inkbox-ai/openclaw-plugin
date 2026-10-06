@@ -33,6 +33,10 @@ describe("Slack signed source and published SDK contract", () => {
     await expect(sendSlackReply(sdk as any, parseSlack(event(), identityId)!, "answer")).rejects.toThrow("identity");
     expect(sdk.slack.sendMessage).toHaveBeenCalledTimes(1);
   });
+  it("revalidates the current connection workspace immediately before automatic sends", async () => {
+    const sdk = client(); sdk.slack.listConnections.mockResolvedValue({ connections: [{ ...connection, workspaceId: "TOTHER" }] });
+    await expect(sendSlackReply(sdk as any, parseSlack(event(), identityId)!, "answer")).rejects.toThrow("workspace changed"); expect(sdk.slack.sendMessage).not.toHaveBeenCalled();
+  });
   it("adds only missing subscription events without replacing unrelated delivery", async () => {
     const update = vi.fn(), create = vi.fn();
     const sdk: any = { webhooks: { subscriptions: { list: async () => [{ id: "one", url: "https://receiver.test", status: "active", eventTypes: ["slack.mention_received", "text.received"] }], update, create } } };

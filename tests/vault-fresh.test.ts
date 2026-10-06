@@ -37,6 +37,20 @@ describe("selective Vault read semantics", () => {
     expect(await f.helper.getTotpCode(secretId)).toEqual({ code: "654321", secondsRemaining: 29 });
     expect(f.vault.unlock).toHaveBeenCalledTimes(2); expect(f.getTotpCode).toHaveBeenCalledTimes(2);
   });
+  it("does not reuse cached unlock after local key removal or a rejected key rotation", async () => {
+    vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", "first-key"); const f = fixture(); await f.helper.getSecret(secretId);
+    vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", "wrong-rotated-key"); f.vault.unlock.mockRejectedValueOnce(new Error("key rejected"));
+    await expect(f.helper.getSecret(secretId)).rejects.toThrow("key rejected"); expect(f.getSecret).toHaveBeenCalledTimes(1);
+    vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", "valid-rotated-key"); await f.helper.getSecret(secretId); expect(f.vault.unlock).toHaveBeenCalledTimes(3);
+    vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", ""); await expect(f.helper.getTotpCode(secretId)).rejects.toThrow("Vault is locked"); expect(f.getTotpCode).not.toHaveBeenCalled();
+    expect(await f.helper.list()).toHaveLength(1);
+  });
+  it.each(["plaintext", "code"])("withholds an in-flight %s result when the local key is revoked", async (kind) => {
+    vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", "first-key"); const f = fixture();
+    if (kind === "plaintext") f.getSecret.mockImplementation(async () => { vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", ""); return { secretType: "login", payload: { password: "must-not-return" } } as any; });
+    else f.getTotpCode.mockImplementation(async () => { vi.stubEnv("INKBOX_OPENCLAW_VAULT_KEY", "different-key"); return { code: "000001", secondsRemaining: 30 }; });
+    await expect(kind === "plaintext" ? f.helper.getSecret(secretId) : f.helper.getTotpCode(secretId)).rejects.toThrow(/Vault is locked|key changed/);
+  });
   it("retains explicit optional tool gates, including generic retrieval", () => {
     const f = fixture(), registrations: any[] = [];
     registerVaultTools({ registerTool: (tool: any, options: any) => registrations.push({ tool, options }) }, f.runtime as any, f.helper);

@@ -1,3 +1,4 @@
+import { activeNativeSource, assertNativeSource } from "../native-source.js";
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolText } from "../errors.js";
@@ -6,8 +7,10 @@ import { formatWithHeader, formatJson } from "../format.js";
 // Read/lifecycle surface for iMessage. Conversations are the canonical
 // thread key — iMessage rides shared Inkbox-managed numbers, so there is no
 // local-number addressing and no group support.
-export function registerIMessageReads(api: any, runtime: InkboxRuntime): void {
-  for (const byMessage of [true, false]) api.registerTool({
+export function registerIMessageReads(api: any, runtime: InkboxRuntime, nativeEnabled = () => true): void {
+  if (nativeEnabled()) for (const byMessage of [true, false]) api.registerTool((context: { sessionKey?: string }) => {
+    const source = activeNativeSource(context.sessionKey);
+    return {
     name: byMessage ? "inkbox_get_imessage_thread" : "inkbox_get_imessage_conversation_thread",
     description: "Read one native iMessage thread chronologically. Follow nextCursor without changing the opaque thread ID.",
     parameters: Type.Object({
@@ -15,12 +18,24 @@ export function registerIMessageReads(api: any, runtime: InkboxRuntime): void {
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), cursor: Type.Optional(Type.String({ minLength: 1 })),
     }, { additionalProperties: false }),
     async execute(_id: string, params: any) { return runTool(async () => {
+      if (!nativeEnabled()) throw new Error("Native iMessage replies and thread tools are disabled.");
+      const keys = [...(byMessage ? ["messageId"] : ["conversationId", "threadId"]), "limit", "cursor"];
+      if (!params || typeof params !== "object" || Array.isArray(params) || Object.keys(params).some((key) => !keys.includes(key))) throw new Error("Invalid native thread arguments.");
+      if (params.cursor !== undefined && (typeof params.cursor !== "string" || !params.cursor || params.cursor.length > 1024 || params.cursor.includes("\0"))) throw new Error("cursor must be 1–1024 characters without NUL.");
+      if (source?.replyToMessageId && source.companion) throw new Error("Use the supplied Companion history; native thread reads are unavailable in this turn.");
       if (params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 1 || params.limit > 100)) throw new Error("limit must be an integer from 1 to 100.");
       for (const key of byMessage ? ["messageId"] : ["conversationId", "threadId"]) if (typeof params[key] !== "string" || !params[key].trim()) throw new Error(`${key} is required.`);
       const identity = await runtime.getIdentity(), options = { limit: params.limit, cursor: params.cursor };
+      if (source?.replyToMessageId) {
+        assertNativeSource(source, identity.id);
+        const conversationId = byMessage ? (await identity.getIMessage(params.messageId)).conversationId : params.conversationId;
+        if (conversationId !== source.conversationId) throw new Error("Native thread reads must stay in the active source conversation.");
+        assertNativeSource(source, identity.id);
+      }
       return toolText(formatJson(await (byMessage ? identity.getIMessageThread(params.messageId, options) : identity.getIMessageConversationThread(params.conversationId, params.threadId, options))));
     }); },
-  });
+    };
+  }, { names: [byMessage ? "inkbox_get_imessage_thread" : "inkbox_get_imessage_conversation_thread"] });
   api.registerTool({
     name: "inkbox_list_imessage_conversations",
     description:

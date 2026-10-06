@@ -52,9 +52,9 @@ export function registerSlackTools(api: any, runtime: InkboxRuntime, config: () 
             if (route) await assertNativeSource(source!, identity.id);
             const allowed = cfg.allowedRecipients;
             if (allowed?.length && !allowed.includes(route ? source!.author : `slack:${args.connectionId}:${args.conversationId}`)) throw new Error("Slack conversation is not on the outbound allowlist.");
-            if (route) await source!.beforeSend(_id);
+            if (route) { await source!.beforeSend(_id); assertNativeSource(source!, identity.id); }
             const action = await client.slack.sendMessage(args.connectionId, { conversationId: args.conversationId, text: args.text, threadTs: route ? route.threadTs : args.threadTs, idempotencyKey: args.idempotencyKey });
-            if (route && action.status === "sent") await source!.afterSend(_id, action.id);
+            if (route && action.status === "sent") await source!.afterSend(_id, action.id, args.text);
             result = { ...action, ...(action.status !== "sent" ? { instruction: "Do not resend. Inspect this action with inkbox_slack_get_action." } : {}) }; break;
           }
           case "get_action": result = await client.slack.getAction(args.connectionId, args.actionId); break;

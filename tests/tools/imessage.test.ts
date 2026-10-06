@@ -231,3 +231,11 @@ describe("registerIMessageReads", () => {
     expect(out.content[0].text).toContain("2 message");
   });
 });
+
+describe("native thread tool enable gate", () => {
+  it("keeps new native readers hidden when the feature is disabled", () => {
+    const { api, tools } = createApi(); registerIMessageReads(api, createRuntime({}), () => false);
+    expect(tools.has("inkbox_get_imessage_thread")).toBe(false); expect(tools.has("inkbox_get_imessage_conversation_thread")).toBe(false);
+    expect(tools.has("inkbox_get_imessage_conversation")).toBe(true);
+  });
+});

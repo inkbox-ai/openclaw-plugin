@@ -129,6 +129,7 @@ export function registerSendIMessage(
           const block = checkOutboundRecipient(source.author, allowedRecipients);
           if (block) return toolError(block);
           await source.beforeSend(_id);
+          assertNativeSource(source, identity.id);
         }
         const msg = await identity.sendIMessage({
           ...(source?.replyToMessageId ? { conversationId: source.conversationId, replyToMessageId: source.replyToMessageId, plainReplyFallback: true,
@@ -137,7 +138,7 @@ export function registerSendIMessage(
           ...(mediaUrls?.length ? { mediaUrls } : {}),
           ...(params.sendStyle ? { sendStyle: params.sendStyle } : {}),
         });
-        if (source?.replyToMessageId) await source.afterSend(_id, msg.id);
+        if (source?.replyToMessageId) await source.afterSend(_id, msg.id, text);
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
         return sentToolText(
           `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} status=${msg.status ?? "unknown"}`,

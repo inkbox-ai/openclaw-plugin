@@ -6037,7 +6037,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal,
       nativeSource: !input.commandAuthorized && (input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
         identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
-        slackRoute: input.reply.slackRoute, author: input.author, closed: false, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend,
+        slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend,
       } : undefined,
       slackRoute: input.reply.slackRoute,
       activity: input.reply.slackRoute ? (phase) => slackActivity.notify(input.reply.slackRoute!, phase) : undefined,
@@ -6061,7 +6061,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   const slackActivity = createSlackActivity(async (route) => {
     const client = await opts.runtime.getClient(), identity = await opts.runtime.getIdentity();
     if (!route || identity.id !== route.identityId) throw new Error("Slack cleanup identity changed.");
-    await ownSlackConnection(client, identity.id, route.connectionId);
+    const connection = await ownSlackConnection(client, identity.id, route.connectionId);
+    if (connection.workspaceId !== route.workspaceId) throw new Error("Slack cleanup workspace changed.");
     return client.slack;
   }, join(statePaths().dir, `slack-activity-${activityOwner}.json`), (message) => opts.logger?.warn?.(message));
   opts.abortSignal?.addEventListener("abort", () => { void slackActivity.close(); }, { once: true });
@@ -6295,7 +6296,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         if (opts.account.config.imessageThreadedReplies && turn.conversationId && turn.replyToId) {
           const normalized: any = structuredClone(event);
           normalized.event_type = "imessage.received";
-          normalized.companion = { channel: "imessage", phase: "ordinary", sequence: Date.now(), scope_id: `${turn.conversationId}:${(event.data.reaction as any)?.thread_id ?? "main"}`, conversation_id: turn.conversationId };
+          normalized.companion = { channel: "imessage", phase: "ordinary", sequence: Date.now(), scope_id: turn.conversationId, conversation_id: turn.conversationId };
           normalized.data.message = { id: turn.messageId, conversation_id: turn.conversationId, sender_number: turn.remoteAddress, direction: "inbound", content: turn.body, sender_access: "direct", _ordinaryAddressed: turn.conversationKind !== "group" };
           normalized._openclawNativeIMessage = { burstable: false, reaction: true, nativeEventKind: turn.nativeEventKind, replyToMessageId: turn.replyToId };
           await companion.accept(normalized);
@@ -6337,7 +6338,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       if (opts.account.config.imessageThreadedReplies) {
         const normalized: any = structuredClone(event), message = normalized.data.message;
-        const scope = `${turn.conversationId}:${message.thread_id ?? "main"}`;
+        const scope = turn.conversationId!;
         normalized.companion = { channel: "imessage", phase: "ordinary", sequence: Date.now(), scope_id: scope, conversation_id: turn.conversationId };
         message.sender_access ??= "direct";
         message._ordinaryAddressed = turn.conversationKind !== "group";

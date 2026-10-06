@@ -33,7 +33,7 @@ function collectRuntimeTools(registrationMode = "tool-discovery"): {
     registerHook(events: string[]) { commandHookNames.push(...events); },
     pluginConfig: {
       apiKey: "ApiKey_test",
-      identity: "smoke-agent", slackEnabled: true,
+      identity: "smoke-agent", slackEnabled: true, imessageThreadedReplies: true,
     },
     runtime: {
       config: { current: () => ({}) },

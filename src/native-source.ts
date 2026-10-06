@@ -3,9 +3,9 @@ import type { SlackRoute } from "./slack.js";
 /** Trusted, short-lived source ownership captured by native tool factories. */
 export type NativeSource = {
   identityId: string; conversationId: string; replyToMessageId?: string; slackRoute?: SlackRoute;
-  author: string; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
+  author: string; companion?: boolean; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
   beforeSend(callId: string): Promise<void>;
-  afterSend(callId: string, messageId: string): Promise<void>;
+  afterSend(callId: string, messageId: string, text?: string): Promise<void>;
 };
 const key = Symbol.for("inkbox.native-source.v1");
 const shared = globalThis as typeof globalThis & { [key]?: Map<string, NativeSource> };
@@ -16,7 +16,7 @@ export function bindNativeSource(sessionKey: string, source: NativeSource): () =
   sources.set(sessionKey, source);
   return () => { source.closed = true; if (sources.get(sessionKey) === source) sources.delete(sessionKey); };
 }
-export async function assertNativeSource(source: NativeSource, identityId: string): Promise<void> {
+export function assertNativeSource(source: NativeSource, identityId: string): void {
   if (source.closed || source.identityId !== identityId) throw new Error("The native reply source is no longer active.");
 }
 

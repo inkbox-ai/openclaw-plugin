@@ -142,7 +142,7 @@ function registerInkboxTools(api: any): void {
   // by default; optional ones (mark-read, raw text list/get) require opt-in.
   registerEmailReads(api, runtime);
   registerSmsReads(api, runtime);
-  registerIMessageReads(api, runtime);
+  registerIMessageReads(api, runtime, () => resolveCfg().imessageThreadedReplies === true);
   registerCallReads(api, runtime);
 
   // Access-scoped contact + note tools. With an agent-scoped key the SDK

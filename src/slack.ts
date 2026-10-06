@@ -68,7 +68,8 @@ export function slackText(text: string): void {
 }
 export async function sendSlackReply(client: Inkbox, route: SlackRoute, text: string): Promise<string> {
   slackText(text);
-  await ownSlackConnection(client, route.identityId, route.connectionId);
+  const connection = await ownSlackConnection(client, route.identityId, route.connectionId);
+  if (connection.workspaceId !== route.workspaceId) throw new Error("Slack reply workspace changed.");
   const key = createHash("sha256").update(JSON.stringify([route.sourceEventId, slackRouteKey(route), text])).digest("hex");
   const action = await client.slack.sendMessage(route.connectionId, { conversationId: route.conversationId, threadTs: route.threadTs, text, idempotencyKey: `openclaw:${key}` });
   if (action.status !== "sent") throw new Error(`Slack action ${action.id} is ${action.status}; inspect it with inkbox_slack_get_action before deciding whether to send again.`);

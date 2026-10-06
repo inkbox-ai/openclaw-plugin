@@ -2,6 +2,7 @@ import { AgentIdentity, Inkbox } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bindNativeSource, type NativeSource } from "../src/native-source.js";
 import { registerSendIMessage } from "../src/tools/send-imessage.js";
+import { registerIMessageReads } from "../src/tools/imessage-reads.js";
 import { registerSlackTools } from "../src/tools/slack.js";
 afterEach(() => vi.unstubAllGlobals());
 function source(): NativeSource { return { identityId: "identity", conversationId: "conversation", replyToMessageId: "first-source", author: "+15555550100", closed: false, beforeSend: vi.fn(), afterSend: vi.fn() }; }
@@ -17,7 +18,7 @@ describe("immutable native reply source", () => {
       const result = await tool.execute("call-id", { conversationId: "conversation", text: "answer", completeSilently: true });
       expect(result.terminate).toBe(true);
       expect(sendIMessage).toHaveBeenCalledWith({ conversationId: "conversation", replyToMessageId: "first-source", plainReplyFallback: true, idempotencyKey: expect.stringMatching(/^openclaw:tool:[a-f0-9]{64}$/), text: "answer" });
-      expect(src.beforeSend).toHaveBeenCalledWith("call-id"); expect(src.afterSend).toHaveBeenCalledWith("call-id", "accepted");
+      expect(src.beforeSend).toHaveBeenCalledWith("call-id"); expect(src.afterSend).toHaveBeenCalledWith("call-id", "accepted", "answer");
     } finally { close(); }
   });
   it.each([{ replyToMessageId: "other" }, { plainReplyFallback: false }, { to: "+15555550102" }, { conversationId: "other" }])("rejects model-controlled retargeting %j", async (override) => {
@@ -29,6 +30,14 @@ describe("immutable native reply source", () => {
     expect((await prepared.tool.execute("old", { text: "answer" })).isError).toBe(true); expect(prepared.sendIMessage).not.toHaveBeenCalled();
     const proactive = iMessageTool("session-old"); await proactive.tool.execute("new", { conversationId: "conversation", text: "fresh" });
     expect(proactive.sendIMessage).toHaveBeenCalledWith({ conversationId: "conversation", text: "fresh" });
+  });
+  it("does not send after source closure while durable send intent is awaited", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), hold = new Promise<void>((resolve) => { release = resolve; });
+    const src = source(); src.beforeSend = async () => { entered(); await hold; };
+    const close = bindNativeSource("closing-source", src), { tool, sendIMessage } = iMessageTool("closing-source");
+    const pending = tool.execute("intent", { text: "answer" }); await started; close(); release();
+    expect((await pending).isError).toBe(true); expect(sendIMessage).not.toHaveBeenCalled();
   });
   it("serializes native iMessage source and API fallback through the published SDK without retry", async () => {
     const requests: RequestInit[] = [];
@@ -43,6 +52,20 @@ describe("immutable native reply source", () => {
       expect(JSON.parse(String(requests[0]!.body))).toMatchObject({ conversation_id: "conversation", reply_to_message_id: "first-source", plain_reply_fallback: true });
       expect(new Headers(requests[0]!.headers).get("Idempotency-Key")).toMatch(/^openclaw:tool:[a-f0-9]{64}$/);
     } finally { close(); }
+  });
+  it("scopes native thread reads to active conversation and never expands Companion history", async () => {
+    const src = source(), close = bindNativeSource("thread-read", src), tools: any[] = [];
+    const identity = { id: "identity", getIMessage: vi.fn(async () => ({ conversationId: "other" })), getIMessageThread: vi.fn(async () => ({})), getIMessageConversationThread: vi.fn(async () => ({})) };
+    registerIMessageReads({ registerTool: (value: any) => { tools.push(typeof value === "function" ? value({ sessionKey: "thread-read" }) : value); } }, { getIdentity: async () => identity } as any);
+    const message = tools.find((tool) => tool.name === "inkbox_get_imessage_thread"), conversation = tools.find((tool) => tool.name === "inkbox_get_imessage_conversation_thread");
+    try {
+      expect((await message.execute("wrong", { messageId: "foreign-source" })).isError).toBe(true); expect(identity.getIMessageThread).not.toHaveBeenCalled();
+      expect((await conversation.execute("wrong", { conversationId: "other", threadId: "opaque" })).isError).toBe(true); expect(identity.getIMessageConversationThread).not.toHaveBeenCalled();
+      identity.getIMessage.mockResolvedValue({ conversationId: "conversation" });
+      expect((await message.execute("right", { messageId: "visible-source", cursor: "opaque-cursor" })).isError).not.toBe(true); expect(identity.getIMessageThread).toHaveBeenCalledTimes(1);
+      src.companion = true; expect((await message.execute("companion", { messageId: "visible-source" })).isError).toBe(true); expect(identity.getIMessageThread).toHaveBeenCalledTimes(1);
+    } finally { close(); }
+    src.companion = false; expect((await conversation.execute("stale", { conversationId: "conversation", threadId: "opaque" })).isError).toBe(true); expect(identity.getIMessageConversationThread).not.toHaveBeenCalled();
   });
   it("preserves explicit null Slack source thread and refuses a model thread override", async () => {
     const src: NativeSource = { ...source(), replyToMessageId: undefined, slackRoute: { identityId: "identity", connectionId: "connection", conversationId: "CROOM", workspaceId: "TWORK", actorId: "USER", messageTs: "1.1", sourceEventId: "event", author: "TWORK:USER", threadTs: null, mentioned: true, addressed: true, direct: false, rawText: "ask", text: "ask" } };
