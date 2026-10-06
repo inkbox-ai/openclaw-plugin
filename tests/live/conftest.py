@@ -36,6 +36,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -49,6 +50,47 @@ UNANSWERED_LIMIT = 10
 # comfortably more than any single test's opener-send count.
 MIN_FREE_SLOTS = 4
 STALE_CALL_AGE_S = 15 * 60
+RESET_SETUP_TIMEOUT_S = 30.0
+RESET_REQUEST_TIMEOUT_S = 2.0
+RESET_POLL_S = 0.5
+RESET_MAX_POLLS = 60
+
+# Exact transport cases collected from the live modules. Helpers live beside
+# these tests but must never acquire clients or perform live setup, even when
+# the CI process has real keys. Keep model test files and their selection intact.
+LIVE_CASES = {
+    "test_email_reply.py": {"test_email_reachability"},
+    "test_sms.py": {
+        "test_sms_reachability", "test_sms_basic_reply",
+        "test_sms_reports_own_identity", "test_sms_reports_sender_details",
+        "test_sms_aware_of_inkbox_tools", "test_sms_retry_after_carrier_delivery_failure",
+        "test_sms_retry_after_internal_spam_block",
+    },
+    "test_email_intelligence.py": {
+        "test_basic_reply", "test_reports_own_identity", "test_reports_sender_name",
+        "test_aware_of_inkbox_tools", "test_contact_crud_tool_use",
+    },
+    "test_cross_channel.py": {
+        "test_email_request_gets_sms_response", "test_sms_request_gets_email_response",
+        "test_email_request_gets_call", "test_sms_request_gets_call",
+    },
+    "test_external_event_github.py": {
+        "test_forged_github_signature_is_rejected_before_dispatch",
+        "test_valid_github_signature_reaches_openclaw_dispatcher",
+    },
+    "test_external_event_intelligence.py": {"test_signed_external_event_reaches_openclaw_dispatcher"},
+    "test_voice.py": {
+        "test_inbound_call_inkbox_tts_stt", "test_outbound_call_realtime",
+        "test_outbound_call_realtime_direct_contact_lookup",
+        "test_outbound_call_hosted_and_settles_sms_once",
+    },
+}
+
+
+def _is_live_case(item) -> bool:
+    path = Path(item.path).resolve()
+    name = getattr(item, "originalname", None) or item.name
+    return path.parent == Path(__file__).resolve().parent and name in LIVE_CASES.get(path.name, ())
 
 
 def pytest_configure(config):
@@ -59,10 +101,10 @@ def pytest_configure(config):
     )
 
 
-def _client(key: str):
+def _client(key: str, *, timeout: float = 30.0):
     from inkbox import Inkbox
 
-    return Inkbox(api_key=key, base_url=BASE_URL)
+    return Inkbox(api_key=key, base_url=BASE_URL, timeout=timeout)
 
 
 _ENDED_CALL_STATUSES = {"completed", "failed", "canceled"}
@@ -146,7 +188,7 @@ def _cleanup_targets(
     return explicitly_owned | (current - baseline)
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def live_call_cleanup():
     """Clean stale calls, then tear down only calls explicitly owned by this run."""
     if not AUT_KEY:
@@ -191,45 +233,70 @@ def _digits(s: str) -> str:
 
 @pytest.fixture(scope="session")
 def _reset_channel():
-    """Session-cached reset endpoints, or None when the suite can't run.
+    """Only exact live cases request these short-timeout clients.
 
-    Returns ``(aut, aut_pid, aut_phone, remote, remote_pid, driver_phone)``:
-    both SDK clients plus each side's phone-number id and E.164 number, so
-    the reset can read/send in either direction. None off-CI (keys/numbers
-    absent) makes the guardrail a no-op.
+    Phone-number reads happen inside the per-case setup budget. SDK 0.7.6
+    has two connect retries: a final in-flight request can exceed the polling
+    deadline by its finite transport timeout/retry overhead (not a hard wall).
     """
-    if not (REMOTE_KEY and AUT_KEY):
-        return None
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        aut = stack.enter_context(_client(AUT_KEY, timeout=RESET_REQUEST_TIMEOUT_S))
+        remote = stack.enter_context(_client(REMOTE_KEY, timeout=RESET_REQUEST_TIMEOUT_S))
+        yield aut, remote
+
+
+def _before_reset_operation(deadline):
+    if time.monotonic() >= deadline:
+        raise RuntimeError("live reset receipt/readiness not confirmed within setup budget")
+
+
+def _reset_endpoints(clients, deadline):
+    aut, remote = clients
     try:
-        aut = _client(AUT_KEY)
-        remote = _client(REMOTE_KEY)
+        _before_reset_operation(deadline)
         aut_nums = aut.phone_numbers.list()
+        _before_reset_operation(deadline)
         remote_nums = remote.phone_numbers.list()
+        _before_reset_operation(deadline)
         if not (aut_nums and remote_nums):
-            return None
-        return (
-            aut, str(aut_nums[0].id), aut_nums[0].number,
-            remote, str(remote_nums[0].id), remote_nums[0].number,
-        )
+            raise RuntimeError("live reset identity has no phone number")
+        return (aut, str(aut_nums[0].id), aut_nums[0].number,
+                remote, str(remote_nums[0].id), remote_nums[0].number)
     except Exception:
-        return None
+        raise RuntimeError("live reset endpoints unavailable") from None
 
 
-def _window_count(client, pid: str, counterparty_number: str) -> int | None:
+def _window_count(client, pid: str, counterparty_number: str, *, deadline=None, allow_first_contact=False) -> int | None:
     """The opener's unanswered-outbound count in this conversation.
 
     Counts the opener's outbound to the counterparty since the opener's most
     recent inbound from them — the same "since last reply" window the server
-    scores. Returns None if the history can't be read (treat as "unknown →
-    reset to be safe").
+    scores. Returns None if the history can't be read or a full page cannot
+    establish enough head-room; unknown never authorizes a reset send.
     """
-    tail = _digits(counterparty_number)[-10:]
+    if deadline is not None:
+        _before_reset_operation(deadline)
     try:
-        msgs = [
-            m for m in client.texts.list(pid, limit=30)
-            if _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == tail
-        ]
-    except Exception:
+        history = client.texts.get_conversation(pid, counterparty_number, limit=50, offset=0)
+        if not isinstance(history, list) or len(history) > 50:
+            return None
+        # Do not let unrelated mailbox traffic hide this window, or trust a
+        # foreign/malformed row as proof that the exact conversation is empty.
+        if any(_digits(getattr(m, "remote_phone_number", "")) != _digits(counterparty_number)
+               or getattr(m, "direction", None) not in {"inbound", "outbound"}
+               for m in history):
+            return None
+        msgs = list(history)
+    except Exception as exc:
+        from inkbox.exceptions import InkboxAPIError
+
+        # Number ownership was verified by _reset_endpoints. The server's
+        # exact 1:1 lookup has this distinct first-contact response; all other
+        # missing-resource/auth/transport errors remain unknown.
+        if allow_first_contact and isinstance(exc, InkboxAPIError) and exc.status_code == 404 and exc.detail == "Conversation not found":
+            return 0
         return None
     # Newest first, walk back until the last inbound; count outbound before it.
     msgs.sort(key=lambda m: str(getattr(m, "created_at", "")), reverse=True)
@@ -237,67 +304,98 @@ def _window_count(client, pid: str, counterparty_number: str) -> int | None:
     for m in msgs:
         direction = (getattr(m, "direction", "") or "").lower()
         if direction == "inbound":
-            break
+            return count
         if direction == "outbound":
             count += 1
+    if len(history) >= 50 and count < UNANSWERED_LIMIT - MIN_FREE_SLOTS + 1:
+        return None
     return count
 
 
-def _try_send(send_fn) -> bool:
-    """Attempt one reset send; True if it landed, False on any block/error."""
+def _ensure_conversation_health(channel, opener, deadline):
+    aut, aut_pid, aut_phone, remote, remote_pid, driver_phone = channel
+    if opener == "aut":
+        receiver, receiver_pid, receiver_phone = aut, aut_pid, aut_phone
+        sender, sender_pid, sender_phone = remote, remote_pid, driver_phone
+    elif opener == "penetrator":
+        receiver, receiver_pid, receiver_phone = remote, remote_pid, driver_phone
+        sender, sender_pid, sender_phone = aut, aut_pid, aut_phone
+    else:
+        raise RuntimeError("invalid live reset opener")
+
+    window = _window_count(receiver, receiver_pid, sender_phone, deadline=deadline, allow_first_contact=True)
+    _before_reset_operation(deadline)
+    if window is None:
+        raise RuntimeError("live reset conversation window unavailable")
+    if UNANSWERED_LIMIT - window >= MIN_FREE_SLOTS:
+        return
+
+    body = _sync_body()
+    _before_reset_operation(deadline)
     try:
-        send_fn()
-        return True
+        accepted = sender.texts.send(sender_pid, to=receiver_phone, text=body)
     except Exception:
-        return False
+        # A rejected or ambiguous POST is not permission to issue another send.
+        raise RuntimeError("live reset send rejected or unconfirmed") from None
+    if not getattr(accepted, "id", None):
+        raise RuntimeError("live reset send acceptance unavailable")
+    created = getattr(accepted, "created_at", None)
+    if not isinstance(created, datetime) or created.tzinfo is None:
+        raise RuntimeError("live reset send timestamp unavailable")
+
+    for _ in range(RESET_MAX_POLLS):
+        _before_reset_operation(deadline)
+        try:
+            rows = receiver.texts.list(receiver_pid, limit=30, start_datetime=created.isoformat())
+        except Exception:
+            raise RuntimeError("live reset inbound receipt unavailable") from None
+        if len(rows) >= 30:
+            raise RuntimeError("live reset inbound receipt page incomplete")
+        exact = [row for row in rows
+                 if getattr(row, "direction", None) == "inbound"
+                 and getattr(row, "id", None)
+                 and _digits(getattr(row, "local_phone_number", "")) == _digits(receiver_phone)
+                 and _digits(getattr(row, "remote_phone_number", "")) == _digits(sender_phone)
+                 and getattr(row, "text", None) == body
+                 and isinstance(getattr(row, "created_at", None), datetime)
+                 and row.created_at.tzinfo is not None and row.created_at >= created]
+        if len(exact) > 1:
+            raise RuntimeError("live reset inbound receipt ambiguous")
+        if len(exact) == 1:
+            window = _window_count(receiver, receiver_pid, sender_phone, deadline=deadline)
+            if window is None:
+                raise RuntimeError("live reset refreshed window unavailable")
+            _before_reset_operation(deadline)
+            if UNANSWERED_LIMIT - window >= MIN_FREE_SLOTS:
+                return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(RESET_POLL_S, remaining))
+    raise RuntimeError("live reset receipt/readiness not confirmed within setup budget")
 
 
 @pytest.fixture(autouse=True)
-def _reset_conversation_health(request, _reset_channel):
+def _reset_conversation_health(request):
     """Reset the opener's conversation window only when it's running low.
 
     See the module docstring for the who-opens / which-window logic.
     """
-    if _reset_channel is None:
+    if not _is_live_case(request.node):
         yield
         return
-
-    aut, aut_pid, aut_phone, remote, remote_pid, driver_phone = _reset_channel
-
-    def smoke_to_pen():  # AUT → penetrator; empties the PENETRATOR's window
-        aut.texts.send(aut_pid, to=driver_phone, text=_sync_body())
-
-    def pen_to_smoke():  # penetrator → AUT; empties the AUT's window (wakes agent)
-        remote.texts.send(remote_pid, to=aut_phone, text=_sync_body())
-
-    marker = request.node.get_closest_marker("first_sender")
-    opener = (marker.args[0] if marker and marker.args else "penetrator").lower()
-
-    if opener == "aut":
-        # AUT opens: guard the AUT's window; empty it with a penetrator→AUT poke.
-        opener_client, opener_pid, counterparty = aut, aut_pid, driver_phone
-        close, open_ = pen_to_smoke, smoke_to_pen
-    else:
-        # Penetrator opens: guard the driver's window; empty it with an AUT→driver poke.
-        opener_client, opener_pid, counterparty = remote, remote_pid, aut_phone
-        close, open_ = smoke_to_pen, pen_to_smoke
-
-    window = _window_count(opener_client, opener_pid, counterparty)
-    # Enough head-room → don't send anything (the common, spam-free path).
-    if window is not None and UNANSWERED_LIMIT - window >= MIN_FREE_SLOTS:
-        yield
-        return
-
-    # Window is low (or unknown) → land an inbound on the opener to empty it.
-    if not _try_send(close):
-        # Blocked → the counterparty's window is also full; drain both.
-        _try_send(close)
-        _try_send(open_)
-        _try_send(close)
-
+    # Resolve both session fixtures only after the exact live-case boundary.
+    # Cleanup still owns new model-created calls, even if reset setup fails.
+    request.getfixturevalue("live_call_cleanup")
+    if REMOTE_KEY and AUT_KEY:
+        deadline = time.monotonic() + RESET_SETUP_TIMEOUT_S
+        clients = request.getfixturevalue("_reset_channel")
+        channel = _reset_endpoints(clients, deadline)
+        marker = request.node.get_closest_marker("first_sender")
+        opener = (marker.args[0] if marker and marker.args else "penetrator").lower()
+        _ensure_conversation_health(channel, opener, deadline)
     yield
 
 
 def _sync_body() -> str:
     # Unique + benign: never trips duplicate_body or the content filter.
-    return f"[test-sync] conversation reset {uuid.uuid4().hex[:8]}"
+    return f"[test-sync] conversation reset {uuid.uuid4().hex}"

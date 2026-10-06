@@ -65,5 +65,7 @@ describe.skipIf(baseline)("actual host auxiliary progress dispatch", () => {
       vi.unstubAllEnvs();
       caseDirectories.push(directory);
     }
-  });
+  // This starts real native session workers; leave bounded cold-start headroom
+  // under the complete parallel offline suite, without changing live deadlines.
+  }, 30_000);
 });

@@ -192,7 +192,7 @@ jobs:
         run: |
           if [ "${{ matrix.mode }}" = "real" ]; then
             export AUT_WEBHOOK_URL="$(cat "$AUT_WEBHOOK_URL_FILE")"
-            LIVE_REAL_MODEL=1 python3 -m pytest tests/live -v --tb=short --maxfail=1
+            LIVE_REAL_MODEL=1 python3 tests/live/channel_failure_diagnostics.py tests/live -v --tb=short --maxfail=1
           else
             python3 -m pytest tests/live -v --tb=short
           fi
