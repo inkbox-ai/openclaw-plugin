@@ -42,6 +42,7 @@ export function registerSendIMessage(
   api: any,
   runtime: InkboxRuntime,
   allowedRecipients?: string[],
+  threadedRepliesEnabled: () => boolean = () => true,
 ): void {
   api.registerTool((context: { sessionKey?: string }) => {
     const source = activeNativeSource(context.sessionKey);
@@ -99,6 +100,12 @@ export function registerSendIMessage(
     }),
     async execute(_id: string, params: any) {
       return runTool(async () => {
+        const validateSource = (identityId = source?.identityId) => {
+          if (!source?.replyToMessageId) return;
+          if (!threadedRepliesEnabled()) throw new Error("Native iMessage replies are disabled; this source-owned send cannot be downgraded or continued.");
+          assertNativeSource(source, identityId!);
+        };
+        validateSource();
         if ("replyToMessageId" in params || "plainReplyFallback" in params) return toolError("Reply targeting and fallback are owned by the current source, not model arguments.");
         const text = typeof params.text === "string" ? params.text : "";
         const mediaUrls = Array.isArray(params.mediaUrls) ? params.mediaUrls : undefined;
@@ -126,13 +133,13 @@ export function registerSendIMessage(
 
         const identity = await runtime.getIdentity();
         if (source?.replyToMessageId) {
-          await assertNativeSource(source, identity.id);
+          validateSource(identity.id);
           const block = checkOutboundRecipient(source.author, allowedRecipients);
           if (block) return toolError(block);
           await verifyNativeIMessageTarget(identity, source.conversationId, source.replyToMessageId);
-          assertNativeSource(source, identity.id);
+          validateSource(identity.id);
           await source.beforeSend(_id);
-          assertNativeSource(source, identity.id);
+          validateSource(identity.id);
         }
         const msg = await identity.sendIMessage({
           ...(source?.replyToMessageId ? { conversationId: source.conversationId, replyToMessageId: source.replyToMessageId, plainReplyFallback: true,

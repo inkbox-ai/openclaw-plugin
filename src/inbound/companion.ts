@@ -253,7 +253,7 @@ export function createCompanionReceiver(opts: {
         const active = await mutate((j) => {
           const job = j.jobs[id]!;
           job.nativeOwner = { sessionKey, runId };
-          return !stopped() && !job.stoppedBy && job.state === "submitting" && !job.nativeComplete;
+          return !stopped() && enabled(job) && !job.stoppedBy && job.state === "submitting" && !job.nativeComplete;
         });
         if (!active) throw new Error("The native source was stopped before its run could begin.");
       },
@@ -262,7 +262,7 @@ export function createCompanionReceiver(opts: {
         await validate();
         await mutate((journal) => {
           const job = journal.jobs[id]!;
-          if (stopped() || job.stoppedBy || job.state !== "submitting" || job.nativeComplete) throw new Error("The native job is no longer active; its tool send is not authorized.");
+          if (stopped() || !enabled(job) || job.stoppedBy || job.state !== "submitting" || job.nativeComplete) throw new Error("The native job is no longer active; its tool send is not authorized.");
           if (Object.values(job.toolSends ?? {}).some((send) => !send.messageId) || job.toolSends?.[callId]) throw new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
           job.toolSends ??= {}; job.toolSends[callId] = {};
         });
@@ -375,16 +375,17 @@ export function createCompanionReceiver(opts: {
       validateBeforeDispatch: async () => {
         checkSponsor(sponsor, sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
-        await mutate((j) => { if (j.jobs[id]!.stoppedBy || !["pending", "submitting"].includes(j.jobs[id]!.state) || (j.jobs[id]!.state === "submitting" && j.jobs[id]!.nativeComplete)) throw new Error("The native job is no longer authorized to dispatch or deliver approval prompts."); j.jobs[id]!.nativeComplete = false; j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; });
+        await mutate((j) => { if (stopped() || !enabled(j.jobs[id]!) || j.jobs[id]!.stoppedBy || !["pending", "submitting"].includes(j.jobs[id]!.state) || (j.jobs[id]!.state === "submitting" && j.jobs[id]!.nativeComplete)) throw new Error("The native job is no longer authorized to dispatch or deliver approval prompts."); j.jobs[id]!.nativeComplete = false; j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; });
       }, recordDelivery, ...toolSendCallbacks(id, () => validateSlack(job)),
     });
     async function sendSaved() {
       const current = (await read()).jobs[id]!;
-      if (current.stoppedBy) return;
+      if (stopped() || !enabled(current) || current.stoppedBy) return;
       if (Object.values(current.toolSends ?? {}).some((send) => !send.messageId)) throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
       const input = makeInput(current.reply!);
       for (const text of current.replies ?? []) {
-        if ((await read()).jobs[id]!.stoppedBy) return;
+        const pending = (await read()).jobs[id]!;
+        if (stopped() || !enabled(pending) || pending.stoppedBy) return;
         // Only an exact accepted same-source send is delivery proof. Do not
         // suppress a different answer, an unknown result, or a legacy receipt.
         if (Object.values(current.toolSends ?? {}).some((send) => send.messageId && send.text === text)) {
@@ -394,7 +395,7 @@ export function createCompanionReceiver(opts: {
         const savedActivation = (await read()).activations[scope];
         checkSponsor(current.sponsor ?? savedActivation?.sponsor ?? author, current.sponsorContactId ?? savedActivation?.sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
-        const sent = await opts.deliver(input, text, async () => { await mutate((j) => { if (j.jobs[id]!.stoppedBy) throw new Error("The source turn was stopped before sending."); j.jobs[id]!.state = "sending"; }); });
+        const sent = await opts.deliver(input, text, async () => { await mutate((j) => { if (stopped() || !enabled(j.jobs[id]!) || j.jobs[id]!.stoppedBy) throw new Error("The source turn was stopped or disabled before sending."); j.jobs[id]!.state = "sending"; }); });
         await mutate((j) => {
           if (sent) j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), sent])];
           j.jobs[id]!.replies!.shift(); j.jobs[id]!.state = j.jobs[id]!.stoppedBy ? "done" : "reply_pending";

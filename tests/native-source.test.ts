@@ -6,12 +6,25 @@ import { registerIMessageReads } from "../src/tools/imessage-reads.js";
 import { registerSlackTools } from "../src/tools/slack.js";
 afterEach(() => vi.unstubAllGlobals());
 function source(): NativeSource { return { identityId: "identity", conversationId: "conversation", replyToMessageId: "first-source", author: "+15555550100", closed: false, beforeSend: vi.fn(), afterSend: vi.fn() }; }
-function iMessageTool(sessionKey: string, sendIMessage = vi.fn(async () => ({ id: "accepted" })), overrides: Record<string, unknown> = {}) {
+function iMessageTool(sessionKey: string, sendIMessage = vi.fn(async () => ({ id: "accepted" })), overrides: Record<string, unknown> = {}, enabled = () => true) {
   let factory: any;
-  registerSendIMessage({ registerTool: (value: any) => { factory = value; } }, { getIdentity: async () => ({ id: "identity", sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => ({ conversationId: "conversation" }), getIMessageConversationThread() {}, ...overrides }) } as any);
+  registerSendIMessage({ registerTool: (value: any) => { factory = value; } }, { getIdentity: async () => ({ id: "identity", sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => ({ conversationId: "conversation" }), getIMessageConversationThread() {}, ...overrides }) } as any, undefined, enabled);
   return { tool: factory({ sessionKey }), sendIMessage };
 }
 describe("immutable native reply source", () => {
+  it.each(["before", "preflight", "intent"])("does not continue or downgrade an owned send when disabled during %s", async (phase) => {
+    let enabled = phase !== "before";
+    const src = source(), close = bindNativeSource("disable-owned", src);
+    if (phase === "intent") src.beforeSend = vi.fn(async () => { enabled = false; });
+    const { tool, sendIMessage } = iMessageTool("disable-owned", undefined, { getIMessageThread: async () => { if (phase === "preflight") enabled = false; return { conversationId: "conversation" }; } }, () => enabled);
+    try {
+      expect((await tool.execute("send", { text: "answer" })).isError).toBe(true); expect(sendIMessage).not.toHaveBeenCalled();
+      if (phase !== "intent") expect(src.beforeSend).not.toHaveBeenCalled();
+    } finally { close(); }
+    const proactive = iMessageTool("unrelated-proactive", undefined, {}, () => false);
+    await proactive.tool.execute("fresh", { conversationId: "conversation", text: "explicit proactive" });
+    expect(proactive.sendIMessage).toHaveBeenCalledWith({ conversationId: "conversation", text: "explicit proactive" });
+  });
   it("binds explicit iMessage replies to first source with API-only fallback", async () => {
     const src = source(), close = bindNativeSource("session-one", src), { tool, sendIMessage } = iMessageTool("session-one");
     try {

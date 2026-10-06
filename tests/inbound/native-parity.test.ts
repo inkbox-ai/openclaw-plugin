@@ -22,6 +22,21 @@ function receiver(submit: any, deliver = vi.fn(async () => "sent"), threaded = t
   return createCompanionReceiver({ accountId: "default", config: { identity: "agent", imessageThreadedReplies: threaded }, runtime: { getIdentity: async () => ({ id: identityId }), getClient: async () => ({}) } as any, submit, deliver });
 }
 describe("durable noninterrupting native iMessage coordinator", () => {
+  it("retains an owned answer while disabled and rejects old dispatch/tool authority", async () => {
+    let entered!: () => void, release!: () => void, owner: any;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    const config = { identity: "agent", imessageThreadedReplies: true };
+    const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); owner = input; entered(); await held; return ["saved answer"]; });
+    const deliver = vi.fn(async (_input: any, _text: string, beforeSend: any) => { await beforeSend(); return "sent"; });
+    const queue = createCompanionReceiver({ accountId: "default", config, runtime: { getIdentity: async () => ({ id: identityId }), getClient: async () => ({}) } as any, submit, deliver });
+    await queue.accept(imessage("disable-active")); await started; config.imessageThreadedReplies = false;
+    await expect(owner.beforeToolSend("old-tool")).rejects.toThrow("no longer active");
+    await expect(owner.validateBeforeDispatch()).rejects.toThrow("no longer authorized");
+    release(); await queue.idle(); await queue.recover(); expect(deliver).not.toHaveBeenCalled();
+    expect(Object.values((await readJournal()).jobs).some((job: any) => job.state === "reply_pending")).toBe(true);
+    config.imessageThreadedReplies = true; await queue.recover(); await queue.idle(); queue.close();
+    expect(submit).toHaveBeenCalledTimes(1); expect(deliver).toHaveBeenCalledTimes(1);
+  });
   it("blocks a late native owner that arrives after accepted Stop without inventing terminal proof", async () => {
     let entered!: () => void, release!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });

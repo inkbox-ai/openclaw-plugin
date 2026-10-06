@@ -99,7 +99,7 @@ function registerInkboxTools(api: any): void {
   // threaded through; when undefined, no filtering applies.
   registerSendEmail(api, runtime, cfg.allowedRecipients);
   registerSendSms(api, runtime, cfg.allowedRecipients);
-  registerSendIMessage(api, runtime, cfg.allowedRecipients);
+  registerSendIMessage(api, runtime, cfg.allowedRecipients, () => resolveCfg().imessageThreadedReplies === true);
   registerA2ATools(api, runtime, cfg.allowedRecipients);
 
   // Optional outbound tools — require explicit opt-in via tools.allow.
