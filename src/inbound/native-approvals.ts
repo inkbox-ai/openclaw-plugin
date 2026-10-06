@@ -12,7 +12,7 @@ type Decision = "allow-once" | "allow-always" | "deny";
 export type NativeApprovalOwner = { scope: string; author: string; channel: string; accountId: string };
 export type NativeApprovalBinding = NativeApprovalOwner & {
   to: string; threadId?: string; sessionKey: string; marker: string; runId?: string; modelStarted?: boolean; resetRequested?: boolean; resetCommitted?: boolean;
-  deliver(text: string): Promise<void>;
+  deliver(text: string, approvalId: string): Promise<void>;
   ready?(): Promise<void>;
   activity?(phase: "waiting" | "resumed"): void;
 };
@@ -124,7 +124,7 @@ export const inkboxApprovalCapability = {
       deliverPending: async (params) => {
         const binding = params.preparedTarget;
         if (find(params) !== binding) return null;
-        await binding.deliver(params.pendingPayload);
+        await binding.deliver(params.pendingPayload, params.request.id);
         const buffer = contextBuffer(binding.scope);
         const entries = await buffer.snapshot();
         await buffer.acknowledge(entries.filter((entry) => { try { return JSON.parse(entry.body).expiresAt <= Date.now(); } catch { return false; } }));

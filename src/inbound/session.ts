@@ -146,6 +146,8 @@ type InkboxInboundTurn = {
   companionReply?: CompanionReply;
   companionValidateBeforeDispatch?: () => Promise<void>;
   companionRecordDelivery?: (messageId: string) => Promise<void>;
+  companionBeforeApprovalSend?: (approvalId: string) => Promise<void>;
+  companionAfterApprovalSend?: (approvalId: string, messageId: string) => Promise<void>;
   rawText?: string;
   storedMessageId?: string;
   reaction?: boolean;
@@ -2730,11 +2732,18 @@ async function dispatchInboundTurn(
     accountId: opts.account.accountId, scope: approvalScope(opts.turn, opts.account), author: opts.turn.remoteAddress ?? "",
     channel: opts.turn.mode === "email" ? "mail" : opts.turn.mode, sessionKey: effectiveSessionKey,
     to: smsReplyTarget, threadId: opts.turn.threadId, marker: approvalMarker, resetRequested: opts.turn.contextResetExpected,
-    deliver: async (text) => {
+    deliver: async (text, approvalId) => {
+      if (opts.turn.companionBeforeApprovalSend && (typeof approvalId !== "string" || !approvalId)) throw new Error("Native approval request identity is unavailable.");
       if (opts.turn.companionReply && opts.account.config.groupReplyMode === "mention") text += "\nInclude @agent before /approve when answering in mention mode.";
       await opts.turn.companionValidateBeforeDispatch?.();
-      const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger, beforeSend: opts.turn.companionValidateBeforeDispatch });
-      if (messageId) await opts.turn.companionRecordDelivery?.(messageId);
+      const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger, beforeSend: async () => {
+        await opts.turn.companionValidateBeforeDispatch?.();
+        await opts.turn.companionBeforeApprovalSend?.(approvalId);
+      } });
+      if (messageId) {
+        if (opts.turn.companionAfterApprovalSend) await opts.turn.companionAfterApprovalSend(approvalId, messageId);
+        else await opts.turn.companionRecordDelivery?.(messageId);
+      }
     }, ready: opts.turn.companionApprovalReady, activity: opts.turn.activity,
   };
   const releaseApprovalTurn = trackNativeApprovalTurn(core, approvalBinding);
@@ -6056,6 +6065,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       companionReply: structuredClone(input.reply),
       companionValidateBeforeDispatch: input.validateBeforeDispatch,
       companionRecordDelivery: input.recordDelivery,
+      companionBeforeApprovalSend: input.beforeApprovalSend,
+      companionAfterApprovalSend: input.afterApprovalSend,
       companionApprovalReady: () => companion.reconsiderApprovals(),
       replyToId: input.reply.replyToMessageId ?? undefined,
       threadId: input.reply.slackRoute ? input.reply.slackRoute.threadTs ?? undefined : `${mode}:${input.reply.conversationId}`,
@@ -6200,7 +6211,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
       normalized._openclawSlack = { route, rawText: slackControlText(route, botUserId) };
       normalized.data.message = { id, author: route.author, conversation_id: normalized.companion.conversation_id, direction: "inbound", body: route.text, text: route.text, sender_access: route.senderAccess ?? "direct", mentioned: route.mentioned || route.nativeStop,
-        _ordinaryAddressed: !event.companion && route.addressed, _slackDirect: route.direct, attachments: event.data.event.files ?? [] };
+        _ordinaryAddressed: !event.companion && route.direct, _slackDirect: route.direct, attachments: event.data.event.files ?? [] };
       await companion.accept(normalized);
     },
     async onCallEnded(event) {

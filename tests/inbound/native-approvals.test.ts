@@ -28,7 +28,7 @@ it("delivers a queued turn's approval only to its original run and rejects wrong
   const handler = await createChannelApprovalHandlerFromCapability({ capability: inkboxApprovalCapability, cfg: {}, channel: "inkbox", channelLabel: "Inkbox", accountId: "default", label: "native-contract", clientDisplayName: "Synthetic", context: s.context });
   try {
     await handler!.handleRequested(request(s.binding.sessionKey, "first-run"));
-    expect(s.binding.deliver).toHaveBeenCalledTimes(1); expect(later.deliver).not.toHaveBeenCalled();
+    expect(s.binding.deliver).toHaveBeenCalledTimes(1); expect(s.binding.deliver).toHaveBeenCalledWith(expect.any(String), id); expect(later.deliver).not.toHaveBeenCalled();
     for (const owner of [{ ...s.binding, author: later.author }, { ...s.binding, scope: "different-activation" }]) expect(await resolveNativeApproval(owner, `/approve ${id} allow-once`, {})).toBe(false);
     expect(await resolveNativeApproval(s.binding, `/approve ${id} allow-always`, {})).toBe(false);
     expect(state.resolve).not.toHaveBeenCalled();

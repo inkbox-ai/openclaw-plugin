@@ -8,20 +8,221 @@ const gateway = vi.hoisted(() => ({ rpc: vi.fn() }));
 vi.mock("../../src/state.js", async () => ({ statePaths: () => ({ dir: state.dir }), ensureStateDir: async () => (await import("node:fs/promises")).mkdir(state.dir, { recursive: true }) }));
 vi.mock("openclaw/plugin-sdk/gateway-runtime", () => ({ callGatewayFromCli: gateway.rpc }));
 vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({ resolveInboundRouteEnvelopeBuilderWithRuntime: () => ({ route: { agentId: "main", accountId: "default", sessionKey: "native-session" }, buildEnvelope: ({ body }: any) => ({ storePath: "memory:test", body }) }) }));
+import { createChannelApprovalHandlerFromCapability } from "openclaw/plugin-sdk/approval-handler-runtime";
+import { inkboxApprovalCapability, resolveNativeApproval } from "../../src/inbound/native-approvals.js";
 import { createCompanionReceiver, readCompanionQueueSummary } from "../../src/inbound/companion.js";
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
 import { bindNativeOwner, fenceNativeOwner, guardRetiredNativeRun, trackNativeOwner } from "../../src/native-owner.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
+const approvalHandlers: Array<{ stop(): Promise<void> }> = [];
 const bridges: ReturnType<typeof createInkboxSessionBridge>[] = [];
 const identityId = "11111111-1111-4111-8111-111111111111", connectionId = "22222222-2222-4222-8222-222222222222";
 beforeEach(async () => { state.dir = await mkdtemp(join(tmpdir(), "native-parity-")); gateway.rpc.mockReset(); });
-afterEach(async () => { await Promise.all(bridges.splice(0).map((bridge) => bridge.shutdownA2A())); vi.useRealTimers(); await rm(state.dir, { recursive: true, force: true }); });
-async function readJournal() { const name = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name)); return name ? JSON.parse(await readFile(join(state.dir, name), "utf8")) : { jobs: {} }; }
+afterEach(async () => { await Promise.all(approvalHandlers.splice(0).map((handler) => handler.stop())); await Promise.all(bridges.splice(0).map((bridge) => bridge.shutdownA2A())); vi.useRealTimers(); await rm(state.dir, { recursive: true, force: true }); });
+async function readJournal() {
+  const name = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name));
+  if (!name) return { jobs: {} };
+  const journal = JSON.parse(await readFile(join(state.dir, name), "utf8"));
+  const directory = join(state.dir, `${name}.receipts`, "events");
+  for (const entry of await readdir(directory).catch((error) => { if (error.code === "ENOENT") return []; throw error; })) {
+    if (!entry.endsWith(".json")) continue;
+    const receipt = JSON.parse(await readFile(join(directory, entry), "utf8"));
+    journal.jobs[receipt.id] ??= receipt.job;
+  }
+  return journal;
+}
 function imessage(id: string, text = id, thread = "main", burstable = false) { return { id: `event-${id}`, event_type: "imessage.received", companion: { channel: "imessage", phase: "ordinary", sequence: Date.now(), scope_id: `conversation:${thread}`, conversation_id: "conversation" }, data: { message: { id, conversation_id: "conversation", sender_number: "+15555550100", content: text, sender_access: "direct", _ordinaryAddressed: true } }, _openclawNativeIMessage: { burstable } }; }
 function receiver(submit: any, deliver = vi.fn(async () => "sent"), threaded = true) {
   return createCompanionReceiver({ accountId: "default", config: { identity: "agent", imessageThreadedReplies: threaded }, runtime: { getIdentity: async () => ({ id: identityId }), getClient: async () => ({}) } as any, submit, deliver });
 }
 describe("durable noninterrupting native iMessage coordinator", () => {
+  it.each(["accepted", "uncertain"])("stops later native reply blocks without relabeling the first crossed send: %s", async (outcome) => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); return ["first", "second"]; });
+    const deliver = vi.fn(async (_input: any, _text: string, beforeSend: any) => { await beforeSend(); entered(); await held; if (outcome === "uncertain") throw new Error("synthetic unknown send"); return "first-accepted"; });
+    const queue = receiver(submit, deliver); await queue.accept(imessage("many-blocks")); await started;
+    try { await queue.accept(imessage("many-stop", "/stop")); } finally { release(); }
+    await queue.idle(); await queue.recover();
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "event-many-blocks") as any;
+    expect(submit).toHaveBeenCalledOnce(); expect(deliver).toHaveBeenCalledOnce();
+    if (outcome === "accepted") expect(original).toMatchObject({ state: "done", sendUnconfirmed: false, outboundIds: ["first-accepted"], replies: ["second"] });
+    else expect(original).toMatchObject({ state: "paused", sendUnconfirmed: true, uncertaintyRecorded: true, replies: ["first", "second"] });
+    expect(original.reason ?? "").not.toContain("Canceled");
+    await queue.accept(imessage("many-stop", "/stop")); await queue.idle(); queue.close();
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+  it.each(["live", "restart", "legacy-paused", "legacy-sending"])("preserves unknown send proof when a fresh Stop arrives after failure: %s", async (mode) => {
+    const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); return ["answer"]; });
+    const deliver = vi.fn(async (_input: any, _text: string, beforeSend: any) => { await beforeSend(); throw new Error("synthetic unknown send"); });
+    let queue = receiver(submit, deliver); await queue.accept(imessage("unknown-before-stop")); await queue.idle();
+    if (mode !== "live") {
+      queue.close();
+      if (mode.startsWith("legacy")) {
+        const name = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name))!;
+        const journal = JSON.parse(await readFile(join(state.dir, name), "utf8"));
+        for (const job of Object.values(journal.jobs) as any[]) { delete job.sendUnconfirmed; if (mode === "legacy-sending") job.state = "sending"; }
+        await writeFile(join(state.dir, name), JSON.stringify(journal));
+      }
+      queue = receiver(submit, deliver);
+      if (mode === "restart" || mode === "legacy-sending") await queue.recover();
+    }
+    await queue.accept(imessage("fresh-later-stop", "/stop")); await queue.idle();
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "event-unknown-before-stop") as any;
+    expect(original).toMatchObject({ state: "paused", nativeComplete: true, sendUnconfirmed: true, uncertaintyRecorded: true, replies: ["answer"] });
+    expect(original.reason).not.toContain("Canceled"); expect(await queue.ownsDelivery(undefined, "conversation")).toBe(true);
+    expect(await readCompanionQueueSummary("default", { identity: "agent", imessageThreadedReplies: true }, identityId)).toMatchObject({ unconfirmed: 1, blockedConversations: 0 });
+    deliver.mockImplementation(async (_input: any, _text: string, beforeSend: any) => { await beforeSend(); return "fresh-accepted"; });
+    await queue.accept(imessage("fresh-question")); await queue.idle();
+    await queue.accept(imessage("fresh-later-stop", "/stop")); await queue.idle(); queue.close();
+    expect(submit).toHaveBeenCalledTimes(2); expect(deliver).toHaveBeenCalledTimes(2);
+  });
+  it("can stop a definitively unsent saved answer paused by a readonly failure", async () => {
+    const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); return ["answer"]; });
+    const deliver = vi.fn(async () => { throw new Error("synthetic invalid target before POST"); });
+    const queue = receiver(submit, deliver); await queue.accept(imessage("readonly-failed")); await queue.idle();
+    expect(Object.values((await readJournal()).jobs)).toContainEqual(expect.objectContaining({ state: "paused", sendUnconfirmed: false }));
+    await queue.accept(imessage("readonly-stop", "/stop")); await queue.idle(); queue.close();
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "event-readonly-failed") as any;
+    expect(original).toMatchObject({ state: "done", sendUnconfirmed: false }); expect(submit).toHaveBeenCalledOnce(); expect(deliver).toHaveBeenCalledOnce();
+  });
+  it("retains unknown approval intents without blocking other approvals, model sends or the final answer", async () => {
+    const contexts = new Map<string, any>();
+    const sendIMessage = vi.fn(async () => { if (sendIMessage.mock.calls.length === 1) throw new Error("synthetic approval outcome unknown"); return { id: `sent-${sendIMessage.mock.calls.length}` }; });
+    const identity = { id: identityId, sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => ({ conversationId: "conversation" }), getIMessageConversationThread() {} };
+    const runtime = { getIdentity: async () => identity, getClient: async () => ({}) };
+    const dispatchReply = vi.fn(async (input: any) => {
+      const binding = contexts.get("approval.native").bindings.get(input.routeSessionKey)[0];
+      const outcomes = await Promise.allSettled([binding.deliver("request", "unknown-approval"), binding.deliver("request", "other-approval")]);
+      expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "fulfilled"]);
+      await expect(binding.deliver("request", "unknown-approval")).rejects.toThrow("accepted or uncertain");
+      const { registerSendIMessage } = await import("../../src/tools/send-imessage.js"); let factory: any;
+      registerSendIMessage({ registerTool: (value: any) => { factory = value; } }, runtime as any);
+      expect((await factory({ sessionKey: input.routeSessionKey }).execute("model-send", { text: "extra" })).isError).not.toBe(true);
+      await input.delivery.deliver({ text: "final answer" }, { kind: "final" }); return { dispatched: true };
+    });
+    const config = { identity: "agent", imessageThreadedReplies: true };
+    const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config } as any, cfg: {}, runtime: runtime as any, channelRuntime: { runtimeContexts: { get: ({ capability }: any) => contexts.get(capability), register: ({ capability, context }: any) => { contexts.set(capability, context); return { dispose() {} }; } }, inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
+    bridges.push(bridge); await dispatchInbound(imessage("approval-uncertainty"), bridge.handlers); await bridge.catchUpCompanion();
+    expect(dispatchReply).toHaveBeenCalledOnce(); expect(sendIMessage).toHaveBeenCalledTimes(4);
+    expect(sendIMessage.mock.calls[3]![0]).toMatchObject({ text: "final answer" });
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.data.message.id === "approval-uncertainty") as any;
+    expect(original).toMatchObject({ state: "done", toolSends: { "approval:unknown-approval": { kind: "approval" } } });
+    expect(await readCompanionQueueSummary("default", config, identityId)).toMatchObject({ unconfirmed: 1, blockedConversations: 0, savedAnswers: 0 });
+  });
+  it("does not infer approval authority from a model-supplied tool-call identifier", async () => {
+    const submit = vi.fn(async (input: any) => {
+      await input.validateBeforeDispatch(); await input.beforeToolSend("approval:ordinary-model-call");
+      await expect(input.beforeToolSend("later-model-send")).rejects.toThrow("accepted or uncertain");
+      await input.beforeApprovalSend("real-request"); await input.afterApprovalSend("real-request", "prompt-accepted");
+      return ["answer"];
+    });
+    const deliver = vi.fn(), queue = receiver(submit, deliver); await queue.accept(imessage("intent-kind")); await queue.idle(); queue.close();
+    expect(deliver).not.toHaveBeenCalled();
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "event-intent-kind") as any;
+    expect(original.toolSends["approval:ordinary-model-call"]).toEqual({});
+    expect(original.toolSends["approval:real-request"]).toEqual({ kind: "approval", messageId: "prompt-accepted" });
+  });
+
+  it.each(["accepted", "uncertain"])("preserves a native reply already past the send checkpoint when Stop arrives: %s", async (outcome) => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); return ["saved"]; });
+    const deliver = vi.fn(async (_input: any, _text: string, beforeSend: any) => { await beforeSend(); entered(); await held; if (outcome === "uncertain") throw new Error("synthetic unknown send"); return "accepted-reply"; });
+    const queue = receiver(submit, deliver);
+    await queue.accept(imessage("crossed")); await started; await queue.accept(imessage("crossed-stop", "/stop"));
+    try {
+      const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "event-crossed") as any;
+      expect(original.state).toBe("sending"); expect(original.stoppedBy).toEqual(expect.any(String));
+    } finally { release(); }
+    await queue.idle(); await queue.recover();
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "event-crossed") as any;
+    if (outcome === "accepted") { expect(original.state).toBe("done"); expect(await queue.ownsDelivery("accepted-reply")).toBe(true); }
+    else { expect(original).toMatchObject({ state: "paused", nativeComplete: true, uncertaintyRecorded: true, replies: ["saved"] }); expect(await queue.ownsDelivery(undefined, "conversation")).toBe(true); }
+    expect(original.reason ?? "").not.toContain("Canceled");
+    await queue.accept(imessage("crossed-stop", "/stop")); await queue.idle(); queue.close();
+    expect(submit).toHaveBeenCalledOnce(); expect(deliver).toHaveBeenCalledOnce();
+  });
+  it.each(["disable", "shutdown"])("resumes an unsent saved answer after %s during readonly preflight", async (mode) => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    const config = { identity: "agent", imessageThreadedReplies: true }, sent = vi.fn();
+    const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); return ["saved"]; });
+    const deliver = vi.fn(async (_input: any, text: string, beforeSend: any) => { entered(); await held; await beforeSend(); sent(text); return "sent"; });
+    const make = () => createCompanionReceiver({ accountId: "default", config, runtime: { getIdentity: async () => ({ id: identityId }), getClient: async () => ({}) } as any, submit, deliver });
+    const queue = make(); await queue.accept(imessage("preflight")); await started;
+    if (mode === "shutdown") queue.close(); else config.imessageThreadedReplies = false;
+    release(); await queue.idle(); queue.close();
+    expect(sent).not.toHaveBeenCalled();
+    expect(Object.values((await readJournal()).jobs)).toContainEqual(expect.objectContaining({ state: "reply_pending", replies: ["saved"], nativeComplete: true }));
+    config.imessageThreadedReplies = true; const next = make(); await next.recover(); await next.idle(); next.close();
+    expect(submit).toHaveBeenCalledOnce(); expect(sent).toHaveBeenCalledOnce(); expect(sent).toHaveBeenCalledWith("saved");
+  });
+  it.each(["accepted", "uncertain"])("retains an in-flight native approval delivery after Stop and archival: %s", async (outcome) => {
+    let entered!: () => void, releaseSdk!: () => void, releaseModel!: () => void, delivery!: Promise<void>, binding: any, handler: any;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), sdkHeld = new Promise<void>((resolve) => { releaseSdk = resolve; }), modelHeld = new Promise<void>((resolve) => { releaseModel = resolve; });
+    const contexts = new Map<string, any>();
+    const sendIMessage = vi.fn(async () => { entered(); await sdkHeld; if (outcome === "uncertain") throw new Error("synthetic unknown delivery outcome"); return { id: "approval-accepted" }; });
+    const identity = { id: identityId, sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => ({ conversationId: "conversation" }), getIMessageConversationThread() {} };
+    const dispatchReply = vi.fn(async (input: any) => {
+      await bindNativeOwner({ prompt: JSON.stringify(input.ctxPayload) }, { sessionKey: input.routeSessionKey, runId: "approval-run" });
+      binding = contexts.get("approval.native").bindings.get(input.routeSessionKey)[0];
+      handler = await createChannelApprovalHandlerFromCapability({ capability: inkboxApprovalCapability, cfg: {}, channel: "inkbox", channelLabel: "Inkbox", accountId: "default", label: "native-contract", clientDisplayName: "Synthetic", context: contexts.get("approval.native") });
+      approvalHandlers.push(handler);
+      delivery = handler.handleRequested({ id: "33333333-3333-4333-8333-333333333333", createdAtMs: Date.now(), expiresAtMs: Date.now() + 60_000, request: { command: "synthetic", ask: "always", sessionKey: input.routeSessionKey, turnSourceChannel: "inkbox", turnSourceAccountId: "default", turnSourceTo: binding.to, turnSourceThreadId: binding.threadId } });
+      void delivery.catch(() => {});
+      await modelHeld; return { dispatched: true };
+    });
+    const config = { identity: "agent", imessageThreadedReplies: true };
+    const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config } as any, cfg: {}, runtime: { getIdentity: async () => identity, getClient: async () => ({}) } as any, channelRuntime: { runtimeContexts: { get: ({ capability }: any) => contexts.get(capability), register: ({ capability, context }: any) => { contexts.set(capability, context); return { dispose() {} }; } }, inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
+    bridges.push(bridge);
+    gateway.rpc.mockResolvedValue({ runId: "approval-run", status: "ok", endedAt: 100 });
+    const nativeEvent = (id: string, content: string) => ({ id: `native-${id}`, event_type: "imessage.received", data: { message: { id, conversation_id: "conversation", sender_number: "+15555550100", remote_number: "+15555550100", direction: "inbound", content } } });
+    await dispatchInbound(nativeEvent("approval-owner", "question"), bridge.handlers); await started;
+    await dispatchInbound(nativeEvent("approval-stop", "/stop"), bridge.handlers); releaseModel(); await bridge.catchUpCompanion();
+    await handler.handleResolved({ id: "33333333-3333-4333-8333-333333333333", decision: "deny", resolvedAtMs: Date.now() });
+    const filename = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name))!;
+    const hot = async () => JSON.parse(await readFile(join(state.dir, filename), "utf8"));
+    try {
+      const original = Object.values((await hot()).jobs).find((job: any) => job.event.data.message.id === "approval-owner") as any;
+      expect(original).toMatchObject({ state: "done", nativeComplete: true });
+      expect(Object.values(original.toolSends)).toEqual([{ kind: "approval" }]);
+      expect(await readCompanionQueueSummary("default", config, identityId)).toMatchObject({ unconfirmed: 1, blockedConversations: 0 });
+      expect(gateway.rpc).toHaveBeenCalledWith("agent.wait", expect.anything(), expect.objectContaining({ runId: "approval-run" }));
+    } finally { releaseSdk(); }
+    if (outcome === "accepted") {
+      await delivery; await bridge.catchUpCompanion();
+      expect(Object.keys((await hot()).jobs)).toHaveLength(0);
+      const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.data.message.id === "approval-owner") as any;
+      expect(original.outboundIds).toContain("approval-accepted");
+      expect(Object.values(original.toolSends)).toEqual([{ kind: "approval", messageId: "approval-accepted" }]);
+    } else {
+      await delivery; await bridge.catchUpCompanion();
+      expect(Object.values((await hot()).jobs)).toContainEqual(expect.objectContaining({ state: "done", toolSends: expect.any(Object) }));
+      expect(await readCompanionQueueSummary("default", { ...config, imessageThreadedReplies: false }, identityId)).toMatchObject({ disabledRetained: 1, unconfirmed: 0, blockedConversations: 0 });
+    }
+    expect(await resolveNativeApproval(binding, "/approve 33333333-3333-4333-8333-333333333333 allow-once", {})).toBe(false);
+    expect(sendIMessage).toHaveBeenCalledOnce(); expect(dispatchReply).toHaveBeenCalledOnce();
+  });
+  it("keys approval intents by native request ID without suppressing an identical final answer", async () => {
+    const contexts = new Map<string, any>(), sendIMessage = vi.fn(async () => ({ id: `sent-${sendIMessage.mock.calls.length}` }));
+    const identity = { id: identityId, sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => ({ conversationId: "conversation" }), getIMessageConversationThread() {} };
+    const dispatchReply = vi.fn(async (input: any) => {
+      const binding = contexts.get("approval.native").bindings.get(input.routeSessionKey)[0];
+      await binding.deliver("same text", "approval-one");
+      await binding.deliver("same text", "approval-two");
+      await expect(binding.deliver("same text", "approval-one")).rejects.toThrow("accepted or uncertain");
+      await input.delivery.deliver({ text: "same text" }, { kind: "final" }); return { dispatched: true };
+    });
+    const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config: { identity: "agent", imessageThreadedReplies: true } } as any, cfg: {}, runtime: { getIdentity: async () => identity, getClient: async () => ({}) } as any, channelRuntime: { runtimeContexts: { get: ({ capability }: any) => contexts.get(capability), register: ({ capability, context }: any) => { contexts.set(capability, context); return { dispose() {} }; } }, inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
+    bridges.push(bridge); await dispatchInbound(imessage("approval-identities"), bridge.handlers); await bridge.catchUpCompanion();
+    expect(sendIMessage).toHaveBeenCalledTimes(3);
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.data.message.id === "approval-identities") as any;
+    expect(Object.keys(original.toolSends)).toHaveLength(2);
+    expect(Object.values(original.toolSends).every((send: any) => send.messageId && send.text === undefined)).toBe(true);
+    expect(original.outboundIds).toHaveLength(3);
+  });
+
   it("does not suppress a current source answer after an independent explicit send with identical text", async () => {
     const sendIMessage = vi.fn(async () => ({ id: `sent-${sendIMessage.mock.calls.length}` }));
     const identity = { id: identityId, sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => ({ conversationId: "conversation" }), getIMessageConversationThread() {} };
@@ -89,7 +290,7 @@ describe("durable noninterrupting native iMessage coordinator", () => {
     const identity = { id: identityId, sendIMessage, getIMessage: async (id: string) => ({ id, conversationId: "conversation" }), getIMessageThread: async () => { entered(); await held; return { conversationId: "conversation" }; }, getIMessageConversationThread() {} };
     const dispatchReply = vi.fn(async (input: any) => {
       const binding = contexts.get("approval.native").bindings.get(input.routeSessionKey)[0];
-      await binding.deliver("Approval requested"); return { dispatched: true };
+      await binding.deliver("Approval requested", "approval-request"); return { dispatched: true };
     });
     const bridge = createInkboxSessionBridge({ account: { accountId: "default", identity: "agent", config: { identity: "agent", imessageThreadedReplies: true } } as any, cfg: {}, runtime: { getIdentity: async () => identity, getClient: async () => ({}) } as any, channelRuntime: { runtimeContexts: { get: ({ capability }: any) => contexts.get(capability), register: ({ capability, context }: any) => { contexts.set(capability, context); return { dispose() {} }; } }, inbound: { buildContext: (v: any) => v, dispatchReply }, session: { recordInboundSession() {} }, reply: { dispatchReplyWithBufferedBlockDispatcher() {} } } });
     bridges.push(bridge);
@@ -376,6 +577,222 @@ function slackBridge(config: Record<string, unknown> = {}) {
   return { bridge, slack, companion, dispatchReply, runtime, settings, actors };
 }
 describe("Slack native host channel-wide Companion", () => {
+  it("archives a successfully completed ordinary native control without keeping it in hot rewrites", async () => {
+    const f = slackBridge(); let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      if (input.ctxPayload.message.commandBody === "/stop") release(); else { entered(); await held; }
+      return { dispatched: true };
+    });
+    const current: any = slackEvent(1, "1769999999.999999"); delete current.companion;
+    await dispatchInbound(current, f.bridge.handlers); await started;
+    const stop: any = slackEvent(2, "1769999999.999999"); delete stop.companion; stop.data.event.text = "<@UBOT> /stop";
+    try { await dispatchInbound(stop, f.bridge.handlers); } finally { release(); await f.bridge.catchUpCompanion(); }
+    expect(f.dispatchReply).toHaveBeenCalledTimes(2); expect(f.slack.sendMessage).not.toHaveBeenCalled();
+    const name = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name))!;
+    expect(Object.keys(JSON.parse(await readFile(join(state.dir, name), "utf8")).jobs)).toHaveLength(0);
+    await dispatchInbound(stop, f.bridge.handlers); await f.bridge.catchUpCompanion(); expect(f.dispatchReply).toHaveBeenCalledTimes(2);
+  });
+  it.each(["native", "text", "legacy-native", "legacy-text", "saved-native", "saved-text", "delayed-native", "delayed-text"])("does not dispatch a restored pending %s Stop without an active captured target", async (control) => {
+    const first = slackBridge(), thread = "1769999999.999999";
+    await dispatchInbound(slackEvent(1, null), first.bridge.handlers); await first.bridge.catchUpCompanion();
+    await dispatchInbound(slackEvent(2, thread), first.bridge.handlers); await first.bridge.catchUpCompanion(); await first.bridge.shutdownA2A();
+    const name = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name))!;
+    const journal = JSON.parse(await readFile(join(state.dir, name), "utf8"));
+    const [targetId, target] = Object.entries(journal.jobs).find(([, job]: any) => job.event.id === "slack-event-2") as [string, any];
+    const saved = control.startsWith("saved") || control.startsWith("delayed");
+    if (saved) Object.assign(target, { state: "reply_pending", nativeComplete: true, sendUnconfirmed: false, replies: ["unsent captured answer"], outboundIds: [], ...(control.startsWith("delayed") ? { retryAt: Date.now() + 60_000 } : {}) });
+    const stop = structuredClone(target.event); stop.id = "restored-stop"; stop.companion.sequence = 3;
+    stop.event_type = control.endsWith("native") ? "slack.session_stopped" : "slack.channel_message_received";
+    stop.data.message.id = "33333333-3333-4333-8333-000000000003"; stop.data.message.body = stop.data.message.text = "/stop";
+    stop.data.message_ts = "1770000000.000003"; stop.data.event = control.endsWith("native") ? { type: "agent_session_stopped" } : { type: "message", text: "<@UBOT> /stop" };
+    stop._openclawSlack.rawText = "/stop"; Object.assign(stop._openclawSlack.route, { sourceEventId: stop.id, messageTs: stop.data.message_ts, rawText: "/stop", text: "/stop", nativeStop: control.endsWith("native") });
+    journal.jobs[createHash("sha256").update(`${identityId}:${stop.id}`).digest("hex")] = { identityId, event: stop, state: "pending", ...(control.startsWith("legacy") ? {} : { slackStopTarget: targetId }) };
+    await writeFile(join(state.dir, name), JSON.stringify(journal));
+    const next = slackBridge(); next.dispatchReply.mockImplementation(async () => ({ dispatched: true }));
+    await next.bridge.catchUpCompanion(); expect(next.dispatchReply).not.toHaveBeenCalled(); expect(next.slack.sendMessage).not.toHaveBeenCalled();
+    if (saved) expect((await readJournal()).jobs[targetId]).toMatchObject({ state: "done", sendUnconfirmed: false, replies: ["unsent captured answer"] });
+    const archived = next.slack.listArchivedMessages.getMockImplementation()!;
+    next.slack.listArchivedMessages.mockImplementation(async (...args: any[]) => { const page = await archived(...args); for (const message of page.messages) message.threadTs = thread; return page; });
+    await dispatchInbound(slackEvent(4, thread), next.bridge.handlers); await next.bridge.catchUpCompanion(); expect(next.dispatchReply).toHaveBeenCalledOnce();
+    const replay = structuredClone(stop); if (control.endsWith("native")) delete replay.companion;
+    await dispatchInbound(replay, next.bridge.handlers); await next.bridge.catchUpCompanion(); expect(next.dispatchReply).toHaveBeenCalledOnce();
+  });
+  it("recomputes the surviving saved-answer backoff after retiring a restored stale Stop", async () => {
+    const first = slackBridge(), thread = "1769999999.999999";
+    await dispatchInbound(slackEvent(1, null), first.bridge.handlers); await first.bridge.catchUpCompanion();
+    await dispatchInbound(slackEvent(2, thread), first.bridge.handlers); await first.bridge.catchUpCompanion(); await first.bridge.shutdownA2A();
+    const name = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name))!;
+    const journal = JSON.parse(await readFile(join(state.dir, name), "utf8"));
+    const [targetId, target] = Object.entries(journal.jobs).find(([, job]: any) => job.event.id === "slack-event-2") as [string, any];
+    const makeEvent = (sequence: number, text: string) => {
+      const event = structuredClone(target.event); event.id = `restored-${sequence}`; event.companion.sequence = sequence;
+      event.data.message.id = `33333333-3333-4333-8333-${String(sequence).padStart(12, "0")}`;
+      event.data.message.body = event.data.message.text = text; event.data.message_ts = `1770000000.${String(sequence).padStart(6, "0")}`;
+      event.data.event = { type: "message", text: `<@UBOT> ${text}` }; event._openclawSlack.rawText = text;
+      Object.assign(event._openclawSlack.route, { sourceEventId: event.id, messageTs: event.data.message_ts, rawText: text, text, nativeStop: false });
+      return event;
+    };
+    const deferred = makeEvent(3, "deferred"), stop = makeEvent(4, "/stop"), fresh = makeEvent(5, "fresh");
+    const id = (event: any) => createHash("sha256").update(`${identityId}:${event.id}`).digest("hex");
+    journal.jobs[id(deferred)] = { ...structuredClone(target), event: deferred, state: "reply_pending", nativeComplete: true, sendUnconfirmed: false, replies: ["deferred answer"], outboundIds: [], retryAt: Date.now() + 60_000, reply: { ...target.reply, slackRoute: deferred._openclawSlack.route } };
+    journal.jobs[id(stop)] = { identityId, event: stop, state: "pending", slackStopTarget: targetId };
+    journal.jobs[id(fresh)] = { identityId, event: fresh, state: "pending" };
+    await writeFile(join(state.dir, name), JSON.stringify(journal));
+    const next = slackBridge(), order: string[] = [];
+    next.slack.sendMessage.mockImplementation(async () => { order.push("saved"); return { id: "saved-accepted", status: "sent" }; });
+    next.dispatchReply.mockImplementation(async () => { order.push("fresh"); return { dispatched: true }; });
+    await next.bridge.catchUpCompanion();
+    expect(order).toEqual([]); expect((await readJournal()).jobs[id(stop)].state).toBe("done");
+    const retained = JSON.parse(await readFile(join(state.dir, name), "utf8")); retained.jobs[id(deferred)].retryAt = 0;
+    await writeFile(join(state.dir, name), JSON.stringify(retained)); await next.bridge.catchUpCompanion();
+    expect(order).toEqual(["saved", "fresh"]);
+  });
+  it.each(["native", "text"].flatMap((control) => ["saved", "sending"].map((phase) => ({ control, phase }))))("keeps a captured $control Stop on its original turn as it becomes $phase during admission", async ({ control, phase }) => {
+    const f = slackBridge(); await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion(); f.dispatchReply.mockClear(); f.slack.sendMessage.mockClear();
+    let enteredModel!: () => void, releaseModel!: () => void, enteredRead!: () => void, releaseRead!: () => void, enteredDelivery!: () => void, releaseDelivery!: () => void;
+    const modelStarted = new Promise<void>((r) => { enteredModel = r; }), modelHeld = new Promise<void>((r) => { releaseModel = r; });
+    const readStarted = new Promise<void>((r) => { enteredRead = r; }), readHeld = new Promise<void>((r) => { releaseRead = r; });
+    const deliveryStarted = new Promise<void>((r) => { enteredDelivery = r; }), deliveryHeld = new Promise<void>((r) => { releaseDelivery = r; });
+    let armedRead = true, armedDelivery = false;
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      expect(input.ctxPayload.message.commandBody).not.toBe("/stop"); enteredModel(); await modelHeld;
+      await input.delivery.deliver({ text: "first" }, { kind: "final" }); await input.delivery.deliver({ text: "second" }, { kind: "final" }); armedDelivery = true; return { dispatched: true };
+    });
+    const identity = f.runtime.getIdentity;
+    f.runtime.getIdentity = async () => {
+      if (armedRead && Object.values((await readJournal()).jobs).some((job: any) => job.event.id === "phase-stop")) { armedRead = false; enteredRead(); await readHeld; }
+      return identity();
+    };
+    if (phase === "saved") { const get = f.runtime.getClient.getMockImplementation()!; f.runtime.getClient.mockImplementation(async () => { if (armedDelivery) { armedDelivery = false; enteredDelivery(); await deliveryHeld; } return get(); }); }
+    else f.slack.sendMessage.mockImplementation(async () => { enteredDelivery(); await deliveryHeld; return { id: "accepted-first", status: "sent" }; });
+    const current = slackEvent(2, "1769999999.999999"); await dispatchInbound(current, f.bridge.handlers); await modelStarted;
+    const stop: any = control === "native" ? { id: "phase-stop", event_type: "slack.session_stopped", data: { ...current.data, event: { type: "agent_session_stopped" } } } : slackEvent(3, "1769999999.999999");
+    stop.id = "phase-stop"; if (control === "text") { stop.data.event.text = "<@UBOT> /stop"; const archived = f.slack.listArchivedMessages.getMockImplementation()!; f.slack.listArchivedMessages.mockImplementation(async (...args: any[]) => { const page = await archived(...args); page.messages[0]!.threadTs = "1769999999.999999"; return page; }); }
+    const accepting = dispatchInbound(stop, f.bridge.handlers);
+    try { await readStarted; releaseModel(); await deliveryStarted; releaseRead(); await accepting; } finally { releaseModel(); releaseRead(); releaseDelivery(); await accepting; await f.bridge.catchUpCompanion(); }
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.slack.sendMessage).toHaveBeenCalledTimes(phase === "sending" ? 1 : 0);
+    await vi.waitFor(() => expect(f.slack.setProcessingStatus.mock.calls.at(-1)?.[3]).toBe("active"));
+  });
+  it.each(["native", "text", "legacy-native", "legacy-text"])("does not retarget an admitted %s Stop after its captured turn finishes during an identity read", async (control) => {
+    const f = slackBridge(); await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion(); f.dispatchReply.mockClear();
+    const thread = "1769999999.999999", archived = f.slack.listArchivedMessages.getMockImplementation()!;
+    f.slack.listArchivedMessages.mockImplementation(async (...args: any[]) => { const page = await archived(...args); for (const message of page.messages) message.threadTs = thread; return page; });
+    let enteredFirst!: () => void, releaseFirst!: () => void, enteredNext!: () => void, releaseNext!: () => void, enteredRead!: () => void, releaseRead!: () => void;
+    const firstStarted = new Promise<void>((r) => { enteredFirst = r; }), firstHeld = new Promise<void>((r) => { releaseFirst = r; });
+    const nextStarted = new Promise<void>((r) => { enteredNext = r; }), nextHeld = new Promise<void>((r) => { releaseNext = r; });
+    const readStarted = new Promise<void>((r) => { enteredRead = r; }), readHeld = new Promise<void>((r) => { releaseRead = r; });
+    let turns = 0, stops = 0, armed = true;
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      if (input.ctxPayload.message.commandBody === "/stop") { stops++; return { dispatched: true }; }
+      if (++turns === 1) { enteredFirst(); await firstHeld; } else { enteredNext(); await nextHeld; }
+      return { dispatched: true };
+    });
+    const identity = f.runtime.getIdentity;
+    f.runtime.getIdentity = async () => {
+      if (armed && Object.values((await readJournal()).jobs).some((job: any) => job.event.id === "race-stop")) { armed = false; enteredRead(); await readHeld; }
+      return identity();
+    };
+    const first = slackEvent(2, thread); await dispatchInbound(first, f.bridge.handlers); await firstStarted;
+    const stop: any = control.endsWith("native") ? { id: "race-stop", event_type: "slack.session_stopped", data: { ...first.data, event: { type: "agent_session_stopped" } } } : slackEvent(4, thread);
+    stop.id = "race-stop"; if (control.endsWith("text")) stop.data.event.text = "<@UBOT> /stop";
+    const accepting = dispatchInbound(stop, f.bridge.handlers);
+    try {
+      await readStarted;
+      if (control.startsWith("legacy")) {
+        const name = (await readdir(state.dir)).find((name) => /^companion-.*\.json$/.test(name))!;
+        const journal = JSON.parse(await readFile(join(state.dir, name), "utf8"));
+        for (const job of Object.values(journal.jobs) as any[]) if (job.event.id === "race-stop") delete job.slackStopTarget;
+        await writeFile(join(state.dir, name), JSON.stringify(journal));
+      }
+      await dispatchInbound(slackEvent(3, thread), f.bridge.handlers); releaseFirst(); await nextStarted;
+      releaseRead(); await accepting; expect(stops).toBe(0);
+    } finally { releaseFirst(); releaseRead(); releaseNext(); await accepting; await f.bridge.catchUpCompanion(); }
+    expect(turns).toBe(2); await dispatchInbound(stop, f.bridge.handlers); await f.bridge.catchUpCompanion(); expect(stops).toBe(0);
+  });
+  it.each(["bystander", "unmentioned"])("does not stop saved Slack blocks for a %s control", async (kind) => {
+    const f = slackBridge({ groupReplyMode: "mention" }); await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    f.dispatchReply.mockClear(); f.slack.sendMessage.mockClear();
+    const thread = "1769999999.999999", archived = f.slack.listArchivedMessages.getMockImplementation()!;
+    f.slack.listArchivedMessages.mockImplementation(async (...args: any[]) => { const page = await archived(...args); for (const message of page.messages) message.threadTs = thread; return page; });
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    f.dispatchReply.mockImplementation(async (input: any) => { await input.delivery.deliver({ text: "first" }, { kind: "final" }); await input.delivery.deliver({ text: "second" }, { kind: "final" }); return { dispatched: true }; });
+    f.slack.sendMessage.mockImplementation(async () => { entered(); await held; return { id: "accepted", status: "sent" }; });
+    const current = slackEvent(2, thread); await dispatchInbound(current, f.bridge.handlers); await started;
+    const stop: any = kind === "bystander" ? { id: "bystander-stop", event_type: "slack.session_stopped", data: { ...current.data, actor_id: "UOTHER", event: { type: "agent_session_stopped" } } } : slackEvent(3, thread, "direct", false);
+    if (kind === "unmentioned") stop.data.event.text = "/stop";
+    try {
+      await dispatchInbound(stop, f.bridge.handlers);
+      await vi.waitFor(() => expect(f.slack.setProcessingStatus.mock.calls.at(-1)?.[3]).toBe("processing"));
+    } finally { release(); }
+    await f.bridge.catchUpCompanion(); expect(f.slack.sendMessage).toHaveBeenCalledTimes(2); expect(f.dispatchReply).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(f.slack.setProcessingStatus.mock.calls.at(-1)?.[3]).toBe("active"));
+  });
+  it("preserves addressed textual Stop routing when no turn is active", async () => {
+    const f = slackBridge({ groupReplyMode: "mention" }), stop: any = slackEvent(1, "1769999999.999999"); delete stop.companion; stop.data.event.text = "<@UBOT> /stop";
+    f.dispatchReply.mockImplementation(async (input: any) => { expect(input.ctxPayload.message.commandBody).toBe("/stop"); expect(input.ctxPayload.extra.CommandAuthorized).toBe(true); return { dispatched: true }; });
+    await dispatchInbound(stop, f.bridge.handlers); await f.bridge.catchUpCompanion(); expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.slack.sendMessage).not.toHaveBeenCalled();
+  });
+  it.each(["native", "text"].flatMap((control) => ["submitting", "saved", "sending"].map((phase) => ({ control, phase }))))("targets current $phase work instead of older uncertainty for $control Stop", async ({ control, phase }) => {
+    const f = slackBridge(); await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    const thread = "1769999999.999999", archived = f.slack.listArchivedMessages.getMockImplementation()!;
+    f.slack.listArchivedMessages.mockImplementation(async (...args: any[]) => { const page = await archived(...args); for (const message of page.messages) message.threadTs = thread; return page; });
+    f.slack.sendMessage.mockRejectedValueOnce(new Error("synthetic old unknown send"));
+    await dispatchInbound(slackEvent(2, thread), f.bridge.handlers); await f.bridge.catchUpCompanion(); await f.bridge.catchUpCompanion();
+    f.dispatchReply.mockClear(); f.slack.sendMessage.mockClear();
+    let entered!: () => void, release!: () => void, armed = false;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      if (input.ctxPayload.message.commandBody === "/stop") { release(); return { dispatched: true }; }
+      if (phase === "submitting") { entered(); await held; return { dispatched: true }; }
+      await input.delivery.deliver({ text: "first" }, { kind: "final" }); await input.delivery.deliver({ text: "second" }, { kind: "final" }); armed = true; return { dispatched: true };
+    });
+    if (phase === "saved") { const get = f.runtime.getClient.getMockImplementation()!; f.runtime.getClient.mockImplementation(async () => { if (armed) { armed = false; entered(); await held; } return get(); }); }
+    if (phase === "sending") f.slack.sendMessage.mockImplementation(async () => { entered(); await held; return { id: "current-accepted", status: "sent" }; });
+    const current = slackEvent(3, thread); await dispatchInbound(current, f.bridge.handlers); await started;
+    const stop: any = control === "native" ? { id: "current-native-stop", event_type: "slack.session_stopped", data: { ...current.data, event: { type: "agent_session_stopped" } } } : slackEvent(4, thread);
+    if (control === "text") stop.data.event.text = "<@UBOT> /stop";
+    try { await dispatchInbound(stop, f.bridge.handlers); if (phase === "submitting") expect(f.dispatchReply).toHaveBeenCalledTimes(2); } finally { release(); }
+    await f.bridge.catchUpCompanion(); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).toHaveBeenCalledTimes(phase === "sending" ? 1 : 0);
+    if (phase === "submitting") expect(Object.values((await readJournal()).jobs).find((job: any) => job.event.id === stop.id)).toMatchObject({ state: "done", nativeComplete: true });
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "slack-event-2") as any;
+    expect(original).toMatchObject({ state: "paused", sendUnconfirmed: true }); expect(original.stoppedBy).toBeUndefined();
+    await vi.waitFor(() => expect(f.slack.setProcessingStatus.mock.calls.at(-1)?.[3]).toBe("active"));
+    const count = f.dispatchReply.mock.calls.length; await dispatchInbound(stop, f.bridge.handlers); await f.bridge.catchUpCompanion(); expect(f.dispatchReply).toHaveBeenCalledTimes(count);
+  });
+  it.each(["accepted", "uncertain"])("stops later Slack reply blocks without relabeling the first crossed send: %s", async (outcome) => {
+    const f = slackBridge(); await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    f.slack.sendMessage.mockClear(); f.dispatchReply.mockClear();
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    f.dispatchReply.mockImplementation(async (input: any) => { await input.delivery.deliver({ text: "first" }, { kind: "final" }); await input.delivery.deliver({ text: "second" }, { kind: "final" }); return { dispatched: true }; });
+    f.slack.sendMessage.mockImplementation(async () => { entered(); await held; if (outcome === "uncertain") throw new Error("synthetic unknown Slack send"); return { id: "first-action", status: "sent" }; });
+    const incoming = slackEvent(2, "1769999999.999999"), stop = { id: "many-slack-stop", event_type: "slack.session_stopped", data: { ...incoming.data, event: { type: "agent_session_stopped" } } };
+    await dispatchInbound(incoming, f.bridge.handlers); await started;
+    try { await dispatchInbound(stop, f.bridge.handlers); } finally { release(); }
+    await f.bridge.catchUpCompanion(); await f.bridge.catchUpCompanion();
+    const original = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === incoming.id) as any;
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.slack.sendMessage).toHaveBeenCalledOnce();
+    if (outcome === "accepted") expect(original).toMatchObject({ state: "done", sendUnconfirmed: false, outboundIds: ["first-action"], replies: ["second"] });
+    else expect(original).toMatchObject({ state: "paused", sendUnconfirmed: true, uncertaintyRecorded: true, replies: ["first", "second"] });
+    expect(original.reason ?? "").not.toContain("Canceled");
+    await vi.waitFor(() => expect(f.slack.setProcessingStatus.mock.calls.at(-1)?.[3]).toBe("active"));
+    await dispatchInbound(stop, f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).toHaveBeenCalledOnce();
+  });
+  it.each(["group_dm", "thread"])("keeps unmentioned ordinary %s messages as context in mention mode", async (kind) => {
+    const f = slackBridge({ groupReplyMode: "mention" });
+    const ordinary = (sequence: number, mentioned: boolean) => { const incoming: any = slackEvent(sequence, "1770000000.000001", "direct", mentioned); delete incoming.companion; incoming.data.message_kinds = [kind, ...(mentioned ? ["mention"] : [])]; return incoming; };
+    await dispatchInbound(ordinary(1, true), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    f.dispatchReply.mockClear(); f.slack.sendMessage.mockClear(); f.slack.setProcessingStatus.mockClear();
+    await dispatchInbound(ordinary(2, false), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).not.toHaveBeenCalled(); expect(f.slack.sendMessage).not.toHaveBeenCalled(); expect(f.slack.setProcessingStatus).not.toHaveBeenCalled();
+    await dispatchInbound(ordinary(3, true), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.slack.sendMessage).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.dispatchReply.mock.calls)).toContain("quiet context");
+  });
   it("ignores unaddressed ordinary channels until the exact thread is engaged", async () => {
     const f = slackBridge({ groupReplyMode: "auto" });
     const ordinary = (sequence: number, mentioned: boolean, thread: string | null) => { const event: any = slackEvent(sequence, thread, "direct", mentioned); delete event.companion; return event; };
@@ -386,6 +803,15 @@ describe("Slack native host channel-wide Companion", () => {
     expect(f.dispatchReply).toHaveBeenCalledTimes(2); expect(f.slack.sendMessage).toHaveBeenCalledTimes(2);
     await dispatchInbound(ordinary(4, false, "1770000000.000001"), f.bridge.handlers); await f.bridge.catchUpCompanion();
     expect(f.dispatchReply).toHaveBeenCalledTimes(2);
+  });
+  it("retains exact ordinary Slack thread engagement after terminal archival and gateway restart", async () => {
+    const first = slackBridge({ groupReplyMode: "auto" });
+    const ordinary = (sequence: number, mentioned: boolean, thread: string | null) => { const event: any = slackEvent(sequence, thread, "direct", mentioned); delete event.companion; return event; };
+    await dispatchInbound(ordinary(1, true, null), first.bridge.handlers); await first.bridge.catchUpCompanion(); await first.bridge.shutdownA2A();
+    const next = slackBridge({ groupReplyMode: "auto" });
+    await dispatchInbound(ordinary(2, false, "1770000000.000001"), next.bridge.handlers); await next.bridge.catchUpCompanion();
+    await dispatchInbound(ordinary(3, false, "1770000000.000099"), next.bridge.handlers); await next.bridge.catchUpCompanion();
+    expect(next.dispatchReply).toHaveBeenCalledOnce(); expect(next.slack.sendMessage).toHaveBeenCalledOnce();
   });
   it.each(["client", "connection"])("withholds saved replies when disabled during the final %s read", async (phase) => {
     const f = slackBridge(); let modelDone = false, armed = false, entered!: () => void, release!: () => void;
@@ -399,6 +825,9 @@ describe("Slack native host channel-wide Companion", () => {
     f.settings.slackEnabled = false; release(); await f.bridge.catchUpCompanion();
     expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.slack.sendMessage).not.toHaveBeenCalled();
     expect(Object.values((await readJournal()).jobs).some((job: any) => job.state === "sending")).toBe(false);
+    expect(Object.values((await readJournal()).jobs)).toContainEqual(expect.objectContaining({ state: "reply_pending", replies: ["saved"] }));
+    f.settings.slackEnabled = true; await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.slack.sendMessage).toHaveBeenCalledOnce();
   });
   it.each(["client", "connection"])("durably cancels a saved Slack reply stopped during the final %s read", async (phase) => {
     const f = slackBridge(); await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion(); f.slack.sendMessage.mockClear(); f.dispatchReply.mockClear();
@@ -415,6 +844,7 @@ describe("Slack native host channel-wide Companion", () => {
     const stop = { id: "saved-stop", event_type: "slack.session_stopped", data: { ...incoming.data, event: { type: "agent_session_stopped" } } };
     stopped = true; await dispatchInbound(stop, f.bridge.handlers); release(); await f.bridge.catchUpCompanion();
     expect(f.slack.sendMessage).not.toHaveBeenCalled(); expect(f.dispatchReply).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(f.slack.setProcessingStatus.mock.calls.at(-1)?.[3]).toBe("active"));
     await dispatchInbound(slackEvent(3, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
     await dispatchInbound(stop, f.bridge.handlers); await f.bridge.catchUpCompanion();
     expect(f.slack.sendMessage).toHaveBeenCalledOnce(); expect(f.dispatchReply).toHaveBeenCalledTimes(2);

@@ -72,14 +72,14 @@ describe("Slack signed source and published SDK contract", () => {
   });
 });
 describe("Slack activity destination policy", () => {
-  it("aggregates native thread owners, suspends on approval, and never adds thread eyes", async () => {
+  it.each(["completed", "cancelled"] as const)("aggregates native thread owners after %s, suspends on approval, and never adds thread eyes", async (ending) => {
     const dir = await mkdtemp(join(tmpdir(), "slack-activity-"));
     try {
       const slack = { setProcessingStatus: vi.fn(async () => ({ status: "succeeded" })), addReaction: vi.fn(), removeReaction: vi.fn() };
       const activity = createSlackActivity(async () => slack as any, join(dir, "state.json"));
       const first = parseSlack(event(), identityId)!, second = { ...first, sourceEventId: "second" };
       activity.notify(first, "accepted"); activity.notify(second, "accepted"); await activity.flush();
-      activity.notify(first, "waiting"); await activity.flush(); activity.notify(first, "completed"); await activity.flush();
+      activity.notify(first, "waiting"); await activity.flush(); activity.notify({ ...first, sourceEventId: "unrelated" }, "cancelled"); await activity.flush(); activity.notify(first, ending); await activity.flush(); activity.notify(first, "cancelled"); await activity.flush();
       activity.notify(second, "completed"); await activity.flush();
       expect(slack.setProcessingStatus.mock.calls.map((v: any) => v[3])).toEqual(["processing", "suspended", "processing", "active"]);
       expect(slack.addReaction).not.toHaveBeenCalled(); expect(slack.removeReaction).not.toHaveBeenCalled();

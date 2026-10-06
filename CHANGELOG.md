@@ -40,6 +40,8 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Keep explicitly separate sends independent of source-answer receipts; preserve enabled cross-channel reads without expanding iMessage Companion history.
 - Avoid unengaged ordinary Slack threads, bind controls to the current actor, and recheck saved-answer authority after safe connection reads.
 - Preserve Slack setup settings when initial verification fails and check doctor readiness against the published SDK surface.
+- Move completed ordinary receipts to a durable indexed archive without expiring replay or callback proof; retain active and uncertain work in the journal.
+- Retain approval-send outcomes after a stopped turn, preserve crossed send outcomes while stopping unsent reply blocks, keep approval uncertainty separate from model answers, resume unsent saved answers after restart, and require mentions in group DMs when configured.
 
 ## [0.2.15]
 
