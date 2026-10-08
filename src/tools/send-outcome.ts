@@ -51,7 +51,8 @@ function markerPath(id: string): string {
 function mark(id: string, next: string): void {
   if (!id) return;
   try {
-    if (next !== "webhook" && state(id) === "webhook") return;
+    const previous = state(id);
+    if ((next !== "webhook" && previous === "webhook") || previous === "inline") return;
     const path = markerPath(id);
     const temp = `${path}.${process.pid}.tmp`;
     writeFileSync(temp, JSON.stringify({ state: next, at: Date.now() }), { mode: 0o600 });

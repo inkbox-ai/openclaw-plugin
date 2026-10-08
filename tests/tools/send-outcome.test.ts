@@ -92,3 +92,10 @@ it("caps the number of status reads even with a longer observation window", asyn
   expect(result.delivery_final).toBe(false);
   expect(getText).toHaveBeenCalledTimes(20);
 });
+
+it("keeps the inline receipt when an accepted message is observed again", async () => {
+  const runtime = { getClient: async () => ({}) };
+  await pollSendOutcome(runtime, {}, "imessage", { id: "repeat", status: "error" });
+  await pollSendOutcome(runtime, {}, "imessage", { id: "repeat", status: "pending" });
+  expect(await reportedInline("repeat")).toBe(true);
+});
