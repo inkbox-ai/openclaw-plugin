@@ -111,7 +111,7 @@ export function startPreload({ marker, statePath, outputPath, hooks = registerHo
         if (!packages.has(packagePath)) {
           if (packages.size >= 16) { emit({ phase: "observer", status: "unavailable" }); return loaded; }
           const metadata = JSON.parse(readFileSync(packagePath, "utf8"));
-          packages.set(packagePath, metadata.name === "@inkbox/sdk" && metadata.version === "0.7.14");
+          packages.set(packagePath, metadata.name === "@inkbox/sdk" && ["0.7.14", "0.7.15", "0.7.16"].includes(metadata.version));
         }
         if (packages.get(packagePath) !== true || loaded.format !== "module") {
           emit({ phase: "observer", status: "unavailable", module_bound: false }); return loaded;

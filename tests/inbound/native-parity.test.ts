@@ -12,8 +12,10 @@ import { createChannelApprovalHandlerFromCapability } from "openclaw/plugin-sdk/
 import { inkboxApprovalCapability, resolveNativeApproval } from "../../src/inbound/native-approvals.js";
 import { createCompanionReceiver, readCompanionQueueSummary } from "../../src/inbound/companion.js";
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
-import { bindNativeOwner, fenceNativeOwner, guardRetiredNativeRun, trackNativeOwner } from "../../src/native-owner.js";
+import { bindNativeOwner, fenceNativeOwner, guardRetiredNativeRun, trackNativeOwner, settleNativeOwner } from "../../src/native-owner.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
+import { activeNativeSource } from "../../src/native-source.js";
+import { uploadSlackSourceFile } from "../../src/slack-files.js";
 const approvalHandlers: Array<{ stop(): Promise<void> }> = [];
 const bridges: ReturnType<typeof createInkboxSessionBridge>[] = [];
 const identityId = "11111111-1111-4111-8111-111111111111", connectionId = "22222222-2222-4222-8222-222222222222";
@@ -577,6 +579,201 @@ function slackBridge(config: Record<string, unknown> = {}) {
   return { bridge, slack, companion, dispatchReply, runtime, settings, actors };
 }
 describe("Slack native host channel-wide Companion", () => {
+  it.each([false, true])("runs a fresh Slack request after a confirmed Stop, including restart=%s", async (restart) => {
+    const first = slackBridge(); let release!: () => void, entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; }), started = new Promise<void>((resolve) => { entered = resolve; });
+    first.dispatchReply.mockImplementation(async (input: any) => {
+      if (input.ctxPayload.message.commandBody === "/stop") release(); else { entered(); await held; }
+      return { dispatched: true };
+    });
+    const original: any = slackEvent(1, "1769999999.999999"); delete original.companion;
+    await dispatchInbound(original, first.bridge.handlers); await started;
+    const stop = { id: "fresh-stop", event_type: "slack.session_stopped", data: { ...original.data, event: { type: "agent_session_stopped" } } };
+    try { await dispatchInbound(stop, first.bridge.handlers); } finally { release(); await first.bridge.catchUpCompanion(); }
+    expect(first.dispatchReply).toHaveBeenCalledTimes(2);
+    if (restart) await first.bridge.shutdownA2A();
+    const next = restart ? slackBridge() : first;
+    next.dispatchReply.mockImplementation(async (input: any) => { await input.delivery.deliver({ text: "Follow-up received" }, { kind: "final" }); return { dispatched: true }; });
+    const followup: any = slackEvent(3, original.data.thread_ts); delete followup.companion;
+    await dispatchInbound(followup, next.bridge.handlers); await next.bridge.catchUpCompanion();
+    expect(next.slack.sendMessage.mock.calls.some((call: any) => call[1].text === "Follow-up received" && call[1].threadTs === original.data.thread_ts)).toBe(true);
+    const count = next.dispatchReply.mock.calls.length;
+    await dispatchInbound(stop, next.bridge.handlers); await next.bridge.catchUpCompanion();
+    expect(next.dispatchReply).toHaveBeenCalledTimes(count);
+  });
+  it("uploads host reply media from local bytes before delivering Slack-formatted final text", async () => {
+    const f = slackBridge(), path = join(state.dir, "chart.png");
+    await writeFile(path, Buffer.from([137, 80, 78, 71, 0, 255]));
+    const uploadFile = vi.fn(async () => ({ id: "44444444-4444-4444-8444-444444444444", connectionId, conversationId: "CROOM", operation: "file_upload", status: "succeeded", fileId: "FFILE" }));
+    Object.assign(f.slack, { uploadFile });
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      expect(input.ctxPayload.message.bodyForAgent).toContain("This turn is on Slack");
+      await bindNativeOwner({ prompt: JSON.stringify(input.ctxPayload) }, { sessionKey: input.routeSessionKey, runId: "attachment-run" });
+      await settleNativeOwner({}, { sessionKey: input.routeSessionKey, runId: "attachment-run" });
+      await input.delivery.deliver({ text: "**Chart** [details](https://example.test)", mediaUrls: [path] }, { kind: "final" });
+      return { dispatched: true };
+    });
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(uploadFile).toHaveBeenCalledOnce();
+    const payload = (uploadFile.mock.calls as any)[0][1];
+    expect(payload).toMatchObject({ conversationId: "CROOM", threadTs: null, filename: "chart.png" });
+    expect(Buffer.from(payload.contentBase64, "base64")).toEqual(Buffer.from([137, 80, 78, 71, 0, 255]));
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: "*Chart* <https://example.test|details>", threadTs: null }));
+    const row: any = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "slack-event-1");
+    expect(Object.values(row.toolSends)).toContainEqual(expect.objectContaining({ upload: expect.objectContaining({ status: "succeeded" }) }));
+  });
+  it.each(["succeeded", "unknown", "timeout"])("never duplicates a tool upload returned again as host media: %s", async (status) => {
+    const f = slackBridge(), file = join(state.dir, "repeated.png"); await writeFile(file, "bytes");
+    const uploadFile = vi.fn(async () => {
+      if (status === "timeout") throw new Error("ambiguous upload");
+      return { id: "44444444-4444-4444-8444-444444444444", connectionId, conversationId: "CROOM", operation: "file_upload", status, fileId: status === "succeeded" ? "FFILE" : null };
+    });
+    const getOperation = vi.fn();
+    Object.assign(f.slack, { uploadFile, getOperation });
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      const owner = activeNativeSource(input.routeSessionKey)!;
+      try { await uploadSlackSourceFile(await f.runtime.getClient() as any, owner, owner.slackRoute!, { filePath: file, filename: "renamed.png", title: "Chart", initialComment: "The requested chart" }, "explicit-call", "explicit-key"); } catch { /* The model observes uncertainty, not delivery proof. */ }
+      await input.delivery.deliver({ text: "Chart result", mediaUrl: file }, { kind: "final" }); return { dispatched: true };
+    });
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(uploadFile).toHaveBeenCalledOnce();
+    const row: any = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "slack-event-1");
+    expect(Object.keys(row.toolSends)).toEqual(["explicit-call"]);
+    expect(row.toolSends["explicit-call"]).toMatchObject({ uploadKey: "explicit-key", uploadFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), uploadTarget: { connectionId, conversationId: "CROOM", workspaceId: "TWORK" } });
+    expect(f.slack.sendMessage).toHaveBeenCalledTimes(status === "succeeded" ? 1 : 0);
+    if (status === "unknown") { for (let i = 0; i < 8; i++) await f.bridge.catchUpCompanion(); expect(getOperation).not.toHaveBeenCalled(); }
+  });
+  it.each(["missing", "url", "failed", "unknown", "timeout", "in_progress"])("preserves final text with an honest attachment notice after %s", async (outcome) => {
+    const f = slackBridge(), path = join(state.dir, "attachment.png"), operationId = "44444444-4444-4444-8444-444444444444";
+    await writeFile(path, "bytes");
+    const op = (status: string) => ({ id: operationId, connectionId, conversationId: "CROOM", operation: "file_upload", status, fileId: status === "succeeded" ? "FFILE" : null });
+    const uploadFile = vi.fn(async () => { if (outcome === "timeout") throw new Error("ambiguous transport"); return op(outcome); });
+    const getOperation = vi.fn(async () => op("in_progress"));
+    Object.assign(f.slack, { uploadFile, getOperation });
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      await input.delivery.deliver({ text: "Preparing chart", mediaUrl: outcome === "missing" ? `${path}.missing` : outcome === "url" ? "https://example.test/chart.png" : path }, { kind: "block" });
+      await input.delivery.deliver({ text: "The chart is ready" }, { kind: "final" });
+      return { dispatched: true };
+    });
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: expect.stringMatching(/The chart is ready[\s\S]*attachment[\s\S]*not confirmed|The chart is ready[\s\S]*attachment could not be confirmed/i) }));
+    expect(uploadFile).toHaveBeenCalledTimes(["missing", "url"].includes(outcome) ? 0 : 1);
+    const row: any = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "slack-event-1");
+    expect(row.state).toBe("done");
+    if (!["missing", "url"].includes(outcome)) expect(Object.values(row.toolSends)).toContainEqual(expect.objectContaining({ kind: "attachment", uploadKey: expect.stringMatching(/^openclaw:file:/) }));
+    await f.bridge.catchUpCompanion(); expect(uploadFile).toHaveBeenCalledTimes(["missing", "url"].includes(outcome) ? 0 : 1);
+  });
+  it("settles accepted attachment work by read-only inspection and recovers a lost response by its durable key", async () => {
+    const f = slackBridge(), path = join(state.dir, "attachment.png"), operationId = "44444444-4444-4444-8444-444444444444";
+    await writeFile(path, "bytes");
+    const op = (status: string) => ({ id: operationId, connectionId, conversationId: "CROOM", operation: "file_upload", status, fileId: status === "succeeded" ? "FFILE" : null });
+    const uploadFile = vi.fn(async () => op("in_progress")), getOperation = vi.fn(async () => op("succeeded")), getOperationByKey = vi.fn(async () => op("succeeded"));
+    Object.assign(f.slack, { uploadFile, getOperation, getOperationByKey });
+    f.dispatchReply.mockImplementation(async (input: any) => { await input.delivery.deliver({ text: "Chart", mediaUrl: path }, { kind: "final" }); return { dispatched: true }; });
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(uploadFile).toHaveBeenCalledOnce(); expect(getOperation).toHaveBeenCalledOnce();
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: "Chart" }));
+    uploadFile.mockRejectedValueOnce(new Error("lost response")); getOperationByKey.mockRejectedValueOnce(new Error("not yet visible"));
+    await dispatchInbound(slackEvent(2, "1769999999.999999"), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    const after: any = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "slack-event-2");
+    const key = (Object.values(after.toolSends)[0] as any).uploadKey;
+    await f.bridge.catchUpCompanion();
+    expect(getOperationByKey).toHaveBeenCalledWith(connectionId, { idempotencyKey: key });
+    expect(uploadFile).toHaveBeenCalledTimes(2);
+    await f.bridge.catchUpCompanion();
+    const settled: any = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "slack-event-2");
+    expect(Object.values(settled.toolSends)).toContainEqual(expect.objectContaining({ messageId: operationId, upload: expect.objectContaining({ status: "succeeded" }) }));
+  });
+  it("resumes only the unsent saved reply after an explicit upload is verified", async () => {
+    const f = slackBridge(), file = join(state.dir, "explicit.png"); await writeFile(file, "bytes");
+    let visible = false;
+    const uploadFile = vi.fn(async () => { throw new Error("lost response"); });
+    const getOperationByKey = vi.fn(async () => {
+      if (!visible) throw new Error("not visible");
+      return { id: "44444444-4444-4444-8444-444444444444", connectionId, conversationId: "CROOM", operation: "file_upload", status: "succeeded", fileId: "FFILE" };
+    });
+    const updateMessage = vi.fn(async () => ({ id: "edit", connectionId, conversationId: "CROOM", status: "succeeded", messageTs: "2.0" }));
+    Object.assign(f.slack, { uploadFile, getOperationByKey, updateMessage });
+    f.slack.sendMessage.mockImplementation(async () => ({ id: "sent", connectionId, conversationId: "CROOM", status: "sent", messageTs: "2.0" }));
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      await vi.waitFor(() => expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: "Working…" })));
+      const owner = activeNativeSource(input.routeSessionKey)!;
+      try { await uploadSlackSourceFile(await f.runtime.getClient() as any, owner, owner.slackRoute!, { filePath: file }, "explicit", "explicit-key"); } catch {}
+      await input.delivery.deliver({ text: "Saved chart answer" }, { kind: "final" }); return { dispatched: true };
+    });
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).toHaveBeenCalledTimes(1);
+    expect(updateMessage.mock.calls.at(-1)?.[3]).toBe("Paused; prior work is unconfirmed");
+    const paused: any = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === "slack-event-1");
+    expect(paused).toMatchObject({ state: "paused", awaitingUploads: true, nativeComplete: true });
+    visible = true; await f.bridge.catchUpCompanion(); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).toHaveBeenCalledTimes(2);
+    expect(updateMessage.mock.calls.at(-1)?.[3]).toBe("Completed");
+    expect(updateMessage.mock.calls.some((call: any) => call[3] === "Work stopped with an error")).toBe(false);
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: "Saved chart answer" }));
+    expect(uploadFile).toHaveBeenCalledOnce(); expect(f.dispatchReply).toHaveBeenCalledOnce();
+  });
+  it("retains both attachment limit and failure notices across host delivery blocks", async () => {
+    const f = slackBridge();
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      await input.delivery.deliver({ text: "Preparing", mediaUrls: Array.from({ length: 11 }, (_, i) => join(state.dir, `missing-${i}.png`)) }, { kind: "block" });
+      await input.delivery.deliver({ text: "Final answer" }, { kind: "final" }); return { dispatched: true };
+    });
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: expect.stringContaining("per-reply limit") }));
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: expect.stringContaining("could not be confirmed") }));
+  });
+  it("keeps a maximum-length final answer sendable when an attachment notice is added", async () => {
+    const f = slackBridge(), body = "x".repeat(12_000);
+    f.dispatchReply.mockImplementation(async (input: any) => { await input.delivery.deliver({ text: body, mediaUrl: join(state.dir, "missing.png") }, { kind: "final" }); return { dispatched: true }; });
+    await dispatchInbound(slackEvent(1, null), f.bridge.handlers); await f.bridge.catchUpCompanion();
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: body }));
+    expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: expect.stringContaining("could not be confirmed") }));
+    expect(f.slack.sendMessage).toHaveBeenCalledTimes(2);
+  });
+  it("never advances a pending job merely to publish accepted progress", async () => {
+    const f = slackBridge(); let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    const connections = f.slack.listConnections.getMockImplementation()!;
+    f.slack.listConnections.mockImplementation(async () => {
+      if (f.slack.listConnections.mock.calls.length === 2) { entered(); await held; }
+      return connections();
+    });
+    Object.assign(f.slack, { updateMessage: vi.fn(async () => ({ id: "update", connectionId, conversationId: "CROOM", status: "succeeded", messageTs: "2.0" })) });
+    f.slack.sendMessage.mockImplementation(async () => ({ id: "progress", connectionId, conversationId: "CROOM", status: "sent", messageTs: "2.0" }));
+    const event: any = slackEvent(1, "1769999999.999999"); delete event.companion;
+    await dispatchInbound(event, f.bridge.handlers); await started;
+    try {
+      await vi.waitFor(() => expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: "Working…" })));
+      const row: any = Object.values((await readJournal()).jobs).find((job: any) => job.event.id === event.id);
+      expect(row.state).toBe("pending"); expect(row.reply).toBeUndefined(); expect(row.sponsor).toBeUndefined();
+      expect(f.dispatchReply).not.toHaveBeenCalled();
+    } finally { release(); await f.bridge.catchUpCompanion(); }
+  });
+  it("uses a read-only admitted-source check for progress and pauses the wired bridge during shutdown", async () => {
+    const f = slackBridge(); let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
+    const updateMessage = vi.fn(async () => ({ id: "update", connectionId, conversationId: "CROOM", status: "succeeded", messageTs: "2.0" }));
+    Object.assign(f.slack, { updateMessage });
+    f.slack.sendMessage.mockImplementation(async () => ({ id: "progress", connectionId, conversationId: "CROOM", status: "sent", messageTs: "2.0" }));
+    f.dispatchReply.mockImplementation(async () => { entered(); await held; return { dispatched: true }; });
+    const event: any = slackEvent(1, "1769999999.999999"); delete event.companion;
+    await dispatchInbound(event, f.bridge.handlers); await started;
+    await vi.waitFor(() => expect(f.slack.sendMessage).toHaveBeenCalledWith(connectionId, expect.objectContaining({ text: "Working…" })));
+    const before = await readJournal();
+    expect(Object.values(before.jobs)).toContainEqual(expect.objectContaining({ state: "submitting" }));
+    const checks = f.companion.activationMessages.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(await readJournal()).toEqual(before); expect(f.companion.activationMessages).toHaveBeenCalledTimes(checks);
+    // Shutdown pauses the durable source without claiming that it was cancelled.
+    const shutdown = f.bridge.shutdownA2A();
+    release(); await shutdown;
+    expect(updateMessage.mock.calls.some((call: any) => call[3] === "Paused while reconnecting…")).toBe(true);
+    const recovered = slackBridge(); Object.assign(recovered.slack, { updateMessage });
+    await recovered.bridge.catchUpCompanion();
+    expect(updateMessage.mock.calls.at(-1)?.[3]).toBe("Completed");
+    expect(recovered.slack.sendMessage).not.toHaveBeenCalled();
+  });
   it("archives a successfully completed ordinary native control without keeping it in hot rewrites", async () => {
     const f = slackBridge(); let entered!: () => void, release!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
