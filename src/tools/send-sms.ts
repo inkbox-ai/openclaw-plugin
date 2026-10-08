@@ -4,6 +4,7 @@ import { runTool, toolError } from "../errors.js";
 import { sentToolText, silentSendCompletionParameter } from "./send-completion.js";
 import { checkOutboundRecipient } from "../allowlist.js";
 import { SMS_MAX_TEXT_CHARS, smsTextTooLongMessage } from "../message-limits.js";
+import { saveOutboundContext } from "../delivery-failure.js";
 
 function normalizeRecipients(value: unknown): string[] | undefined {
   if (typeof value === "string") {
@@ -123,6 +124,16 @@ export function registerSendSms(
             : { to: toList!.length === 1 ? toList![0] : toList }),
         };
         const msg = await identity.sendText(payload);
+        const recipient =
+          toList?.length === 1 ? toList[0] : toList?.length ? toList.join(",") : undefined;
+        saveOutboundContext({
+          messageId: msg.id,
+          channel: "sms",
+          chatId: conversationId || recipient || msg.id,
+          recipient: toList?.length === 1 ? toList[0] : undefined,
+          body: params.text,
+          conversationId: conversationId || msg.conversationId,
+        });
         const target = formatTargetSummary(msg, params);
         const status = msg.deliveryStatus ?? "unknown";
         return sentToolText(

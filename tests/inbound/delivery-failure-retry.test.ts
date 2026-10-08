@@ -41,7 +41,9 @@ import { IMESSAGE_EVENT_TYPES, MAIL_EVENT_TYPES, TEXT_EVENT_TYPES } from "../../
 import {
   DELIVERY_FAILURE_EVENT_TYPES,
   OUTBOUND_FAILURE_MAX_ATTEMPTS as MAX,
+  getOutboundContext,
   resetDeliveryFailureStateForTest,
+  saveOutboundContext,
 } from "../../src/delivery-failure.js";
 
 function createRuntime(opts: { sendText?: any } = {}) {
@@ -486,5 +488,153 @@ describe("outbound delivery-failure recovery — session routing", () => {
 
     // Entered once (the inbound turn); no second, woken recovery turn.
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("correlates a thin SMS failure webhook via outbound context", async () => {
+    const { runtime, sendText } = createRuntime();
+    const channelRuntime = createChannelRuntime("Shorter retry text.");
+    const bridge = createBridge(runtime, channelRuntime);
+
+    saveOutboundContext({
+      messageId: "txt-ctx-1",
+      channel: "sms",
+      chatId: "contact-123",
+      recipient: "+15551234567",
+      body: "Production path SMS content",
+      conversationId: "conv-9",
+    });
+
+    // Incomplete webhook: no remote number, webhook body differs from what we sent.
+    await bridge.handlers.onText?.(
+      textFailure({
+        messageId: "txt-ctx-1",
+        remote: null,
+        conversationId: null,
+        text: "Incomplete webhook text",
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.reply.to).toBe("sms:conv-9");
+    const body = run.ctxPayload.message.bodyForAgent;
+    expect(body).toContain("Production path SMS content");
+    expect(body).not.toContain("Incomplete webhook text");
+    expect(getOutboundContext("txt-ctx-1")).toBeUndefined();
+    expect(sendText).toHaveBeenCalledWith({
+      conversationId: "conv-9",
+      text: "Shorter retry text.",
+    });
+  });
+
+  it("does not wake when a thin failure has no outbound context and no route", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    await createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime,
+      channelRuntime,
+      logger,
+    }).handlers.onText?.(
+      textFailure({
+        messageId: "txt-unknown",
+        remote: null,
+        conversationId: null,
+        text: null,
+      }),
+    );
+
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("not correlated to a conversation"),
+    );
+  });
+
+  it("correlates a thin email bounce via outbound context", async () => {
+    const { runtime, sendEmail } = createRuntime();
+    const channelRuntime = createChannelRuntime("Trying another address.");
+    const bridge = createBridge(runtime, channelRuntime);
+
+    saveOutboundContext({
+      messageId: "mail-ctx-1",
+      channel: "email",
+      chatId: "contact-123",
+      recipient: "kim@example.com",
+      body: "Production path Email content",
+      emailThreadId: "thread-real",
+      emailRfcMessageId: "rfc-real",
+      emailSubject: "Real subject",
+    });
+
+    await bridge.handlers.onMail?.({
+      id: "evt-mail-thin",
+      event_type: "message.bounced",
+      timestamp: "2026-07-01T00:00:00Z",
+      data: {
+        contacts: [],
+        agent_identities: [],
+        message: {
+          id: "mail-ctx-1",
+          thread_id: "wrong-thread",
+          message_id: "<wrong@inkboxmail.com>",
+          from_address: "smoke-agent@inkboxmail.com",
+          to_addresses: [],
+          subject: "Different Subject",
+          direction: "outbound",
+          status: "bounced",
+        },
+      },
+    });
+
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    const run = channelRuntime.inbound.dispatchReply.mock.calls[0][0];
+    expect(run.ctxPayload.extra.InkboxMode).toBe("email");
+    expect(run.ctxPayload.reply.to).toBe("kim@example.com");
+    expect(run.ctxPayload.reply.messageThreadId).toBe("email:thread-real");
+    const body = run.ctxPayload.message.bodyForAgent;
+    expect(body).toContain("Production path Email content");
+    expect(getOutboundContext("mail-ctx-1")).toBeUndefined();
+    // The retry is a reply-all on the bounced message, so it stays in its thread.
+    expect(sendEmail).toHaveBeenCalledWith("mail-ctx-1", expect.anything());
+  });
+
+  it("records outbound context from deliverReply and clears it on delivered", async () => {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("Here is the update.");
+    const bridge = createBridge(runtime, channelRuntime);
+
+    await bridge.handlers.onText?.(inboundText("conv-9"));
+    expect(getOutboundContext("txt-reply")).toMatchObject({
+      channel: "sms",
+      bodySnippet: "Here is the update.",
+      conversationId: "conv-9",
+    });
+
+    await bridge.handlers.onText?.({
+      id: "evt-delivered",
+      event_type: "text.delivered",
+      timestamp: "2026-07-01T00:00:01Z",
+      data: {
+        contacts: [],
+        agent_identities: [],
+        recipient_phone_number: null,
+        text_message: {
+          id: "txt-reply",
+          direction: "outbound",
+          local_phone_number: "+16282028580",
+          remote_phone_number: "+15551234567",
+          conversation_id: "conv-9",
+          text: "Here is the update.",
+          type: "sms",
+          delivery_status: "delivered",
+          created_at: "2026-07-01T00:00:01Z",
+        },
+      },
+    });
+
+    expect(getOutboundContext("txt-reply")).toBeUndefined();
   });
 });
