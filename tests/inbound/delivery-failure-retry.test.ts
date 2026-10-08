@@ -488,3 +488,30 @@ describe("outbound delivery-failure recovery — session routing", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
   });
 });
+
+it("counts an inline failure once without waking a duplicate retry", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { pollSendOutcome } = await import("../../src/tools/send-outcome.js");
+  const home = mkdtempSync(join(tmpdir(), "inline-failure-"));
+  vi.stubEnv("INKBOX_SEND_OUTCOME_HOME", home);
+  try {
+    const { runtime } = createRuntime();
+    const channelRuntime = createChannelRuntime("NO_REPLY");
+    const bridge = createBridge(runtime, channelRuntime);
+    await pollSendOutcome(runtime, {}, "sms", { id: "inline-first", deliveryStatus: "delivery_failed" });
+    const first = textFailure({ messageId: "inline-first" });
+    await bridge.handlers.onText?.(first);
+    await bridge.handlers.onText?.(first);
+    expect(channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+    await bridge.handlers.onText?.(textFailure({ messageId: "inline-second" }));
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(lastBody(channelRuntime)).toContain("attempt=2/3");
+    await bridge.handlers.onText?.(textFailure({ messageId: "inline-third" }));
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  }
+});

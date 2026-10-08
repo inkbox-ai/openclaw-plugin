@@ -1,3 +1,4 @@
+import { pollSendOutcome, outcomeText } from "./send-outcome.js";
 import { createHash } from "node:crypto";
 import { activeNativeSource, assertNativeSource } from "../native-source.js";
 import { verifyNativeIMessageTarget } from "../imessage-threading.js";
@@ -157,10 +158,12 @@ export function registerSendIMessage(
           try { await source.recordIMessageAccepted?.(msg); } catch { /* Accepted send; optional history failure is not permission to resend. */ }
         }
         if (bound && source?.replyToMessageId) await source.afterSend(_id, msg.id, text);
+        const outcome = await pollSendOutcome(runtime, identity, "imessage", msg);
         const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
         return sentToolText(
-          `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} status=${msg.status ?? "unknown"}`,
+          `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} ${outcomeText(outcome)}`,
           params.completeSilently,
+          { ...outcome },
         );
       });
     },
