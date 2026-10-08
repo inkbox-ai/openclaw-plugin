@@ -361,14 +361,19 @@ An authorized `/stop` or `/cancel` silently cancels this sender's already-admitt
 
 Run `openclaw inkbox setup` and explicitly enable Slack. Setup can reuse a saved workspace or accept **masked** app-configuration credentials, prepare the identity's app asynchronously, hand off browser installation, and observe its connected state. The plugin does not retain the token pair or provision apps in the background. Preparation and installation waits are separately bounded/cancellable; an unknown app-creation outcome is never blindly retried. Alternatively connect the identity in the Inkbox Console first and set `channels.inkbox.slackEnabled: true` or `INKBOX_SLACK_ENABLED=1`, then restart.
 
-The same signed receiver handles Slack. Subscription reconciliation adds missing events to the current active URL without deleting unrelated events or receivers. `skipWebhookReconcile` remains supported. Disabling Slack gates events, recovered jobs, automatic replies, and its six tools:
+The same signed receiver handles Slack. Subscription reconciliation adds missing events to the current active URL without deleting unrelated events or receivers. `skipWebhookReconcile` remains supported. Disabling Slack gates events, recovered jobs, automatic replies, and its eight tools:
 
 - `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`
 - `inkbox_slack_search`, `inkbox_slack_send_message`, `inkbox_slack_get_action`
+- `inkbox_slack_upload_file`, `inkbox_slack_get_operation`
 
 Search covers retained text, not arbitrary workspace files. Follow a returned cursor even after an empty page. Explicit sends require a stable idempotency key; inspect pending/unknown actions with `get_action` rather than repeating a send. Native channel targets use `slack:<connection UUID>:<Slack conversation ID>`, with a separate optional native thread timestamp.
 
 Ordinary DMs stay inline and mentions in channels can start native threads. Unaddressed ordinary channel messages do not start work in an unengaged thread; eligible follow-ups in an already engaged thread retain Auto/Mention policy. Companion history/session scope spans the channel, while **each current message** owns its exact connection, channel, actor, and null-or-native-thread reply destination. Safe/Relaxed admission and Auto/Mention wake policy remain independent. Quiet context is durable and does not start a model, tool, or indicator. A mention can wake Companion without forcing a reply when the native room-event policy permits silence.
+
+Slack turns receive Slack-specific formatting instructions, and ordinary Markdown links/bold are repaired outside code blocks. Local files (1 byte–10 MiB) can be uploaded with `inkbox_slack_upload_file`; local media returned by the host is also uploaded to the original reply thread. Within one source turn, identical bytes to the same destination reuse the first upload receipt even if later filename/caption metadata differs. A local path or Markdown image is not a delivered file. Only a confirmed successful upload is delivery proof; unknown outcomes remain recorded and must not be blindly resent.
+
+Native tool activity appears in one source-owned progress surface, separate from approvals and final answers. SDK `0.7.16` or newer can use native task streams when supported by the workspace and the original thread/recipient context. The published `0.7.15` baseline uses one ordinary status message edited in place. Scope presence alone does not prove native support; an uncertain native write never causes a second fallback message. Automatic reconciliation is bounded, and definitive unknown outcomes remain inspectable without repeated provider reads. Pending operation keys and confirmed stream IDs survive restart; unresolved old-SDK edits remain fenced when read-only lookup is unavailable. Progress journals require a local hard-link-capable filesystem; do not share the same plugin state directory between containers with separate PID namespaces. Shutdown pauses a card without claiming a confirmed Stop; restart reconciles the original durable job before updating it.
 
 Working indicators follow the **outgoing destination**: inline replies use eyes on the source; native subthreads use Slack processing/suspended/active state and never reaction fallbacks. Approval waits suspend the native thread. Overlapping work is aggregated, bounded status retries do not affect delivery, and shutdown/restart cleanup retains unresolved operations.
 
@@ -459,7 +464,7 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 | `voiceRealtime.consultPolicy` | no | `substantive` | When realtime calls should consult the main OpenClaw agent. |
 | `voiceRealtime.providers.openai.apiKey` | no | - | OpenAI API key validated by setup and used for Realtime calls. |
 | `voiceRealtime.fallbackToInkboxSttTts` | no | `true` | Fall back to Inkbox STT/TTS when realtime is unavailable. |
-| `slackEnabled` | no | `false` | Enable connected Slack messaging and six Slack tools. |
+| `slackEnabled` | no | `false` | Enable connected Slack messaging and eight Slack tools. |
 | `imessageThreadedReplies` | no | `false` | Source-targeted native replies and durable follow-ups. |
 | `vault.keyEnvVar` | no | `INKBOX_OPENCLAW_VAULT_KEY` | Env var containing the vault unlock key. |
 

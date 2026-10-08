@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 // index.ts, src/channel.ts, src/health.ts, and src/inbound/session.ts.
 const HOST_SYMBOLS: Record<string, string[]> = {
   "openclaw/plugin-sdk/gateway-runtime": ["callGatewayFromCli"],
+  "openclaw/plugin-sdk/routing": ["isSubagentSessionKey"],
   "openclaw/plugin-sdk/channel-core": [
     "defineChannelPluginEntry",
     "buildChannelOutboundSessionRoute",

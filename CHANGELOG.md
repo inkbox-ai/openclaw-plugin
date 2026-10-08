@@ -6,6 +6,12 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Added
 
+- Deliver local Slack attachments through the SDK with source-owned durable outcomes and file-operation inspection.
+- Add Slack mrkdwn guidance and conservative formatting repair outside code blocks.
+- Show native tool progress in source-bound task streams when the SDK/workspace supports them, with one edited-message fallback and non-replaying uncertainty recovery.
+- Cover Stop followed by another message, late tool callbacks, attachment ownership, and restart recovery.
+- Support published SDK `0.7.15` and newer; native task-stream methods are optional until available in the installed SDK.
+
 - A resumable, non-interactive `openclaw inkbox bootstrap` command for existing identities, hosted Voice AI, explicit signing-key rotation, and gateway service startup.
 - A native three-option phone call voice-stack setup flow for Inkbox Voice AI, OpenAI Realtime API, and Inkbox TTS/STT.
 - Durable `call.ended` processing for hosted calls, including full transcript retrieval, post-call action reconciliation, replay after restart, and suppression of obsolete text replies.

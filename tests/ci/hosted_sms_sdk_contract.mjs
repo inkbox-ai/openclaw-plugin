@@ -76,5 +76,5 @@ assert(!JSON.stringify(records).includes(marker));
 assert(!JSON.stringify(records).includes("fixture-receipt"));
 assert(!JSON.stringify(records).includes(target));
 hook.deregister(); server.close();
-console.log("Published SDK 0.7.14: two actual native-loaded module graphs observed; safe accepted evidence verified.");
+console.log("Installed supported SDK: two actual native-loaded module graphs observed; safe accepted evidence verified.");
 process.exit(0);

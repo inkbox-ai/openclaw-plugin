@@ -1,3 +1,4 @@
+import { slackMrkdwn } from "./slack-style.js";
 import { createHash, randomUUID } from "node:crypto";
 import { ownSlackConnection, slackText } from "./slack.js";
 import { createInkboxRuntime } from "./client.js";
@@ -245,7 +246,8 @@ export async function sendInkboxChannelText(
   }
   if (target.mode === "slack") {
     if (!account.config.slackEnabled) throw new Error("Slack is disabled.");
-    slackText(params.text);
+    const text = slackMrkdwn(params.text);
+    slackText(text);
     const block = checkOutboundRecipient(`slack:${target.value}`, account.config.allowedRecipients);
     if (block) throw new Error(block);
     const runtime = createInkboxRuntime(account.config), client = await runtime.getClient(), identity = await runtime.getIdentity();
@@ -254,7 +256,7 @@ export async function sendInkboxChannelText(
     if (threadTs !== null && !/^\d{1,12}\.\d{1,6}$/.test(threadTs)) throw new Error("Invalid Slack thread timestamp.");
     const operation = params.replyToId ?? randomUUID();
     const idempotencyKey = `openclaw:channel:${createHash("sha256").update(JSON.stringify([identity.id, target.value, threadTs, operation, params.text])).digest("hex")}`;
-    const action = await client.slack.sendMessage(target.connectionId!, { conversationId: target.conversationId!, text: params.text, threadTs, idempotencyKey });
+    const action = await client.slack.sendMessage(target.connectionId!, { conversationId: target.conversationId!, text, threadTs, idempotencyKey });
     if (action.status !== "sent") throw new Error(`Slack action ${action.id} is ${action.status}; inspect the action rather than repeating the send.`);
     return { messageId: action.id };
   }

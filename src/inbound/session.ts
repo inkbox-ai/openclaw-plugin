@@ -1,9 +1,13 @@
+import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
 import { bindNativeSource, type NativeSource } from "../native-source.js";
 import { join } from "node:path";
 import { statePaths } from "../state.js";
-import { parseSlack, prepareSlackSource, ownSlackConnection, slackControlText, slackRouteKey, sendSlackReply, reconcileSlackSubscription, type SlackRoute } from "../slack.js";
+import { SLACK_REPLY_STYLE, parseSlack, prepareSlackSource, ownSlackConnection, slackControlText, slackRouteKey, sendSlackReply, reconcileSlackSubscription, type SlackRoute } from "../slack.js";
 import { createSlackActivity } from "../slack-activity.js";
+import { createSlackProgress, type ProgressResource } from "../slack-progress.js";
+import { uploadSlackSourceFile } from "../slack-files.js";
+import { fileURLToPath } from "node:url";
 import { contextBuffer } from "./context-buffer.js";
 import { ensureNativeApprovalContext, nativeApprovalScope, resolveNativeApproval, trackNativeApprovalTurn, type NativeApprovalBinding } from "./native-approvals.js";
 import { verifyNativeIMessageTarget } from "../imessage-threading.js";
@@ -2612,7 +2616,7 @@ async function dispatchInboundTurn(
     message: {
       inboundEventKind: opts.turn.nativeEventKind,
       body,
-      bodyForAgent: ["sms", "email", "imessage", "slack"].includes(opts.turn.mode) ? `${opts.turn.body}\n\n${approvalMarker}` : opts.turn.body,
+      bodyForAgent: ["sms", "email", "imessage", "slack"].includes(opts.turn.mode) ? `${opts.turn.body}\n\n${opts.turn.mode === "slack" ? SLACK_REPLY_STYLE + "\n\n" : ""}${approvalMarker}` : opts.turn.body,
       rawBody: opts.turn.rawText ?? opts.turn.body,
       commandBody: opts.turn.commandAuthorized === false ? "" : opts.turn.rawText ?? opts.turn.body,
       envelopeFrom: opts.turn.fromLabel,
@@ -5657,8 +5661,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
 
   async function shutdownA2A(): Promise<void> {
     companion.close();
-    await companion.idle();
+    await slackProgress.close();
     await slackActivity.close();
+    await companion.idle();
     a2aShuttingDown = true;
     const runs = [...a2aRuns.values()].flatMap((taskRuns) => [...taskRuns]);
     for (const run of runs) run.controller.abort();
@@ -6055,11 +6060,12 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal,
       nativeSource: !input.commandAuthorized && (input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
         identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
-        slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, validate: input.validateBeforeDispatch, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend,
+        slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, validate: input.validateBeforeDispatch, validateUpload: input.validateToolUpload, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend, afterUpload: input.afterToolUpload, rejectUpload: input.rejectToolUpload, beforeUpload: input.beforeToolUpload, inspectUpload: input.inspectToolUpload,
+        progress: input.reply.slackRoute ? (update) => slackProgress.observe(input.reply.slackRoute!, update) : undefined,
         recordIMessageAccepted: input.recordIMessageAccepted,
       } : undefined,
       slackRoute: input.reply.slackRoute,
-      activity: input.reply.slackRoute ? (phase) => slackActivity.notify(input.reply.slackRoute!, phase) : undefined,
+      activity: input.reply.slackRoute ? (phase) => { slackActivity.notify(input.reply.slackRoute!, phase); slackProgress.notify(input.reply.slackRoute!, phase); } : undefined,
       mode, contactKey: input.key, approvalRoute: input.key, sessionKeyOverride: input.event._openclawNativeIMessage ? `native-imessage:${input.reply.identityId}:${input.reply.conversationId}` : input.key,
       conversationKind: "group", conversationLabel: "Inkbox Companion conversation",
       conversationId: input.reply.conversationId,
@@ -6080,21 +6086,43 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     };
   }
   const activityOwner = createHash("sha256").update(JSON.stringify([opts.account.accountId, opts.account.config.identity, opts.account.config.baseUrl])).digest("hex");
+  const slackProgress = createSlackProgress({
+    resource: async (route) => {
+      if (!opts.account.config.slackEnabled) throw new Error("Slack is disabled.");
+      const client = await opts.runtime.getClient(), identity = await opts.runtime.getIdentity();
+      if (identity.id !== route.identityId) throw new Error("Slack progress identity changed.");
+      const connection = await ownSlackConnection(client, identity.id, route.connectionId, route.connectionGeneration);
+      if (connection.workspaceId !== route.workspaceId) throw new Error("Slack progress workspace changed.");
+      return client.slack as unknown as ProgressResource;
+    },
+    recoverEvent: (route) => companion.progressEvent(route as SlackRoute),
+    authorize: async (route, terminal) => {
+      if (!opts.account.config.slackEnabled) return false;
+      return companion.authorizeProgress(route as SlackRoute, terminal);
+    },
+    path: join(statePaths().dir, `slack-progress-${activityOwner}.json`),
+    warn: (message) => opts.logger?.warn?.(message),
+  });
   const slackActivity = createSlackActivity(async (route) => {
     const client = await opts.runtime.getClient(), identity = await opts.runtime.getIdentity();
     if (!route || identity.id !== route.identityId) throw new Error("Slack cleanup identity changed.");
-    const connection = await ownSlackConnection(client, identity.id, route.connectionId);
+    const connection = await ownSlackConnection(client, identity.id, route.connectionId, route.connectionGeneration);
     if (connection.workspaceId !== route.workspaceId) throw new Error("Slack cleanup workspace changed.");
     return client.slack;
   }, join(statePaths().dir, `slack-activity-${activityOwner}.json`), (message) => opts.logger?.warn?.(message));
-  opts.abortSignal?.addEventListener("abort", () => { void slackActivity.close(); }, { once: true });
+  opts.abortSignal?.addEventListener("abort", () => { void slackActivity.close(); void slackProgress.close(); }, { once: true });
   const companion = createCompanionReceiver({
     accountId: opts.account.accountId,
     config: opts.account.config,
     runtime: opts.runtime,
     warn: (message) => opts.logger?.warn?.(message),
     signal: opts.abortSignal,
-    activity: (event, phase) => { if (event._openclawSlack?.route) slackActivity.notify(event._openclawSlack.route, phase); },
+    activity: (event, phase) => {
+      const route = event._openclawSlack?.route;
+      if (!route) return;
+      if (phase !== "paused") slackActivity.notify(route, phase);
+      slackProgress.notify(route, phase);
+    },
     async submit(input) {
       if (input.commandAuthorized && input.rawText.toLowerCase() === "/resume") {
         await input.validateBeforeDispatch();
@@ -6104,6 +6132,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const finals: string[] = [];
       let completedSilently = false;
       const turn = companionTurn(input);
+      const uploadedMedia = new Set<string>();
+      const attachmentNotices = new Set<string>();
       if (input.commandAuthorized) {
         const aliases: Record<string, string> = { "/clear": "/new", "/cancel": "/stop", "/health": "/status" };
         turn.rawText = aliases[input.rawText.toLowerCase()] ?? input.rawText;
@@ -6114,8 +6144,32 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         onCompletedSilently: () => { completedSilently = true; },
         deliveryOverride: {
           deliver: async (payload, info) => {
-            const text = payloadText(payload).trim();
-            if (text && !isInkboxSilentReply(text)) {
+
+            if (turn.slackRoute && payload && typeof payload === "object" && info?.kind !== "tool") {
+              const raw = payload as { mediaUrl?: unknown; mediaUrls?: unknown };
+              const media = Array.isArray(raw.mediaUrls) ? raw.mediaUrls : raw.mediaUrl ? [raw.mediaUrl] : [];
+              if (media.length > 10) attachmentNotices.add("Some attachments exceeded the per-reply limit and were not uploaded.");
+              for (const location of media.slice(0, 10)) {
+                if (typeof location === "string" && uploadedMedia.has(location)) continue;
+                try {
+                  if (typeof location !== "string" || !location || !turn.nativeSource) throw new Error("No active attachment source.");
+                  // Remember attempted locations even when the external outcome is unknown.
+                  uploadedMedia.add(location);
+                  const filePath = location.startsWith("file://") ? fileURLToPath(location) : location;
+                  const callId = `reply-file:${createHash("sha256").update(location).digest("hex")}`;
+                  const receipt = await uploadSlackSourceFile(await opts.runtime.getClient(), turn.nativeSource, turn.slackRoute, { filePath }, callId, undefined, true);
+                  if (receipt.status !== "succeeded") attachmentNotices.add("An attachment upload was not confirmed. No automatic resend was attempted.");
+                } catch {
+                  attachmentNotices.add("An attachment could not be confirmed delivered. No automatic resend was attempted.");
+                }
+              }
+            }
+            const body = payloadText(payload).trim();
+            const replyBody = isInkboxSilentReply(body) ? "" : body;
+            const notice = [...attachmentNotices].join("\n\n");
+            const combined = [replyBody, notice].filter(Boolean).join("\n\n");
+            const texts = turn.slackRoute && replyBody && notice && [...slackMrkdwn(combined)].length > 12_000 ? [replyBody, notice] : [combined];
+            for (const text of texts.filter(Boolean)) {
               if (info?.kind === "block") {
                 blocks.push({ text, isError: Boolean(payload && typeof payload === "object" && (payload as { isError?: unknown }).isError === true) });
               } else if (!info?.kind || info.kind === "final") finals.push(text);
@@ -6201,7 +6255,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const route = parseSlack(event, identity.id);
       if (!route) return;
       const client = await opts.runtime.getClient();
-      const connection = await ownSlackConnection(client, identity.id, route.connectionId);
+      const connection = await ownSlackConnection(client, identity.id, route.connectionId, route.connectionGeneration);
+        route.connectionGeneration = connection.generation;
       if (connection.workspaceId !== route.workspaceId) throw new Error("Slack source workspace mismatch.");
       const normalized = structuredClone(event);
       delete normalized._openclawSlack;
@@ -6213,6 +6268,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         const profile = await client.slack.getUser(route.connectionId, route.actorId);
         if (profile?.id !== route.actorId || !/^T[A-Z0-9]{1,63}$/.test(String(profile?.team_id ?? ""))) throw new Error("Slack sender home workspace is unavailable.");
         route.author = `${profile.team_id}:${route.actorId}`;
+        route.recipientTeamId = String(profile.team_id);
         const scope = slackRouteKey(route);
         normalized.companion = { channel: "slack", phase: "ordinary", sequence: Date.now(), scope_id: createHash("sha256").update(scope).digest("hex"), conversation_id: route.conversationId };
       }
@@ -6667,7 +6723,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     activeCalls,
     catchUpA2A,
     catchUpHostedCalls,
-    catchUpCompanion: async () => { await slackActivity.recover(); await companion.recover(); },
+    catchUpCompanion: async () => { await slackActivity.recover(); await companion.recover(); await slackProgress.recover(); },
     shutdownA2A,
   };
 }

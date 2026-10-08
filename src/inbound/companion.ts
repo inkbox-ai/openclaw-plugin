@@ -1,7 +1,8 @@
+import { checkedSlackUpload, type SlackUploadReceipt, type SlackUploadIntent } from "../slack-files.js";
 import { createTerminalReceipts, type ReceiptIndex } from "./terminal-receipts.js";
 import { createIMessageOutcomes, imessageFailureNotice, type IMessageOutcomeRoute } from "./imessage-outcomes.js";
 import { fenceNativeOwner } from "../native-owner.js";
-import { SLACK_EVENTS, type SlackRoute, ownSlackConnection, slackAuthorAllowed } from "../slack.js";
+import { SLACK_EVENTS, type SlackRoute, ownSlackConnection, slackAuthorAllowed, slackRouteKey } from "../slack.js";
 import { companionWakes, controlText, isCompanionControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
@@ -26,10 +27,10 @@ function nativeSources(event: Record<string, any>): string[] {
 type Channel = CompanionChannel;
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc"> & { slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = CompanionMetadata;
-type Job = { slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval"; messageId?: string; text?: string }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string): Promise<void>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -65,7 +66,7 @@ export async function readCompanionQueueSummary(accountId: string, config: Parti
     if (!journal.jobs || typeof journal.jobs !== "object" || Array.isArray(journal.jobs)) throw new Error("Invalid journal");
     const blocked = new Set<string>();
     for (const job of Object.values(journal.jobs)) {
-      const unresolvedSend = crossedSend(job) || Object.values(job.toolSends ?? {}).some((send) => !send.messageId);
+      const unresolvedSend = crossedSend(job) || Object.values(job.toolSends ?? {}).some((send) => !send.messageId && !send.failed);
       if (job.identityId !== identityId || (job.state === "done" && !unresolvedSend)) continue;
       const m = metadata(job.event);
       const enabled = m.channel === "slack" ? config.slackEnabled === true : m.channel === "imessage" && (job.nativeThreaded || job.event._openclawNativeIMessage || job.reply?.replyToMessageId) ? config.imessageThreadedReplies === true : true;
@@ -139,10 +140,20 @@ export function createCompanionReceiver(opts: {
   canApprove?(input: CompanionInput): Promise<boolean>;
   resolveApproval?(event: Record<string, any>, key: string, beforeResolve: () => Promise<boolean>): Promise<boolean>;
   signal?: AbortSignal;
-  activity?(event: Record<string, any>, phase: "accepted" | "completed" | "failed" | "cancelled"): void;
+  activity?(event: Record<string, any>, phase: "accepted" | "completed" | "failed" | "cancelled" | "paused"): void;
   deliver(input: CompanionInput, text: string, beforeSend: () => Promise<void>): Promise<string | undefined>; warn?(message: string): void;
 }) {
   let closed = false;
+  const progressJobs = new Set<string>();
+  function activity(event: Record<string, any>, phase: "accepted" | "completed" | "failed" | "cancelled" | "paused") {
+    const route = event._openclawSlack?.route as SlackRoute | undefined;
+    if (route) {
+      const id = hash(`${route.identityId}:${route.sourceEventId}`);
+      if (["accepted", "paused"].includes(phase)) progressJobs.add(id);
+      else progressJobs.delete(id);
+    }
+    opts.activity?.(event, phase);
+  }
   const stopped = () => closed || opts.signal?.aborted === true;
   const owner = hash(JSON.stringify([opts.accountId, opts.config.identity, opts.config.baseUrl ?? ""]));
   const path = journalPath(opts.accountId, opts.config);
@@ -227,7 +238,7 @@ export function createCompanionReceiver(opts: {
         for (const [id, job] of Object.entries(journal.jobs)) {
           if (moved === 64) break;
           const m = metadata(job.event);
-          if (m.phase !== "ordinary" || !["slack", "imessage"].includes(m.channel) || job.state !== "done" || job.sendUnconfirmed || Object.values(job.toolSends ?? {}).some((send) => !send.messageId) || (!job.nativeComplete && (job.nativeOwner || job.reply || job.toolSends))) continue;
+          if (m.phase !== "ordinary" || !["slack", "imessage"].includes(m.channel) || job.state !== "done" || job.sendUnconfirmed || Object.values(job.toolSends ?? {}).some((send) => !send.messageId && !send.failed) || (!job.nativeComplete && (job.nativeOwner || job.reply || job.toolSends))) continue;
           if (job.stopTargets && !(await Promise.all(job.stopTargets.map(async (target) => {
             const captured = journal.jobs[target] ?? await receipts.event(target);
             return captured && (captured.state === "done" || captured.stoppedBy !== id || crossedSend(captured));
@@ -301,7 +312,7 @@ export function createCompanionReceiver(opts: {
   }
   async function notifyStoppedSlack(targetId: string, stopId: string) {
     const target = await readJob(targetId);
-    if (target?.stoppedBy === stopId && target.state === "done") opts.activity?.(target.event, "cancelled");
+    if (target?.stoppedBy === stopId && target.state === "done") activity(target.event, "cancelled");
   }
   async function reconcileNativeStops() {
     for (const [id, stop] of Object.entries((await read()).jobs)) {
@@ -338,7 +349,7 @@ export function createCompanionReceiver(opts: {
     const route: SlackRoute | undefined = job.event._openclawSlack?.route;
     if (!opts.config.slackEnabled || !route || route.identityId !== job.identityId) throw new Error("Slack reply source is no longer enabled.");
     const client = await opts.runtime.getClient();
-    const connection = await ownSlackConnection(client, job.identityId, route.connectionId);
+    const connection = await ownSlackConnection(client, job.identityId, route.connectionId, route.connectionGeneration);
     if (connection.workspaceId !== route.workspaceId) throw new Error("Slack workspace changed.");
     const m = metadata(job.event);
     if (m.phase !== "ordinary") {
@@ -347,13 +358,16 @@ export function createCompanionReceiver(opts: {
     }
   }
   function toolSendCallbacks(id: string, validate: () => Promise<void>) {
-    const beforeSend = async (callId: string, kind?: "approval") => {
+    const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent) => {
       await validate();
-      await mutate((journal) => {
+      return mutate((journal) => {
         const job = journal.jobs[id]!;
-        if (stopped() || !enabled(job) || job.stoppedBy || job.state !== "submitting" || job.nativeComplete) throw new Error("The native job is no longer active; its tool send is not authorized.");
-        if ((!kind && Object.values(job.toolSends ?? {}).some((send) => send.kind !== "approval" && !send.messageId)) || job.toolSends?.[callId]) throw new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
-        job.toolSends ??= {}; job.toolSends[callId] = kind ? { kind } : {};
+        if (stopped() || !enabled(job) || job.stoppedBy || job.state !== "submitting" || (job.nativeComplete && kind !== "attachment")) throw new Error("The native job is no longer active; its tool send is not authorized.");
+        const previous = upload && Object.values(job.toolSends ?? {}).find((send) => !send.failed && send.uploadFingerprint === upload.fingerprint);
+        if (previous?.upload) return { ...previous.upload, deduplicated: true };
+        if (previous) throw new Error("This file already has an uncertain upload; inspect it instead of repeating it.");
+        if ((kind !== "approval" && Object.values(job.toolSends ?? {}).some((send) => send.kind !== "approval" && !send.messageId && !send.failed)) || job.toolSends?.[callId]) throw new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
+        job.toolSends ??= {}; job.toolSends[callId] = { ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
       }, [id]);
     };
     const afterSend = async (callId: string, messageId: string, text?: string) => { await mutate((journal) => {
@@ -363,7 +377,37 @@ export function createCompanionReceiver(opts: {
       if (text !== undefined) job.toolSends[callId]!.text = text;
       job.outboundIds = [...new Set([...(job.outboundIds ?? []), messageId])];
     }, [id]); };
+    const afterUpload = async (callId: string, receipt: SlackUploadReceipt) => { await mutate((journal) => {
+      const job = journal.jobs[id]!, send = job.toolSends?.[callId];
+      if (!send || send.kind === "approval" || (send.upload && send.upload.id !== receipt.id)) throw new Error("Slack upload has no matching durable intent.");
+      if (send.uploadTarget && (receipt.connectionId !== send.uploadTarget.connectionId || receipt.conversationId !== send.uploadTarget.conversationId)) throw new Error("Slack upload target does not match its durable intent.");
+      if (send.upload && ["succeeded", "failed"].includes(send.upload.status)) {
+        if (send.upload.status !== receipt.status) throw new Error("Slack upload terminal outcome changed.");
+        return;
+      }
+      send.upload = receipt;
+      if (receipt.status === "succeeded") {
+        send.messageId = receipt.id;
+        job.outboundIds = [...new Set([...(job.outboundIds ?? []), receipt.id])];
+      } else if (receipt.status === "failed") send.failed = true;
+    }, [id]); };
     return {
+      afterToolUpload: afterUpload,
+      rejectToolUpload: async (callId: string) => { await mutate((j) => {
+        const send = j.jobs[id]?.toolSends?.[callId];
+        if (send?.uploadKey && !send.upload && !send.messageId) send.failed = true;
+      }, [id]); },
+      validateToolUpload: async (automatic: boolean) => {
+        await validate();
+        const job = await readJob(id);
+        if (stopped() || !job || !enabled(job) || job.stoppedBy || job.state !== "submitting" || (job.nativeComplete && !automatic)) throw new Error("The original reply no longer owns this attachment delivery.");
+      },
+      beforeToolUpload: (callId: string, intent: SlackUploadIntent) => beforeSend(callId, intent.automatic ? "attachment" : undefined, intent),
+      inspectToolUpload: async (receipt: SlackUploadReceipt) => {
+        const job = await readJob(id);
+        const matches = Object.entries(job?.toolSends ?? {}).filter(([, send]) => send.upload?.id === receipt.id);
+        if (matches.length === 1) await afterUpload(matches[0]![0], receipt);
+      },
       bindNativeOwner: async (sessionKey: string, runId: string) => {
         const active = await mutate((j) => {
           const job = j.jobs[id]!;
@@ -373,11 +417,41 @@ export function createCompanionReceiver(opts: {
         if (!active) throw new Error("The native source was stopped before its run could begin.");
       },
       nativeTerminal: async () => { await mutate((j) => { j.jobs[id]!.nativeComplete = true; }, [id]); },
-      beforeToolSend: (callId: string) => beforeSend(callId),
+      beforeToolSend: async (callId: string) => { await beforeSend(callId); },
       afterToolSend: afterSend,
-      beforeApprovalSend: (approvalId: string) => beforeSend(`approval:${approvalId}`, "approval"),
+      beforeApprovalSend: async (approvalId: string) => { await beforeSend(`approval:${approvalId}`, "approval"); },
       afterApprovalSend: (approvalId: string, messageId: string) => afterSend(`approval:${approvalId}`, messageId),
     };
+  }
+  async function reconcileUploads() {
+    for (const [id, job] of Object.entries((await read()).jobs)) {
+      const route: SlackRoute | undefined = job.event._openclawSlack?.route;
+      if (!route || route.identityId !== job.identityId) continue;
+      const pending = Object.entries(job.toolSends ?? {}).filter(([, send]) => send.uploadKey && !send.messageId && !send.failed && send.upload?.status !== "unknown" && (send.uploadLookups ?? 0) < 5);
+      if (!pending.length && !job.awaitingUploads) continue;
+      try {
+        const client = await opts.runtime.getClient(), identity = await opts.runtime.getIdentity();
+        if (identity.id !== job.identityId) continue;
+        for (const [callId, send] of pending) {
+          try {
+            await mutate((j) => { const pending = j.jobs[id]?.toolSends?.[callId]; if (pending) pending.uploadLookups = (pending.uploadLookups ?? 0) + 1; }, [id]);
+            const target = send.uploadTarget ?? route;
+            const connection = await ownSlackConnection(client, job.identityId, target.connectionId, undefined, true);
+            if (connection.workspaceId !== target.workspaceId) continue;
+            const sdk = client.slack as typeof client.slack & { getOperationByKey?(connectionId: string, options: { idempotencyKey: string }): Promise<any> };
+            const operation = send.upload ? await sdk.getOperation(target.connectionId, send.upload.id) : sdk.getOperationByKey ? await sdk.getOperationByKey(target.connectionId, { idempotencyKey: send.uploadKey! }) : undefined;
+            if (operation) await toolSendCallbacks(id, async () => {}).afterToolUpload(callId, checkedSlackUpload(operation, target.connectionId, target.conversationId));
+          } catch { /* Unknown/not found is not proof that an upload failed. */ }
+        }
+      } catch { opts.warn?.("Slack attachment reconciliation is unavailable; no upload was repeated."); }
+      await mutate((j) => {
+        const saved = j.jobs[id];
+        if (saved?.state !== "paused" || !saved.awaitingUploads || !saved.nativeComplete || saved.stoppedBy || saved.sendUnconfirmed || !saved.replies?.length) return;
+        if (Object.values(saved.toolSends ?? {}).some((send) => send.kind !== "approval" && send.kind !== "attachment" && !send.messageId && !send.failed)) return;
+        saved.state = "reply_pending";
+        delete saved.awaitingUploads; delete saved.retryAt; delete saved.reason;
+      }, [id]);
+    }
   }
   async function tryApproval(id: string, job: Job): Promise<boolean> {
     if (!opts.resolveApproval || job.state !== "pending" || await completedSource(job)) return false;
@@ -505,17 +579,21 @@ export function createCompanionReceiver(opts: {
         checkSponsor(sponsor, sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
         await mutate((j) => { if (stopped() || !enabled(j.jobs[id]!) || j.jobs[id]!.stoppedBy || !["pending", "submitting"].includes(j.jobs[id]!.state) || (j.jobs[id]!.state === "submitting" && j.jobs[id]!.nativeComplete)) throw new Error("The native job is no longer authorized to dispatch or deliver approval prompts."); j.jobs[id]!.nativeComplete = false; j.jobs[id]!.state = "submitting"; j.jobs[id]!.sponsor = sponsor; j.jobs[id]!.sponsorContactId = sponsorContactId; j.jobs[id]!.sources = sources; j.jobs[id]!.reply = reply; }, [id]);
-      }, recordDelivery, recordIMessageAccepted: (message) => acceptedIMessage(id, message), ...toolSendCallbacks(id, () => validateSlack(job)),
+      }, recordDelivery, recordIMessageAccepted: (message) => acceptedIMessage(id, message), ...toolSendCallbacks(id, async () => { checkSponsor(sponsor, sponsorContactId, job.event._openclawSlack?.route); await validateSlack(job); }),
     });
     async function sendSaved() {
       const current = (await read()).jobs[id]!;
-      if (current.stoppedBy) { opts.activity?.(job.event, "cancelled"); return; }
+      if (current.stoppedBy) { activity(job.event, "cancelled"); return; }
       if (stopped() || !enabled(current)) return;
-      if (Object.values(current.toolSends ?? {}).some((send) => send.kind !== "approval" && !send.messageId)) throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
+      const unresolved = Object.values(current.toolSends ?? {}).filter((send) => send.kind !== "approval" && send.kind !== "attachment" && !send.messageId && !send.failed);
+      if (unresolved.length) {
+        await mutate((j) => { j.jobs[id]!.awaitingUploads = unresolved.every((send) => Boolean(send.uploadKey)); }, [id]);
+        throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
+      }
       const input = makeInput(current.reply!);
       for (const text of current.replies ?? []) {
         const pending = (await read()).jobs[id]!;
-        if (pending.stoppedBy) { opts.activity?.(job.event, "cancelled"); return; }
+        if (pending.stoppedBy) { activity(job.event, "cancelled"); return; }
         if (stopped() || !enabled(pending)) return;
         // Only an exact accepted same-source send is delivery proof. Do not
         // suppress a different answer, an unknown result, or a legacy receipt.
@@ -534,9 +612,9 @@ export function createCompanionReceiver(opts: {
         });
       }
       await mutate((j) => { j.jobs[id]!.state = "done"; });
-      opts.activity?.(job.event, "completed");
+      activity(job.event, "completed");
     }
-    if (job.state === "reply_pending") { opts.activity?.(job.event, "accepted"); await sendSaved(); return; }
+    if (job.state === "reply_pending") { activity(job.event, "accepted"); await sendSaved(); return; }
     const journal = await read();
     if (await completedSource(job) || Object.entries(journal.jobs).some(([otherId, other]) => otherId !== id && other.identityId === job.identityId &&
         ["done", "reply_pending"].includes(other.state) && key(metadata(other.event), other.identityId) === scope &&
@@ -653,7 +731,7 @@ export function createCompanionReceiver(opts: {
       notices.push(notice); included.push(failure); inputBytes += addedBytes;
     }
     input.body = [...pending, ...notices, body].join("\n\n");
-    opts.activity?.(job.event, "accepted");
+    activity(job.event, "accepted");
     const texts = await opts.submit(input) ?? [];
     await mutate((j) => {
       if (j.jobs[id]!.stoppedBy) { j.jobs[id]!.state = "done"; j.jobs[id]!.nativeComplete = true; return; }
@@ -718,7 +796,8 @@ export function createCompanionReceiver(opts: {
             if (j.activations[scope]?.state === "submitting") j.activations[scope]!.state = "paused";
           });
           if (deferred) continue;
-          if ((await read()).jobs[id]?.state === "paused") opts.activity?.(job.event, "failed");
+          const paused = (await read()).jobs[id];
+          if (paused?.state === "paused") activity(job.event, paused.awaitingUploads ? "paused" : "failed");
           opts.warn?.("Companion delivery retained for recovery; uncertain submissions are paused.");
         }
         await archiveTerminal();
@@ -733,6 +812,7 @@ export function createCompanionReceiver(opts: {
     const task = (async () => {
       await ensureStateDir();
       await withFileLock(`${path}.worker`, lockOptions, async () => {
+        await reconcileUploads();
         await archiveTerminal();
         await mutate((j) => {
           for (const job of Object.values(j.jobs)) {
@@ -751,6 +831,7 @@ export function createCompanionReceiver(opts: {
         for (const [id, job] of Object.entries((await read()).jobs)) {
           if (job.stopTargets || (job.stoppedBy && !crossedSend(job))) continue;
           if (job.state !== "paused") continue;
+          activity(job.event, "paused");
           if (!job.nativeComplete && job.nativeOwner) {
             if (await fenceNativeOwner(job.nativeOwner.sessionKey, job.nativeOwner.runId)) await mutate((j) => { j.jobs[id]!.nativeComplete = true; });
           }
@@ -806,6 +887,22 @@ export function createCompanionReceiver(opts: {
       if (Object.values((await read()).jobs).some((job) => job.identityId === identityId &&
         ((messageId && job.outboundIds?.includes(messageId)) || (job.state !== "done" && metadata(job.event).conversation_id === conversationId)))) return true;
       return Boolean(messageId && await receipts.lookup("deliveries", JSON.stringify([identityId, messageId])));
+    },
+    async progressEvent(route: SlackRoute): Promise<"completed" | "cancelled" | "failed" | "paused" | undefined> {
+      if (!(await this.authorizeProgress(route, true))) return;
+      const job = await readJob(hash(`${route.identityId}:${route.sourceEventId}`));
+      if (job?.state === "done") return job.stoppedBy ? "cancelled" : "completed";
+      if (job?.state === "paused") return job.nativeComplete && !job.awaitingUploads ? "failed" : "paused";
+    },
+    async authorizeProgress(route: SlackRoute, terminal: boolean) {
+      const id = hash(`${route.identityId}:${route.sourceEventId}`), job = await readJob(id);
+      const original = job?.event._openclawSlack?.route as SlackRoute | undefined;
+      if (!job || !original || !enabled(job) || job.identityId !== route.identityId ||
+          original.sourceEventId !== route.sourceEventId || original.workspaceId !== route.workspaceId ||
+          original.actorId !== route.actorId || original.messageTs !== route.messageTs || original.author !== route.author || original.recipientTeamId !== route.recipientTeamId ||
+          original.connectionGeneration !== route.connectionGeneration || slackRouteKey(original) !== slackRouteKey(route)) return false;
+      // Pure ownership lookup: never advance dispatch, refresh sponsor, or rewrite a job.
+      return terminal || (progressJobs.has(id) && !job.stoppedBy && ["pending", "submitting", "reply_pending", "paused"].includes(job.state));
     },
     close() { closed = true; const timer = retries.get(path); if (timer) clearTimeout(timer); retries.delete(path); },
     async accept(event: Record<string, any>) {
@@ -930,6 +1027,8 @@ export function createCompanionReceiver(opts: {
         catch { opts.warn?.("Retained iMessage outcome metadata could not be recovered; no sends were replayed."); }
       }
       if (!Object.keys((await read()).jobs).length) return;
+      await start();
+      // A joined worker may already have taken its last snapshot before admission.
       await start();
     },
     async idle() { while (workers.has(path)) await workers.get(path); },

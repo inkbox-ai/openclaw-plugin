@@ -1,4 +1,4 @@
-import { bindNativeSourceRun, guardNativeSourceTool } from "./src/native-source.js";
+import { bindNativeSourceRun, guardNativeSourceTool, recordNativeSourceProgress } from "./src/native-source.js";
 import { bindNativeOwner, settleNativeOwner, guardRetiredNativeRun } from "./src/native-owner.js";
 import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall, reconcileSilentSendAgentEnd } from "./src/silent-send-capture.js";
 import { bindNativeApprovalTurnToRun, markNativeConversationReset } from "./src/inbound/native-approvals.js";
@@ -193,6 +193,7 @@ function registerHostedCallSettlementHooks(api: any): void {
     const decision = await recordHostedSmsBeforeToolCall(event, context);
     if (!decision?.block) {
       recordA2AProgressToolActivity(event, context);
+      recordNativeSourceProgress(event, context);
       // Fixed metadata only: no recipients, bodies, or tool/error prose.
       if (["inkbox_send_sms", "inkbox_send_email", "message"].includes(event.toolName)) {
         const body = event.params?.text ?? event.params?.bodyText ?? event.params?.message;
@@ -205,6 +206,7 @@ function registerHostedCallSettlementHooks(api: any): void {
   });
   api.on("model_call_started", recordSilentSendModelStarted);
   api.on("after_tool_call", recordSilentSendAfterToolCall);
+  api.on("after_tool_call", (event: any, context: any) => recordNativeSourceProgress(event, context, true));
   api.on("agent_end", reconcileSilentSendAgentEnd);
   api.on("agent_end", settleNativeOwner);
   api.on("after_tool_call", recordHostedSmsAfterToolCall);

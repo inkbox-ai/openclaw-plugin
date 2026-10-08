@@ -125,7 +125,7 @@ describe("guided Slack setup", () => {
     expect(startSetup).not.toHaveBeenCalled(); expect(installation).not.toHaveBeenCalled();
   });
 });
-describe("six opt-in Slack tools", () => {
+describe("eight opt-in Slack tools", () => {
   it.each(["thome:uperson", "tinstall:uperson"])("keeps canonical and installation author allowlists consistent: %s", async (allowed) => {
     const sdk = client(), factories: any[] = [], route = { ...parseSlack(event(), identityId)!, author: "THOME:UPERSON" };
     const beforeSend = vi.fn(), afterSend = vi.fn();
@@ -140,11 +140,22 @@ describe("six opt-in Slack tools", () => {
       expect(sdk.slack.sendMessage).toHaveBeenCalledOnce();
     } finally { close(); }
   });
-  it("keeps exactly six names, validates args before API, and no arbitrary status/reaction tools", async () => {
+  it("rejects expanded Slack text before checkpointing or sending", async () => {
+    const sdk = client(), factories: any[] = [], beforeSend = vi.fn();
+    const route = { ...parseSlack(event(), identityId)!, author: "THOME:UPERSON" };
+    const close = bindNativeSource("rendered-limit", { identityId, conversationId: route.conversationId, slackRoute: route, author: route.author, closed: false, validate: vi.fn(), beforeSend, afterSend: vi.fn() });
+    try {
+      registerSlackTools({ registerTool: (factory: any) => factories.push(factory) }, { getClient: async () => sdk, getIdentity: async () => ({ id: identityId }) } as any, () => ({ slackEnabled: true }));
+      const send = factories.map((factory) => factory({ sessionKey: "rendered-limit" })).find((tool) => tool.name === "inkbox_slack_send_message");
+      const result = await send.execute("long", { connectionId, conversationId: "CROOM", text: `[${"&".repeat(3000)}](https://example.test)`, idempotencyKey: "long" });
+      expect(result.isError).toBe(true); expect(beforeSend).not.toHaveBeenCalled(); expect(sdk.slack.sendMessage).not.toHaveBeenCalled();
+    } finally { close(); }
+  });
+  it("keeps exactly eight names, validates args before API, and no arbitrary status/reaction tools", async () => {
     const factories: any[] = [], sdk = client();
     registerSlackTools({ registerTool: (factory: any) => factories.push(factory) }, { getClient: async () => sdk, getIdentity: async () => ({ id: identityId }) } as any, () => ({ slackEnabled: true }));
     const tools = factories.map((factory) => factory({}));
-    expect(tools.map((tool) => tool.name.replace("inkbox_slack_", ""))).toEqual(["list_connections", "list_conversations", "list_messages", "search", "send_message", "get_action"]);
+    expect(tools.map((tool) => tool.name.replace("inkbox_slack_", ""))).toEqual(["list_connections", "list_conversations", "list_messages", "search", "send_message", "upload_file", "get_operation", "get_action"]);
     const send = tools.find((tool) => tool.name === "inkbox_slack_send_message");
     const result = await send.execute("tool", { connectionId, conversationId: "CROOM", text: "hello", idempotencyKey: "valid", reaction: "eyes" });
     expect(result.isError).toBe(true); expect(sdk.slack.sendMessage).not.toHaveBeenCalled();
