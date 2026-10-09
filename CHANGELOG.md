@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.17 (unreleased)
+
+- Send tools wait briefly for delivery updates and report status, transport, finality, and a plain-English outcome without repeating a send.
+- Suppress duplicate delivery-failure wakeups after an inline result while preserving retry accounting and native reply ownership.
+
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]

@@ -1,3 +1,4 @@
+import { pollSendOutcome, outcomeText } from "./send-outcome.js";
 import { Type } from "typebox";
 import type { InkboxRuntime } from "../client.js";
 import { runTool, toolError } from "../errors.js";
@@ -124,11 +125,11 @@ export function registerSendSms(
         };
         const msg = await identity.sendText(payload);
         const target = formatTargetSummary(msg, params);
-        const status = msg.deliveryStatus ?? "unknown";
+        const outcome = await pollSendOutcome(runtime, identity, "sms", msg);
         return sentToolText(
-          `Sent text id=${msg.id} ${target} status=${status} (${params.text.length} chars)`,
+          `Sent text id=${msg.id} ${target} ${outcomeText(outcome)} (${params.text.length} chars)`,
           params.completeSilently,
-          { inkboxSendSms: { sent: true } },
+          { inkboxSendSms: { sent: true }, ...outcome },
         );
       });
     },

@@ -1,3 +1,4 @@
+import { reportedInline } from "../tools/send-outcome.js";
 import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
 import { bindNativeSource, type NativeSource } from "../native-source.js";
@@ -4577,6 +4578,7 @@ async function handleDeliveryFailure(
     errorCode: failure.errorCode,
     errorDetail: failure.errorDetail,
   });
+  if (failure.stage !== "send_rejected" && await reportedInline(failure.messageId ?? "")) return;
   if (!note.woke) {
     if (note.reason === "capped") {
       opts.logger?.warn?.(
