@@ -48,6 +48,17 @@ describe("handleInkboxWebhook", () => {
     expect(out.status).toBe(403);
   });
 
+  it("returns 403 when the SDK throws on a malformed signature", async () => {
+    vi.mocked(verifyWebhook).mockImplementation(() => {
+      throw new RangeError("Input buffers must have the same byte length");
+    });
+    const out = await handleInkboxWebhook(mailBody, baseHeaders, {
+      signingKey: "whsec_x",
+      handlers: {},
+    });
+    expect(out.status).toBe(403);
+  });
+
   it("returns 200 on a valid mail event and invokes onMail", async () => {
     const onMail = vi.fn();
     const out = await handleInkboxWebhook(mailBody, baseHeaders, {

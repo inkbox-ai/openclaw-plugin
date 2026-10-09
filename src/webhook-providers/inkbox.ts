@@ -9,7 +9,13 @@ export const inkboxProvider = {
   name: "inkbox",
   providerHeader: "X-Inkbox-Signature",
   verify({ body, headers, secret }: WebhookVerifyInput): boolean {
-    return verifyWebhook({ payload: body, headers, secret });
+    try {
+      return verifyWebhook({ payload: body, headers, secret });
+    } catch {
+      // The SDK throws on a malformed signature (e.g. a digest whose length
+      // doesn't match). That is a bad signature, not a server error.
+      return false;
+    }
   },
 };
 

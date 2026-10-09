@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { matchProvider, registerProvider } from "../src/webhook-providers/index.js";
 import { githubProvider } from "../src/webhook-providers/github.js";
+import { inkboxProvider } from "../src/webhook-providers/inkbox.js";
 
 describe("matchProvider", () => {
   it("classifies by signature header before any verification runs", () => {
@@ -77,6 +78,40 @@ describe("github provider verify", () => {
         headers: { "x-hub-signature-256": "abcdef" },
         secret,
       }),
+    ).toBe(false);
+  });
+});
+
+describe("inkbox provider verify", () => {
+  const body = JSON.stringify({ event_type: "message.received" });
+  const secret = "whsec_inkbox-secret";
+  const requestId = "req-1";
+  const timestamp = "1747900800";
+
+  function headers(signature: string): Record<string, string> {
+    return {
+      "x-inkbox-signature": signature,
+      "x-inkbox-request-id": requestId,
+      "x-inkbox-timestamp": timestamp,
+    };
+  }
+
+  function sign(): string {
+    const digest = createHmac("sha256", "inkbox-secret")
+      .update(`${requestId}.${timestamp}.${body}`)
+      .digest("hex");
+    return `sha256=${digest}`;
+  }
+
+  it("accepts a valid signature", () => {
+    expect(inkboxProvider.verify({ body, headers: headers(sign()), secret })).toBe(true);
+  });
+
+  it("rejects a malformed signature instead of throwing", () => {
+    // The SDK's timing-safe compare throws on a length mismatch.
+    expect(inkboxProvider.verify({ body, headers: headers("sha256=x"), secret })).toBe(false);
+    expect(
+      inkboxProvider.verify({ body, headers: headers(sign().slice(0, -1)), secret }),
     ).toBe(false);
   });
 });
