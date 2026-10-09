@@ -4113,11 +4113,18 @@ function verifyCallWebSocket(
   ws.headers.forEach((value, key) => {
     headers[key.toLowerCase()] = value;
   });
-  const ok = verifyWebhook({
-    payload: callContext,
-    headers,
-    secret: signingKey,
-  });
+  let ok: boolean;
+  try {
+    ok = verifyWebhook({
+      payload: callContext,
+      headers,
+      secret: signingKey,
+    });
+  } catch {
+    // Malformed signatures make the SDK throw; reject them like any other
+    // bad signature (1008) instead of failing the handler (1011).
+    ok = false;
+  }
   if (!ok) {
     logger?.warn?.("Inkbox call WebSocket signature verification failed");
   }
