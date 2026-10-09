@@ -99,3 +99,13 @@ it("keeps the inline receipt when an accepted message is observed again", async 
   await pollSendOutcome(runtime, {}, "imessage", { id: "repeat", status: "pending" });
   expect(await reportedInline("repeat")).toBe(true);
 });
+
+it("keeps ambiguous delivery unknown and preserves safe rejection explanations", () => {
+  const uncertain = sendOutcome({ status: "error", errorCode: "send_outcome_ambiguous", errorMessage: "Delivery could not be confirmed." }, "imessage");
+  expect(uncertain.delivery_final).toBe(true);
+  expect(uncertain.error_detail).toBe("Delivery could not be confirmed.");
+  expect(uncertain.note).toContain("unknown; do not resend");
+  expect(uncertain.note).not.toContain("Delivery failed");
+  const rejected = sendOutcome({ status: "error", error_code: "message_send_rejected", error_message: "Message content could not be sent." }, "imessage");
+  expect(rejected.error_detail).toBe("Message content could not be sent.");
+});
