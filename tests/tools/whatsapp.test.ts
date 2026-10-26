@@ -11,6 +11,11 @@ function fixture(allowed?: string[], sessionKey?: string) {
     id: "identity-a",
     whatsappEnabled: false,
     getWhatsAppStatus: vi.fn(async () => ({ enabled: true, status: "ready" })),
+    getWhatsAppLimits: vi.fn(async () => ({
+      agentIdentityId: "identity-a",
+      limits: { "whatsapp.texts_per_agent_identity_per_24h": 1000 },
+      usage: { "whatsapp.texts_per_agent_identity_per_24h": 2 },
+    })),
     getWhatsAppConversation: vi.fn(async () => ({
       agentIdentityId: "identity-a",
       isGroup: false,
@@ -43,6 +48,16 @@ function fixture(allowed?: string[], sessionKey?: string) {
   return { identity, lookup, tools };
 }
 describe("dedicated WhatsApp tools", () => {
+  it("reads daily-only effective limits without billing-cycle fields", async () => {
+    const f = fixture();
+    const result = await f.tools.get("inkbox_get_whatsapp_status").execute("limits", {});
+    expect(JSON.parse(result.content[0].text.replace(/^```json\n|\n```$/g, ""))).toEqual({
+      enabled: true,
+      status: "ready",
+      limits: { "whatsapp.texts_per_agent_identity_per_24h": 1000 },
+      usage: { "whatsapp.texts_per_agent_identity_per_24h": 2 },
+    });
+  });
   it("treats email-address policy as a curated rejection without freeing unknown outcomes", async () => {
     const rejectSend = vi.fn(async () => {});
     const release = bindNativeSource("wa-email-policy", { whatsapp: true, identityId: "identity-a", conversationId: "conversation-a",
@@ -59,10 +74,12 @@ describe("dedicated WhatsApp tools", () => {
       expect(rejectSend).toHaveBeenCalledWith("first", "original-email-key", { ...policy, status_code: 422 });
       await f.tools.get("inkbox_send_whatsapp").execute("retry", payload);
       expect(f.identity.sendWhatsApp.mock.calls[0][0]).toEqual(f.identity.sendWhatsApp.mock.calls[1][0]);
-      f.identity.sendWhatsApp.mockRejectedValueOnce(new InkboxAPIError(429, policy));
-      const unknown = await f.tools.get("inkbox_send_whatsapp").execute("unknown", payload);
-      expect(unknown.details.requestAccepted).toBeUndefined();
-      expect(unknown.content[0].text).not.toContain("Request not accepted");
+      for (const error of [new InkboxAPIError(429, policy), new InkboxAPIError(402, { error: "whatsapp_cycle_limit_exceeded" })]) {
+        f.identity.sendWhatsApp.mockRejectedValueOnce(error);
+        const unknown = await f.tools.get("inkbox_send_whatsapp").execute("unknown", payload);
+        expect(unknown.details.requestAccepted).toBeUndefined();
+        expect(unknown.content[0].text).not.toContain("Request not accepted");
+      }
       expect(rejectSend).toHaveBeenCalledOnce();
     } finally { release(); }
   });

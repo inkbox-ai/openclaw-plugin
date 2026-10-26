@@ -178,7 +178,7 @@ export function registerWhatsAppTools(
       if (!status) return status;
       try {
         const current = await i.getWhatsAppLimits();
-        return { ...status, limits: current.limits, usage: current.usage, cycleStart: current.cycleStart };
+        return { ...status, limits: current.limits, usage: current.usage };
       } catch {
         return status; // Retained history/status remains usable if policy lookup is unavailable.
       }

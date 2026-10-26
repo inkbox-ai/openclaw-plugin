@@ -47,7 +47,6 @@ export const WHATSAPP_EVENTS = [
   "whatsapp.delivery_unconfirmed",
 ] as const;
 const rejectedSendCodes: Record<number, readonly string[]> = {
-  402: ["whatsapp_cycle_limit_exceeded"],
   403: ["whatsapp_not_eligible", "whatsapp_access_required", "whatsapp_contact_not_allowed", "whatsapp_media_source_not_allowed"],
   413: ["whatsapp_media_too_large"],
   422: ["whatsapp_groups_not_supported", "whatsapp_invalid_recipient", "whatsapp_text_too_long", "whatsapp_unanswered_followup_limit", "whatsapp_opening_message_too_long", "whatsapp_reply_required_for_media", "whatsapp_reply_required_for_links", "whatsapp_reply_required_for_phone_numbers", "whatsapp_reply_required_for_email_addresses"],
@@ -61,7 +60,7 @@ export function whatsappSendRejection(error: unknown): WhatsAppSendRejection | u
   const policy: WhatsAppSendRejection = { error: code, status_code: error.statusCode };
   if (typeof row.quota === "string" && /^whatsapp\.[a-z0-9_.]{1,120}$/.test(row.quota)) policy.quota = row.quota;
   for (const key of ["limit", "used"] as const) if (Number.isSafeInteger(row[key]) && Number(row[key]) >= 0) policy[key] = Number(row[key]);
-  if (typeof row.retry_condition === "string" && ["configuration", "window_reset", "cycle_reset_or_configuration", "recipient_reply", "recipient_reply_or_shorter_text", "recipient_reply_or_configuration"].includes(row.retry_condition)) policy.retry_condition = row.retry_condition;
+  if (typeof row.retry_condition === "string" && ["configuration", "window_reset", "recipient_reply", "recipient_reply_or_shorter_text", "recipient_reply_or_configuration"].includes(row.retry_condition)) policy.retry_condition = row.retry_condition;
   if (typeof row.reset_at === "string" && /^[0-9T:.+Z-]{20,40}$/.test(row.reset_at) && Number.isFinite(Date.parse(row.reset_at))) policy.reset_at = row.reset_at;
   if (Number.isSafeInteger(error.retryAfterSeconds) && Number(error.retryAfterSeconds) >= 0) policy.retry_after_seconds = Number(error.retryAfterSeconds);
   return policy;

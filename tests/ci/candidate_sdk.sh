@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Source before dependency installation. The ordinary manifest remains semver-based.
 set -euo pipefail
-candidate_revision=4f8574f9b8ae4f3988681fd8862a72ed1aa908ad
+candidate_revision=5bf65d4dfa6d8cfe65ec13a39ffa89a66ecb6b97
 candidate_directory="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/inkbox-sdk-candidate.XXXXXX")"
 git clone --quiet --filter=blob:none --no-checkout https://github.com/inkbox-ai/inkbox.git "$candidate_directory/source"
 git -C "$candidate_directory/source" fetch --quiet --depth=1 origin "$candidate_revision"
