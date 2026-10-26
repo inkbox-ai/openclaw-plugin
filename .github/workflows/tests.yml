@@ -28,10 +28,11 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
-      - name: Install dependencies
+      - name: Install reviewed SDK candidate and dependencies
         run: |
+          source "$GITHUB_WORKSPACE/tests/ci/candidate_sdk.sh"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@2026.5.27
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false "$INKBOX_SDK_CANDIDATE_TGZ" openclaw@2026.5.27
 
       - name: Typecheck
         run: npm run typecheck
@@ -43,6 +44,7 @@ jobs:
         run: |
           npm run build
           node tests/ci/verify_package.mjs
+          node tests/ci/verify_candidate_package.mjs
 
   # Contract suite + full typecheck against the LATEST OpenClaw host. This is
   # the lane that catches upstream interface drift (a moved plugin-sdk symbol,
@@ -59,10 +61,12 @@ jobs:
           node-version: "24.16.0"
           cache: npm
 
-      - name: Install deps + latest OpenClaw host
+      - name: Install reviewed SDK candidate + latest OpenClaw host
         run: |
+          source "$GITHUB_WORKSPACE/tests/ci/candidate_sdk.sh"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@latest
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false "$INKBOX_SDK_CANDIDATE_TGZ" openclaw@latest
+          node tests/ci/verify_candidate_sdk.mjs
           npm ls openclaw || true
 
       - name: Typecheck vs latest OpenClaw

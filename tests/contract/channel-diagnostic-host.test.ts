@@ -213,11 +213,13 @@ describe("exact-source post-outcome native diagnostics", () => {
           const exports=await import(pathToFileURL(join(dist,file)).href);
           const maintain=Object.values(exports).find(f=>typeof f==='function'&&f.name==='runSessionColdStorageMaintenance');
           const target={agentId:'main',sessionKey:${JSON.stringify(sessionKey)}};
-          const realNow=Date.now;Date.now=()=>realNow()-60*86400000;
+          const realNow=Date.now;
           await upsertSessionEntry({...target,entry:{sessionId:${JSON.stringify(id)},updatedAt:Date.now()}});
           await appendSessionTranscriptMessageByIdentity({...target,sessionId:${JSON.stringify(id)},message:{role:'user',content:[{type:'text',text:${JSON.stringify(scope.text)}}],timestamp:Date.now()}});
-          Date.now=realNow;
+          // The transcript worker owns its write timestamp; advance the maintenance clock, not just the caller clock during writes.
+          Date.now=()=>realNow()+60*86400000;
           const result=await maintain({config:{agents:{list:[{id:'main'}]},session:{maintenance:{coldStorage:{enabled:true,afterDays:30}}}}});
+          Date.now=realNow;
           if(result.archivedTranscripts!==1)throw Error('native fixture did not archive exactly one transcript');
           process.exit(0);`;
         execFileSync(process.execPath, ["--input-type=module", "-e", setup], { env: env(state), cwd: process.cwd(),

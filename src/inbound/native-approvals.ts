@@ -45,7 +45,7 @@ export function ensureNativeApprovalContext(core: any, accountId: string, abortS
   return context;
 }
 export function trackNativeApprovalTurn(core: any, binding: NativeApprovalBinding): () => void {
-  if (!["mail", "phone", "sms", "imessage", "slack"].includes(binding.channel)) return () => {};
+  if (!["mail", "phone", "sms", "imessage", "whatsapp", "slack"].includes(binding.channel)) return () => {};
   // Account startup owns this context. A late dispatch must not recreate it after shutdown.
   const context = core?.runtimeContexts?.get?.({ channelId: "inkbox", accountId: binding.accountId, capability }) as NativeContext | undefined;
   context?.bindings.set(binding.sessionKey, [...(context.bindings.get(binding.sessionKey) ?? []), binding]);

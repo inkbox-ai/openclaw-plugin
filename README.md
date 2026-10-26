@@ -625,3 +625,13 @@ See [PLAN.md](./PLAN.md) for the longer architecture history and roadmap.
 ## License
 
 MIT - see [LICENSE](./LICENSE).
+
+## Dedicated WhatsApp
+
+WhatsApp is available by approval for an agent with a dedicated personal iMessage number. The channel uses that same number, not a shared line. Request access from the Inkbox Console. There is no local enable flag, self-service provisioning tool, or automatic SMS fallback. Existing installations subscribe to notifications independently of a cached disabled identity snapshot, so later approval does not require changing credentials.
+
+The plugin handles authenticated incoming one-to-one text and media, retains source-owned work and answers across restarts, and routes final replies to the originating WhatsApp conversation. Do not duplicate an ordinary final answer with a send tool. Delivery notifications update tracking without waking the model or automatically resending.
+
+Ten native tools provide sending, conversation/message reads, owned-media upload/access, local mark-read, fresh status and read-only send lookup. Upload one local file (maximum 20 MiB) and retain its media ID before sending. Text is at most 4,000 Unicode code points. Preserve the original idempotency key and media ID after uncertainty; confirmed sending with unknown delivery is not a failed send. Incoming files have a local path when bytes are available, or an explicit unavailable notice. Groups, quoted replies, reactions, typing, remote read receipts and WhatsApp calls are not supported.
+
+This draft requires SDK 0.7.21 and the corresponding API. Candidate CI builds public SDK commit `52455f5d0f11acd2e3a0e4a9eeb8d5585485bec5`, then verifies the real archive from inside an installed packed plugin with the actual OpenClaw host. Normal registry installation remains a release prerequisite; no package is published by these checks.

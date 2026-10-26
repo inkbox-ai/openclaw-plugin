@@ -3,6 +3,7 @@ import type { SlackUploadReceipt, SlackUploadIntent } from "./slack-files.js";
 
 /** Trusted, short-lived source ownership captured by native tool factories. */
 export type NativeSource = {
+  whatsapp?: boolean; sourceMessageId?: string;
   identityId: string; conversationId: string; replyToMessageId?: string; slackRoute?: SlackRoute;
   author: string; companion?: boolean; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
   validate(): Promise<void>;

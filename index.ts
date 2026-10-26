@@ -14,6 +14,7 @@ import { registerInkboxPublicUrlInboundRoutes } from "./src/gateway.js";
 import { listInkboxAccountIds, resolveInkboxAccount, resolveInkboxToolsConfig } from "./src/accounts.js";
 import { registerSendEmail } from "./src/tools/send-email.js";
 import { registerSendSms } from "./src/tools/send-sms.js";
+import { registerWhatsAppTools } from "./src/tools/whatsapp.js";
 import { registerSendIMessage } from "./src/tools/send-imessage.js";
 import { registerForwardEmail } from "./src/tools/forward-email.js";
 import { registerEmailReads } from "./src/tools/email-reads.js";
@@ -97,6 +98,7 @@ function registerInkboxTools(api: any): void {
   // Required outbound tools — registered without { optional: true } so they
   // light up as soon as the plugin is enabled. Recipient allowlist is
   // threaded through; when undefined, no filtering applies.
+  registerWhatsAppTools(api, runtime, cfg.allowedRecipients);
   registerSendEmail(api, runtime, cfg.allowedRecipients);
   registerSendSms(api, runtime, cfg.allowedRecipients);
   registerSendIMessage(api, runtime, cfg.allowedRecipients, () => resolveCfg().imessageThreadedReplies === true);

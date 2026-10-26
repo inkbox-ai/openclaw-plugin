@@ -1,3 +1,4 @@
+import { assertWhatsAppText, whatsappReady, whatsappSendKey } from "./whatsapp.js";
 import { slackMrkdwn } from "./slack-style.js";
 import { createHash, randomUUID } from "node:crypto";
 import { ownSlackConnection, slackText } from "./slack.js";
@@ -12,7 +13,9 @@ export type InkboxTargetMode =
   | "sms"
   | "sms-conversation"
   | "imessage"
-  | "imessage-conversation";
+  | "imessage-conversation"
+  | "whatsapp"
+  | "whatsapp-conversation";
 
 export interface ParsedInkboxTarget {
   mode: InkboxTargetMode;
@@ -39,10 +42,10 @@ function stripKnownPrefix(raw: string): string {
   return raw
     .trim()
     .replace(/^(inkbox:)/i, "")
-    .replace(/^(sms:conversation:|text:conversation:|phone:conversation:|imessage:conversation:)/i, "")
+    .replace(/^(sms:conversation:|text:conversation:|phone:conversation:|imessage:conversation:|whatsapp:conversation:)/i, "")
     .replace(/^(conversation:|thread:)/i, "")
     .replace(/^(email:|mailto:)/i, "")
-    .replace(/^(sms:|text:|phone:|imessage:)/i, "");
+    .replace(/^(sms:|text:|phone:|imessage:|whatsapp:)/i, "");
 }
 
 function stripProviderPrefix(raw: string): string {
@@ -64,6 +67,7 @@ export function normalizeInkboxTarget(raw: string): string | undefined {
   // iMessage targets keep their channel prefix: a stripped conversation UUID
   // is indistinguishable from an SMS conversation id, so normalizing it away
   // would re-route the send to the wrong channel.
+  if (/^whatsapp:/i.test(stripProviderPrefix(trimmed))) { const value = stripKnownPrefix(trimmed); return value ? `whatsapp:${value}` : undefined; }
   if (/^imessage:/i.test(stripProviderPrefix(trimmed))) {
     const value = stripKnownPrefix(trimmed);
     return value ? `imessage:${value}` : undefined;
@@ -82,6 +86,7 @@ export function parseInkboxTarget(raw: string): ParsedInkboxTarget | null {
     return match ? { mode: "slack", value: `${match[1]}:${match[2]}`, connectionId: match[1], conversationId: match[2] } : null;
   }
   const normalized = stripKnownPrefix(trimmed);
+  if (/^whatsapp:/i.test(withoutProvider)) return /^\+[1-9]\d{6,14}$/.test(normalized) ? { mode: "whatsapp", value: normalized } : looksLikeConversationId(normalized) ? { mode: "whatsapp-conversation", value: normalized } : null;
   if (!normalized) {
     return null;
   }
@@ -259,6 +264,17 @@ export async function sendInkboxChannelText(
     const action = await client.slack.sendMessage(target.connectionId!, { conversationId: target.conversationId!, text, threadTs, idempotencyKey });
     if (action.status !== "sent") throw new Error(`Slack action ${action.id} is ${action.status}; inspect the action rather than repeating the send.`);
     return { messageId: action.id };
+  }
+  if (target.mode === "whatsapp" || target.mode === "whatsapp-conversation") {
+    assertWhatsAppText(params.text);
+    const identity = await createInkboxRuntime(account.config).getIdentity();
+    let recipient = target.value;
+    if (target.mode === "whatsapp-conversation") { const conversation = await identity.getWhatsAppConversation(target.value); if (conversation.agentIdentityId !== identity.id || conversation.isGroup || conversation.participants.length !== 1) throw new Error("A direct WhatsApp conversation is required."); recipient = conversation.remoteNumber ?? conversation.participants[0]!; }
+    const blocked = checkOutboundRecipient(recipient, account.config.allowedRecipients); if (blocked) throw new Error(blocked);
+    await whatsappReady(identity);
+    const message = await identity.sendWhatsApp({ ...(target.mode === "whatsapp" ? { to: target.value } : { conversationId: target.value }), text: params.text,
+      idempotencyKey: whatsappSendKey([identity.id, target.value, params.replyToId ?? randomUUID(), params.text]) });
+    return { messageId: message.id };
   }
   if (target.mode === "imessage" || target.mode === "imessage-conversation") {
     assertIMessageTextWithinLimit(params.text);

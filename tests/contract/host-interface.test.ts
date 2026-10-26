@@ -23,7 +23,7 @@ const HOST_SYMBOLS: Record<string, string[]> = {
     "buildThreadAwareOutboundSessionRoute",
     "createChatChannelPlugin",
   ],
-  "openclaw/plugin-sdk/channel-message": [
+  "openclaw/plugin-sdk/channel-outbound": [
     "createMessageReceiptFromOutboundResults",
     "defineChannelMessageAdapter",
   ],

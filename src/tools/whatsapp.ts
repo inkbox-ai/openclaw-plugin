@@ -1,0 +1,212 @@
+import { Type } from "typebox";
+import type { InkboxRuntime } from "../client.js";
+import { runTool, toolText } from "../errors.js";
+import { formatJson } from "../format.js";
+import { checkOutboundRecipient } from "../allowlist.js";
+import { activeNativeSource, assertNativeSource } from "../native-source.js";
+import {
+  acceptedWhatsApp,
+  assertWhatsAppText,
+  whatsappFile,
+  whatsappReady,
+  whatsappSendKey,
+} from "../whatsapp.js";
+import {
+  silentSendCompletionParameter,
+  sentToolText,
+} from "./send-completion.js";
+
+export function registerWhatsAppTools(
+  api: any,
+  runtime: InkboxRuntime,
+  allowedRecipients?: string[],
+) {
+  api.registerTool(
+    (context: { sessionKey?: string }) => {
+      const source = activeNativeSource(context.sessionKey);
+      return {
+        name: "inkbox_send_whatsapp",
+        description:
+          "Send one-to-one WhatsApp using one E.164 recipient or an existing conversation and optional owned media ID. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
+        parameters: Type.Object(
+          {
+            to: Type.Optional(Type.String()),
+            conversationId: Type.Optional(Type.String()),
+            text: Type.Optional(Type.String({ maxLength: 4000 })),
+            mediaIds: Type.Optional(Type.Array(Type.String(), { maxItems: 1 })),
+            idempotencyKey: Type.Optional(Type.String()),
+            completeSilently: silentSendCompletionParameter,
+          },
+          { additionalProperties: false },
+        ),
+        async execute(callId: string, params: any) {
+          return runTool(async () => {
+            const identity = await runtime.getIdentity();
+            const conversationId =
+              params.conversationId ??
+              (source?.whatsapp ? source.conversationId : undefined);
+            if (!!params.to === !!conversationId)
+              throw new Error("Specify exactly one of to or conversationId.");
+            if (!params.text?.trim() && !params.mediaIds?.length)
+              throw new Error("Provide text or one owned media ID.");
+            if ((params.mediaIds?.length ?? 0) > 1)
+              throw new Error("WhatsApp supports one attachment.");
+            assertWhatsAppText(params.text ?? "");
+            if (source) {
+              assertNativeSource(source, identity.id);
+              await source.validate();
+            }
+            const bound = Boolean(
+              source?.whatsapp &&
+                !params.to &&
+                conversationId === source.conversationId,
+            );
+            let recipient = params.to;
+            if (conversationId) {
+              const conversation =
+                await identity.getWhatsAppConversation(conversationId);
+              if (
+                conversation.agentIdentityId !== identity.id ||
+                conversation.isGroup ||
+                conversation.participants.length !== 1
+              )
+                throw new Error(
+                  "A direct conversation owned by this identity is required.",
+                );
+              recipient =
+                conversation.remoteNumber ?? conversation.participants[0];
+            }
+            const block = checkOutboundRecipient(recipient, allowedRecipients);
+            if (block) throw new Error(block);
+            await whatsappReady(identity);
+            if (bound) await source!.beforeSend(callId);
+            const message = await identity.sendWhatsApp({
+              ...(params.to ? { to: params.to } : { conversationId }),
+              ...(params.text !== undefined ? { text: params.text } : {}),
+              ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}),
+              idempotencyKey:
+                params.idempotencyKey ??
+                whatsappSendKey([
+                  identity.id,
+                  source?.whatsapp ? source.sourceMessageId : null,
+                  callId,
+                  conversationId ?? params.to,
+                  params.text,
+                  params.mediaIds,
+                ]),
+            });
+            if (bound) {
+              try {
+                await source!.afterSend(callId, message.id, params.text);
+              } catch {
+                /* Accepted send remains accepted even if optional tracking fails. */
+              }
+            }
+            return sentToolText(
+              formatJson(acceptedWhatsApp(message)),
+              params.completeSilently,
+              { inkboxMessageId: message.id },
+            );
+          });
+        },
+      };
+    },
+    { names: ["inkbox_send_whatsapp"] },
+  );
+  const page = {
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+    offset: Type.Optional(Type.Integer({ minimum: 0 })),
+  };
+  const read = (
+    name: string,
+    description: string,
+    fields: Record<string, any>,
+    execute: (identity: any, params: any) => Promise<unknown>,
+  ) =>
+    api.registerTool({
+      name,
+      description,
+      parameters: Type.Object(fields, { additionalProperties: false }),
+      async execute(_id: string, params: any) {
+        return runTool(async () =>
+          toolText(
+            formatJson(await execute(await runtime.getIdentity(), params)),
+          ),
+        );
+      },
+    });
+  read(
+    "inkbox_get_whatsapp_status",
+    "Read fresh WhatsApp approval and availability; never enables access.",
+    {},
+    (i) => i.getWhatsAppStatus(),
+  );
+  read(
+    "inkbox_list_whatsapp_conversations",
+    "List direct WhatsApp conversations with local unread counts; retained history remains readable when sending is disabled.",
+    page,
+    (i, p) => i.listWhatsAppConversations(p),
+  );
+  read(
+    "inkbox_get_whatsapp_conversation",
+    "Read WhatsApp conversation metadata. Use list messages separately for history.",
+    { conversationId: Type.String() },
+    (i, p) => i.getWhatsAppConversation(p.conversationId),
+  );
+  read(
+    "inkbox_list_whatsapp_messages",
+    "List stored WhatsApp messages, newest first, with separate send/delivery state.",
+    {
+      ...page,
+      conversationId: Type.Optional(Type.String()),
+      isRead: Type.Optional(Type.Boolean()),
+    },
+    (i, p) => i.listWhatsAppMessages(p),
+  );
+  read(
+    "inkbox_get_whatsapp_message",
+    "Read the original WhatsApp message and status freshness. Uncertain sending and unknown delivery are not permission to resend.",
+    { messageId: Type.String() },
+    (i, p) => i.getWhatsAppMessage(p.messageId),
+  );
+  read(
+    "inkbox_get_whatsapp_media",
+    "Reauthorize owned WhatsApp media and retrieve fresh temporary URL/availability; never forward API credentials to that URL.",
+    { mediaId: Type.String() },
+    (i, p) => i.getWhatsAppMedia(p.mediaId),
+  );
+  read(
+    "inkbox_mark_whatsapp_read",
+    "Mark local history read through one exact message boundary. Sends no remote read receipt.",
+    { conversationId: Type.String(), throughMessageId: Type.String() },
+    (i, p) => i.markWhatsAppRead(p.conversationId, p.throughMessageId),
+  );
+  api.registerTool((context: { sessionKey?: string }) => {
+    const source = activeNativeSource(context.sessionKey);
+    return {
+      name: "inkbox_upload_whatsapp_media",
+      description: "Upload one local regular file up to 20 MiB. Retain its owned media ID for send retries.",
+      parameters: Type.Object({ filePath: Type.String(), contentType: Type.Optional(Type.String()) }, { additionalProperties: false }),
+      async execute(_id: string, params: any) { return runTool(async () => {
+        const identity = await runtime.getIdentity();
+        if (source) { assertNativeSource(source, identity.id); await source.validate(); }
+        const file = await whatsappFile(params.filePath);
+        await whatsappReady(identity);
+        if (source) { assertNativeSource(source, identity.id); await source.validate(); }
+        return toolText(formatJson(await identity.uploadWhatsAppMedia({ ...file, contentType: params.contentType })));
+      }); },
+    };
+  }, { names: ["inkbox_upload_whatsapp_media"] });
+  read(
+    "inkbox_lookup_whatsapp_send",
+    "Read-only lookup of the original message ID by logical-send key. A missing result does not authorize another key or send.",
+    { idempotency_key: Type.String() },
+    async (i, p) =>
+      (await runtime.getClient()).messageSends.lookup({
+        senderKind: "whatsapp_identity",
+        senderId: i.id,
+        operation: "whatsapp.send",
+        idempotencyKey: p.idempotency_key,
+      }),
+  );
+}

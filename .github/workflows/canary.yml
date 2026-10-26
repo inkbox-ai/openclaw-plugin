@@ -23,8 +23,10 @@ jobs:
 
       - name: Install deps + latest OpenClaw host
         run: |
+          source "$GITHUB_WORKSPACE/tests/ci/candidate_sdk.sh"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@latest
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false "$INKBOX_SDK_CANDIDATE_TGZ" openclaw@latest
+          node tests/ci/verify_candidate_sdk.mjs
           npm ls openclaw || true
 
       - name: Typecheck vs latest OpenClaw

@@ -1,3 +1,4 @@
+import { assertWhatsAppText, whatsappReady, whatsappSendKey } from "../whatsapp.js";
 import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
 import { bindNativeSource, type NativeSource } from "../native-source.js";
@@ -102,6 +103,7 @@ import {
 import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
 import {
   IMESSAGE_EVENT_TYPES,
+  WHATSAPP_EVENT_TYPES,
   A2A_EVENT_TYPES,
   CALL_EVENT_TYPES,
   MAIL_EVENT_TYPES,
@@ -117,6 +119,7 @@ type InboundMode =
   | "email"
   | "sms"
   | "imessage"
+  | "whatsapp"
   | "voice"
   | "warmup"
   | "external"
@@ -438,6 +441,7 @@ const MAIN_AGENT_CAPABILITIES: ReadonlyArray<
       "inkbox_mark_imessage_conversation_read",
     ],
   ],
+  ["whatsapp", "use approved one-to-one WhatsApp with the configured agent", ["inkbox_send_whatsapp", "inkbox_get_whatsapp_status", "inkbox_list_whatsapp_conversations", "inkbox_list_whatsapp_messages", "inkbox_get_whatsapp_message", "inkbox_upload_whatsapp_media", "inkbox_get_whatsapp_media", "inkbox_lookup_whatsapp_send"]],
   ["email", "send email", ["inkbox_send_email"]],
   ["calls", "place a separate outbound phone call", ["inkbox_place_call"]],
   ["identity", "check its own Inkbox identity and numbers", ["inkbox_whoami"]],
@@ -1694,6 +1698,17 @@ async function deliverReply(
     if (!params.turn.slackRoute) throw new Error("Slack reply has no bound source.");
     return sendSlackReply(await params.runtime.getClient(), params.turn.slackRoute, text, params.beforeSend);
   }
+  if (params.turn.mode === "whatsapp") {
+    assertWhatsAppText(text);
+    const identity = await params.runtime.getIdentity();
+    if (!params.turn.conversationId) throw new Error("WhatsApp replies require the originating conversation.");
+    if (params.turn.companionReply?.identityId && identity.id !== params.turn.companionReply.identityId) throw new Error("The WhatsApp reply identity changed.");
+    await whatsappReady(identity);
+    await params.beforeSend?.();
+    const message = await identity.sendWhatsApp({ conversationId: params.turn.conversationId, text,
+      idempotencyKey: whatsappSendKey([identity.id, params.turn.messageId, params.turn.conversationId, text]) });
+    return message.id;
+  }
   if (params.turn.mode === "imessage") {
     // Length guard stays a plain throw before the send: an over-limit reply is
     // a local bug to surface, not a server delivery failure to recover from.
@@ -2520,7 +2535,7 @@ async function dispatchInboundTurn(
     ? withInkboxGroupSilenceDefault(opts.cfg) : opts.cfg;
   const channelThreadRouteId =
     opts.turn.conversationId
-      ? `${opts.turn.mode === "slack" ? "slack" : opts.turn.mode === "email" ? "email" : opts.turn.mode === "imessage" ? "imessage" : "sms"}:${opts.turn.conversationId}`
+      ? `${opts.turn.mode === "slack" ? "slack" : opts.turn.mode === "email" ? "email" : opts.turn.mode === "imessage" ? "imessage" : opts.turn.mode === "whatsapp" ? "whatsapp" : "sms"}:${opts.turn.conversationId}`
       : undefined;
   const conversationRouteId =
     conversationKind === "group"
@@ -2553,11 +2568,11 @@ async function dispatchInboundTurn(
     timestamp,
     body: opts.turn.body,
   });
-  const conversationPrefix = opts.turn.mode === "slack" ? "slack" : opts.turn.mode === "imessage" ? "imessage" : "sms";
+  const conversationPrefix = opts.turn.mode === "slack" ? "slack" : opts.turn.mode === "imessage" ? "imessage" : opts.turn.mode === "whatsapp" ? "whatsapp" : "sms";
   const smsReplyTarget = opts.turn.slackRoute ? `slack:${opts.turn.slackRoute.connectionId}:${opts.turn.slackRoute.conversationId}` : opts.turn.conversationId
     ? `${opts.turn.mode === "email" ? "email" : conversationPrefix}:${opts.turn.conversationId}`
     : opts.turn.remoteAddress ?? opts.turn.contactKey;
-  const silentSendCapture = (!opts.deliveryOverride || opts.turn.companionReply) && ["sms", "email", "imessage", "slack"].includes(opts.turn.mode)
+  const silentSendCapture = (!opts.deliveryOverride || opts.turn.companionReply) && ["sms", "email", "imessage", "whatsapp", "slack"].includes(opts.turn.mode)
     ? beginSilentSendCapture(effectiveSessionKey) : undefined;
   const nativeOwner = opts.turn.bindNativeOwner && opts.turn.nativeTerminal ? trackNativeOwner(effectiveSessionKey, opts.turn.bindNativeOwner, opts.turn.nativeTerminal) : undefined;
   if (opts.turn.nativeSource && nativeOwner) opts.turn.nativeSource.marker = nativeOwner.marker;
@@ -2616,7 +2631,7 @@ async function dispatchInboundTurn(
     message: {
       inboundEventKind: opts.turn.nativeEventKind,
       body,
-      bodyForAgent: ["sms", "email", "imessage", "slack"].includes(opts.turn.mode) ? `${opts.turn.body}\n\n${opts.turn.mode === "slack" ? SLACK_REPLY_STYLE + "\n\n" : ""}${approvalMarker}` : opts.turn.body,
+      bodyForAgent: ["sms", "email", "imessage", "whatsapp", "slack"].includes(opts.turn.mode) ? `${opts.turn.body}\n\n${opts.turn.mode === "slack" ? SLACK_REPLY_STYLE + "\n\n" : ""}${approvalMarker}` : opts.turn.body,
       rawBody: opts.turn.rawText ?? opts.turn.body,
       commandBody: opts.turn.commandAuthorized === false ? "" : opts.turn.rawText ?? opts.turn.body,
       envelopeFrom: opts.turn.fromLabel,
@@ -6055,10 +6070,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
 
   function companionTurn(input: CompanionInput): InkboxInboundTurn {
-    const mode = input.channel === "slack" ? "slack" : input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
+    const mode = input.channel === "whatsapp" ? "whatsapp" : input.channel === "slack" ? "slack" : input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
     return {
       bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal,
-      nativeSource: !input.commandAuthorized && (input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
+      nativeSource: !input.commandAuthorized && (input.channel === "whatsapp" || input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
+        whatsapp: input.channel === "whatsapp", sourceMessageId: input.messageId,
         identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
         slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, validate: input.validateBeforeDispatch, validateUpload: input.validateToolUpload, beforeSend: input.beforeToolSend, afterSend: input.afterToolSend, afterUpload: input.afterToolUpload, rejectUpload: input.rejectToolUpload, beforeUpload: input.beforeToolUpload, inspectUpload: input.inspectToolUpload,
         progress: input.reply.slackRoute ? (update) => slackProgress.observe(input.reply.slackRoute!, update) : undefined,
@@ -6067,7 +6083,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       slackRoute: input.reply.slackRoute,
       activity: input.reply.slackRoute ? (phase) => { slackActivity.notify(input.reply.slackRoute!, phase); slackProgress.notify(input.reply.slackRoute!, phase); } : undefined,
       mode, contactKey: input.key, approvalRoute: input.key, sessionKeyOverride: input.event._openclawNativeIMessage ? `native-imessage:${input.reply.identityId}:${input.reply.conversationId}` : input.key,
-      conversationKind: "group", conversationLabel: "Inkbox Companion conversation",
+      conversationKind: input.channel === "whatsapp" ? "direct" : "group", conversationLabel: input.channel === "whatsapp" ? "WhatsApp conversation" : "Inkbox Companion conversation",
       conversationId: input.reply.conversationId,
       fromLabel: input.author, remoteAddress: input.author, body: input.body,
       reaction: input.event._openclawNativeIMessage?.reaction, nativeEventKind: input.channel === "slack" && input.event.companion.phase !== "ordinary" ? "room_event" : input.event._openclawNativeIMessage?.nativeEventKind,
@@ -6189,7 +6205,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const message = channel === "phone" ? event.data.text_message : event.data.message;
       const author = channel === "slack" ? message.author : channel === "mail" ? message.from_address : channel === "phone" ? message.sender_phone_number ?? message.remote_phone_number : message.sender_number ?? message.remote_number;
       return resolveNativeApproval({ scope: nativeApprovalScope(opts.account, key + (channel === "slack" ? `:source:${slackRouteKey(event._openclawSlack.route)}` : "")), author, channel, accountId: opts.account.accountId },
-        controlText(String(channel === "slack" ? event._openclawSlack.rawText : channel === "phone" ? message.text ?? message.body ?? "" : channel === "imessage" ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
+        controlText(String(channel === "slack" ? event._openclawSlack.rawText : channel === "phone" ? message.text ?? message.body ?? "" : ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
     },
     async deliver(input, text, beforeSend) {
       const turn = companionTurn(input);
@@ -6338,6 +6354,26 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       // A fresh inbound starts a fresh logical reply — reset its failed-send budget.
       clearOutboundFailures("sms", turn.conversationId, turn.remoteAddress, turn.contactKey);
       await dispatchInboundTurn({ ...opts, turn, activeCalls });
+    },
+    async onWhatsApp(event) {
+      const identity = await opts.runtime.getIdentity();
+      const message = event.data?.message;
+      if (!message || message.agent_identity_id !== identity.id) throw new Error("WhatsApp event identity mismatch.");
+      if (event.event_type !== "whatsapp.received") {
+        if (typeof message.id === "string" && await companion.ownsDelivery(message.id)) {
+          await contextBuffer(JSON.stringify(["whatsapp-delivery", opts.account.accountId, identity.id, message.conversation_id]), { retainLatest: true })
+            .append({ id: event.id, body: JSON.stringify({ message_id: message.id, event_type: event.event_type, status: message.status, delivery_state: message.delivery_state }) });
+        }
+        return;
+      }
+      if (message.direction !== "inbound" || message.is_group !== false || !Array.isArray(message.participants) || message.participants.length !== 1 || message.participants[0] !== message.sender_number ||
+          typeof message.conversation_id !== "string" || !/^\+[1-9]\d{6,14}$/.test(message.sender_number) || message.remote_number !== message.sender_number) throw new Error("A direct WhatsApp source is required.");
+      if (event.companion != null) throw new Error("WhatsApp Companion activations are not supported.");
+      const normalized = structuredClone(event);
+      normalized.companion = { channel: "whatsapp", phase: "ordinary", sequence: Date.now(), scope_id: message.conversation_id, conversation_id: message.conversation_id };
+      normalized._openclawWhatsApp = true;
+      normalized.data.message._ordinaryAddressed = true;
+      await companion.accept(normalized);
     },
     async onIMessage(event) {
       if (event.event_type === "imessage.delivery_failed") {
@@ -6743,6 +6779,8 @@ export async function configureInkboxIdentityDelivery(
     opts.runtime.getClient(),
   ]);
   if (opts.slackEnabled) await reconcileSlackSubscription(inkbox, identity.id, opts.webhookUrl);
+  try { await reconcileWebhookSubscription(inkbox, { agentIdentityId: identity.id, url: opts.webhookUrl, eventTypes: WHATSAPP_EVENT_TYPES }, opts.logger); }
+  catch (error) { opts.logger?.warn?.(`WhatsApp notification registration is unavailable: ${errorMessage(error)}`); }
   const mailboxId = identity.mailbox?.id;
   if (mailboxId) {
     try {

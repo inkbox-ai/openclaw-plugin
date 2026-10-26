@@ -34,6 +34,7 @@ import {
 import {
   CALL_EVENT_TYPES,
   IMESSAGE_EVENT_TYPES,
+  WHATSAPP_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
   reconcileWebhookSubscription,
@@ -1289,6 +1290,8 @@ async function configureIdentityGatewayDelivery(params: {
     }
   }
 
+  try { await reconcileWebhookSubscription(params.client, { agentIdentityId: params.identity.id, url: webhookUrl, eventTypes: WHATSAPP_EVENT_TYPES }); }
+  catch { console.log("WhatsApp notifications could not be registered yet; other channels remain configured."); }
   const tunnelName = deriveTunnelName(params.identity, params.identityHandle);
   return {
     webhookUrl,
