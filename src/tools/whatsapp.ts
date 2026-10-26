@@ -94,6 +94,11 @@ export function registerWhatsAppTools(
                 return result;
               }
             }
+            if (source) {
+              assertNativeSource(source, identity.id);
+              await source.validate();
+              assertNativeSource(source, identity.id);
+            }
             let message;
             try {
               message = await identity.sendWhatsApp({
@@ -214,7 +219,7 @@ export function registerWhatsAppTools(
         if (source) { assertNativeSource(source, identity.id); await source.validate(); }
         const file = await whatsappFile(params.filePath);
         await whatsappReady(identity);
-        if (source) { assertNativeSource(source, identity.id); await source.validate(); }
+        if (source) { assertNativeSource(source, identity.id); await source.validate(); assertNativeSource(source, identity.id); }
         return toolText(formatJson(await identity.uploadWhatsAppMedia({ ...file, contentType: params.contentType })));
       }); },
     };

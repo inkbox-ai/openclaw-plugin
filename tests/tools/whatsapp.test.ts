@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { bindNativeSource } from "../../src/native-source.js";
 import { registerWhatsAppTools } from "../../src/tools/whatsapp.js";
 function fixture(allowed?: string[], sessionKey?: string) {
@@ -136,6 +139,51 @@ describe("dedicated WhatsApp tools", () => {
       expect(result.content[0].text).not.toContain("not-attempted-key");
       expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
     } finally { release(); }
+  });
+
+  it.each(["conversation", "readiness", "validation", "intent"])("does not send after source closes during %s", async (phase) => {
+    let validations = 0;
+    const release = bindNativeSource(`wa-closed-${phase}`, {
+      whatsapp: true, sourceMessageId: "incoming-a", identityId: "identity-a",
+      conversationId: "conversation-a", author: "+15555550123", closed: false,
+      validate: async () => { if (++validations > 1 && phase === "validation") release(); },
+      beforeSend: async () => { if (phase === "intent") release(); }, afterSend: async () => {},
+    });
+    try {
+      const f = fixture(undefined, `wa-closed-${phase}`);
+      if (phase === "conversation") f.identity.getWhatsAppConversation.mockImplementation(async () => {
+        release();
+        return { agentIdentityId: "identity-a", isGroup: false, participants: ["+15555550124"] };
+      });
+      if (phase === "readiness") f.identity.getWhatsAppStatus.mockImplementation(async () => {
+        release(); return { enabled: true, status: "ready" };
+      });
+      const target = phase === "conversation" ? { conversationId: "conversation-b" }
+        : phase === "intent" ? {} : { to: "+15555550124" };
+      const result = await f.tools.get("inkbox_send_whatsapp").execute("call-a", { ...target, text: "Answer" });
+      expect(result.isError).toBe(true);
+      expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    } finally { release(); }
+  });
+
+  it("does not upload after its final asynchronous source validation closes the turn", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "whatsapp-source-"));
+    const filePath = join(directory, "notes.txt");
+    writeFileSync(filePath, "Notes");
+    let validations = 0;
+    const release = bindNativeSource("wa-upload-closed", {
+      whatsapp: true, identityId: "identity-a", conversationId: "conversation-a",
+      author: "+15555550123", closed: false,
+      validate: async () => { if (++validations === 2) release(); },
+      beforeSend: async () => {}, afterSend: async () => {},
+    });
+    try {
+      const f = fixture(undefined, "wa-upload-closed");
+      f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "media-a" }));
+      const result = await f.tools.get("inkbox_upload_whatsapp_media").execute("upload-a", { filePath });
+      expect(result.isError).toBe(true);
+      expect(f.identity.uploadWhatsAppMedia).not.toHaveBeenCalled();
+    } finally { release(); rmSync(directory, { recursive: true, force: true }); }
   });
 
 });
