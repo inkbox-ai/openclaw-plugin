@@ -125,4 +125,17 @@ describe("dedicated WhatsApp tools", () => {
     } finally { release(); }
   });
 
+  it("reports the earlier key, not a new unattempted key, when the source fence rejects a second intent", async () => {
+    const release = bindNativeSource("wa-rejected-test", { whatsapp: true, sourceMessageId: "incoming-a", identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123", closed: false,
+      validate: async () => {}, beforeSend: async () => { throw Object.assign(new Error("Earlier send uncertain"), { idempotencyKey: "earlier-actual-key" }); }, afterSend: async () => {} });
+    try {
+      const f = fixture(undefined, "wa-rejected-test");
+      const result = await f.tools.get("inkbox_send_whatsapp").execute("different-call", { text: "Different new intent", idempotencyKey: "not-attempted-key" });
+      expect(result.isError).toBe(true); expect(result.details).toEqual({ sendAttempted: false, idempotencyKey: "earlier-actual-key" });
+      expect(result.content[0].text).toContain("No new WhatsApp request");
+      expect(result.content[0].text).not.toContain("not-attempted-key");
+      expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    } finally { release(); }
+  });
+
 });

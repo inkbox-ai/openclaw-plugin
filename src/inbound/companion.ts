@@ -367,7 +367,13 @@ export function createCompanionReceiver(opts: {
         const previous = upload && Object.values(job.toolSends ?? {}).find((send) => !send.failed && send.uploadFingerprint === upload.fingerprint);
         if (previous?.upload) return { ...previous.upload, deduplicated: true };
         if (previous) throw new Error("This file already has an uncertain upload; inspect it instead of repeating it.");
-        if ((kind !== "approval" && Object.values(job.toolSends ?? {}).some((send) => send.kind !== "approval" && !send.messageId && !send.failed)) || job.toolSends?.[callId]) throw new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
+        const unresolved = Object.values(job.toolSends ?? {}).find((send) => send.kind !== "approval" && !send.messageId && !send.failed);
+        if ((kind !== "approval" && unresolved) || job.toolSends?.[callId]) {
+          const error = new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
+          const priorKey = unresolved?.whatsappKey ?? job.toolSends?.[callId]?.whatsappKey;
+          if (intent && priorKey) Object.assign(error, { idempotencyKey: priorKey });
+          throw error;
+        }
         job.toolSends ??= {}; job.toolSends[callId] = { ...(intent ? { whatsappKey: intent.idempotencyKey, text: intent.text } : {}), ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
       }, [id]);
     };

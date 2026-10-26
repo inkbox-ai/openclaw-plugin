@@ -84,9 +84,18 @@ export function registerWhatsAppTools(
               identity.id, source?.whatsapp ? source.sourceMessageId : callId,
               conversationId ?? params.to, params.text, params.mediaIds,
             ]);
+            if (bound) {
+              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text }); }
+              catch (error) {
+                const result = mapInkboxError(error), priorKey = getMessageRequestKey(error);
+                result.content[0]!.text += "\nNo new WhatsApp request was attempted.";
+                if (priorKey) result.content[0]!.text += ` Earlier send key: ${priorKey}. Inspect it with inkbox_lookup_whatsapp_send; do not repeat it.`;
+                result.details = { ...result.details, sendAttempted: false, ...(priorKey ? { idempotencyKey: priorKey } : {}) };
+                return result;
+              }
+            }
             let message;
             try {
-              if (bound) await source!.beforeSend(callId, { idempotencyKey, text: params.text });
               message = await identity.sendWhatsApp({
                 ...(params.to ? { to: params.to } : { conversationId }),
                 ...(params.text !== undefined ? { text: params.text } : {}),
