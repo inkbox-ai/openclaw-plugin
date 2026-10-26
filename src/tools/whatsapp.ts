@@ -139,7 +139,16 @@ export function registerWhatsAppTools(
     "inkbox_get_whatsapp_status",
     "Read fresh WhatsApp approval and availability; never enables access.",
     {},
-    (i) => i.getWhatsAppStatus(),
+    async (i) => {
+      const status = await i.getWhatsAppStatus();
+      if (!status) return status;
+      try {
+        const current = await i.getWhatsAppLimits();
+        return { ...status, limits: current.limits, usage: current.usage, cycleStart: current.cycleStart };
+      } catch {
+        return status; // Retained history/status remains usable if policy lookup is unavailable.
+      }
+    },
   );
   read(
     "inkbox_list_whatsapp_conversations",
@@ -185,7 +194,7 @@ export function registerWhatsAppTools(
     const source = activeNativeSource(context.sessionKey);
     return {
       name: "inkbox_upload_whatsapp_media",
-      description: "Upload one local regular file up to 20 MiB. Retain its owned media ID for send retries.",
+      description: "Upload one local regular file within current organization limits (20 MiB protocol ceiling). Retain its owned media ID for send retries.",
       parameters: Type.Object({ filePath: Type.String(), contentType: Type.Optional(Type.String()) }, { additionalProperties: false }),
       async execute(_id: string, params: any) { return runTool(async () => {
         const identity = await runtime.getIdentity();

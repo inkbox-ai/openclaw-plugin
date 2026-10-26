@@ -58,7 +58,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24.16.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install reviewed SDK candidate + latest OpenClaw host

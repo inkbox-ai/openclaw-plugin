@@ -15,6 +15,7 @@ if (
   manifest.version !== "0.7.21" ||
   typeof client.whatsapp?.send !== "function" ||
   typeof client.whatsapp?.uploadMedia !== "function" ||
+  typeof client.whatsapp?.getLimits !== "function" ||
   typeof client.messageSends?.lookup !== "function"
 )
   throw new Error(
