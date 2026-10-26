@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bindNativeSource } from "../../src/native-source.js";
 import { registerWhatsAppTools } from "../../src/tools/whatsapp.js";
+import { InkboxAPIError } from "@inkbox/sdk";
 function fixture(allowed?: string[], sessionKey?: string) {
   const tools = new Map<string, any>();
   const identity: any = {
@@ -42,6 +43,29 @@ function fixture(allowed?: string[], sessionKey?: string) {
   return { identity, lookup, tools };
 }
 describe("dedicated WhatsApp tools", () => {
+  it("treats email-address policy as a curated rejection without freeing unknown outcomes", async () => {
+    const rejectSend = vi.fn(async () => {});
+    const release = bindNativeSource("wa-email-policy", { whatsapp: true, identityId: "identity-a", conversationId: "conversation-a",
+      author: "+15555550123", closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {}, rejectSend });
+    try {
+      const f = fixture(undefined, "wa-email-policy");
+      const policy = { error: "whatsapp_reply_required_for_email_addresses", quota: "whatsapp.pre_reply_email_addresses_allowed",
+        limit: 0, retry_condition: "recipient_reply_or_configuration" };
+      f.identity.sendWhatsApp.mockRejectedValueOnce(new InkboxAPIError(422, { ...policy, message: "private-diagnostic" }));
+      const payload = { text: "Email sender@example.com", idempotencyKey: "original-email-key" };
+      const first = await f.tools.get("inkbox_send_whatsapp").execute("first", payload);
+      expect(first.details).toEqual({ ...policy, status_code: 422, idempotencyKey: "original-email-key", requestAccepted: false });
+      expect(JSON.stringify(first)).not.toContain("private-diagnostic");
+      expect(rejectSend).toHaveBeenCalledWith("first", "original-email-key", { ...policy, status_code: 422 });
+      await f.tools.get("inkbox_send_whatsapp").execute("retry", payload);
+      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toEqual(f.identity.sendWhatsApp.mock.calls[1][0]);
+      f.identity.sendWhatsApp.mockRejectedValueOnce(new InkboxAPIError(429, policy));
+      const unknown = await f.tools.get("inkbox_send_whatsapp").execute("unknown", payload);
+      expect(unknown.details.requestAccepted).toBeUndefined();
+      expect(unknown.content[0].text).not.toContain("Request not accepted");
+      expect(rejectSend).toHaveBeenCalledOnce();
+    } finally { release(); }
+  });
   it("registers all ten tools before approval and checks fresh readiness rather than cached flags", async () => {
     const f = fixture();
     expect(f.tools.size).toBe(10);
