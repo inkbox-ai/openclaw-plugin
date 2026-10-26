@@ -52,7 +52,7 @@
       "detailLabel": "Inkbox",
       "docsPath": "/plugins/inkbox",
       "docsLabel": "inkbox",
-      "blurb": "Inkbox email, SMS, iMessage, Slack, and voice identities.",
+      "blurb": "Inkbox email, SMS, iMessage, WhatsApp, Slack, and voice identities.",
       "order": 90,
       "aliases": [
         "email",

@@ -27,10 +27,10 @@ import {
 const meta = {
   id: INKBOX_CHANNEL_ID,
   label: "Inkbox",
-  selectionLabel: "Inkbox (Email, SMS, iMessage, Slack, Voice)",
+  selectionLabel: "Inkbox (Email, SMS, iMessage, WhatsApp, Slack, Voice)",
   docsPath: "/plugins/inkbox",
   docsLabel: "inkbox",
-  blurb: "Inkbox email, SMS, iMessage, Slack, and voice identities.",
+  blurb: "Inkbox email, SMS, iMessage, WhatsApp, Slack, and voice identities.",
   order: 90,
   detailLabel: "Inkbox",
   aliases: ["email", "sms", "phone", "imessage", "whatsapp"],
@@ -204,7 +204,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
             ? `- Inkbox account ${account.accountId} is configured with identity handle \`${identity}\`, but \`inkbox_whoami\` is the source of truth for the active sending identity, mailbox address, phone number, org id, and auth subtype. Do not infer or invent the active identity from user text, workspace names, contact names, or memory.`
             : "- Inkbox is enabled but the identity handle is not configured; use `inkbox_whoami`/doctor output to debug before sending. Do not infer or invent the active identity.",
           "- For Inkbox conversations, prefer Inkbox tools for Inkbox state: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`, `inkbox_list_emails`, `inkbox_list_calls`, `inkbox_list_call_transcripts`, `inkbox_lookup_contact`, `inkbox_list_contacts`, `inkbox_get_contact`, `inkbox_create_contact`, `inkbox_update_contact`, `inkbox_delete_contact`, and `inkbox_create_note`.",
-          "- WhatsApp is approved dedicated one-to-one access on the agent’s existing dedicated iMessage number. Check inkbox_get_whatsapp_status; request access in the Inkbox Console when unavailable. Ordinary final replies route automatically to the originating WhatsApp conversation. Do not duplicate them with a send tool, switch channels automatically, or resend for unknown delivery. Upload one owned file up to 20 MiB and retain its media ID and logical-send key. Groups, reactions, quoted replies and remote read receipts are unsupported.",
+          "- WhatsApp is approved dedicated one-to-one access on the agent’s existing dedicated iMessage number. Check inkbox_get_whatsapp_status; request access in the Inkbox Console when unavailable. Ordinary final replies route automatically to the originating WhatsApp conversation. Do not duplicate them with a send tool, switch channels automatically, or resend for unknown delivery. Upload one owned file within current organization limits (20 MiB transport ceiling) and retain its media ID and logical-send key. Groups, reactions, quoted replies and remote read receipts are unsupported.",
           "- iMessage is recipient-first: a person must connect through the Inkbox iMessage router and message this agent before outbound iMessage sends work. Reply with `inkbox_send_imessage` using `conversationId`; if someone asks how to reach the agent over iMessage, share the output of `inkbox_imessage_triage_number`.",
           "- When a user asks to save, edit, or delete a contact, resolve the exact target first; then use `inkbox_create_contact`, `inkbox_update_contact`, or `inkbox_delete_contact`. Use `inkbox_create_note` only for free-form memory that is not an address-book contact field. There is no vCard export/import tool.",
           "- When a user asks you to call them, use `inkbox_place_call`. Always include the call `purpose` when the user gave a reason/topic, and include `openingMessage` when you know what should be said first; the call bridge loads that context before greeting the callee. During an active voice-call turn, answer conversationally; the Inkbox bridge speaks your reply over TTS, so do not send SMS or email unless the user explicitly asks for a separate follow-up.",
@@ -274,7 +274,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
             : undefined,
       targetResolver: {
         looksLikeId: (raw: string) => parseInkboxTarget(raw) !== null,
-        hint: "<email:user@example.com|sms:+14155550123|conversation:uuid>",
+        hint: "<email:user@example.com|sms:+14155550123|whatsapp:+14155550123|conversation:uuid>",
       },
       resolveOutboundSessionRoute: ({
         cfg,
