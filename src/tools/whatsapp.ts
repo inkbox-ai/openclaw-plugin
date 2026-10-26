@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { getMessageRequestKey } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
-import { mapInkboxError, runTool, toolText } from "../errors.js";
+import { mapInkboxError, runTool, toolError, toolText } from "../errors.js";
 import { formatJson } from "../format.js";
 import { checkOutboundRecipient } from "../allowlist.js";
 import { activeNativeSource, assertNativeSource } from "../native-source.js";
@@ -10,6 +10,7 @@ import {
   assertWhatsAppText,
   whatsappFile,
   whatsappReady,
+  whatsappSendRejection,
   whatsappSendKey,
 } from "../whatsapp.js";
 import {
@@ -57,15 +58,18 @@ export function registerWhatsAppTools(
               assertNativeSource(source, identity.id);
               await source.validate();
             }
+            const directRecipient = typeof params.to === "string" ? params.to.replace(/[\s().-]/g, "") : "";
             const bound = Boolean(
-              source?.whatsapp &&
-                !params.to &&
-                conversationId === source.conversationId,
+              source?.whatsapp && (
+                (!params.to && conversationId === source.conversationId) ||
+                (/^\+[1-9]\d{6,14}$/.test(directRecipient) && directRecipient === source.author)
+              ),
             );
+            const targetConversationId = bound ? source!.conversationId : conversationId;
             let recipient = params.to;
-            if (conversationId) {
+            if (targetConversationId) {
               const conversation =
-                await identity.getWhatsAppConversation(conversationId);
+                await identity.getWhatsAppConversation(targetConversationId);
               if (
                 conversation.agentIdentityId !== identity.id ||
                 conversation.isGroup ||
@@ -82,14 +86,17 @@ export function registerWhatsAppTools(
             await whatsappReady(identity);
             const idempotencyKey = params.idempotencyKey ?? whatsappSendKey([
               identity.id, source?.whatsapp ? source.sourceMessageId : callId,
-              conversationId ?? params.to, params.text, params.mediaIds,
+              targetConversationId ?? params.to, params.text, params.mediaIds,
             ]);
             if (bound) {
-              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text }); }
+              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}) }); }
               catch (error) {
                 const result = mapInkboxError(error), priorKey = getMessageRequestKey(error);
                 result.content[0]!.text += "\nNo new WhatsApp request was attempted.";
-                if (priorKey) result.content[0]!.text += ` Earlier send key: ${priorKey}. Inspect it with inkbox_lookup_whatsapp_send; do not repeat it.`;
+                const policy = error instanceof Error && "whatsappRejection" in error ? error.whatsappRejection : undefined;
+                if (priorKey) result.content[0]!.text += policy
+                  ? ` Original request was rejected/not accepted: ${JSON.stringify(policy)}. Follow retry_condition and reuse the original key ${priorKey} with unchanged text and owned media IDs.`
+                  : ` Earlier send key: ${priorKey}. Inspect it with inkbox_lookup_whatsapp_send; do not repeat it.`;
                 result.details = { ...result.details, sendAttempted: false, ...(priorKey ? { idempotencyKey: priorKey } : {}) };
                 return result;
               }
@@ -102,12 +109,21 @@ export function registerWhatsAppTools(
             let message;
             try {
               message = await identity.sendWhatsApp({
-                ...(params.to ? { to: params.to } : { conversationId }),
+                ...(params.to && !bound ? { to: params.to } : { conversationId: targetConversationId }),
                 ...(params.text !== undefined ? { text: params.text } : {}),
                 ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), idempotencyKey,
               });
             } catch (error) {
               const key = getMessageRequestKey(error) ?? idempotencyKey;
+              const policy = whatsappSendRejection(error);
+              if (policy) {
+                if (bound && source!.rejectSend) {
+                  try { await source!.rejectSend(callId, idempotencyKey, policy); }
+                  catch { /* The durable intent stays fenced if its rejection cannot be saved. */ }
+                }
+                return toolError(`WhatsApp request rejected/not accepted: ${JSON.stringify(policy)}. Follow retry_condition, then reuse the original key ${key} and owned media IDs; do not create a new request.`,
+                  { ...policy, idempotencyKey: key, requestAccepted: false, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}) });
+              }
               const result = mapInkboxError(error);
               result.content[0]!.text += `\nOriginal idempotency key: ${key}. Use inkbox_lookup_whatsapp_send to inspect this send. Do not create a new key or another copy.`;
               result.details = { ...result.details, idempotencyKey: key };

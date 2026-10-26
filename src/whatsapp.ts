@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { open, mkdir, rename, readdir, lstat, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { AgentIdentity, WhatsAppMessage } from "@inkbox/sdk";
+import { InkboxAPIError } from "@inkbox/sdk";
 import type { InkboxRuntime } from "./client.js";
 import { withFileLock } from "./file-lock.js";
 import { contextBuffer } from "./inbound/context-buffer.js";
@@ -45,6 +46,26 @@ export const WHATSAPP_EVENTS = [
   "whatsapp.delivery_failed",
   "whatsapp.delivery_unconfirmed",
 ] as const;
+const rejectedSendCodes: Record<number, readonly string[]> = {
+  402: ["whatsapp_cycle_limit_exceeded"],
+  403: ["whatsapp_not_eligible", "whatsapp_access_required", "whatsapp_contact_not_allowed", "whatsapp_media_source_not_allowed"],
+  413: ["whatsapp_media_too_large"],
+  422: ["whatsapp_groups_not_supported", "whatsapp_invalid_recipient", "whatsapp_text_too_long", "whatsapp_unanswered_followup_limit", "whatsapp_opening_message_too_long", "whatsapp_reply_required_for_media", "whatsapp_reply_required_for_links", "whatsapp_reply_required_for_phone_numbers"],
+  429: ["whatsapp_daily_limit_exceeded", "whatsapp_unanswered_message_limit", "whatsapp_conversation_rate_limited", "whatsapp_new_contact_rate_limited", "whatsapp_new_contact_spacing", "whatsapp_follow_up_rate_limited"],
+};
+export type WhatsAppSendRejection = { error: string; status_code: number; quota?: string; limit?: number; used?: number; retry_condition?: string; reset_at?: string; retry_after_seconds?: number };
+export function whatsappSendRejection(error: unknown): WhatsAppSendRejection | undefined {
+  if (!(error instanceof InkboxAPIError) || !error.detail || typeof error.detail !== "object") return;
+  const row = error.detail as Record<string, unknown>, code = row.error;
+  if (typeof code !== "string" || !rejectedSendCodes[error.statusCode]?.includes(code)) return;
+  const policy: WhatsAppSendRejection = { error: code, status_code: error.statusCode };
+  if (typeof row.quota === "string" && /^whatsapp\.[a-z0-9_.]{1,120}$/.test(row.quota)) policy.quota = row.quota;
+  for (const key of ["limit", "used"] as const) if (Number.isSafeInteger(row[key]) && Number(row[key]) >= 0) policy[key] = Number(row[key]);
+  if (typeof row.retry_condition === "string" && ["configuration", "window_reset", "cycle_reset_or_configuration", "recipient_reply", "recipient_reply_or_shorter_text", "recipient_reply_or_configuration"].includes(row.retry_condition)) policy.retry_condition = row.retry_condition;
+  if (typeof row.reset_at === "string" && /^[0-9T:.+Z-]{20,40}$/.test(row.reset_at) && Number.isFinite(Date.parse(row.reset_at))) policy.reset_at = row.reset_at;
+  if (Number.isSafeInteger(error.retryAfterSeconds) && Number(error.retryAfterSeconds) >= 0) policy.retry_after_seconds = Number(error.retryAfterSeconds);
+  return policy;
+}
 export const whatsappSendKey = (parts: unknown[]) =>
   `openclaw:whatsapp:${createHash("sha256").update(JSON.stringify(parts)).digest("hex")}`;
 export function assertWhatsAppText(text: string) {

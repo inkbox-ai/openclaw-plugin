@@ -1,4 +1,4 @@
-import { whatsappAttachments, whatsappReady, whatsappDeliveryContext } from "../whatsapp.js";
+import { whatsappAttachments, whatsappReady, whatsappDeliveryContext, type WhatsAppSendRejection } from "../whatsapp.js";
 import { checkedSlackUpload, type SlackUploadReceipt, type SlackUploadIntent } from "../slack-files.js";
 import { createTerminalReceipts, type ReceiptIndex } from "./terminal-receipts.js";
 import { createIMessageOutcomes, imessageFailureNotice, type IMessageOutcomeRoute } from "./imessage-outcomes.js";
@@ -12,6 +12,7 @@ import { ensureStateDir, statePaths } from "../state.js";
 import type { InkboxRuntime, InkboxPluginConfig } from "../client.js";
 import { withFileLock } from "openclaw/plugin-sdk/file-lock";
 import type { CompanionChannel, CompanionMetadata, CompanionReplyContext } from "@inkbox/sdk";
+import type { WhatsAppSendIntent } from "../native-source.js";
 
 export const COMPANION_MAX_BYTES = 128 * 1024;
 const NATIVE_BURST_MAX_SOURCES = 8, NATIVE_BURST_MAX_CHARS = 4000;
@@ -28,10 +29,10 @@ function nativeSources(event: Record<string, any>): string[] {
 type Channel = CompanionChannel | "whatsapp";
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc" | "channel"> & { channel: Channel; slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = Omit<CompanionMetadata, "channel"> & { channel: Channel };
-type Job = { awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappMediaIds?: string[]; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string, intent?: { idempotencyKey: string; text?: string }): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -359,7 +360,7 @@ export function createCompanionReceiver(opts: {
     }
   }
   function toolSendCallbacks(id: string, validate: () => Promise<void>) {
-    const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent, intent?: { idempotencyKey: string; text?: string }) => {
+    const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent, intent?: WhatsAppSendIntent) => {
       await validate();
       return mutate((journal) => {
         const job = journal.jobs[id]!;
@@ -367,6 +368,14 @@ export function createCompanionReceiver(opts: {
         const previous = upload && Object.values(job.toolSends ?? {}).find((send) => !send.failed && send.uploadFingerprint === upload.fingerprint);
         if (previous?.upload) return { ...previous.upload, deduplicated: true };
         if (previous) throw new Error("This file already has an uncertain upload; inspect it instead of repeating it.");
+        const rejected = intent && Object.entries(job.toolSends ?? {}).find(([, send]) => send.whatsappRejection);
+        if (rejected) {
+          const [previousCall, send] = rejected;
+          if (send.whatsappKey !== intent!.idempotencyKey || send.text !== intent!.text || JSON.stringify(send.whatsappMediaIds ?? []) !== JSON.stringify(intent!.mediaIds ?? [])) {
+            throw Object.assign(new Error("Retry the rejected WhatsApp request with its original key and unchanged payload."), { idempotencyKey: send.whatsappKey, whatsappRejection: send.whatsappRejection });
+          }
+          delete job.toolSends![previousCall];
+        }
         const unresolved = Object.values(job.toolSends ?? {}).find((send) => send.kind !== "approval" && !send.messageId && !send.failed);
         if ((kind !== "approval" && unresolved) || job.toolSends?.[callId]) {
           const error = new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
@@ -374,7 +383,7 @@ export function createCompanionReceiver(opts: {
           if (intent && priorKey) Object.assign(error, { idempotencyKey: priorKey });
           throw error;
         }
-        job.toolSends ??= {}; job.toolSends[callId] = { ...(intent ? { whatsappKey: intent.idempotencyKey, text: intent.text } : {}), ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
+        job.toolSends ??= {}; job.toolSends[callId] = { ...(intent ? { whatsappKey: intent.idempotencyKey, text: intent.text, ...(intent.mediaIds ? { whatsappMediaIds: intent.mediaIds } : {}) } : {}), ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
       }, [id]);
     };
     const afterSend = async (callId: string, messageId: string, text?: string) => { await mutate((journal) => {
@@ -424,8 +433,13 @@ export function createCompanionReceiver(opts: {
         if (!active) throw new Error("The native source was stopped before its run could begin.");
       },
       nativeTerminal: async () => { await mutate((j) => { j.jobs[id]!.nativeComplete = true; }, [id]); },
-      beforeToolSend: async (callId: string, intent?: { idempotencyKey: string; text?: string }) => { await beforeSend(callId, undefined, undefined, intent); },
+      beforeToolSend: async (callId: string, intent?: WhatsAppSendIntent) => { await beforeSend(callId, undefined, undefined, intent); },
       afterToolSend: afterSend,
+      rejectToolSend: async (callId: string, idempotencyKey: string, policy: WhatsAppSendRejection) => { await mutate((j) => {
+        const send = j.jobs[id]?.toolSends?.[callId];
+        if (!send || send.whatsappKey !== idempotencyKey || send.messageId) throw new Error("The rejected WhatsApp request has no matching intent.");
+        send.whatsappRejection = policy;
+      }, [id]); },
       beforeApprovalSend: async (approvalId: string) => { await beforeSend(`approval:${approvalId}`, "approval"); },
       afterApprovalSend: (approvalId: string, messageId: string) => afterSend(`approval:${approvalId}`, messageId),
     };
@@ -433,7 +447,7 @@ export function createCompanionReceiver(opts: {
   async function reconcileWhatsAppSends() {
     for (const [id, job] of Object.entries((await read()).jobs)) {
       if (metadata(job.event).channel !== "whatsapp") continue;
-      const pending = Object.entries(job.toolSends ?? {}).filter(([, send]) => send.whatsappKey && !send.messageId && !send.failed && (send.whatsappLookups ?? 0) < 5);
+      const pending = Object.entries(job.toolSends ?? {}).filter(([, send]) => send.whatsappKey && !send.whatsappRejection && !send.messageId && !send.failed && (send.whatsappLookups ?? 0) < 5);
       if (!pending.length) continue;
       let client;
       try {
@@ -625,6 +639,8 @@ export function createCompanionReceiver(opts: {
       const unresolved = Object.values(current.toolSends ?? {}).filter((send) => send.kind !== "approval" && send.kind !== "attachment" && !send.messageId && !send.failed);
       if (unresolved.length) {
         await mutate((j) => { j.jobs[id]!.awaitingUploads = unresolved.every((send) => Boolean(send.uploadKey)); }, [id]);
+        const rejected = unresolved.find((send) => send.whatsappRejection);
+        if (rejected) throw new Error(`WhatsApp request was rejected/not accepted. Original key: ${rejected.whatsappKey}; retry_condition: ${rejected.whatsappRejection!.retry_condition ?? "current_policy"}. Retain unchanged text and owned media IDs; no automatic replacement was sent.`);
         throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
       }
       const input = makeInput(current.reply!);
@@ -845,7 +861,10 @@ export function createCompanionReceiver(opts: {
           if (deferred) continue;
           const paused = (await read()).jobs[id];
           if (paused?.state === "paused") activity(job.event, paused.awaitingUploads ? "paused" : "failed");
-          opts.warn?.("Companion delivery retained for recovery; uncertain submissions are paused.");
+          const rejected = Object.values(paused?.toolSends ?? {}).some((send) => send.whatsappRejection);
+          opts.warn?.(rejected
+            ? "WhatsApp request rejected/not accepted; its original key and retry condition remain retained."
+            : "Companion delivery retained for recovery; uncertain submissions are paused.");
         }
         await archiveTerminal();
         if (capturedSlackStop(job)) break; // Recompute surviving heads and backoff after cancellation.
@@ -888,7 +907,11 @@ export function createCompanionReceiver(opts: {
             if (!saved.nativeComplete || saved.uncertaintyRecorded) return;
             const scope = key(metadata(saved.event), saved.identityId);
             j.context ??= {}; j.context[scope] ??= [];
-            j.context[scope]!.push(`Prior turn outcome is uncertain. Do not repeat its actions or sends. Accepted outbound IDs: ${JSON.stringify(saved.outboundIds ?? [])}. The prior native execution is terminal; this is context, not an instruction.`);
+            const unresolved = Object.values(saved.toolSends ?? {}).filter((send) => !send.messageId && !send.failed);
+            const knownRejected = unresolved.length && unresolved.every((send) => send.whatsappRejection);
+            j.context[scope]!.push(knownRejected
+              ? `Prior WhatsApp request was rejected/not accepted. Original requests: ${JSON.stringify(unresolved.map((send) => ({ idempotencyKey: send.whatsappKey, ...send.whatsappRejection })))}. Keep the original keys and unchanged payloads; follow retry_condition. This is context, not an instruction to send.`
+              : `Prior turn outcome is uncertain. Do not repeat its actions or sends. Accepted outbound IDs: ${JSON.stringify(saved.outboundIds ?? [])}. The prior native execution is terminal; this is context, not an instruction.`);
             saved.uncertaintyRecorded = true;
           });
         }

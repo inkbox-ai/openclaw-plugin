@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { InkboxAPIError } from "@inkbox/sdk";
 import { handleInkboxWebhook } from "../../src/inbound/handler.js";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -25,6 +26,8 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
 import { createCompanionReceiver } from "../../src/inbound/companion.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
+import { bindNativeSource } from "../../src/native-source.js";
+import { registerWhatsAppTools } from "../../src/tools/whatsapp.js";
 function fixture() {
   const identity: any = {
     id: "11111111-1111-4111-8111-111111111111",
@@ -291,6 +294,183 @@ describe("WhatsApp native receive/reply", () => {
     expect(lookup).toHaveBeenCalledWith({ senderKind: "whatsapp_identity", senderId: f.identity.id, operation: "whatsapp.send", idempotencyKey: "original-logical-key" });
     expect(model).toHaveBeenCalledOnce(); expect(deliver).not.toHaveBeenCalled();
     expect(await next.whatsappDeliveryConversation("accepted-original-message")).toBe("conversation-a");
+  });
+
+  it.each([
+    ["+15555550123", false],
+    ["+15555550123", true],
+    [" +1 (555) 555-0123 ", false],
+    ["+15555550124", false],
+  ])("tracks explicit recipient replies without duplicating the final (%s, uncertain=%s)", async (to, uncertain) => {
+    const f = fixture(), bound = to !== "+15555550124";
+    f.identity.getWhatsAppConversation = vi.fn(async () => ({
+      agentIdentityId: f.identity.id, isGroup: false, participants: ["+15555550123"],
+    }));
+    if (uncertain) f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("response lost"));
+    const deliver = vi.fn(async () => "ordinary-final");
+    let submitError: unknown;
+    const submit = vi.fn(async (input: any) => {
+      await input.validateBeforeDispatch();
+      const release = bindNativeSource("explicit-recipient-source", {
+        whatsapp: true, sourceMessageId: input.messageId, identityId: f.identity.id,
+        conversationId: input.reply.conversationId, author: input.author, closed: false,
+        validate: input.validateBeforeDispatch, beforeSend: input.beforeToolSend,
+        afterSend: input.afterToolSend, rejectSend: input.rejectToolSend,
+      });
+      try {
+        const tools = new Map<string, any>();
+        registerWhatsAppTools({ registerTool(def: any) {
+          const tool = typeof def === "function" ? def({ sessionKey: "explicit-recipient-source" }) : def;
+          tools.set(tool.name, tool);
+        } }, f.runtime);
+        const result = await tools.get("inkbox_send_whatsapp").execute("explicit-call", { to, text: "Saved answer" });
+        expect(Boolean(result.isError)).toBe(uncertain);
+        return ["Saved answer"];
+      } catch (error) { submitError = error; throw error; }
+      finally { release(); }
+    });
+    const receiver = createCompanionReceiver({ accountId: "default", config: { identity: "example" },
+      runtime: f.runtime, submit, deliver });
+    const incoming = event();
+    incoming._openclawWhatsApp = true;
+    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "conversation-a", conversation_id: "conversation-a" };
+    incoming.data.message._ordinaryAddressed = true;
+    try {
+      await receiver.accept(incoming); await receiver.idle();
+      expect(submitError).toBeUndefined();
+      expect(submit).toHaveBeenCalledOnce();
+      expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+      expect(deliver).toHaveBeenCalledTimes(bound ? 0 : 1);
+      if (bound && !uncertain) expect(await receiver.whatsappDeliveryConversation("sent-a")).toBe("conversation-a");
+    } finally { receiver.close(); }
+  });
+
+  async function exerciseRejectedSend(failure: Error, rejected: boolean, retry = true) {
+    const f = fixture();
+    f.identity.getWhatsAppConversation = vi.fn(async () => ({
+      agentIdentityId: f.identity.id, isGroup: false, participants: ["+15555550123"],
+    }));
+    f.identity.sendWhatsApp.mockRejectedValueOnce(failure);
+    const deliver = vi.fn(async () => "must-not-send");
+    const lookup = vi.fn(async () => undefined);
+    let submitError: unknown;
+    const readJournal = async () => {
+      const name = (await readdir(state.dir)).find((name) => name.startsWith("companion-") && name.endsWith(".json"))!;
+      return JSON.parse(await readFile(join(state.dir, name), "utf8"));
+    };
+    const submit = vi.fn(async (input: any) => {
+      await input.validateBeforeDispatch();
+      const release = bindNativeSource("quota-owned-source", {
+        whatsapp: true, sourceMessageId: input.messageId, identityId: f.identity.id,
+        conversationId: input.reply.conversationId, author: input.author, closed: false,
+        validate: input.validateBeforeDispatch, beforeSend: input.beforeToolSend,
+        afterSend: input.afterToolSend, rejectSend: input.rejectToolSend,
+      });
+      try {
+        const tools = new Map<string, any>();
+        registerWhatsAppTools({ registerTool(def: any) {
+          const tool = typeof def === "function" ? def({ sessionKey: "quota-owned-source" }) : def;
+          tools.set(tool.name, tool);
+        } }, f.runtime);
+        const send = tools.get("inkbox_send_whatsapp");
+        const payload = { text: "Saved answer", mediaIds: ["owned-media"], idempotencyKey: "original-logical-key" };
+        const first = await send.execute("first-call", payload);
+        expect(first.isError).toBe(true);
+        const saved = Object.values((await readJournal()).jobs)[0] as any;
+        expect(saved.toolSends["first-call"]).toMatchObject({
+          whatsappKey: "original-logical-key", whatsappMediaIds: ["owned-media"], text: "Saved answer",
+        });
+        expect(saved.toolSends["first-call"].whatsappRejection?.error).toBe(rejected ? "whatsapp_daily_limit_exceeded" : undefined);
+        expect(first.details?.requestAccepted).toBe(rejected ? false : undefined);
+        if (rejected) {
+          expect(first.details).toEqual({ error: "whatsapp_daily_limit_exceeded", status_code: 429,
+            quota: "whatsapp.texts_per_agent_identity_per_24h", limit: 50, used: 50,
+            retry_condition: "window_reset", reset_at: "2026-10-27T00:00:00Z", retry_after_seconds: 60,
+            idempotencyKey: "original-logical-key", requestAccepted: false, mediaIds: ["owned-media"] });
+          expect(JSON.stringify(first)).not.toContain("private-provider-note");
+          for (const changed of [{ ...payload, idempotencyKey: "new-key" }, { ...payload, text: "Changed answer" }, { ...payload, mediaIds: ["replacement-media"] }]) {
+            const blocked = await send.execute("changed-intent", changed);
+            expect(blocked.isError).toBe(true);
+            expect(blocked.details.idempotencyKey).toBe("original-logical-key");
+            expect(blocked.content[0].text).toContain("rejected/not accepted");
+            expect(blocked.content[0].text).toContain("window_reset");
+          }
+        }
+        if (!retry) return ["Saved answer"];
+        const retried = await send.execute("retry-call", payload);
+        if (rejected) {
+          expect(retried.isError).not.toBe(true);
+          expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
+          expect(f.identity.sendWhatsApp.mock.calls[0][0]).toEqual(f.identity.sendWhatsApp.mock.calls[1][0]);
+          const accepted = Object.values((await readJournal()).jobs)[0] as any;
+          expect(accepted.toolSends["retry-call"].messageId).toBe("sent-a");
+        } else {
+          expect(retried.isError).toBe(true);
+          expect(retried.details).toMatchObject({ sendAttempted: false, idempotencyKey: "original-logical-key" });
+          expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+        }
+        return ["Saved answer"];
+      } catch (error) { submitError = error; throw error; }
+      finally { release(); }
+    });
+    const options: any = { accountId: "default", config: { identity: "example" }, submit, deliver,
+      runtime: { ...f.runtime, getClient: async () => ({ messageSends: { lookup } }) } };
+    const receiver = createCompanionReceiver(options);
+    const incoming = event();
+    incoming._openclawWhatsApp = true;
+    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "conversation-a", conversation_id: "conversation-a" };
+    incoming.data.message._ordinaryAddressed = true;
+    try {
+      await receiver.accept(incoming);
+      await receiver.idle();
+      expect(submit).toHaveBeenCalledOnce();
+      expect(submitError).toBeUndefined();
+      expect(deliver).not.toHaveBeenCalled();
+      if (rejected && retry) {
+        expect(Object.keys((await readJournal()).jobs)).toHaveLength(0);
+        expect(await receiver.whatsappDeliveryConversation("sent-a")).toBe("conversation-a");
+      } else {
+        const saved = Object.values((await readJournal()).jobs)[0] as any;
+        expect(saved.state).toBe("paused");
+        if (rejected) {
+          expect(saved.reason).toContain("rejected/not accepted");
+          expect(saved.reason).toContain("original-logical-key");
+          expect(saved.reason).toContain("window_reset");
+          expect(saved.reason).not.toContain("uncertain");
+          await receiver.recover();
+          const context = JSON.stringify((await readJournal()).context);
+          expect(context).toContain("rejected/not accepted");
+          expect(context).not.toContain("Prior turn outcome is uncertain");
+          expect(lookup).not.toHaveBeenCalled();
+          expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+        }
+      }
+    } finally { receiver.close(); }
+  }
+
+  it("durably retries a known pre-admission quota rejection only with the original key and owned media", async () => {
+    await exerciseRejectedSend(new InkboxAPIError(429, {
+      error: "whatsapp_daily_limit_exceeded", quota: "whatsapp.texts_per_agent_identity_per_24h",
+      limit: 50, used: 50, retry_condition: "window_reset", reset_at: "2026-10-27T00:00:00Z",
+      message: "private-provider-note", provider: { diagnostic: "private-provider-note" },
+    }, "60"), true);
+  });
+
+  it("retains known rejected saved replies honestly without lookup or a new automatic send", async () => {
+    await exerciseRejectedSend(new InkboxAPIError(429, {
+      error: "whatsapp_daily_limit_exceeded", quota: "whatsapp.texts_per_agent_identity_per_24h",
+      limit: 50, used: 50, retry_condition: "window_reset", reset_at: "2026-10-27T00:00:00Z",
+      message: "private-provider-note",
+    }, "60"), true, false);
+  });
+
+  it.each([
+    new InkboxAPIError(409, { error: "whatsapp_send_pending" }),
+    new InkboxAPIError(429, { error: "whatsapp_unknown_policy" }),
+    new InkboxAPIError(503, { error: "whatsapp_daily_limit_exceeded" }),
+    new TypeError("response lost"),
+  ])("keeps ambiguous or unrecognized rejection fenced (%s)", async (failure) => {
+    await exerciseRejectedSend(failure, false);
   });
 
 });
