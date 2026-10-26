@@ -6,6 +6,7 @@ candidate_directory="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/inkbox-sdk-can
 git clone --quiet --filter=blob:none --no-checkout https://github.com/inkbox-ai/inkbox.git "$candidate_directory/source"
 git -C "$candidate_directory/source" fetch --quiet --depth=1 origin "$candidate_revision"
 git -C "$candidate_directory/source" checkout --quiet --detach "$candidate_revision"
+printf 'Reviewed SDK source: %s\n' "$candidate_revision"
 (
   cd "$candidate_directory/source/sdk/typescript"
   npm ci --no-audit --no-fund

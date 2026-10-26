@@ -23,6 +23,7 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
   }),
 }));
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
+import { createCompanionReceiver } from "../../src/inbound/companion.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
 function fixture() {
   const identity: any = {
@@ -179,6 +180,12 @@ describe("WhatsApp native receive/reply", () => {
     await dispatchInbound(receipt,b.handlers);await settle(b);expect(f.dispatchReply).toHaveBeenCalledTimes(2);expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
     const files=await readdir(state.dir);const contexts=files.filter(n=>n.startsWith("group-context-"));expect(contexts.length).toBeGreaterThan(0);
     expect((await Promise.all(contexts.map(n=>readFile(join(state.dir,n),"utf8")))).join("")).toContain("delivery_unconfirmed");
+    const next=event(undefined,"event-c");next.data.message.id="message-c";
+    await dispatchInbound(next,b.handlers);await settle(b);
+    expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[2][0])).toContain("delivery_unconfirmed");
+    const later=event(undefined,"event-d");later.data.message.id="message-d";
+    await dispatchInbound(later,b.handlers);await settle(b);
+    expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[3][0])).not.toContain("delivery_unconfirmed");
   });
   it("keeps media-only unavailable attachments explicit rather than dropping the turn", async () => {
     const f = fixture(),
@@ -258,4 +265,32 @@ describe("WhatsApp native receive/reply", () => {
       "WhatsApp answer",
     );
   });
+  it("recovers a journaled unknown tool send by key after restart without regenerating or resending", async () => {
+    const f = fixture();
+    const lookup = vi.fn(async () => undefined as string | undefined);
+    const model = vi.fn(async (input: any) => {
+      await input.validateBeforeDispatch();
+      await input.beforeToolSend("original-call", { idempotencyKey: "original-logical-key", text: "Saved answer" });
+      return ["Saved answer"];
+    });
+    const deliver = vi.fn(async () => "must-not-send");
+    const options: any = { accountId: "default", config: { identity: "example" },
+      runtime: { getIdentity: async () => f.identity, getClient: async () => ({ messageSends: { lookup } }) }, submit: model, deliver };
+    const first = createCompanionReceiver(options), incoming = event();
+    incoming._openclawWhatsApp = true;
+    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "conversation-a", conversation_id: "conversation-a" };
+    incoming.data.message._ordinaryAddressed = true;
+    await first.accept(incoming); await first.idle(); first.close();
+    const path = (await readdir(state.dir)).find((name) => name.startsWith("companion-") && name.endsWith(".json"))!;
+    expect(await readFile(join(state.dir, path), "utf8")).toContain("original-logical-key");
+    const unavailable = createCompanionReceiver({ ...options, runtime: { ...options.runtime, getClient: async () => { throw new Error("Client unavailable"); } } });
+    await expect(unavailable.recover()).resolves.toBeUndefined(); unavailable.close();
+    expect(deliver).not.toHaveBeenCalled();
+    lookup.mockResolvedValue("accepted-original-message");
+    const next = createCompanionReceiver(options); await next.recover(); await next.idle(); next.close();
+    expect(lookup).toHaveBeenCalledWith({ senderKind: "whatsapp_identity", senderId: f.identity.id, operation: "whatsapp.send", idempotencyKey: "original-logical-key" });
+    expect(model).toHaveBeenCalledOnce(); expect(deliver).not.toHaveBeenCalled();
+    expect(await next.whatsappDeliveryConversation("accepted-original-message")).toBe("conversation-a");
+  });
+
 });

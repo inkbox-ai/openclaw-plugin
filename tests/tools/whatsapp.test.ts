@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { bindNativeSource } from "../../src/native-source.js";
 import { registerWhatsAppTools } from "../../src/tools/whatsapp.js";
-function fixture(allowed?: string[]) {
+function fixture(allowed?: string[], sessionKey?: string) {
   const tools = new Map<string, any>();
   const identity: any = {
     id: "identity-a",
@@ -25,7 +26,7 @@ function fixture(allowed?: string[]) {
   registerWhatsAppTools(
     {
       registerTool(def: any) {
-        const tool = typeof def === "function" ? def({}) : def;
+        const tool = typeof def === "function" ? def({ sessionKey }) : def;
         tools.set(tool.name, tool);
       },
     },
@@ -57,8 +58,11 @@ describe("dedicated WhatsApp tools", () => {
       text: "Brief",
       mediaIds: ["media-a"],
     };
-    await f.tools.get("inkbox_send_whatsapp").execute("call-a", p);
-    await f.tools.get("inkbox_send_whatsapp").execute("call-a", p);
+    const unknown = await f.tools.get("inkbox_send_whatsapp").execute("call-a", p);
+    const key = unknown.details.idempotencyKey;
+    expect(unknown.content[0].text).toContain(key);
+    const accepted = await f.tools.get("inkbox_send_whatsapp").execute("different-host-call", { ...p, idempotencyKey: key });
+    expect(JSON.parse(accepted.content[0].text.replace(/^```json\n|\n```$/g, "")).idempotencyKey).toBe(key);
     expect(f.identity.sendWhatsApp.mock.calls[0][0]).toEqual(
       f.identity.sendWhatsApp.mock.calls[1][0],
     );
@@ -103,4 +107,22 @@ describe("dedicated WhatsApp tools", () => {
     });
     expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
   });
+  it("journals the exact source-bound recovery key before dispatch and permits an explicit different recipient", async () => {
+    const beforeSend = vi.fn(async () => {});
+    const release = bindNativeSource("wa-source-test", { whatsapp: true, sourceMessageId: "incoming-a", identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123", closed: false,
+      validate: async () => {}, beforeSend, afterSend: async () => {} });
+    try {
+      const f = fixture(undefined, "wa-source-test");
+      const first = await f.tools.get("inkbox_send_whatsapp").execute("call-a", { text: "Reply" });
+      const key = JSON.parse(first.content[0].text.replace(/^```json\n|\n```$/g, "")).idempotencyKey;
+      expect(beforeSend).toHaveBeenCalledWith("call-a", { idempotencyKey: key, text: "Reply" });
+      const second = await f.tools.get("inkbox_send_whatsapp").execute("call-b", { text: "Reply" });
+      expect(JSON.parse(second.content[0].text.replace(/^```json\n|\n```$/g, "")).idempotencyKey).toBe(key);
+      const explicit = await f.tools.get("inkbox_send_whatsapp").execute("call-c", { to: "+15555550124", text: "Explicit outreach" });
+      expect(explicit.isError).not.toBe(true);
+      expect(f.identity.sendWhatsApp.mock.calls[2][0].to).toBe("+15555550124");
+      expect(beforeSend).toHaveBeenCalledTimes(2);
+    } finally { release(); }
+  });
+
 });

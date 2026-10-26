@@ -1,6 +1,7 @@
 import { Type } from "typebox";
+import { getMessageRequestKey } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
-import { runTool, toolText } from "../errors.js";
+import { mapInkboxError, runTool, toolText } from "../errors.js";
 import { formatJson } from "../format.js";
 import { checkOutboundRecipient } from "../allowlist.js";
 import { activeNativeSource, assertNativeSource } from "../native-source.js";
@@ -44,7 +45,7 @@ export function registerWhatsAppTools(
             const identity = await runtime.getIdentity();
             const conversationId =
               params.conversationId ??
-              (source?.whatsapp ? source.conversationId : undefined);
+              (!params.to && source?.whatsapp ? source.conversationId : undefined);
             if (!!params.to === !!conversationId)
               throw new Error("Specify exactly one of to or conversationId.");
             if (!params.text?.trim() && !params.mediaIds?.length)
@@ -79,22 +80,25 @@ export function registerWhatsAppTools(
             const block = checkOutboundRecipient(recipient, allowedRecipients);
             if (block) throw new Error(block);
             await whatsappReady(identity);
-            if (bound) await source!.beforeSend(callId);
-            const message = await identity.sendWhatsApp({
-              ...(params.to ? { to: params.to } : { conversationId }),
-              ...(params.text !== undefined ? { text: params.text } : {}),
-              ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}),
-              idempotencyKey:
-                params.idempotencyKey ??
-                whatsappSendKey([
-                  identity.id,
-                  source?.whatsapp ? source.sourceMessageId : null,
-                  callId,
-                  conversationId ?? params.to,
-                  params.text,
-                  params.mediaIds,
-                ]),
-            });
+            const idempotencyKey = params.idempotencyKey ?? whatsappSendKey([
+              identity.id, source?.whatsapp ? source.sourceMessageId : callId,
+              conversationId ?? params.to, params.text, params.mediaIds,
+            ]);
+            let message;
+            try {
+              if (bound) await source!.beforeSend(callId, { idempotencyKey, text: params.text });
+              message = await identity.sendWhatsApp({
+                ...(params.to ? { to: params.to } : { conversationId }),
+                ...(params.text !== undefined ? { text: params.text } : {}),
+                ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), idempotencyKey,
+              });
+            } catch (error) {
+              const key = getMessageRequestKey(error) ?? idempotencyKey;
+              const result = mapInkboxError(error);
+              result.content[0]!.text += `\nOriginal idempotency key: ${key}. Use inkbox_lookup_whatsapp_send to inspect this send. Do not create a new key or another copy.`;
+              result.details = { ...result.details, idempotencyKey: key };
+              return result;
+            }
             if (bound) {
               try {
                 await source!.afterSend(callId, message.id, params.text);
@@ -103,7 +107,7 @@ export function registerWhatsAppTools(
               }
             }
             return sentToolText(
-              formatJson(acceptedWhatsApp(message)),
+              formatJson(acceptedWhatsApp(message, idempotencyKey)),
               params.completeSilently,
               { inkboxMessageId: message.id },
             );

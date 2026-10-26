@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile, mkdir, truncate, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ import {
   whatsappAttachments,
   whatsappFile,
   WHATSAPP_MAX_BYTES,
+  WHATSAPP_MEDIA_CACHE_BYTES,
 } from "../src/whatsapp.js";
 beforeEach(async () => {
   state.dir = await mkdtemp(join(tmpdir(), "inkbox-wa-files-"));
@@ -102,4 +103,18 @@ describe("owned WhatsApp attachment bytes", () => {
     await writeFile(path, Buffer.alloc(WHATSAPP_MAX_BYTES + 1));
     await expect(whatsappFile(path)).rejects.toThrow(/20 MiB/);
   });
+  it("expires old cache bytes and refuses new bytes when fresh retained files fill the bound", async () => {
+    const directory = join(state.dir, "whatsapp-media"); await mkdir(directory);
+    const retained = join(directory, "a".repeat(64)); await writeFile(retained, ""); await truncate(retained, WHATSAPP_MEDIA_CACHE_BYTES);
+    const identity = { id: "identity-a", getWhatsAppMedia: async () => ({ id: "media-a", status: "ready", size: 5, url: "https://example.test/file" }) };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("brief")));
+    const message = { agent_identity_id: "identity-a", media: [{ id: "media-a", filename: "brief.txt", content_type: "text/plain" }] };
+    expect((await whatsappAttachments({ getIdentity: async () => identity } as any, message))[0].unavailable).toBe(true);
+    expect((await stat(retained)).size).toBe(WHATSAPP_MEDIA_CACHE_BYTES);
+    await utimes(retained, new Date(Date.now() - 2 * 86400000), new Date(Date.now() - 2 * 86400000));
+    const downloaded = await whatsappAttachments({ getIdentity: async () => identity } as any, message);
+    expect(await readFile(downloaded[0].local_path as string, "utf8")).toBe("brief");
+    await expect(stat(retained)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
 });

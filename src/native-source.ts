@@ -8,7 +8,7 @@ export type NativeSource = {
   author: string; companion?: boolean; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
   validate(): Promise<void>;
   validateUpload?(automatic: boolean): Promise<void>;
-  beforeSend(callId: string): Promise<void>;
+  beforeSend(callId: string, intent?: { idempotencyKey: string; text?: string }): Promise<void>;
   afterSend(callId: string, messageId: string, text?: string): Promise<void>;
   progress?(update: { tool: string; id: string; status: "running" | "completed" | "error" }): void;
   afterUpload?(callId: string, receipt: SlackUploadReceipt): Promise<void>;

@@ -1,4 +1,4 @@
-import { whatsappAttachments, whatsappReady } from "../whatsapp.js";
+import { whatsappAttachments, whatsappReady, whatsappDeliveryContext } from "../whatsapp.js";
 import { checkedSlackUpload, type SlackUploadReceipt, type SlackUploadIntent } from "../slack-files.js";
 import { createTerminalReceipts, type ReceiptIndex } from "./terminal-receipts.js";
 import { createIMessageOutcomes, imessageFailureNotice, type IMessageOutcomeRoute } from "./imessage-outcomes.js";
@@ -28,10 +28,10 @@ function nativeSources(event: Record<string, any>): string[] {
 type Channel = CompanionChannel | "whatsapp";
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc" | "channel"> & { channel: Channel; slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = Omit<CompanionMetadata, "channel"> & { channel: Channel };
-type Job = { awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string, intent?: { idempotencyKey: string; text?: string }): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -359,7 +359,7 @@ export function createCompanionReceiver(opts: {
     }
   }
   function toolSendCallbacks(id: string, validate: () => Promise<void>) {
-    const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent) => {
+    const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent, intent?: { idempotencyKey: string; text?: string }) => {
       await validate();
       return mutate((journal) => {
         const job = journal.jobs[id]!;
@@ -368,7 +368,7 @@ export function createCompanionReceiver(opts: {
         if (previous?.upload) return { ...previous.upload, deduplicated: true };
         if (previous) throw new Error("This file already has an uncertain upload; inspect it instead of repeating it.");
         if ((kind !== "approval" && Object.values(job.toolSends ?? {}).some((send) => send.kind !== "approval" && !send.messageId && !send.failed)) || job.toolSends?.[callId]) throw new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
-        job.toolSends ??= {}; job.toolSends[callId] = { ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
+        job.toolSends ??= {}; job.toolSends[callId] = { ...(intent ? { whatsappKey: intent.idempotencyKey, text: intent.text } : {}), ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
       }, [id]);
     };
     const afterSend = async (callId: string, messageId: string, text?: string) => { await mutate((journal) => {
@@ -418,11 +418,37 @@ export function createCompanionReceiver(opts: {
         if (!active) throw new Error("The native source was stopped before its run could begin.");
       },
       nativeTerminal: async () => { await mutate((j) => { j.jobs[id]!.nativeComplete = true; }, [id]); },
-      beforeToolSend: async (callId: string) => { await beforeSend(callId); },
+      beforeToolSend: async (callId: string, intent?: { idempotencyKey: string; text?: string }) => { await beforeSend(callId, undefined, undefined, intent); },
       afterToolSend: afterSend,
       beforeApprovalSend: async (approvalId: string) => { await beforeSend(`approval:${approvalId}`, "approval"); },
       afterApprovalSend: (approvalId: string, messageId: string) => afterSend(`approval:${approvalId}`, messageId),
     };
+  }
+  async function reconcileWhatsAppSends() {
+    for (const [id, job] of Object.entries((await read()).jobs)) {
+      if (metadata(job.event).channel !== "whatsapp") continue;
+      const pending = Object.entries(job.toolSends ?? {}).filter(([, send]) => send.whatsappKey && !send.messageId && !send.failed && (send.whatsappLookups ?? 0) < 5);
+      if (!pending.length) continue;
+      let client;
+      try {
+        if ((await opts.runtime.getIdentity()).id !== job.identityId) continue;
+        client = await opts.runtime.getClient();
+      } catch { opts.warn?.("WhatsApp send lookup is unavailable; no send was repeated."); continue; }
+      for (const [callId, send] of pending) {
+        await mutate((j) => { const current = j.jobs[id]?.toolSends?.[callId]; if (current) current.whatsappLookups = (current.whatsappLookups ?? 0) + 1; }, [id]);
+        try {
+          const messageId = await client.messageSends.lookup({ senderKind: "whatsapp_identity", senderId: job.identityId, operation: "whatsapp.send", idempotencyKey: send.whatsappKey! });
+          if (typeof messageId !== "string" || !messageId) continue;
+          await toolSendCallbacks(id, async () => {}).afterToolSend(callId, messageId, send.text);
+        } catch { /* Missing/unavailable lookup never proves that another send is safe. */ }
+      }
+      await mutate((j) => {
+        const saved = j.jobs[id];
+        if (!saved || saved.state !== "paused" || !saved.nativeComplete || !saved.reply || !saved.replies || saved.stoppedBy || saved.sendUnconfirmed) return;
+        if (Object.values(saved.toolSends ?? {}).some((send) => !send.messageId && !send.failed)) return;
+        saved.state = "reply_pending"; delete saved.reason; delete saved.retryAt;
+      }, [id]);
+    }
   }
   async function reconcileUploads() {
     for (const [id, job] of Object.entries((await read()).jobs)) {
@@ -735,6 +761,15 @@ export function createCompanionReceiver(opts: {
       if (inputBytes + addedBytes > COMPANION_MAX_BYTES) continue;
       notices.push(notice); included.push(failure); inputBytes += addedBytes;
     }
+    const deliveryContext = m.channel === "whatsapp" ? whatsappDeliveryContext(opts.accountId, job.identityId, m.conversation_id) : undefined;
+    const deliveries = await deliveryContext?.snapshot().catch(() => { opts.warn?.("WhatsApp delivery observations remain pending."); return []; }) ?? [];
+    const includedDeliveries: typeof deliveries = [];
+    for (const delivery of deliveries) {
+      const notice = `WhatsApp delivery observation (context only; never resend automatically): ${delivery.body}`;
+      const addedBytes = Buffer.byteLength(notice) + 2;
+      if (inputBytes + addedBytes > COMPANION_MAX_BYTES) continue;
+      notices.push(notice); includedDeliveries.push(delivery); inputBytes += addedBytes;
+    }
     input.body = [...pending, ...notices, body].join("\n\n");
     activity(job.event, "accepted");
     const texts = await opts.submit(input) ?? [];
@@ -743,6 +778,7 @@ export function createCompanionReceiver(opts: {
       finishSources(j); if (j.context) delete j.context[scope];
       Object.assign(j.jobs[id]!, { replies: texts, reply, sponsor: activation?.sponsor ?? author, sponsorContactId, state: "reply_pending", nativeComplete: true });
     });
+    if (includedDeliveries.length) await deliveryContext?.acknowledge(includedDeliveries).catch(() => { opts.warn?.("WhatsApp delivery observations may repeat as context only."); });
     if (included.length) await outcomes(job.identityId).acknowledge(included).catch(() => { opts.warn?.("iMessage delivery notice acknowledgment could not be saved; retained notices may repeat as context only."); });
     await sendSaved();
   }
@@ -818,6 +854,7 @@ export function createCompanionReceiver(opts: {
       await ensureStateDir();
       await withFileLock(`${path}.worker`, lockOptions, async () => {
         await reconcileUploads();
+        await reconcileWhatsAppSends();
         await archiveTerminal();
         await mutate((j) => {
           for (const job of Object.values(j.jobs)) {
@@ -885,6 +922,11 @@ export function createCompanionReceiver(opts: {
         replyToMessageId: null, threadId: null, threadRootMessageId: null } : undefined;
       await store.failed(message.id, fallback);
       return true;
+    },
+    async whatsappDeliveryConversation(messageId: string): Promise<string | undefined> {
+      const identityId = (await opts.runtime.getIdentity()).id;
+      const original = await deliveryJob(identityId, messageId);
+      return original && metadata(original.event).channel === "whatsapp" ? metadata(original.event).conversation_id : undefined;
     },
     async ownsDelivery(messageId?: string, conversationId?: string | null) {
       if (!messageId && !conversationId) return false;

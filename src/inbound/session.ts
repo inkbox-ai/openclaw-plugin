@@ -1,4 +1,4 @@
-import { assertWhatsAppText, whatsappReady, whatsappSendKey } from "../whatsapp.js";
+import { assertWhatsAppText, whatsappReady, whatsappSendKey, whatsappDeliveryContext } from "../whatsapp.js";
 import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
 import { bindNativeSource, type NativeSource } from "../native-source.js";
@@ -6360,8 +6360,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const message = event.data?.message;
       if (!message || message.agent_identity_id !== identity.id) throw new Error("WhatsApp event identity mismatch.");
       if (event.event_type !== "whatsapp.received") {
-        if (typeof message.id === "string" && await companion.ownsDelivery(message.id)) {
-          await contextBuffer(JSON.stringify(["whatsapp-delivery", opts.account.accountId, identity.id, message.conversation_id]), { retainLatest: true })
+        const conversation = typeof message.id === "string" ? await companion.whatsappDeliveryConversation(message.id) : undefined;
+        if (conversation) {
+          await whatsappDeliveryContext(opts.account.accountId, identity.id, conversation)
             .append({ id: event.id, body: JSON.stringify({ message_id: message.id, event_type: event.event_type, status: message.status, delivery_state: message.delivery_state }) });
         }
         return;

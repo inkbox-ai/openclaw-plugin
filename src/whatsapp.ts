@@ -1,12 +1,43 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open, mkdir, rename } from "node:fs/promises";
+import { open, mkdir, rename, readdir, lstat, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { AgentIdentity, WhatsAppMessage } from "@inkbox/sdk";
 import type { InkboxRuntime } from "./client.js";
+import { withFileLock } from "./file-lock.js";
+import { contextBuffer } from "./inbound/context-buffer.js";
 import { ensureStateDir, statePaths } from "./state.js";
 
 export const WHATSAPP_MAX_BYTES = 20 * 1024 * 1024;
+export const WHATSAPP_MEDIA_CACHE_BYTES = 256 * 1024 * 1024;
+const MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;
+export const whatsappDeliveryContext = (accountId: string, identityId: string, conversationId: string) =>
+  contextBuffer(JSON.stringify(["whatsapp-delivery", accountId, identityId, conversationId]), { retainLatest: true });
+
+async function cacheMedia(directory: string, name: string, bytes: Buffer): Promise<string> {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  return withFileLock(join(directory, ".cache"), { stale: 60_000, retries: { retries: 10, factor: 1.5, minTimeout: 20, maxTimeout: 1000 } }, async () => {
+    let retainedBytes = 0, retainedFiles = 0;
+    for (const filename of await readdir(directory)) {
+      if (!/^[a-f0-9]{64}(?:\.[a-f0-9-]+\.tmp)?$/.test(filename)) continue;
+      const path = join(directory, filename);
+      const info = await lstat(path).catch((error) => { if (error.code === "ENOENT") return undefined; throw error; });
+      if (!info?.isFile()) continue;
+      if (info.mtimeMs < Date.now() - MEDIA_RETENTION_MS) {
+        await unlink(path).catch((error) => { if (error.code !== "ENOENT") throw error; });
+      } else if (filename !== name) { retainedBytes += info.size; retainedFiles++; }
+    }
+    // Never evict a fresh file another native turn may still be reading.
+    if (retainedFiles >= 256 || retainedBytes + bytes.length > WHATSAPP_MEDIA_CACHE_BYTES) throw new Error("WhatsApp local attachment cache is full; media remains available by owned ID.");
+    const path = join(directory, name), temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      const file = await open(temporary, "wx", 0o600);
+      try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+      await rename(temporary, path);
+    } finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
+    return path;
+  });
+}
 export const WHATSAPP_EVENTS = [
   "whatsapp.received",
   "whatsapp.sent",
@@ -138,24 +169,16 @@ export async function whatsappAttachments(
       } finally {
         await reader.cancel().catch(() => {});
       }
+      if (size < 1 || (current.size != null && current.size !== size))
+        throw new Error("Attachment bytes are incomplete.");
       if ((await runtime.getIdentity()).id !== identity.id)
         throw new Error("The WhatsApp identity changed.");
       await ensureStateDir();
       const directory = join(statePaths().dir, "whatsapp-media");
-      await mkdir(directory, { recursive: true, mode: 0o700 });
       const name = createHash("sha256")
         .update(JSON.stringify([identity.id, current.id]))
         .digest("hex");
-      const path = join(directory, name),
-        temporary = `${path}.${randomUUID()}.tmp`;
-      const file = await open(temporary, "wx", 0o600);
-      try {
-        await file.writeFile(Buffer.concat(chunks));
-        await file.sync();
-      } finally {
-        await file.close();
-      }
-      await rename(temporary, path);
+      const path = await cacheMedia(directory, name, Buffer.concat(chunks));
       attachments.push({ ...metadata, status: "ready", local_path: path });
     } catch {
       attachments.push({
@@ -175,9 +198,10 @@ export async function whatsappAttachments(
     });
   return attachments;
 }
-export function acceptedWhatsApp(message: WhatsAppMessage) {
+export function acceptedWhatsApp(message: WhatsAppMessage, idempotencyKey?: string) {
   return {
     messageId: message.id,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
     conversationId: message.conversationId,
     status: message.status,
     deliveryState: message.deliveryState,
