@@ -1,3 +1,4 @@
+import { checkOutboundRecipients } from "../allowlist.js";
 import { assertWhatsAppText, whatsappReady, whatsappSendKey, whatsappDeliveryContext } from "../whatsapp.js";
 import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
@@ -1666,6 +1667,7 @@ async function deliverReply(
     imessageTyping?: IMessageTypingPulse;
     logger?: PluginLogger;
     beforeSend?: () => Promise<void>;
+    allowedRecipients?: string[];
   },
 ): Promise<string | undefined> {
   const text = params.text.trim();
@@ -1703,6 +1705,12 @@ async function deliverReply(
     const identity = await params.runtime.getIdentity();
     if (!params.turn.conversationId) throw new Error("WhatsApp replies require the originating conversation.");
     if (params.turn.companionReply?.identityId && identity.id !== params.turn.companionReply.identityId) throw new Error("The WhatsApp reply identity changed.");
+    if (params.turn.conversationKind === "group") {
+      const conversation = await identity.getWhatsAppConversation(params.turn.conversationId);
+      if (conversation.agentIdentityId !== identity.id || !conversation.isGroup || !conversation.participants.length || (conversation.unresolvedParticipantCount ?? 0) > 0 || conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number))) throw new Error("An owned resolved WhatsApp group is required.");
+      const blocked = checkOutboundRecipients(conversation.participants, params.allowedRecipients);
+      if (blocked) throw new Error(blocked);
+    }
     await whatsappReady(identity);
     await params.beforeSend?.();
     const replyToMessageId = params.turn.companionReply?.replyToMessageId;
@@ -2710,6 +2718,7 @@ async function dispatchInboundTurn(
           runtime: opts.runtime,
           activeCalls: opts.activeCalls,
           imessageTyping: opts.imessageTyping,
+          allowedRecipients: opts.account.config.allowedRecipients,
           logger: opts.logger,
         });
         await rememberApprovals(opts.turn, opts.account, text);
@@ -2763,7 +2772,7 @@ async function dispatchInboundTurn(
       if (opts.turn.companionBeforeApprovalSend && (typeof approvalId !== "string" || !approvalId)) throw new Error("Native approval request identity is unavailable.");
       if (opts.turn.companionReply && opts.account.config.groupReplyMode === "mention") text += "\nInclude @agent before /approve when answering in mention mode.";
       await opts.turn.companionValidateBeforeDispatch?.();
-      const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger, beforeSend: async () => {
+      const messageId = await deliverReply({ turn: opts.turn, text, runtime: opts.runtime, activeCalls: opts.activeCalls, logger: opts.logger, allowedRecipients: opts.account.config.allowedRecipients, beforeSend: async () => {
         await opts.turn.companionValidateBeforeDispatch?.();
         await opts.turn.companionBeforeApprovalSend?.(approvalId);
       } });
@@ -6089,7 +6098,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       conversationKind: input.channel === "whatsapp" ? input.event._openclawWhatsApp?.isGroup ? "group" : "direct" : "group", conversationLabel: input.channel === "whatsapp" ? "WhatsApp conversation" : "Inkbox Companion conversation",
       conversationId: input.reply.conversationId,
       fromLabel: input.author, remoteAddress: input.author, body: input.body,
-      reaction: input.event._openclawNativeIMessage?.reaction ?? input.event._openclawWhatsApp?.reaction, nativeEventKind: input.channel === "slack" && input.event.companion.phase !== "ordinary" ? "room_event" : input.event._openclawNativeIMessage?.nativeEventKind,
+      reaction: input.event._openclawNativeIMessage?.reaction ?? input.event._openclawWhatsApp?.reaction, nativeEventKind: input.channel === "slack" && input.event.companion.phase !== "ordinary" ? "room_event" : input.event._openclawWhatsApp?.reaction ? "room_event" : input.event._openclawNativeIMessage?.nativeEventKind,
       rawText: input.rawText, wasMentioned: input.wasMentioned, commandAuthorized: input.commandAuthorized,
       messageId: input.messageId, raw: input.event,
       subject: input.channel === "mail" ? input.event.data?.message?.subject : undefined,
@@ -6213,7 +6222,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     async deliver(input, text, beforeSend) {
       const turn = companionTurn(input);
       if (opts.account.config.groupReplyMode === "mention" && /\/approve\s/.test(text)) text += "\nInclude @agent before /approve when answering in mention mode.";
-      const messageId = await deliverReply({ turn, text, runtime: opts.runtime, activeCalls, logger: opts.logger, beforeSend });
+      const messageId = await deliverReply({ turn, text, runtime: opts.runtime, activeCalls, logger: opts.logger, allowedRecipients: opts.account.config.allowedRecipients, beforeSend });
       await rememberApprovals(turn, opts.account, text);
       return messageId;
     },
@@ -6226,7 +6235,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const command = controlText(raw, opts.account.config.identity);
     const localControl = isLocalControl(command) || isCompanionControl(command);
     if (isCompanionControl(command) && command.toLowerCase() === "/resume") {
-      await deliverReply({ turn, text: "Reopening a previous conversation with /resume is not supported by this OpenClaw channel. Use /new for a fresh conversation or /status for the current session.", runtime: opts.runtime, activeCalls, logger: opts.logger });
+      await deliverReply({ turn, text: "Reopening a previous conversation with /resume is not supported by this OpenClaw channel. Use /new for a fresh conversation or /status for the current session.", runtime: opts.runtime, activeCalls, logger: opts.logger, allowedRecipients: opts.account.config.allowedRecipients });
       return true;
     }
     if (command.startsWith("/")) {
@@ -6675,6 +6684,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
                 text: replyText,
                 runtime: opts.runtime,
                 activeCalls,
+                allowedRecipients: opts.account.config.allowedRecipients,
                 logger: opts.logger,
               });
               sttTtsTranscript.push({ role: "assistant", text: replyText });

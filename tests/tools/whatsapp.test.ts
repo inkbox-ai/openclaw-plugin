@@ -294,3 +294,10 @@ it("fences reaction writes against blocked group peers and a source revoked duri
     expect(f.identity.sendWhatsAppReaction).not.toHaveBeenCalled();
   } finally { release(); }
 });
+
+
+it.each(["", " ", "\n", null])("does not silently omit an explicit invalid quote target %j", async (replyToMessageId) => {
+  const f = fixture();
+  const result = await f.tools.get("inkbox_send_whatsapp").execute("invalid-quote", { conversationId: "conversation-a", replyToMessageId, text: "Never plain" });
+  expect(result.isError).toBe(true); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+});

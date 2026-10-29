@@ -6,14 +6,14 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Added
 
-- Approved dedicated one-to-one WhatsApp messaging, ten native tools, signed incoming events, source-bound durable replies, owned attachments, and status-only delivery notifications.
-- Require SDK 0.7.21; candidate checks build the pinned public source package before normal publication.
+- Approved dedicated direct/group WhatsApp messaging, fifteen native tools for explicit quoted replies, paginated threads and named/custom reactions, signed incoming events, source-bound durable replies, owned attachments, and status-only delivery notifications.
+- Require SDK 0.7.24; candidate checks build the pinned public source package before normal publication.
 
 - Deliver local Slack attachments through the SDK with source-owned durable outcomes and file-operation inspection.
 - Add Slack mrkdwn guidance and conservative formatting repair outside code blocks.
 - Show native tool progress in source-bound task streams when the SDK/workspace supports them, with one edited-message fallback and non-replaying uncertainty recovery.
 - Cover Stop followed by another message, late tool callbacks, attachment ownership, and restart recovery.
-- Support published SDK `0.7.15` and newer; native task-stream methods are optional until available in the installed SDK.
+- Require SDK `0.7.24` for the WhatsApp surface; native task-stream methods remain negotiated with the server.
 
 - A resumable, non-interactive `openclaw inkbox bootstrap` command for existing identities, hosted Voice AI, explicit signing-key rotation, and gateway service startup.
 - A native three-option phone call voice-stack setup flow for Inkbox Voice AI, OpenAI Realtime API, and Inkbox TTS/STT.

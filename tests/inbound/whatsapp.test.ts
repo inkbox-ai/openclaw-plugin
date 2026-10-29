@@ -32,6 +32,7 @@ function fixture() {
   const identity: any = {
     id: "11111111-1111-4111-8111-111111111111",
     getWhatsAppStatus: vi.fn(async () => ({ enabled: true, status: "ready" })),
+    getWhatsAppConversation: vi.fn(async () => ({ agentIdentityId: "11111111-1111-4111-8111-111111111111", isGroup: true, participants: ["+15555550123", "+15555550124"], unresolvedParticipantCount: 0 })),
     sendWhatsApp: vi.fn(async () => ({
       id: "sent-a",
       conversationId: "conversation-a",
@@ -486,6 +487,8 @@ describe("WhatsApp v2 native group admission", () => {
     expect(f.dispatchReply).toHaveBeenCalledOnce();
     const built = f.core.inbound.buildContext.mock.calls[0][0];
     expect(JSON.stringify(built)).toContain("group");
+    expect(JSON.stringify(built)).toContain("parent-a");
+    expect(JSON.stringify(built)).toContain("thread-a");
     expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "conversation-a" });
     expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
   });
@@ -505,6 +508,7 @@ describe("WhatsApp v2 native group admission", () => {
     await dispatchInbound(e, b.handlers); await settle(b); await dispatchInbound(e, b.handlers); await settle(b);
     expect(f.dispatchReply).toHaveBeenCalledOnce();
     expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0])).toContain("context, not a new instruction");
+    expect(f.core.inbound.buildContext.mock.calls[0][0].message.inboundEventKind).toBe("room_event");
     const own = structuredClone(e); own.id = "own-event"; own.data.reaction.id = "own-reaction"; own.data.reaction.direction = "outbound";
     await dispatchInbound(own, b.handlers); await settle(b); expect(f.dispatchReply).toHaveBeenCalledOnce();
     const hidden = structuredClone(e); hidden.id = "hidden-event"; hidden.data.message.is_blocked = true; hidden.data.reaction.id = "hidden-reaction";
@@ -512,4 +516,59 @@ describe("WhatsApp v2 native group admission", () => {
     const removed = structuredClone(e); removed.id = "removed-event"; removed.data.reaction.revision = 2; removed.data.reaction.status = "removed";
     await dispatchInbound(removed, b.handlers); await settle(b); expect(f.dispatchReply).toHaveBeenCalledTimes(2);
   });
+});
+
+
+it("blocks automatic group answers, including saved-answer recovery, for any disallowed peer", async () => {
+  const f = fixture();
+  const options: any = { cfg: {}, account: { accountId: "default", identity: "example", config: { identity: "example", allowedRecipients: ["+15555550123"] } }, runtime: f.runtime, channelRuntime: f.core };
+  const e = event(); e.data.message.is_group = true; e.data.message.participants = ["+15555550123", "+15555550124"];
+  const first = createInkboxSessionBridge(options); await dispatchInbound(e, first.handlers); await settle(first);
+  expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  const next = createInkboxSessionBridge(options); await settle(next);
+  expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+});
+it("keeps a recovered uncertain explicit quote fenced against reformatted plain final answers", async () => {
+  const f = fixture(), lookup = vi.fn(async () => "accepted-quote");
+  f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("response lost"));
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup } });
+  f.dispatchReply.mockImplementation(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    await tools.get("inkbox_send_whatsapp").execute("quoted-attempt", { conversationId: "conversation-a", replyToMessageId: "original-parent", text: "Answer\n", idempotencyKey: "original-quote-key" });
+    await input.delivery.deliver({ text: "Answer" }, { kind: "final" }); return { dispatched: true };
+  });
+  const first = f.bridge(); await dispatchInbound(event(), first.handlers); await settle(first);
+  const next = f.bridge(); await settle(next);
+  expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(lookup).toHaveBeenCalled();
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ replyToMessageId: "original-parent", text: "Answer\n", idempotencyKey: "original-quote-key" });
+});
+
+
+it("retains an overlong saved reply as not attempted, never as a delivery-uncertain send", async () => {
+  const f = fixture();
+  f.dispatchReply.mockImplementationOnce(async (input: any) => { await input.delivery.deliver({ text: "x".repeat(4001) }, { kind: "final" }); return { dispatched: true }; });
+  const first = f.bridge(); await dispatchInbound(event(), first.handlers); await settle(first);
+  expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  const next = f.bridge(); await settle(next);
+  const fresh = event(undefined, "new-event"); fresh.data.message.id = "new-message";
+  await dispatchInbound(fresh, next.handlers); await settle(next);
+  const context = JSON.stringify(f.core.inbound.buildContext.mock.calls.at(-1)[0]);
+  expect(context).toContain("automatic WhatsApp reply was not attempted");
+  expect(context).not.toContain("Prior turn outcome is uncertain");
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+});
+
+
+it("admits the canonical reaction webhook only with a resolved permitted actor and never replays target text", async () => {
+  const shared = JSON.parse(await readFile(new URL("../fixtures/whatsapp-v2.json", import.meta.url), "utf8"));
+  const f = fixture(); f.identity.id = shared.message.agent_identity_id;
+  const bridge = f.bridge(), raw = structuredClone(shared.reaction_webhook);
+  await dispatchInbound(raw, bridge.handlers); await settle(bridge); expect(f.dispatchReply).not.toHaveBeenCalled();
+  raw.id = "evt-resolved-reaction"; raw.data.reaction.remote_number = shared.message.participants[0];
+  await dispatchInbound(raw, bridge.handlers); await settle(bridge);
+  expect(f.dispatchReply).toHaveBeenCalledOnce();
+  const context = JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0]);
+  expect(context).toContain("context, not a new instruction"); expect(context).not.toContain(shared.message.content);
 });

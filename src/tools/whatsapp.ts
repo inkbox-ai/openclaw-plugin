@@ -34,7 +34,7 @@ export function registerWhatsAppTools(
         parameters: Type.Object(
           {
             to: Type.Optional(Type.Union([Type.String(), Type.Array(Type.String(), { minItems: 1, maxItems: 8 })])),
-            replyToMessageId: Type.Optional(Type.String()),
+            replyToMessageId: Type.Optional(Type.String({ minLength: 1 })),
             groupName: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
             conversationId: Type.Optional(Type.String()),
             text: Type.Optional(Type.String({ maxLength: 4000 })),
@@ -61,6 +61,7 @@ export function registerWhatsAppTools(
               assertNativeSource(source, identity.id);
               await source.validate();
             }
+            if (params.replyToMessageId !== undefined && (typeof params.replyToMessageId !== "string" || !params.replyToMessageId.trim())) throw new Error("replyToMessageId must be a nonempty message ID.");
             const explicitRecipients = params.to === undefined ? undefined : whatsappRecipients(params.to);
             if (params.replyToMessageId && !conversationId) throw new Error("replyToMessageId requires conversationId.");
             if (params.groupName && (!explicitRecipients || explicitRecipients.length < 2)) throw new Error("groupName is only a group creation hint.");
