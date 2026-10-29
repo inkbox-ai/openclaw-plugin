@@ -60,11 +60,16 @@ export function registerWhatsAppTools(
             const directRecipient = explicitRecipients?.length === 1 ? explicitRecipients[0] : "";
             const bound = Boolean(
               source?.whatsapp && (
-                (!params.to && conversationId === source.conversationId) ||
+                (!params.to && conversationId?.toLowerCase() === source.conversationId.toLowerCase()) ||
                 (!source.isGroup && /^\+[1-9]\d{6,14}$/.test(directRecipient) && directRecipient === source.author)
               ),
             );
-            const targetConversationId = bound ? source!.conversationId : conversationId;
+            const retainedDestination = bound && params.idempotencyKey
+              ? await source!.whatsappReplyDestination?.(params.idempotencyKey) : undefined;
+            // Source ownership is semantic; an exact replay retains its wire selector.
+            const retainedSourceSelector = retainedDestination?.conversationId?.toLowerCase() === source?.conversationId.toLowerCase()
+              ? retainedDestination : undefined;
+            const targetConversationId = retainedSourceSelector?.conversationId ?? (bound ? source!.conversationId : conversationId);
             let recipients = explicitRecipients ?? [];
             // A caller-supplied recovery key never acquires a new quote target.
             const replyToMessageId = params.replyToMessageId ?? (bound
@@ -82,7 +87,7 @@ export function registerWhatsAppTools(
             validateWhatsAppSend(request);
             if (!params.idempotencyKey && (typeof callId !== "string" || !callId.trim())) throw new Error("A stable host tool call ID or explicit idempotencyKey is required.");
             const tracked = source?.whatsapp === true;
-            const destination = bound ? undefined : targetConversationId ? { conversationId: targetConversationId } : { to: explicitRecipients };
+            const destination = retainedSourceSelector ?? (bound ? undefined : targetConversationId ? { conversationId: targetConversationId } : { to: explicitRecipients });
             let destinationEvidence: WhatsAppDestinationEvidence | undefined;
             if (targetConversationId) {
               const conversation =
@@ -104,7 +109,7 @@ export function registerWhatsAppTools(
                 result.content[0]!.text += "\nNo new WhatsApp request was attempted.";
                 const policy = error instanceof Error && "whatsappRejection" in error ? error.whatsappRejection : undefined;
                 if (priorKey) result.content[0]!.text += policy
-                  ? ` Original request was rejected/not accepted: ${JSON.stringify(policy)}. Follow retry_condition and reuse the original key ${priorKey} with unchanged text and owned media IDs.`
+                  ? ` An earlier attempt returned a rejection; its outcome may remain uncertain: ${JSON.stringify(policy)}. Follow retry_condition and reuse the original key ${priorKey} with unchanged text and owned media IDs.`
                   : ` Earlier send key: ${priorKey}. Inspect it with inkbox_lookup_whatsapp_send; do not repeat it.`;
                 result.details = { ...result.details, sendAttempted: false, ...(priorKey ? { idempotencyKey: priorKey } : {}) };
                 return result;
@@ -126,8 +131,8 @@ export function registerWhatsAppTools(
                   try { await source!.rejectSend(callId, idempotencyKey, policy); }
                   catch { /* The durable intent stays fenced if its rejection cannot be saved. */ }
                 }
-                return toolError(`WhatsApp request rejected/not accepted: ${JSON.stringify(policy)}. Follow retry_condition, then reuse the original key ${key} and owned media IDs; do not create a new request.`,
-                  { ...policy, idempotencyKey: key, requestAccepted: false, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}) });
+                return toolError(`WhatsApp attempt returned a rejection; an earlier attempt may remain uncertain: ${JSON.stringify(policy)}. Inspect this send with inkbox_lookup_whatsapp_send. Follow retry_condition and preserve the original key ${key} and owned media IDs; do not create a new request.`,
+                  { ...policy, idempotencyKey: key, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}) });
               }
               const result = mapInkboxError(error);
               result.content[0]!.text += `\nOriginal idempotency key: ${key}. Use inkbox_lookup_whatsapp_send to inspect this send. Do not create a new key or another copy.`;

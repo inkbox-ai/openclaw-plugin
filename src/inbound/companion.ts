@@ -31,11 +31,13 @@ export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc" | "channel"
 type Metadata = Omit<CompanionMetadata, "channel"> & { channel: Channel };
 type Job = { replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappUncertain?: boolean; whatsappDestination?: WhatsAppSendIntent["destination"]; whatsappDestinationEvidence?: WhatsAppSendIntent["destinationEvidence"]; whatsappConversationId?: string; whatsappMediaIds?: string[]; whatsappReplyToMessageId?: string; whatsappGroupName?: string; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
-// A missing body is a consumed receipt; keep its event key to reject redelivery.
-type WhatsAppObservation = { identityId: string; messageId: string; body?: string; conversationId?: string };
+// Context-only lifecycle history is bounded; send and source receipts are not expired.
+const WHATSAPP_OBSERVATION_RETENTION_MS = 24 * 60 * 60 * 1000;
+const WHATSAPP_OBSERVATION_LIMIT = 1024;
+type WhatsAppObservation = { createdAt?: number; identityId: string; messageId: string; body?: string; conversationId?: string };
 type WhatsAppReactionCursor = { identityId: string; actor: string; targetMessageId: string; revision: number };
 type Journal = { whatsappObservations?: Record<string, WhatsAppObservation>; whatsappReactionOrder?: Record<string, WhatsAppReactionCursor>; jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string, uncertain?: boolean, conversationId?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>; whatsappReplyDestination?(idempotencyKey: string): Promise<WhatsAppSendIntent["destination"]>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string, uncertain?: boolean, conversationId?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -219,8 +221,12 @@ export function createCompanionReceiver(opts: {
   function needsWhatsAppRoute(send: NonNullable<Job["toolSends"]>[string]): boolean {
     return Boolean(send.whatsappKey && !send.failed && send.whatsappDestination && !send.whatsappConversationId && !send.whatsappDestination.conversationId);
   }
-  function rejectedWhatsAppOutreach(send: NonNullable<Job["toolSends"]>[string]): boolean {
-    return Boolean(send.whatsappDestination && send.whatsappRejection);
+  function sourceWhatsAppSend(send: NonNullable<Job["toolSends"]>[string], job: Job): boolean {
+    return !send.whatsappDestination ||
+      send.whatsappDestination.conversationId?.toLowerCase() === metadata(job.event).conversation_id.toLowerCase();
+  }
+  function rejectedWhatsAppOutreach(send: NonNullable<Job["toolSends"]>[string], job: Job): boolean {
+    return Boolean(send.whatsappRejection && !sourceWhatsAppSend(send, job));
   }
   async function sameWhatsAppDestination(job: Job, send: NonNullable<Job["toolSends"]>[string], intent: WhatsAppSendIntent): Promise<boolean> {
     // An omitted selector is the bound source conversation, not every destination.
@@ -263,7 +269,15 @@ export function createCompanionReceiver(opts: {
           if (job) { journal.jobs[id] = job; loaded.set(id, JSON.stringify(job)); }
         }
         const result = await fn(journal);
-        // Correlation and consumption share the journal transaction; no transfer can lose an early event.
+        // Bound context and consumed event keys before doing correlation reads.
+        const observations = journal.whatsappObservations ?? {};
+        for (const [id, observation] of Object.entries(observations)) {
+          observation.createdAt ??= Date.now();
+          if (observation.createdAt < Date.now() - WHATSAPP_OBSERVATION_RETENTION_MS) delete observations[id];
+        }
+        const retained = Object.entries(observations).sort(([, a], [, b]) => a.createdAt! - b.createdAt!);
+        for (const [id] of retained.slice(0, Math.max(0, retained.length - WHATSAPP_OBSERVATION_LIMIT))) delete observations[id];
+        // Correlation and consumption of retained context share the journal transaction.
         for (const observation of Object.values(journal.whatsappObservations ?? {})) {
           if (!observation.body || observation.conversationId) continue;
           const original = Object.values(journal.jobs).find((job) => job.identityId === observation.identityId && job.outboundIds?.includes(observation.messageId))
@@ -505,6 +519,10 @@ export function createCompanionReceiver(opts: {
         if (!active) throw new Error("The native source was stopped before its run could begin.");
       },
       nativeTerminal: async () => { await mutate((j) => { j.jobs[id]!.nativeComplete = true; }, [id]); },
+      whatsappReplyDestination: async (idempotencyKey: string) => {
+        const job = (await read()).jobs[id];
+        return Object.values(job?.toolSends ?? {}).find(send => send.whatsappKey === idempotencyKey)?.whatsappDestination;
+      },
       whatsappReplyTarget: async (idempotencyKey: string) => {
         const job = (await read()).jobs[id];
         return Object.values(job?.toolSends ?? {}).find((send) => send.whatsappKey === idempotencyKey)?.whatsappReplyToMessageId;
@@ -561,7 +579,7 @@ export function createCompanionReceiver(opts: {
       await mutate((j) => {
         const saved = j.jobs[id];
         if (!saved || saved.state !== "paused" || !saved.nativeComplete || !saved.reply || !saved.replies || saved.stoppedBy || saved.sendUnconfirmed) return;
-        if (Object.values(saved.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send) && !send.messageId && !send.failed)) return;
+        if (Object.values(saved.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send, saved) && !send.messageId && !send.failed)) return;
         saved.state = "reply_pending"; delete saved.reason; delete saved.retryAt;
       }, [id]);
     }
@@ -736,16 +754,16 @@ export function createCompanionReceiver(opts: {
       const current = (await read()).jobs[id]!;
       if (current.stoppedBy) { activity(job.event, "cancelled"); return; }
       if (stopped() || !enabled(current)) return;
-      const unresolved = Object.values(current.toolSends ?? {}).filter((send) => !rejectedWhatsAppOutreach(send) && send.kind !== "approval" && send.kind !== "attachment" && !send.messageId && !send.failed);
+      const unresolved = Object.values(current.toolSends ?? {}).filter((send) => !rejectedWhatsAppOutreach(send, current) && send.kind !== "approval" && send.kind !== "attachment" && !send.messageId && !send.failed);
       if (unresolved.length) {
         await mutate((j) => { j.jobs[id]!.awaitingUploads = unresolved.every((send) => Boolean(send.uploadKey)); }, [id]);
         const rejected = unresolved.find((send) => send.whatsappRejection);
-        if (rejected) throw new Error(`WhatsApp request was rejected/not accepted. Original key: ${rejected.whatsappKey}; retry_condition: ${rejected.whatsappRejection!.retry_condition ?? "current_policy"}. Retain unchanged text and owned media IDs; no automatic replacement was sent.`);
+        if (rejected) throw new Error(`A WhatsApp attempt returned a rejection; an earlier attempt may remain uncertain. Original key: ${rejected.whatsappKey}; retry_condition: ${rejected.whatsappRejection!.retry_condition ?? "current_policy"}. Retain unchanged text and owned media IDs; no automatic replacement was sent.`);
         throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
       }
       // A recovered ID does not authorize a replacement. Legacy receipts without
       // certainty evidence also stay fenced; quote intents are never replaced.
-      if (m.channel === "whatsapp" && Object.values(current.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send) && Boolean((!send.whatsappDestination && send.whatsappReplyToMessageId) || (send.whatsappKey && send.whatsappUncertain !== false)))) {
+      if (m.channel === "whatsapp" && Object.values(current.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send, current) && Boolean((sourceWhatsAppSend(send, current) && send.whatsappReplyToMessageId) || (send.whatsappKey && send.whatsappUncertain !== false)))) {
         await mutate((j) => { j.jobs[id]!.replies = []; j.jobs[id]!.state = "done"; });
         activity(job.event, "completed"); return;
       }
@@ -756,14 +774,14 @@ export function createCompanionReceiver(opts: {
         if (stopped() || !enabled(pending)) return;
         // Only an exact accepted same-source send is delivery proof. Do not
         // suppress a different answer, an unknown result, or a legacy receipt.
-        if (Object.values(current.toolSends ?? {}).some((send) => !send.whatsappDestination && send.messageId && send.text === text)) {
+        if (Object.values(current.toolSends ?? {}).some((send) => sourceWhatsAppSend(send, current) && send.messageId && send.text === text)) {
           await mutate((j) => { j.jobs[id]!.replies!.shift(); });
           continue;
         }
         const savedActivation = (await read()).activations[scope];
         checkSponsor(current.sponsor ?? savedActivation?.sponsor ?? author, current.sponsorContactId ?? savedActivation?.sponsorContactId, job.event._openclawSlack?.route);
         await validateSlack(job);
-        const sent = await opts.deliver(input, text, async () => { await mutate((j) => { if (stopped() || !enabled(j.jobs[id]!) || j.jobs[id]!.stoppedBy) throw new Error("The source turn was stopped or disabled before sending."); j.jobs[id]!.state = "sending"; j.jobs[id]!.sendUnconfirmed = true; }, [id]); });
+        const sent = await opts.deliver(input, text, async () => { await mutate((j) => { if (stopped() || !enabled(j.jobs[id]!) || j.jobs[id]!.stoppedBy) throw new Error("The source turn was stopped or disabled before sending."); delete j.jobs[id]!.replyNotAttempted; j.jobs[id]!.state = "sending"; j.jobs[id]!.sendUnconfirmed = true; }, [id]); });
         await mutate((j) => {
           j.jobs[id]!.sendUnconfirmed = false;
           if (sent) j.jobs[id]!.outboundIds = [...new Set([...(j.jobs[id]!.outboundIds ?? []), sent])];
@@ -919,7 +937,10 @@ export function createCompanionReceiver(opts: {
     await mutate((j) => {
       if (j.jobs[id]!.stoppedBy) { j.jobs[id]!.state = "done"; j.jobs[id]!.nativeComplete = true; return; }
       finishSources(j); if (j.context) delete j.context[scope];
-      for (const observationId of includedObservations) delete j.whatsappObservations![observationId]!.body;
+      for (const observationId of includedObservations) {
+        const observation = j.whatsappObservations?.[observationId];
+        if (observation) delete observation.body;
+      }
       Object.assign(j.jobs[id]!, { replies: texts, reply, sponsor: activation?.sponsor ?? author, sponsorContactId, state: "reply_pending", nativeComplete: true });
     });
     if (includedDeliveries.length) await deliveryContext?.acknowledge(includedDeliveries).catch(() => { opts.warn?.("WhatsApp delivery observations may repeat as context only."); });
@@ -967,7 +988,7 @@ export function createCompanionReceiver(opts: {
           let deferred = false;
           await mutate((j) => {
             const saved = j.jobs[id]!;
-            if (metadata(saved.event).channel === "whatsapp" && saved.state === "reply_pending" && !saved.sendUnconfirmed) saved.replyNotAttempted = true;
+            if (metadata(saved.event).channel === "whatsapp" && saved.state === "reply_pending" && !saved.sendUnconfirmed && !retryableRead(error)) saved.replyNotAttempted = true;
             if (saved.stoppedBy) { saved.state = saved.nativeComplete && !crossedSend(saved) ? "done" : "paused"; return; }
             if (saved.state === "reply_pending" && (stopped() || !enabled(saved))) { deferred = true; return; }
             if (error instanceof WhatsAppReadinessPending && saved.state === "pending") {
@@ -992,7 +1013,7 @@ export function createCompanionReceiver(opts: {
           if (paused?.state === "paused") activity(job.event, paused.awaitingUploads ? "paused" : "failed");
           const rejected = Object.values(paused?.toolSends ?? {}).some((send) => send.whatsappRejection);
           opts.warn?.(rejected
-            ? "WhatsApp request rejected/not accepted; its original key and retry condition remain retained."
+            ? "A WhatsApp attempt returned a rejection; its original key, retry condition, and possible earlier uncertainty remain retained."
             : "Companion delivery retained for recovery; uncertain submissions are paused.");
         }
         await archiveTerminal();
@@ -1028,7 +1049,8 @@ export function createCompanionReceiver(opts: {
           if (job.stopTargets || (job.stoppedBy && !crossedSend(job))) continue;
           // Recovered IDs still need uncertainty context before sendSaved fences
           // the automatic reply and completes the job without sending it.
-          if (job.state !== "paused" && !(job.state === "reply_pending" && job.replyNotAttempted)) continue;
+          if (job.state !== "paused" && !(job.state === "reply_pending" && job.replyNotAttempted &&
+            Object.values(job.toolSends ?? {}).some(send => !send.failed && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false))))) continue;
           if (job.state === "paused") activity(job.event, "paused");
           if (!job.nativeComplete && job.nativeOwner) {
             if (await fenceNativeOwner(job.nativeOwner.sessionKey, job.nativeOwner.runId)) await mutate((j) => { j.jobs[id]!.nativeComplete = true; });
@@ -1041,10 +1063,10 @@ export function createCompanionReceiver(opts: {
             const sends = Object.values(saved.toolSends ?? {});
             const rejected = sends.filter((send) => send.whatsappRejection && !send.messageId && !send.failed);
             const unresolved = sends.filter((send) => !send.whatsappRejection && !send.failed && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false)));
-            const knownRejected = rejected.length && !unresolved.length;
+            const knownRejected = rejected.length && !unresolved.length && !crossedSend(saved);
             j.context[scope]!.push(knownRejected
-              ? `Prior WhatsApp request was rejected/not accepted. Original requests: ${JSON.stringify(rejected.map((send) => ({ idempotencyKey: send.whatsappKey, ...send.whatsappRejection })))}. Keep the original keys and unchanged payloads; follow retry_condition. This is context, not an instruction to send.`
-              : saved.replyNotAttempted ? `The prior saved automatic WhatsApp reply was not attempted; no plain replacement was sent. Earlier explicit operations may remain uncertain: ${JSON.stringify(unresolved.map((send) => ({ idempotencyKey: send.whatsappKey })))}. Do not repeat prior actions or sends. This is context, not an instruction.`
+              ? `A prior WhatsApp attempt returned a rejection; an earlier attempt may remain uncertain. Original requests: ${JSON.stringify(rejected.map((send) => ({ idempotencyKey: send.whatsappKey, ...send.whatsappRejection })))}. Keep the original keys and unchanged payloads; follow retry_condition. This is context, not an instruction to send.`
+              : saved.replyNotAttempted && !crossedSend(saved) ? `The prior saved automatic WhatsApp reply was not attempted; no plain replacement was sent. Earlier explicit operations may remain uncertain: ${JSON.stringify(unresolved.map((send) => ({ idempotencyKey: send.whatsappKey })))}. Do not repeat prior actions or sends. This is context, not an instruction.`
               : `Prior turn outcome is uncertain. Do not repeat its actions or sends. Accepted outbound IDs: ${JSON.stringify(saved.outboundIds ?? [])}. The prior native execution is terminal; this is context, not an instruction.`);
             saved.uncertaintyRecorded = true;
           });
@@ -1090,9 +1112,18 @@ export function createCompanionReceiver(opts: {
       const identityId = (await opts.runtime.getIdentity()).id, message = event.data?.message;
       if (message?.agent_identity_id !== identityId || typeof message.id !== "string" || !message.id || typeof event.id !== "string" || !event.id) throw new Error("Invalid WhatsApp delivery observation.");
       const observationId = hash(JSON.stringify([identityId, event.id]));
-      await mutate((journal) => {
+      await mutate(async (journal) => {
+        const jobs = Object.values(journal.jobs).filter(job => job.identityId === identityId && metadata(job.event).channel === "whatsapp");
+        const original = jobs.find(job => job.outboundIds?.includes(message.id))
+          ?? await receipts.lookup("deliveries", JSON.stringify([identityId, message.id]));
+        // A callback can precede the send response or its key lookup. Retain it
+        // only while an owned send can still acquire this message ID.
+        const awaitingId = jobs.some(job => ["submitting", "sending"].includes(job.state) ||
+          Object.values(job.toolSends ?? {}).some(send => send.whatsappKey && !send.messageId && !send.failed));
+        if (!original && !awaitingId) return;
         journal.whatsappObservations ??= {};
-        journal.whatsappObservations[observationId] ??= { identityId, messageId: message.id,
+        journal.whatsappObservations[observationId] ??= { createdAt: Date.now(), identityId, messageId: message.id,
+          ...(original ? { conversationId: whatsappDeliveryTarget(original, message.id) } : {}),
           body: JSON.stringify({ message_id: message.id, event_type: event.event_type, status: message.status, delivery_state: message.delivery_state }) };
       });
     },
@@ -1248,7 +1279,10 @@ export function createCompanionReceiver(opts: {
         catch { opts.warn?.("Retained iMessage outcome metadata could not be recovered; no sends were replayed."); }
       }
       const journal = await read();
-      if (!Object.keys(journal.jobs).length && !Object.values(journal.whatsappObservations ?? {}).some(observation => observation.body && !observation.conversationId)) return;
+      if (!Object.keys(journal.jobs).length && !Object.values(journal.whatsappObservations ?? {}).some(observation => observation.body && !observation.conversationId)) {
+        if (Object.keys(journal.whatsappObservations ?? {}).length) await mutate(() => {});
+        return;
+      }
       await start();
       // A joined worker may already have taken its last snapshot before admission.
       await start();

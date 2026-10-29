@@ -33,3 +33,24 @@ it("retains the real SDK wire contract for quoted sends, threads, and uncertain 
   expect(reaction.revision).toBe(2);
   expect(calls.at(-1)).toMatchObject({ body: { message_id: fixture.message.id, reaction: "eyes" }, key: "reaction-original" });
 });
+
+it("retains the real SDK's uncertainty limitation when a retry ends in a public rejection", async () => {
+  const requests: { body: string; key: string | null }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url, options) => {
+    if (new URL(String(url)).pathname.includes("/identities/")) return new Response(JSON.stringify({
+      id: fixture.message.agent_identity_id, organization_id: "org_fixture", agent_handle: "example",
+      created_at: fixture.message.created_at, updated_at: fixture.message.updated_at,
+    }), { status: 200, headers: { "content-type": "application/json" } });
+    requests.push({ body: String(options?.body), key: new Headers(options?.headers).get("Idempotency-Key") });
+    if (requests.length === 1) throw Object.assign(new Error("response timed out"), { name: "TimeoutError" });
+    return new Response(JSON.stringify({ detail: { error: "whatsapp_reply_required_for_links" } }), {
+      status: 422, headers: { "content-type": "application/json" },
+    });
+  }));
+  const identity = await new Inkbox({ apiKey: "synthetic-contract-key", baseUrl: "https://contract.example" }).getIdentity("example");
+  await expect(identity.sendWhatsApp({ conversationId: fixture.message.conversation_id,
+    replyToMessageId: fixture.message.reply_to_message_id, text: "See https://example.com", idempotencyKey: "retained-quote-key" }))
+    .rejects.toMatchObject({ statusCode: 422, detail: { error: "whatsapp_reply_required_for_links" }, idempotencyKey: "retained-quote-key" });
+  expect(requests).toHaveLength(2);
+  expect(requests[0]).toEqual(requests[1]);
+});

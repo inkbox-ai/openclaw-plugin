@@ -21,6 +21,8 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Changed
 
+- Preserve WhatsApp source ownership for case-variant conversation IDs while keeping retained request selectors and quotes exact across recovery.
+- Bound WhatsApp delivery context without interrupting saved-answer checkpoints, and keep uncertain sends fenced with accurate recovery guidance.
 - Updated compatible transitive HTTP and development dependencies to patched versions.
 - Outbound calls now use a configured voicemail-detection policy. Hosted calls send `mode=hosted_agent` with a task reason, omit media WebSocket context, and inherit the saved authority default.
 - Inbound call routing and lifecycle subscriptions now follow the selected stack.

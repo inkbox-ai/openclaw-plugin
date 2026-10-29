@@ -69,7 +69,7 @@ describe("dedicated WhatsApp tools", () => {
       f.identity.sendWhatsApp.mockRejectedValueOnce(new InkboxAPIError(422, { ...policy, message: "private-diagnostic" }));
       const payload = { text: "Email sender@example.com", idempotencyKey: "original-email-key" };
       const first = await f.tools.get("inkbox_send_whatsapp").execute("first", payload);
-      expect(first.details).toEqual({ ...policy, status_code: 422, idempotencyKey: "original-email-key", requestAccepted: false });
+      expect(first.details).toEqual({ ...policy, status_code: 422, idempotencyKey: "original-email-key" });
       expect(JSON.stringify(first)).not.toContain("private-diagnostic");
       expect(rejectSend).toHaveBeenCalledWith("first", "original-email-key", { ...policy, status_code: 422 });
       await f.tools.get("inkbox_send_whatsapp").execute("retry", payload);
@@ -403,5 +403,22 @@ it.each([
     const result = await f.tools.get("inkbox_send_whatsapp").execute("unverified", {
       conversationId: "abcdefab-0000-4000-8000-000000000003", text: "Answer", idempotencyKey: "evidence-key" });
     expect(result.isError).toBe(true); expect(beforeSend).not.toHaveBeenCalled(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  } finally { release(); }
+});
+
+it("keeps unknown supplied keys plain while restoring only retained quote targets", async () => {
+  const quote = "00000000-0000-4000-8000-000000000006";
+  const release = bindNativeSource("fresh-key-source", { whatsapp: true, sourceMessageId: quote, replyToMessageId: quote,
+    identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123",
+    closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {},
+    whatsappReplyTarget: async (key) => key === "retained-quoted-key" ? quote : undefined });
+  try {
+    const f = fixture(undefined, "fresh-key-source"), send = f.tools.get("inkbox_send_whatsapp");
+    await send.execute("fresh", { text: "Answer", idempotencyKey: "fresh-key" });
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+    await send.execute("legacy", { text: "Old answer", idempotencyKey: "retained-plain-key" });
+    expect(f.identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
+    await send.execute("quoted", { text: "Old quote", idempotencyKey: "retained-quoted-key" });
+    expect(f.identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({ replyToMessageId: quote, idempotencyKey: "retained-quoted-key" });
   } finally { release(); }
 });
