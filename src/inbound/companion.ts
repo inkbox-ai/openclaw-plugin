@@ -201,6 +201,12 @@ export function createCompanionReceiver(opts: {
       ? send.whatsappConversationId ?? send.whatsappDestination.conversationId
       : metadata(job.event).conversation_id;
   }
+  function needsWhatsAppRoute(send: NonNullable<Job["toolSends"]>[string]): boolean {
+    return Boolean(send.whatsappKey && !send.failed && send.whatsappDestination && !send.whatsappConversationId && !send.whatsappDestination.conversationId);
+  }
+  function rejectedWhatsAppOutreach(send: NonNullable<Job["toolSends"]>[string]): boolean {
+    return Boolean(send.whatsappDestination && send.whatsappRejection);
+  }
   async function completedSource(job: Job): Promise<Job | undefined> {
     const m = metadata(job.event), incoming = source(job.event, m), scope = key(m, job.identityId);
     const previous = Object.values((await read()).jobs).find((other) => other !== job && other.event.id !== job.event.id && other.identityId === job.identityId && other.state === "done" && key(metadata(other.event), other.identityId) === scope && source(other.event, metadata(other.event)).message.id === incoming.message.id)
@@ -256,7 +262,7 @@ export function createCompanionReceiver(opts: {
         for (const [id, job] of Object.entries(journal.jobs)) {
           if (moved === 64) break;
           const m = metadata(job.event);
-          if (m.phase !== "ordinary" || !["slack", "imessage", "whatsapp"].includes(m.channel) || job.state !== "done" || job.sendUnconfirmed || Object.values(job.toolSends ?? {}).some((send) => !send.messageId && !send.failed) || (!job.nativeComplete && (job.nativeOwner || job.reply || job.toolSends))) continue;
+          if (m.phase !== "ordinary" || !["slack", "imessage", "whatsapp"].includes(m.channel) || job.state !== "done" || job.sendUnconfirmed || Object.values(job.toolSends ?? {}).some((send) => (!send.messageId && !send.failed) || needsWhatsAppRoute(send)) || (!job.nativeComplete && (job.nativeOwner || job.reply || job.toolSends))) continue;
           if (job.stopTargets && !(await Promise.all(job.stopTargets.map(async (target) => {
             const captured = journal.jobs[target] ?? await receipts.event(target);
             return captured && (captured.state === "done" || captured.stoppedBy !== id || crossedSend(captured));
@@ -384,21 +390,28 @@ export function createCompanionReceiver(opts: {
         const previous = upload && Object.values(job.toolSends ?? {}).find((send) => !send.failed && send.uploadFingerprint === upload.fingerprint);
         if (previous?.upload) return { ...previous.upload, deduplicated: true };
         if (previous) throw new Error("This file already has an uncertain upload; inspect it instead of repeating it.");
-        const rejected = intent && Object.entries(job.toolSends ?? {}).find(([, send]) => send.whatsappRejection);
+        // Rejections bind their request, not unrelated outreach. Destinations
+        // arrive normalized; a reused key or call ID must still match exactly.
+        const rejected = intent && Object.entries(job.toolSends ?? {}).find(([previousCall, send]) => send.whatsappRejection &&
+          (!send.whatsappDestination || previousCall === callId || send.whatsappKey === intent.idempotencyKey || JSON.stringify(send.whatsappDestination) === JSON.stringify(intent.destination)));
         if (rejected) {
-          const [previousCall, send] = rejected;
-          if (send.whatsappKey !== intent!.idempotencyKey || send.text !== intent!.text || JSON.stringify(send.whatsappMediaIds ?? []) !== JSON.stringify(intent!.mediaIds ?? []) || send.whatsappReplyToMessageId !== intent!.replyToMessageId || send.whatsappGroupName !== intent!.groupName || JSON.stringify(send.whatsappDestination) !== JSON.stringify(intent!.destination)) {
+          const [, send] = rejected;
+          if (send.whatsappKey !== intent!.idempotencyKey || send.text !== intent!.text || JSON.stringify(send.whatsappMediaIds) !== JSON.stringify(intent!.mediaIds) || send.whatsappReplyToMessageId !== intent!.replyToMessageId || send.whatsappGroupName !== intent!.groupName || JSON.stringify(send.whatsappDestination) !== JSON.stringify(intent!.destination)) {
             throw Object.assign(new Error("Retry the rejected WhatsApp request with its original key and unchanged payload."), { idempotencyKey: send.whatsappKey, whatsappRejection: send.whatsappRejection });
           }
-          delete job.toolSends![previousCall];
         }
-        const unresolved = Object.values(job.toolSends ?? {}).find((send) => send.kind !== "approval" && !send.failed && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false)));
-        if ((kind !== "approval" && unresolved) || job.toolSends?.[callId]) {
+        const unresolved = Object.values(job.toolSends ?? {}).find((send) => send !== rejected?.[1] && !rejectedWhatsAppOutreach(send) && send.kind !== "approval" && !send.failed && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false)));
+        const existing = Object.entries(job.toolSends ?? {}).find(([previousCall, send]) => previousCall !== rejected?.[0] &&
+          (previousCall === callId || (intent && send.whatsappKey === intent.idempotencyKey)))?.[1];
+        if ((kind !== "approval" && unresolved) || existing) {
           const error = new Error("An earlier tool send has an accepted or uncertain outcome; do not replay it.");
-          const priorKey = unresolved?.whatsappKey ?? job.toolSends?.[callId]?.whatsappKey;
+          const priorKey = unresolved?.whatsappKey ?? existing?.whatsappKey;
           if (intent && priorKey) Object.assign(error, { idempotencyKey: priorKey });
           throw error;
         }
+        // Only the exact retry replaces its own rejected attempt, atomically
+        // restoring the turn-wide send fence before crossing the transport.
+        if (rejected) delete job.toolSends![rejected[0]];
         job.toolSends ??= {}; job.toolSends[callId] = { ...(intent ? { whatsappKey: intent.idempotencyKey, whatsappUncertain: true, ...(intent.destination ? { whatsappDestination: intent.destination } : {}), text: intent.text, ...(intent.mediaIds ? { whatsappMediaIds: intent.mediaIds } : {}), ...(intent.replyToMessageId ? { whatsappReplyToMessageId: intent.replyToMessageId } : {}), ...(intent.groupName ? { whatsappGroupName: intent.groupName } : {}) } : {}), ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
       }, [id]);
     };
@@ -467,21 +480,41 @@ export function createCompanionReceiver(opts: {
     };
   }
   async function reconcileWhatsAppSends() {
-    for (const [id, job] of Object.entries((await read()).jobs)) {
+    const journal = await read(), jobs = { ...journal.jobs };
+    for (const observation of Object.values(journal.whatsappObservations ?? {})) {
+      if (!observation.body || observation.conversationId || Object.values(jobs).some(job => job.identityId === observation.identityId && job.outboundIds?.includes(observation.messageId))) continue;
+      const archived = await receipts.lookup("deliveries", JSON.stringify([observation.identityId, observation.messageId]));
+      if (archived) jobs[hash(`${archived.identityId}:${archived.event.id}`)] = archived;
+    }
+    for (const [id, job] of Object.entries(jobs)) {
       if (metadata(job.event).channel !== "whatsapp") continue;
-      const pending = Object.entries(job.toolSends ?? {}).filter(([, send]) => send.whatsappKey && !send.whatsappRejection && !send.messageId && !send.failed && (send.whatsappLookups ?? 0) < 5);
+      const pending = Object.entries(job.toolSends ?? {}).filter(([, send]) => send.whatsappKey && !send.whatsappRejection && !send.failed && (send.messageId ? needsWhatsAppRoute(send) : (send.whatsappLookups ?? 0) < 5));
       if (!pending.length) continue;
-      let client;
+      let identity;
       try {
-        if ((await opts.runtime.getIdentity()).id !== job.identityId) continue;
-        client = await opts.runtime.getClient();
+        identity = await opts.runtime.getIdentity();
+        if (identity.id !== job.identityId) continue;
       } catch { opts.warn?.("WhatsApp send lookup is unavailable; no send was repeated."); continue; }
       for (const [callId, send] of pending) {
-        await mutate((j) => { const current = j.jobs[id]?.toolSends?.[callId]; if (current) current.whatsappLookups = (current.whatsappLookups ?? 0) + 1; }, [id]);
         try {
-          const messageId = await client.messageSends.lookup({ senderKind: "whatsapp_identity", senderId: job.identityId, operation: "whatsapp.send", idempotencyKey: send.whatsappKey! });
-          if (typeof messageId !== "string" || !messageId) continue;
-          await toolSendCallbacks(id, async () => {}).afterToolSend(callId, messageId, send.text, true);
+          let messageId = send.messageId;
+          if (!messageId) {
+            const client = await opts.runtime.getClient();
+            await mutate((j) => { const current = j.jobs[id]?.toolSends?.[callId]; if (current) current.whatsappLookups = (current.whatsappLookups ?? 0) + 1; }, [id]);
+            messageId = await client.messageSends.lookup({ senderKind: "whatsapp_identity", senderId: job.identityId, operation: "whatsapp.send", idempotencyKey: send.whatsappKey! });
+            if (typeof messageId !== "string" || !messageId) continue;
+            await toolSendCallbacks(id, async () => {}).afterToolSend(callId, messageId, send.text, true);
+          }
+          if (needsWhatsAppRoute(send)) {
+            const message = await identity.getWhatsAppMessage(messageId);
+            if (message.id !== messageId || message.agentIdentityId !== job.identityId || message.direction !== "outbound" || typeof message.conversationId !== "string" || !message.conversationId || (await opts.runtime.getIdentity()).id !== job.identityId) continue;
+            await mutate(async (j) => {
+              const saved = j.jobs[id] ?? await receipts.event(id), current = saved?.toolSends?.[callId];
+              if (current?.messageId !== messageId) return;
+              current.whatsappConversationId = message.conversationId;
+              if (!j.jobs[id]) await receipts.store(id, saved!);
+            });
+          }
         } catch { /* Missing/unavailable lookup never proves that another send is safe. */ }
       }
       await mutate((j) => {
@@ -662,7 +695,7 @@ export function createCompanionReceiver(opts: {
       const current = (await read()).jobs[id]!;
       if (current.stoppedBy) { activity(job.event, "cancelled"); return; }
       if (stopped() || !enabled(current)) return;
-      const unresolved = Object.values(current.toolSends ?? {}).filter((send) => send.kind !== "approval" && send.kind !== "attachment" && !send.messageId && !send.failed);
+      const unresolved = Object.values(current.toolSends ?? {}).filter((send) => !rejectedWhatsAppOutreach(send) && send.kind !== "approval" && send.kind !== "attachment" && !send.messageId && !send.failed);
       if (unresolved.length) {
         await mutate((j) => { j.jobs[id]!.awaitingUploads = unresolved.every((send) => Boolean(send.uploadKey)); }, [id]);
         const rejected = unresolved.find((send) => send.whatsappRejection);
@@ -671,7 +704,7 @@ export function createCompanionReceiver(opts: {
       }
       // A recovered ID does not authorize a replacement. Legacy receipts without
       // certainty evidence also stay fenced; quote intents are never replaced.
-      if (m.channel === "whatsapp" && Object.values(current.toolSends ?? {}).some((send) => Boolean((!send.whatsappDestination && send.whatsappReplyToMessageId) || (send.whatsappKey && send.whatsappUncertain !== false)))) {
+      if (m.channel === "whatsapp" && Object.values(current.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send) && Boolean((!send.whatsappDestination && send.whatsappReplyToMessageId) || (send.whatsappKey && send.whatsappUncertain !== false)))) {
         await mutate((j) => { j.jobs[id]!.replies = []; j.jobs[id]!.state = "done"; });
         activity(job.event, "completed"); return;
       }
@@ -1168,7 +1201,8 @@ export function createCompanionReceiver(opts: {
         try { await outcomes((await opts.runtime.getIdentity()).id).recover(); }
         catch { opts.warn?.("Retained iMessage outcome metadata could not be recovered; no sends were replayed."); }
       }
-      if (!Object.keys((await read()).jobs).length) return;
+      const journal = await read();
+      if (!Object.keys(journal.jobs).length && !Object.values(journal.whatsappObservations ?? {}).some(observation => observation.body && !observation.conversationId)) return;
       await start();
       // A joined worker may already have taken its last snapshot before admission.
       await start();
