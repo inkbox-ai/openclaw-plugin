@@ -46,7 +46,7 @@ const captureRegistry = Symbol.for("inkbox.silent-send-captures.v1");
 const processState = globalThis as typeof globalThis & { [captureRegistry]?: Set<Capture> };
 const captures = processState[captureRegistry] ??= new Set<Capture>();
 const sendTools = new Set([
-  "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_forward_email",
+  "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_send_whatsapp", "inkbox_forward_email",
 ]);
 const transportTools = new Set(["tool_call", "tool_search_code"]);
 // OpenClaw 2026.9.6's inner source/incomplete-turn finalizers can overlook
@@ -142,8 +142,13 @@ function linkedNativeChild(id: string, parent: string, childName: string, wrappe
   // Mode children. exec is eligible only after its native BEFORE tags prove
   // JavaScript Code Mode, never from the shell tool's shared name alone.
   return ["tool_search_code", ...(wrapper.name === "tool_call" || wrapper.nativeCode === true ? ["tool_call"] : [])].some((transport) => {
-    const prefix = `${transport}:${parentIdSegment(parent)}:${childName}:`;
-    return id.startsWith(prefix) && /^[1-9]\d*$/.test(id.slice(prefix.length));
+    const prefix = `${transport}:${parentIdSegment(parent)}:`;
+    if (!id.startsWith(prefix)) return false;
+    let child = id.slice(prefix.length);
+    // Native Code Mode adds its replay-scope digest between parent and child.
+    // The independently observed same-run wrapper/child acceptance remains mandatory.
+    if (transport === "tool_call" && wrapper.nativeCode === true && /^[a-f0-9]{24}:/.test(child)) child = child.slice(25);
+    return child.startsWith(`${childName}:`) && /^[1-9]\d*$/.test(child.slice(childName.length + 1));
   });
 }
 

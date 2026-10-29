@@ -1,3 +1,4 @@
+import { assertWhatsAppSendKey, assertWhatsAppText, whatsappReady } from "./whatsapp.js";
 import { slackMrkdwn } from "./slack-style.js";
 import { createHash, randomUUID } from "node:crypto";
 import { ownSlackConnection, slackText } from "./slack.js";
@@ -12,7 +13,9 @@ export type InkboxTargetMode =
   | "sms"
   | "sms-conversation"
   | "imessage"
-  | "imessage-conversation";
+  | "imessage-conversation"
+  | "whatsapp"
+  | "whatsapp-conversation";
 
 export interface ParsedInkboxTarget {
   mode: InkboxTargetMode;
@@ -27,6 +30,7 @@ export interface InkboxChannelSendParams {
   to: string;
   text: string;
   subject?: string | null;
+  idempotencyKey?: string;
   threadId?: string | number | null;
   replyToId?: string | number | null;
 }
@@ -39,10 +43,10 @@ function stripKnownPrefix(raw: string): string {
   return raw
     .trim()
     .replace(/^(inkbox:)/i, "")
-    .replace(/^(sms:conversation:|text:conversation:|phone:conversation:|imessage:conversation:)/i, "")
+    .replace(/^(sms:conversation:|text:conversation:|phone:conversation:|imessage:conversation:|whatsapp:conversation:)/i, "")
     .replace(/^(conversation:|thread:)/i, "")
     .replace(/^(email:|mailto:)/i, "")
-    .replace(/^(sms:|text:|phone:|imessage:)/i, "");
+    .replace(/^(sms:|text:|phone:|imessage:|whatsapp:)/i, "");
 }
 
 function stripProviderPrefix(raw: string): string {
@@ -64,6 +68,7 @@ export function normalizeInkboxTarget(raw: string): string | undefined {
   // iMessage targets keep their channel prefix: a stripped conversation UUID
   // is indistinguishable from an SMS conversation id, so normalizing it away
   // would re-route the send to the wrong channel.
+  if (/^whatsapp:/i.test(stripProviderPrefix(trimmed))) { const value = stripKnownPrefix(trimmed); return value ? `whatsapp:${value}` : undefined; }
   if (/^imessage:/i.test(stripProviderPrefix(trimmed))) {
     const value = stripKnownPrefix(trimmed);
     return value ? `imessage:${value}` : undefined;
@@ -82,6 +87,7 @@ export function parseInkboxTarget(raw: string): ParsedInkboxTarget | null {
     return match ? { mode: "slack", value: `${match[1]}:${match[2]}`, connectionId: match[1], conversationId: match[2] } : null;
   }
   const normalized = stripKnownPrefix(trimmed);
+  if (/^whatsapp:/i.test(withoutProvider)) return /^\+[1-9]\d{6,14}$/.test(normalized) ? { mode: "whatsapp", value: normalized } : looksLikeConversationId(normalized) ? { mode: "whatsapp-conversation", value: normalized } : null;
   if (!normalized) {
     return null;
   }
@@ -259,6 +265,24 @@ export async function sendInkboxChannelText(
     const action = await client.slack.sendMessage(target.connectionId!, { conversationId: target.conversationId!, text, threadTs, idempotencyKey });
     if (action.status !== "sent") throw new Error(`Slack action ${action.id} is ${action.status}; inspect the action rather than repeating the send.`);
     return { messageId: action.id };
+  }
+  if (target.mode === "whatsapp" || target.mode === "whatsapp-conversation") {
+    assertWhatsAppText(params.text);
+    const replyToMessageId = params.replyToId == null ? undefined : String(params.replyToId);
+    if (replyToMessageId !== undefined && (!looksLikeConversationId(replyToMessageId) || target.mode !== "whatsapp-conversation"))
+      throw new Error("WhatsApp quoted replies require a conversation target and a message UUID.");
+    if (typeof params.idempotencyKey !== "string" || !params.idempotencyKey.trim())
+      throw new Error("WhatsApp requires a stable logical-send key. Use inkbox_send_whatsapp with idempotencyKey; generic host sends do not supply an attempt ID.");
+    assertWhatsAppSendKey(params.idempotencyKey);
+    const identity = await createInkboxRuntime(account.config).getIdentity();
+    let recipients = [target.value];
+    if (target.mode === "whatsapp-conversation") { const conversation = await identity.getWhatsAppConversation(target.value); if (conversation.agentIdentityId !== identity.id || !conversation.participants.length || (conversation.unresolvedParticipantCount ?? 0) > 0) throw new Error("An owned resolved WhatsApp conversation is required."); recipients = conversation.participants; }
+    for (const recipient of recipients) { const blocked = checkOutboundRecipient(recipient, account.config.allowedRecipients); if (blocked) throw new Error(blocked); }
+    await whatsappReady(identity);
+    const message = await identity.sendWhatsApp({ ...(target.mode === "whatsapp" ? { to: target.value } : { conversationId: target.value }), text: params.text,
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+      idempotencyKey: params.idempotencyKey });
+    return { messageId: message.id };
   }
   if (target.mode === "imessage" || target.mode === "imessage-conversation") {
     assertIMessageTextWithinLimit(params.text);

@@ -53,6 +53,7 @@ export function registerWhoami(api: any, runtime: InkboxRuntime): void {
               info.authType === "api_key" ? info.label : undefined,
             organizationId: info.organizationId,
             identity: {
+              whatsapp: typeof identity.getWhatsAppStatus === "function" ? await identity.getWhatsAppStatus().catch(() => null) : null,
               handle: identity.agentHandle,
               id: identity.id,
               displayName: identity.displayName,

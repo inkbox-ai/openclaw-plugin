@@ -113,7 +113,8 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
           rawControl = createControls({ ...context, catalogRef, config: {}, executeTool }).find((tool: any) => tool.name === "tool_call");
         }
         expect(rawControl).toBeDefined();
-        const control = wrapToolWithBeforeToolCallHook(rawControl, context);
+        // compactTools owns the exec transport hook; wrapping it again fabricates a duplicate outer event.
+        const control = transport === "exec" ? rawControl : wrapToolWithBeforeToolCallHook(rawControl, context);
         const args = transport === "exec"
           ? { title: "Send only", code: "await inkbox_send_email({ completeSilently: true });" }
           : { id: "inkbox_send_email", args: { completeSilently: true } };
@@ -125,7 +126,9 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         expect(events.map((event) => event.runId)).toEqual([context.runId, context.runId]);
         expect(events[0].toolCallId).toBe(outerId);
         if (transport === "exec") expect(events[0]).toMatchObject({ toolKind: "code_mode_exec", toolInputKind: "javascript" });
-        expect(events[1].toolCallId).toBe(`${nativeToolCallPrefix}:outer-send_native-item:inkbox_send_email:1`);
+        if (transport === "exec" && hostVersion.localeCompare("2026.10.7", undefined, { numeric: true }) >= 0) {
+          expect(events[1].toolCallId).toMatch(/^tool_call:outer-send_native-item:[a-f0-9]{24}:inkbox_send_email:1$/);
+        } else expect(events[1].toolCallId).toBe(`${nativeToolCallPrefix}:outer-send_native-item:inkbox_send_email:1`);
         expect(result.terminate).toBe(succeeds ? true : undefined);
         if (transport === "tool_call") {
           expect(result.details.tool.name).toBe("inkbox_send_email");

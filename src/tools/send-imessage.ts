@@ -102,7 +102,7 @@ export function registerSendIMessage(
       return runTool(async () => {
         const validateSource = (identityId = source?.identityId) => {
           if (!source) return;
-          if (source.replyToMessageId && !threadedRepliesEnabled()) throw new Error("Native iMessage replies are disabled; this source-owned send cannot be downgraded or continued.");
+          if (!source.whatsapp && !source.slackRoute && source.replyToMessageId && !threadedRepliesEnabled()) throw new Error("Native iMessage replies are disabled; this source-owned send cannot be downgraded or continued.");
           assertNativeSource(source, identityId!);
         };
         validateSource();
@@ -118,7 +118,7 @@ export function registerSendIMessage(
         const conversationId =
           typeof params.conversationId === "string" ? params.conversationId.trim() : "";
         const to = typeof params.to === "string" ? params.to.trim() : "";
-        const bound = Boolean(source?.replyToMessageId && !to && (!conversationId || conversationId === source.conversationId));
+        const bound = Boolean(source && !source.whatsapp && !source.slackRoute && source.replyToMessageId && !to && (!conversationId || conversationId === source.conversationId));
         if ((conversationId && to) || (!bound && !conversationId && !to)) {
           return toolError("Specify exactly one of `to` or `conversationId`.");
         }

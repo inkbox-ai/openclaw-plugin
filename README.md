@@ -480,7 +480,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The plugin pins `@inkbox/sdk` 0.7.6.
+- The plugin requires `@inkbox/sdk` 0.7.24 or newer; candidate checks use the reviewed source archive until publication.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
@@ -625,3 +625,13 @@ See [PLAN.md](./PLAN.md) for the longer architecture history and roadmap.
 ## License
 
 MIT - see [LICENSE](./LICENSE).
+
+## Dedicated WhatsApp
+
+WhatsApp is available by approval for an agent with a dedicated personal iMessage number. The channel uses that same number, not a shared line. Request access from the Inkbox Console. There is no local enable flag, self-service provisioning tool, or automatic SMS fallback. Existing installations subscribe to notifications independently of a cached disabled identity snapshot, so later approval does not require changing credentials.
+
+The plugin handles authenticated incoming direct/group text and media, retains source-owned work and answers across restarts, and routes final replies to the originating WhatsApp conversation. Do not duplicate an ordinary final answer with a send tool. Delivery notifications update tracking without waking the model or automatically resending.
+
+Fifteen native tools provide sending, conversation/message reads, owned-media upload/access, local mark-read, fresh status and read-only send lookup. Upload one local file within current organization limits (20 MiB transport ceiling) and retain its media ID before sending. Text is at most 4,000 Unicode code points. Preserve the original idempotency key and media ID after uncertainty; confirmed sending with unknown delivery is not a failed send. Incoming files have a temporary local path when bytes are available, or an explicit unavailable notice. The private local cache is bounded to 256 MiB/256 files, expires old files after 24 hours on cache activity, and refuses new materialization rather than evicting fresh files in use. Stable owned media IDs remain the recovery handle. Create groups with 2–8 unique E.164 recipients, or use an existing conversation ID (including larger groups). Group sessions and permissions stay conversation-scoped. Explicit quoted replies use conversationId plus replyToMessageId; thread tools page the corresponding history. Named/custom reaction tools require a stable idempotency key and preserve exact receipt status: queued or uncertain is not applied. Peer reactions are contextual notifications in the same conversation, not fresh commands. New ordinary replies quote their triggering message in the same conversation. Active-source tools inherit that destination and quote by default; an explicit different destination remains separate outreach. Reaction context stays plain. Saved plain intents and caller-supplied recovery keys never acquire a new quote, and an uncertain or rejected quoted send never produces a plain replacement. Typing, remote read receipts and WhatsApp calls are not supported.
+
+WhatsApp requires `@inkbox/sdk` 0.7.24 or later and a compatible API. Use `inkbox_send_whatsapp` for explicit sends: retries retain the host tool-call identity, or an explicit stable `idempotencyKey`. Reuse that key and unchanged payload after uncertainty; a distinct intentional send needs a distinct logical key. The generic host message adapter does not supply a stable attempt ID, so it cannot send WhatsApp messages. Ordinary inbound final replies remain automatic.

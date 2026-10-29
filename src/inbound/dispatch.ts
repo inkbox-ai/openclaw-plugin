@@ -5,6 +5,7 @@ import type {
   PhoneIncomingCallWebhookPayload,
   CallEndedWebhookPayload,
 } from "@inkbox/sdk";
+import { WHATSAPP_EVENTS } from "../whatsapp.js";
 import { inboundContactAllowed } from "../allowlist.js";
 
 // Sync response Inkbox expects for an inbound call webhook.
@@ -20,7 +21,7 @@ export interface InboundCallDecision {
 // keep the previous first-contact allowlist behavior.
 function resolveRemoteContactIds(
   parsed: any,
-  kind: "slack" | "mail" | "text" | "imessage" | "call" | "call-ended",
+  kind: "slack" | "mail" | "text" | "imessage" | "whatsapp" | "call" | "call-ended",
 ): string[] {
   if (kind === "mail") {
     const contacts = parsed?.data?.contacts;
@@ -28,7 +29,7 @@ function resolveRemoteContactIds(
     const fromContact = contacts.find((c: any) => c?.bucket === "from");
     return typeof fromContact?.id === "string" ? [fromContact.id] : [];
   }
-  if (kind === "text" || kind === "imessage") {
+  if (kind === "text" || kind === "imessage" || kind === "whatsapp") {
     const contacts = parsed?.data?.contacts;
     if (Array.isArray(contacts)) {
       const first = contacts.find((c: any) => typeof c?.id === "string");
@@ -58,6 +59,7 @@ function isExplicitOutboundCallEnded(parsed: any): boolean {
 }
 
 export interface InboundHandlers {
+  onWhatsApp?(event: Record<string, any>): Promise<void>;
   onSlack?(event: Record<string, any>): Promise<void>;
   onCompanion?(event: Record<string, any>): Promise<void>;
   // Mail events fire-and-forget. Six event_types: message.received/sent/
@@ -95,7 +97,7 @@ export interface InboundHandlers {
 }
 
 export interface DispatchResult {
-  kind: "slack" | "mail" | "text" | "imessage" | "a2a" | "call-ended" | "call" | "external";
+  kind: "slack" | "mail" | "text" | "imessage" | "whatsapp" | "a2a" | "call-ended" | "call" | "external";
   // Only populated for kind="call". The handler builds the response body
   // from this.
   callDecision?: InboundCallDecision;
@@ -140,6 +142,12 @@ export async function dispatchInbound(
     typeof (parsed as { event_type: unknown }).event_type === "string"
   ) {
     const eventType = (parsed as { event_type: string }).event_type;
+    if (eventType.startsWith("whatsapp.")) {
+      if (!(WHATSAPP_EVENTS as readonly string[]).includes(eventType)) return { kind: "whatsapp" };
+      if (["whatsapp.received", "whatsapp.reaction_received"].includes(eventType) && !anyInboundContactAllowed(resolveRemoteContactIds(parsed, "whatsapp"), allowedContactIds)) return { kind: "whatsapp" };
+      await handlers.onWhatsApp?.(parsed as Record<string, any>);
+      return { kind: "whatsapp" };
+    }
     if (eventType.startsWith("slack.")) {
       await handlers.onSlack?.(parsed as Record<string, any>);
       return { kind: "slack" };

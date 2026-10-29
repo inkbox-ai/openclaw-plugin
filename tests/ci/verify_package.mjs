@@ -6,7 +6,7 @@ const included = new Set(packed.files.map(({ path }) => path));
 for (const path of [manifest.main, ...manifest.openclaw.extensions]) {
   if (!included.has(path.replace(/^\.\//, ""))) throw new Error(`Published package is missing native entry ${path}`);
 }
-for (const path of ["openclaw.plugin.json", "dist/src/slack.js", "dist/src/native-source.js", "dist/src/native-owner.js"]) {
+for (const path of ["openclaw.plugin.json", "dist/src/slack.js", "dist/src/native-source.js", "dist/src/native-owner.js", "dist/src/whatsapp.js", "dist/src/tools/whatsapp.js", "skills/inkbox-whatsapp-responder/SKILL.md"]) {
   if (!included.has(path)) throw new Error(`Published package is missing ${path}`);
 }
 const entry = (await import(new URL(`../../${manifest.openclaw.extensions[0]}`, import.meta.url))).default;

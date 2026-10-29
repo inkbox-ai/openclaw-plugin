@@ -430,3 +430,15 @@ describe.each(["tool_search_code", "tool_call"])("native Code Mode final-send tr
     expect(capture.transform(nativeIncompleteReply)).toBe(nativeIncompleteReply);
   });
 });
+
+
+describe("WhatsApp explicit final-send completion", () => {
+  it("recognizes accepted WhatsApp without suppressing an unrelated or failed outcome", () => {
+    const { capture, ctx } = begin();
+    const event={toolName:"inkbox_send_whatsapp",toolCallId:"wa-final",params:{completeSilently:true}};
+    recordSilentSendBeforeToolCall(event,ctx);
+    recordSilentSendAfterToolCall({...event,result:{terminate:true,details:{inkboxSendCompletion:{accepted:true,completeSilently:true}}}},ctx);
+    expect(capture.completedSilently()).toBe(true);
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
+  });
+});

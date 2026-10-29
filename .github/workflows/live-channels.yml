@@ -61,7 +61,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24.16.0"
+          node-version: "24.22.1"
           cache: npm
 
       - uses: actions/setup-python@v6
@@ -75,8 +75,9 @@ jobs:
 
       - name: Build the plugin
         run: |
+          source "$GITHUB_WORKSPACE/tests/ci/candidate_sdk.sh"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@latest
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false "$INKBOX_SDK_CANDIDATE_TGZ" openclaw@latest
           npm run build
 
       - name: Install the matching OpenClaw host

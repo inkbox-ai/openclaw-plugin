@@ -1,14 +1,21 @@
+import type { WhatsAppSendRejection, WhatsAppDestinationEvidence } from "./whatsapp.js";
 import type { SlackRoute } from "./slack.js";
 import type { SlackUploadReceipt, SlackUploadIntent } from "./slack-files.js";
 
+export type WhatsAppSendIntent = { idempotencyKey: string; text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string; destinationEvidence?: WhatsAppDestinationEvidence; destination?: { conversationId?: string; to?: string[] } };
+
 /** Trusted, short-lived source ownership captured by native tool factories. */
 export type NativeSource = {
+  whatsapp?: boolean; isGroup?: boolean; sourceMessageId?: string;
   identityId: string; conversationId: string; replyToMessageId?: string; slackRoute?: SlackRoute;
   author: string; companion?: boolean; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
   validate(): Promise<void>;
   validateUpload?(automatic: boolean): Promise<void>;
-  beforeSend(callId: string): Promise<void>;
-  afterSend(callId: string, messageId: string, text?: string): Promise<void>;
+  whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>;
+  whatsappReplyDestination?(idempotencyKey: string): Promise<WhatsAppSendIntent["destination"]>;
+  beforeSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>;
+  afterSend(callId: string, messageId: string, text?: string, uncertain?: boolean, conversationId?: string): Promise<void>;
+  rejectSend?(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>;
   progress?(update: { tool: string; id: string; status: "running" | "completed" | "error" }): void;
   afterUpload?(callId: string, receipt: SlackUploadReceipt): Promise<void>;
   rejectUpload?(callId: string): Promise<void>;
