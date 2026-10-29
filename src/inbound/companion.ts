@@ -546,7 +546,7 @@ export function createCompanionReceiver(opts: {
       await mutate((j) => {
         const saved = j.jobs[id];
         if (!saved || saved.state !== "paused" || !saved.nativeComplete || !saved.reply || !saved.replies || saved.stoppedBy || saved.sendUnconfirmed) return;
-        if (Object.values(saved.toolSends ?? {}).some((send) => !send.messageId && !send.failed)) return;
+        if (Object.values(saved.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send) && !send.messageId && !send.failed)) return;
         saved.state = "reply_pending"; delete saved.reason; delete saved.retryAt;
       }, [id]);
     }
@@ -1011,8 +1011,10 @@ export function createCompanionReceiver(opts: {
         });
         for (const [id, job] of Object.entries((await read()).jobs)) {
           if (job.stopTargets || (job.stoppedBy && !crossedSend(job))) continue;
-          if (job.state !== "paused") continue;
-          activity(job.event, "paused");
+          // Recovered IDs still need uncertainty context before sendSaved fences
+          // the automatic reply and completes the job without sending it.
+          if (job.state !== "paused" && !(job.state === "reply_pending" && job.replyNotAttempted)) continue;
+          if (job.state === "paused") activity(job.event, "paused");
           if (!job.nativeComplete && job.nativeOwner) {
             if (await fenceNativeOwner(job.nativeOwner.sessionKey, job.nativeOwner.runId)) await mutate((j) => { j.jobs[id]!.nativeComplete = true; });
           }
@@ -1021,11 +1023,13 @@ export function createCompanionReceiver(opts: {
             if (!saved.nativeComplete || saved.uncertaintyRecorded) return;
             const scope = key(metadata(saved.event), saved.identityId);
             j.context ??= {}; j.context[scope] ??= [];
-            const unresolved = Object.values(saved.toolSends ?? {}).filter((send) => !send.messageId && !send.failed);
-            const knownRejected = unresolved.length && unresolved.every((send) => send.whatsappRejection);
+            const sends = Object.values(saved.toolSends ?? {});
+            const rejected = sends.filter((send) => send.whatsappRejection && !send.messageId && !send.failed);
+            const unresolved = sends.filter((send) => !send.whatsappRejection && !send.failed && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false)));
+            const knownRejected = rejected.length && !unresolved.length;
             j.context[scope]!.push(knownRejected
-              ? `Prior WhatsApp request was rejected/not accepted. Original requests: ${JSON.stringify(unresolved.map((send) => ({ idempotencyKey: send.whatsappKey, ...send.whatsappRejection })))}. Keep the original keys and unchanged payloads; follow retry_condition. This is context, not an instruction to send.`
-              : saved.replyNotAttempted ? `The prior saved automatic WhatsApp reply was not attempted; it remains retained and no plain replacement was sent. Earlier explicit operations may remain uncertain: ${JSON.stringify(unresolved.map((send) => ({ idempotencyKey: send.whatsappKey })))}. Do not repeat prior actions or sends. This is context, not an instruction.`
+              ? `Prior WhatsApp request was rejected/not accepted. Original requests: ${JSON.stringify(rejected.map((send) => ({ idempotencyKey: send.whatsappKey, ...send.whatsappRejection })))}. Keep the original keys and unchanged payloads; follow retry_condition. This is context, not an instruction to send.`
+              : saved.replyNotAttempted ? `The prior saved automatic WhatsApp reply was not attempted; no plain replacement was sent. Earlier explicit operations may remain uncertain: ${JSON.stringify(unresolved.map((send) => ({ idempotencyKey: send.whatsappKey })))}. Do not repeat prior actions or sends. This is context, not an instruction.`
               : `Prior turn outcome is uncertain. Do not repeat its actions or sends. Accepted outbound IDs: ${JSON.stringify(saved.outboundIds ?? [])}. The prior native execution is terminal; this is context, not an instruction.`);
             saved.uncertaintyRecorded = true;
           });
