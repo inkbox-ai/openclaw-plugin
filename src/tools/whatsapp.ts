@@ -30,7 +30,7 @@ export function registerWhatsAppTools(
       return {
         name: "inkbox_send_whatsapp",
         description:
-          "Send WhatsApp using one recipient, 2–8 recipients for a group, or an existing direct/group conversation with optional quoted reply and owned media. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
+          "Send WhatsApp using one recipient, 2–8 recipients for a group, or an existing direct/group conversation with optional quoted reply and owned media. Active-source replies inherit their quote target; explicit destinations remain authoritative. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
         parameters: Type.Object(
           {
             to: Type.Optional(Type.Union([Type.String(), Type.Array(Type.String(), { minItems: 1, maxItems: 8 })])),
@@ -74,7 +74,12 @@ export function registerWhatsAppTools(
             );
             const targetConversationId = bound ? source!.conversationId : conversationId;
             let recipients = explicitRecipients ?? [];
-            const replyToMessageId = params.replyToMessageId;
+            // A caller-supplied recovery key never acquires a new quote target.
+            const replyToMessageId = params.replyToMessageId ?? (bound
+              ? params.idempotencyKey
+                ? await source!.whatsappReplyTarget?.(params.idempotencyKey)
+                : source!.replyToMessageId
+              : undefined);
             if (targetConversationId) {
               const conversation =
                 await identity.getWhatsAppConversation(targetConversationId);

@@ -11,6 +11,7 @@ export type NativeSource = {
   author: string; companion?: boolean; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
   validate(): Promise<void>;
   validateUpload?(automatic: boolean): Promise<void>;
+  whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>;
   beforeSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>;
   afterSend(callId: string, messageId: string, text?: string): Promise<void>;
   rejectSend?(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>;

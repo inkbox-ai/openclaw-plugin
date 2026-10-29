@@ -301,3 +301,26 @@ it.each(["", " ", "\n", null])("does not silently omit an explicit invalid quote
   const result = await f.tools.get("inkbox_send_whatsapp").execute("invalid-quote", { conversationId: "conversation-a", replyToMessageId, text: "Never plain" });
   expect(result.isError).toBe(true); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
 });
+
+
+it.each([false, true])("inherits a source quote only for its own destination (group=%s)", async (isGroup) => {
+  const beforeSend = vi.fn(async () => {});
+  const release = bindNativeSource("autoquote-source", { whatsapp: true, isGroup,
+    sourceMessageId: "source-message", replyToMessageId: "source-message",
+    identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123",
+    closed: false, validate: async () => {}, beforeSend, afterSend: async () => {} });
+  try {
+    const f = fixture(undefined, "autoquote-source"), send = f.tools.get("inkbox_send_whatsapp");
+    await send.execute("source", { text: "Answer" });
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "conversation-a",
+      replyToMessageId: "source-message" });
+    await send.execute("other", { to: "+15555550124", text: "Outreach" });
+    expect(f.identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({ to: "+15555550124" });
+    expect(f.identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
+    await send.execute("room", { conversationId: "other-room", text: "Outreach" });
+    expect(f.identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({ conversationId: "other-room" });
+    expect(f.identity.sendWhatsApp.mock.calls[2][0]).not.toHaveProperty("replyToMessageId");
+    await send.execute("old-key", { text: "Old send", idempotencyKey: "legacy-plain-key" });
+    expect(f.identity.sendWhatsApp.mock.calls[3][0]).not.toHaveProperty("replyToMessageId");
+  } finally { release(); }
+});

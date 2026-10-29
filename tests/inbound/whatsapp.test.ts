@@ -1,7 +1,7 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { InkboxAPIError } from "@inkbox/sdk";
 import { handleInkboxWebhook } from "../../src/inbound/handler.js";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
@@ -162,6 +162,7 @@ describe("WhatsApp native receive/reply", () => {
       expect.objectContaining({
         conversationId: "conversation-a",
         text: "WhatsApp answer",
+        replyToMessageId: "message-a",
         idempotencyKey: expect.stringContaining("openclaw:whatsapp:"),
       }),
     );
@@ -477,7 +478,7 @@ describe("WhatsApp native receive/reply", () => {
 
 
 describe("WhatsApp v2 native group admission", () => {
-  it("uses conversation-scoped group routing, retains quote metadata, and keeps automatic replies plain", async () => {
+  it("uses conversation-scoped group routing, retains quote metadata, and anchors automatic replies to the triggering message", async () => {
     const f = fixture(), b = f.bridge(), e = event();
     e.data.message.is_group = true;
     e.data.message.participants = ["+15555550123", "+15555550124"];
@@ -490,7 +491,7 @@ describe("WhatsApp v2 native group admission", () => {
     expect(JSON.stringify(built)).toContain("parent-a");
     expect(JSON.stringify(built)).toContain("thread-a");
     expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "conversation-a" });
-    expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toHaveProperty("replyToMessageId", "message-a");
   });
   it("preserves group mention admission rather than waking for every peer message", async () => {
     const f = fixture(), b = createInkboxSessionBridge({ cfg: {}, account: { accountId: "default", identity: "example", config: { identity: "example", groupReplyMode: "mention" } }, runtime: f.runtime, channelRuntime: f.core } as any);
@@ -509,6 +510,7 @@ describe("WhatsApp v2 native group admission", () => {
     expect(f.dispatchReply).toHaveBeenCalledOnce();
     expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0])).toContain("context, not a new instruction");
     expect(f.core.inbound.buildContext.mock.calls[0][0].message.inboundEventKind).toBe("room_event");
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
     const own = structuredClone(e); own.id = "own-event"; own.data.reaction.id = "own-reaction"; own.data.reaction.direction = "outbound";
     await dispatchInbound(own, b.handlers); await settle(b); expect(f.dispatchReply).toHaveBeenCalledOnce();
     const hidden = structuredClone(e); hidden.id = "hidden-event"; hidden.data.message.is_blocked = true; hidden.data.reaction.id = "hidden-reaction";
@@ -571,4 +573,70 @@ it("admits the canonical reaction webhook only with a resolved permitted actor a
   expect(f.dispatchReply).toHaveBeenCalledOnce();
   const context = JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0]);
   expect(context).toContain("context, not a new instruction"); expect(context).not.toContain(shared.message.content);
+});
+
+
+it("replays a legacy saved plain reply with its exact original hash after restart", async () => {
+  const f = fixture();
+  const beforeSend = f.identity.getWhatsAppStatus;
+  beforeSend.mockImplementation(async () => { throw new Error("temporarily unavailable"); });
+  const first = f.bridge();
+  await dispatchInbound(event(), first.handlers); await settle(first);
+  const filename = (await readdir(state.dir)).find((name) => name.startsWith("companion-") && name.endsWith(".json"))!;
+  const path = join(state.dir, filename), journal = JSON.parse(await readFile(path, "utf8"));
+  const id = Object.keys(journal.jobs)[0]!, job = journal.jobs[id];
+  job.state = "reply_pending"; job.nativeComplete = true; job.sendUnconfirmed = false;
+  job.replies = ["Legacy answer"]; job.reply = { channel: "whatsapp", identityId: f.identity.id, conversationId: "conversation-a" };
+  delete job.retryAt;
+  await writeFile(path, JSON.stringify(journal));
+  beforeSend.mockResolvedValue({ enabled: true, status: "ready" });
+  const restarted = f.bridge(); await settle(restarted);
+  const key = `openclaw:whatsapp:${createHash("sha256").update(JSON.stringify([
+    f.identity.id, id, "conversation-a", "Legacy answer",
+  ])).digest("hex")}`;
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({ conversationId: "conversation-a",
+    text: "Legacy answer", idempotencyKey: key });
+  expect(f.dispatchReply).not.toHaveBeenCalled();
+});
+
+
+it.each(["accepted", "uncertain", "rejected"])("inherits a tool quote and suppresses changed final output across restart (%s)", async (outcome) => {
+  const f = fixture();
+  const lookup = vi.fn(async () => "accepted-original");
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup } });
+  if (outcome === "uncertain") f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("lost response"));
+  if (outcome === "rejected") f.identity.sendWhatsApp.mockRejectedValueOnce(new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }));
+  let caught: unknown;
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    try {
+      const tools = new Map<string, any>();
+      registerWhatsAppTools({ registerTool(def: any) {
+        const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def;
+        tools.set(tool.name, tool);
+      } }, f.runtime);
+      const send = tools.get("inkbox_send_whatsapp");
+      const result = await send.execute("first", { text: "Tool answer" });
+      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({
+        conversationId: "conversation-a", replyToMessageId: "message-a", text: "Tool answer" });
+      if (outcome !== "accepted") {
+        const originalKey = result.details.idempotencyKey;
+        const replacement = await send.execute("replacement", { text: "Replacement", idempotencyKey: "new-key" });
+        expect(replacement.isError).toBe(true);
+        expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+        const retry = await send.execute("retry", { text: "Tool answer", idempotencyKey: originalKey });
+        if (outcome === "rejected") {
+          expect(retry.isError).not.toBe(true);
+          expect(f.identity.sendWhatsApp.mock.calls[0][0]).toEqual(f.identity.sendWhatsApp.mock.calls[1][0]);
+        } else expect(retry.isError).toBe(true);
+      }
+      await input.delivery.deliver({ text: "Changed final answer" }, { kind: "final" });
+    } catch (error) { caught = error; throw error; }
+    return { dispatched: true };
+  });
+  const first = f.bridge(); await dispatchInbound(event(), first.handlers); await settle(first);
+  const restarted = f.bridge(); await settle(restarted);
+  expect(caught).toBeUndefined();
+  expect(f.dispatchReply).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(outcome === "rejected" ? 2 : 1);
 });

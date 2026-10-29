@@ -32,7 +32,7 @@ type Metadata = Omit<CompanionMetadata, "channel"> & { channel: Channel };
 type Job = { replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappMediaIds?: string[]; whatsappReplyToMessageId?: string; whatsappGroupName?: string; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 type Journal = { jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
+export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -433,6 +433,10 @@ export function createCompanionReceiver(opts: {
         if (!active) throw new Error("The native source was stopped before its run could begin.");
       },
       nativeTerminal: async () => { await mutate((j) => { j.jobs[id]!.nativeComplete = true; }, [id]); },
+      whatsappReplyTarget: async (idempotencyKey: string) => {
+        const job = (await read()).jobs[id];
+        return Object.values(job?.toolSends ?? {}).find((send) => send.whatsappKey === idempotencyKey)?.whatsappReplyToMessageId;
+      },
       beforeToolSend: async (callId: string, intent?: WhatsAppSendIntent) => { await beforeSend(callId, undefined, undefined, intent); },
       afterToolSend: afterSend,
       rejectToolSend: async (callId: string, idempotencyKey: string, policy: WhatsAppSendRejection) => { await mutate((j) => {
@@ -751,6 +755,12 @@ export function createCompanionReceiver(opts: {
       reply = { channel: m.channel, conversationId: m.conversation_id, identityId: job.identityId,
         ...(m.channel === "mail" ? { replyToMessageId: message.id } : {}) };
       body = "";
+    }
+    if (m.channel === "whatsapp") {
+      // A resumed route is immutable, including the absence of a quote target.
+      if (job.reply) reply = job.reply;
+      else if (!job.event._openclawWhatsApp?.reaction)
+        reply = { ...reply, replyToMessageId: message.id };
     }
     if (m.channel === "imessage" && opts.config.imessageThreadedReplies) reply = { ...reply, replyToMessageId: job.event._openclawNativeIMessage?.replyToMessageId ?? message.id };
     if (m.channel === "slack") {
