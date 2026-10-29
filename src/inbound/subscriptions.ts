@@ -34,7 +34,7 @@ export const IMESSAGE_EVENT_TYPES: readonly string[] = [
   "imessage.delivery_failed",
   "imessage.reaction_received",
 ];
-export const WHATSAPP_EVENT_TYPES: readonly string[] = ["whatsapp.received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"];
+export const WHATSAPP_EVENT_TYPES: readonly string[] = ["whatsapp.received", "whatsapp.reaction_received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"];
 export const A2A_EVENT_TYPES: readonly string[] = [
   "a2a.task.created",
   "a2a.task.message",

@@ -12,10 +12,13 @@ const manifest = JSON.parse(
 const { Inkbox } = await import(entry);
 const client = new Inkbox({ apiKey: "synthetic-local-contract" });
 if (
-  manifest.version !== "0.7.21" ||
+  manifest.version !== "0.7.24" ||
   typeof client.whatsapp?.send !== "function" ||
   typeof client.whatsapp?.uploadMedia !== "function" ||
   typeof client.whatsapp?.getLimits !== "function" ||
+  typeof client.whatsapp?.getThread !== "function" ||
+  typeof client.whatsapp?.sendReaction !== "function" ||
+  typeof client.whatsapp?.removeReaction !== "function" ||
   typeof client.messageSends?.lookup !== "function"
 )
   throw new Error(

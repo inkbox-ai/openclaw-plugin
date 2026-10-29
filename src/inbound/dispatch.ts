@@ -144,7 +144,7 @@ export async function dispatchInbound(
     const eventType = (parsed as { event_type: string }).event_type;
     if (eventType.startsWith("whatsapp.")) {
       if (!(WHATSAPP_EVENTS as readonly string[]).includes(eventType)) return { kind: "whatsapp" };
-      if (eventType === "whatsapp.received" && !anyInboundContactAllowed(resolveRemoteContactIds(parsed, "whatsapp"), allowedContactIds)) return { kind: "whatsapp" };
+      if (["whatsapp.received", "whatsapp.reaction_received"].includes(eventType) && !anyInboundContactAllowed(resolveRemoteContactIds(parsed, "whatsapp"), allowedContactIds)) return { kind: "whatsapp" };
       await handlers.onWhatsApp?.(parsed as Record<string, any>);
       return { kind: "whatsapp" };
     }

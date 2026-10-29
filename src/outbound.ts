@@ -268,9 +268,9 @@ export async function sendInkboxChannelText(
   if (target.mode === "whatsapp" || target.mode === "whatsapp-conversation") {
     assertWhatsAppText(params.text);
     const identity = await createInkboxRuntime(account.config).getIdentity();
-    let recipient = target.value;
-    if (target.mode === "whatsapp-conversation") { const conversation = await identity.getWhatsAppConversation(target.value); if (conversation.agentIdentityId !== identity.id || conversation.isGroup || conversation.participants.length !== 1) throw new Error("A direct WhatsApp conversation is required."); recipient = conversation.remoteNumber ?? conversation.participants[0]!; }
-    const blocked = checkOutboundRecipient(recipient, account.config.allowedRecipients); if (blocked) throw new Error(blocked);
+    let recipients = [target.value];
+    if (target.mode === "whatsapp-conversation") { const conversation = await identity.getWhatsAppConversation(target.value); if (conversation.agentIdentityId !== identity.id || !conversation.participants.length || (conversation.unresolvedParticipantCount ?? 0) > 0) throw new Error("An owned resolved WhatsApp conversation is required."); recipients = conversation.participants; }
+    for (const recipient of recipients) { const blocked = checkOutboundRecipient(recipient, account.config.allowedRecipients); if (blocked) throw new Error(blocked); }
     await whatsappReady(identity);
     const message = await identity.sendWhatsApp({ ...(target.mode === "whatsapp" ? { to: target.value } : { conversationId: target.value }), text: params.text,
       idempotencyKey: whatsappSendKey([identity.id, target.value, params.replyToId ?? randomUUID(), params.text]) });

@@ -236,7 +236,7 @@ describe("WhatsApp native receive/reply", () => {
     expect(f.dispatchReply).not.toHaveBeenCalled();
     expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
   });
-  it("refuses a foreign identity and group-shaped payload before dispatch", async () => {
+  it("refuses a foreign identity and an unresolved group author before dispatch", async () => {
     const f = fixture(),
       b = f.bridge();
     await expect(
@@ -244,9 +244,8 @@ describe("WhatsApp native receive/reply", () => {
     ).rejects.toThrow(/identity mismatch/);
     const e = event();
     e.data.message.is_group = true;
-    await expect(dispatchInbound(e, b.handlers)).rejects.toThrow(
-      /direct WhatsApp source/,
-    );
+    e.data.message.sender_number = null;
+    await expect(dispatchInbound(e, b.handlers)).resolves.toMatchObject({ kind: "whatsapp" });
     expect(f.dispatchReply).not.toHaveBeenCalled();
   });
   it("retains an uncertain accepted answer and never regenerates or resends it on restart", async () => {
@@ -473,4 +472,44 @@ describe("WhatsApp native receive/reply", () => {
     await exerciseRejectedSend(failure, false);
   });
 
+});
+
+
+describe("WhatsApp v2 native group admission", () => {
+  it("uses conversation-scoped group routing, retains quote metadata, and keeps automatic replies plain", async () => {
+    const f = fixture(), b = f.bridge(), e = event();
+    e.data.message.is_group = true;
+    e.data.message.participants = ["+15555550123", "+15555550124"];
+    e.data.message.thread_id = "thread-a";
+    e.data.message.reply_to_message_id = "parent-a";
+    await dispatchInbound(e, b.handlers); await settle(b);
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+    const built = f.core.inbound.buildContext.mock.calls[0][0];
+    expect(JSON.stringify(built)).toContain("group");
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "conversation-a" });
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+  });
+  it("preserves group mention admission rather than waking for every peer message", async () => {
+    const f = fixture(), b = createInkboxSessionBridge({ cfg: {}, account: { accountId: "default", identity: "example", config: { identity: "example", groupReplyMode: "mention" } }, runtime: f.runtime, channelRuntime: f.core } as any);
+    const e = event(); e.data.message.is_group = true; e.data.message.participants = ["+15555550123", "+15555550124"]; e.data.message.sender_access = "direct";
+    await dispatchInbound(e, b.handlers); await settle(b);
+    expect(f.dispatchReply).not.toHaveBeenCalled();
+    const mentioned = event(undefined, "mentioned"); mentioned.data.message = { ...e.data.message, id: "mentioned-message", content: "@example please answer" };
+    await dispatchInbound(mentioned, b.handlers); await settle(b);
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+  });
+  it("admits peer reaction transitions into the original group once, without treating the target as a new command", async () => {
+    const f = fixture(), b = f.bridge(), e = event();
+    e.event_type = "whatsapp.reaction_received"; e.data.message.is_group = true; e.data.message.direction = "outbound"; e.data.message.participants = ["+15555550123", "+15555550124"]; e.data.message.sender_access = "direct";
+    e.data.reaction = { id: "reaction-a", target_message_id: e.data.message.id, conversation_id: "conversation-a", agent_identity_id: f.identity.id, direction: "inbound", remote_number: "+15555550123", emoji: "👀", status: "applied", revision: 1 };
+    await dispatchInbound(e, b.handlers); await settle(b); await dispatchInbound(e, b.handlers); await settle(b);
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0])).toContain("context, not a new instruction");
+    const own = structuredClone(e); own.id = "own-event"; own.data.reaction.id = "own-reaction"; own.data.reaction.direction = "outbound";
+    await dispatchInbound(own, b.handlers); await settle(b); expect(f.dispatchReply).toHaveBeenCalledOnce();
+    const hidden = structuredClone(e); hidden.id = "hidden-event"; hidden.data.message.is_blocked = true; hidden.data.reaction.id = "hidden-reaction";
+    await dispatchInbound(hidden, b.handlers); await settle(b); expect(f.dispatchReply).toHaveBeenCalledOnce();
+    const removed = structuredClone(e); removed.id = "removed-event"; removed.data.reaction.revision = 2; removed.data.reaction.status = "removed";
+    await dispatchInbound(removed, b.handlers); await settle(b); expect(f.dispatchReply).toHaveBeenCalledTimes(2);
+  });
 });

@@ -83,9 +83,9 @@ describe("dedicated WhatsApp tools", () => {
       expect(rejectSend).toHaveBeenCalledOnce();
     } finally { release(); }
   });
-  it("registers all ten tools before approval and checks fresh readiness rather than cached flags", async () => {
+  it("registers all fifteen tools before approval and checks fresh readiness rather than cached flags", async () => {
     const f = fixture();
-    expect(f.tools.size).toBe(10);
+    expect(f.tools.size).toBe(15);
     await f.tools
       .get("inkbox_send_whatsapp")
       .execute("call-a", { to: "+15555550123", text: "Hello" });
@@ -227,4 +227,70 @@ describe("dedicated WhatsApp tools", () => {
     } finally { release(); rmSync(directory, { recursive: true, force: true }); }
   });
 
+});
+
+
+describe("WhatsApp groups, explicit quotes, and reaction receipts", () => {
+  it("checks every new group recipient and rejects duplicate numbers or group identifiers", async () => {
+    const f = fixture(["+15555550123", "+15555550124"]);
+    const send = f.tools.get("inkbox_send_whatsapp");
+    await send.execute("group", { to: ["+1 (555) 555-0123", "+15555550124"], groupName: "Team", text: "Hello", idempotencyKey: "group-key" });
+    expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({ to: ["+15555550123", "+15555550124"], groupName: "Team", text: "Hello", idempotencyKey: "group-key" });
+    for (const to of [["+15555550123", "+15555550125"], ["+15555550123", "+1 (555)555-0123"], ["123@g.us"]]) {
+      expect((await send.execute("bad", { to, text: "No" })).isError).toBe(true);
+    }
+    expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  });
+  it("supports existing larger groups by ID and journals explicit quotes without inferring one", async () => {
+    const beforeSend = vi.fn(async () => {});
+    const release = bindNativeSource("wa-v2-group", { whatsapp: true, isGroup: true, sourceMessageId: "incoming", identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123", closed: false, validate: async () => {}, beforeSend, afterSend: async () => {} });
+    try {
+      const f = fixture(undefined, "wa-v2-group");
+      f.identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: "identity-a", isGroup: true, participants: Array.from({length: 10}, (_,i) => `+15555550${String(120+i)}`) });
+      const send = f.tools.get("inkbox_send_whatsapp");
+      await send.execute("quoted", { conversationId: "conversation-a", replyToMessageId: "parent", text: "Answer", idempotencyKey: "quote-key" });
+      expect(beforeSend).toHaveBeenCalledWith("quoted", { text: "Answer", replyToMessageId: "parent", idempotencyKey: "quote-key" });
+      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "conversation-a", replyToMessageId: "parent" });
+      await send.execute("plain", { conversationId: "conversation-a", text: "Plain", idempotencyKey: "plain-key" });
+      expect(f.identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
+      await send.execute("author-dm", { to: "+15555550123", text: "Private", idempotencyKey: "private-key" });
+      expect(f.identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({ to: "+15555550123" });
+      expect(f.identity.sendWhatsApp.mock.calls[2][0]).not.toHaveProperty("conversationId");
+    } finally { release(); }
+  });
+  it("retains exact reaction key and receipt status, checks all participants, and removes the exact ID", async () => {
+    const f = fixture();
+    f.identity.getWhatsAppMessage = vi.fn(async () => ({ agentIdentityId: "identity-a", conversationId: "conversation-a" }));
+    f.identity.sendWhatsAppReaction = vi.fn().mockRejectedValueOnce(new TypeError("timeout")).mockResolvedValue({ id: "reaction-a", status: "queued", revision: 1 });
+    f.identity.getWhatsAppReaction = vi.fn(async () => ({ targetMessageId: "message-a" }));
+    f.identity.removeWhatsAppReaction = vi.fn(async () => ({ id: "reaction-a", status: "removed" }));
+    const send = f.tools.get("inkbox_send_whatsapp_reaction");
+    const args = { messageId: "message-a", reaction: "eyes", idempotencyKey: "reaction-key" };
+    const failed = await send.execute("attempt", args);
+    expect(failed.details.idempotencyKey).toBe("reaction-key");
+    const accepted = await send.execute("retry", args);
+    expect(accepted.content[0].text).toContain('"queued"');
+    expect(f.identity.sendWhatsAppReaction.mock.calls[0][0]).toEqual(f.identity.sendWhatsAppReaction.mock.calls[1][0]);
+    await f.tools.get("inkbox_remove_whatsapp_reaction").execute("remove", { reactionId: "reaction-a", idempotencyKey: "remove-key" });
+    expect(f.identity.removeWhatsAppReaction).toHaveBeenCalledWith("reaction-a", "remove-key");
+    const invalid = await send.execute("bad", { ...args, customEmoji: "👀" });
+    expect(invalid.isError).toBe(true);
+    expect(f.identity.sendWhatsAppReaction).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+it("fences reaction writes against blocked group peers and a source revoked during reads", async () => {
+  const release = bindNativeSource("wa-reaction-fence", { whatsapp: true, isGroup: true, identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123", closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {} });
+  try {
+    const f = fixture(["+15555550123"], "wa-reaction-fence");
+    f.identity.getWhatsAppMessage = vi.fn(async () => ({ agentIdentityId: "identity-a", conversationId: "conversation-a" }));
+    f.identity.sendWhatsAppReaction = vi.fn();
+    f.identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: "identity-a", participants: ["+15555550123", "+15555550124"] });
+    const args = { messageId: "message-a", reaction: "eyes", idempotencyKey: "reaction-key" }, tool = f.tools.get("inkbox_send_whatsapp_reaction");
+    expect((await tool.execute("blocked-peer", args)).isError).toBe(true);
+    f.identity.getWhatsAppConversation.mockImplementation(async () => { release(); return { agentIdentityId: "identity-a", participants: ["+15555550123"] }; });
+    expect((await tool.execute("revoked", args)).isError).toBe(true);
+    expect(f.identity.sendWhatsAppReaction).not.toHaveBeenCalled();
+  } finally { release(); }
 });

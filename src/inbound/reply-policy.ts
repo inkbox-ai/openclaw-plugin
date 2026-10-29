@@ -34,7 +34,7 @@ export function companionWakes(config: Partial<InkboxPluginConfig>, message: any
   if (config.companionResponseMode !== "relaxed" && message.sender_access !== "direct") return false;
   if (config.groupReplyMode !== "mention") return true;
   if (channel === "slack") return message.mentioned === true || message._slackDirect === true;
-  const raw = channel === "imessage" ? message.content ?? message.text : channel === "phone" ? message.text ?? message.body : message.body;
+  const raw = ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text : channel === "phone" ? message.text ?? message.body : message.body;
   if (mentionsAgent(String(raw ?? ""), config.identity)) return true;
   return channel === "mail" && Boolean(mailbox) && Array.isArray(message.to_addresses) &&
     message.to_addresses.some((value: unknown) => typeof value === "string" && normalizeEmail(value) === normalizeEmail(mailbox!));

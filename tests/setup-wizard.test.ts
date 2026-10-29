@@ -1502,7 +1502,7 @@ describe("runSetupWizard", () => {
         updatedAt: new Date(),
       },
       ...(filter.agentIdentityId ? [{ id: "sub-whatsapp", organizationId: "org-1", agentIdentityId: filter.agentIdentityId, mailboxId: null, phoneNumberId: null, url,
-        eventTypes: ["whatsapp.received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"], status: "active", createdAt: new Date(), updatedAt: new Date() }] : []),
+        eventTypes: ["whatsapp.received", "whatsapp.reaction_received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"], status: "active", createdAt: new Date(), updatedAt: new Date() }] : []),
     ]);
     const prompter = createPrompter({ confirms: [false, true] });
 

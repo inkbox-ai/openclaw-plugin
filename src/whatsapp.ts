@@ -41,6 +41,7 @@ async function cacheMedia(directory: string, name: string, bytes: Buffer): Promi
 }
 export const WHATSAPP_EVENTS = [
   "whatsapp.received",
+  "whatsapp.reaction_received",
   "whatsapp.sent",
   "whatsapp.delivered",
   "whatsapp.delivery_failed",
@@ -48,9 +49,10 @@ export const WHATSAPP_EVENTS = [
 ] as const;
 const rejectedSendCodes: Record<number, readonly string[]> = {
   403: ["whatsapp_not_eligible", "whatsapp_access_required", "whatsapp_contact_not_allowed", "whatsapp_media_source_not_allowed"],
+  409: ["whatsapp_capability_not_ready", "whatsapp_quote_unavailable", "whatsapp_membership_unresolved", "whatsapp_group_unavailable", "whatsapp_reaction_pending", "whatsapp_reaction_target_unavailable"],
   413: ["whatsapp_media_too_large"],
   422: ["whatsapp_groups_not_supported", "whatsapp_invalid_recipient", "whatsapp_text_too_long", "whatsapp_unanswered_followup_limit", "whatsapp_opening_message_too_long", "whatsapp_reply_required_for_media", "whatsapp_reply_required_for_links", "whatsapp_reply_required_for_phone_numbers", "whatsapp_reply_required_for_email_addresses"],
-  429: ["whatsapp_daily_limit_exceeded", "whatsapp_unanswered_message_limit", "whatsapp_conversation_rate_limited", "whatsapp_new_contact_rate_limited", "whatsapp_new_contact_spacing", "whatsapp_follow_up_rate_limited"],
+  429: ["whatsapp_daily_limit_exceeded", "whatsapp_unanswered_message_limit", "whatsapp_conversation_rate_limited", "whatsapp_new_contact_rate_limited", "whatsapp_new_contact_spacing", "whatsapp_follow_up_rate_limited", "whatsapp_new_group_limit", "whatsapp_group_unanswered_limit"],
 };
 export type WhatsAppSendRejection = { error: string; status_code: number; quota?: string; limit?: number; used?: number; retry_condition?: string; reset_at?: string; retry_after_seconds?: number };
 export function whatsappSendRejection(error: unknown): WhatsAppSendRejection | undefined {
@@ -230,4 +232,14 @@ export function acceptedWhatsApp(message: WhatsAppMessage, idempotencyKey?: stri
         ? "Send unconfirmed. Inspect the original message; do not send another copy."
         : "Accepted is not delivery confirmation. Unknown delivery does not authorize resend.",
   };
+}
+
+
+/** Normalize explicit phone recipients without interpreting a group address as a phone. */
+export function whatsappRecipients(value: unknown): string[] {
+  const entries = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+  const normalized = entries.map((entry) => typeof entry === "string" ? entry.replace(/[\s().-]/g, "") : "");
+  if (normalized.length < 1 || normalized.length > 8 || normalized.some((number) => !/^\+[1-9]\d{6,14}$/.test(number)) || new Set(normalized).size !== normalized.length)
+    throw new Error("Use one through eight unique E.164 recipients.");
+  return normalized;
 }

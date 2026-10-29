@@ -3,7 +3,7 @@ import { getMessageRequestKey } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import { mapInkboxError, runTool, toolError, toolText } from "../errors.js";
 import { formatJson } from "../format.js";
-import { checkOutboundRecipient } from "../allowlist.js";
+import { checkOutboundRecipients } from "../allowlist.js";
 import { activeNativeSource, assertNativeSource } from "../native-source.js";
 import {
   acceptedWhatsApp,
@@ -12,6 +12,7 @@ import {
   whatsappReady,
   whatsappSendRejection,
   whatsappSendKey,
+  whatsappRecipients,
 } from "../whatsapp.js";
 import {
   silentSendCompletionParameter,
@@ -29,10 +30,12 @@ export function registerWhatsAppTools(
       return {
         name: "inkbox_send_whatsapp",
         description:
-          "Send one-to-one WhatsApp using one E.164 recipient or an existing conversation and optional owned media ID. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
+          "Send WhatsApp using one recipient, 2–8 recipients for a group, or an existing direct/group conversation with optional quoted reply and owned media. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
         parameters: Type.Object(
           {
-            to: Type.Optional(Type.String()),
+            to: Type.Optional(Type.Union([Type.String(), Type.Array(Type.String(), { minItems: 1, maxItems: 8 })])),
+            replyToMessageId: Type.Optional(Type.String()),
+            groupName: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
             conversationId: Type.Optional(Type.String()),
             text: Type.Optional(Type.String({ maxLength: 4000 })),
             mediaIds: Type.Optional(Type.Array(Type.String(), { maxItems: 1 })),
@@ -58,38 +61,42 @@ export function registerWhatsAppTools(
               assertNativeSource(source, identity.id);
               await source.validate();
             }
-            const directRecipient = typeof params.to === "string" ? params.to.replace(/[\s().-]/g, "") : "";
+            const explicitRecipients = params.to === undefined ? undefined : whatsappRecipients(params.to);
+            if (params.replyToMessageId && !conversationId) throw new Error("replyToMessageId requires conversationId.");
+            if (params.groupName && (!explicitRecipients || explicitRecipients.length < 2)) throw new Error("groupName is only a group creation hint.");
+            const directRecipient = explicitRecipients?.length === 1 ? explicitRecipients[0] : "";
             const bound = Boolean(
               source?.whatsapp && (
                 (!params.to && conversationId === source.conversationId) ||
-                (/^\+[1-9]\d{6,14}$/.test(directRecipient) && directRecipient === source.author)
+                (!source.isGroup && /^\+[1-9]\d{6,14}$/.test(directRecipient) && directRecipient === source.author)
               ),
             );
             const targetConversationId = bound ? source!.conversationId : conversationId;
-            let recipient = params.to;
+            let recipients = explicitRecipients ?? [];
+            const replyToMessageId = params.replyToMessageId;
             if (targetConversationId) {
               const conversation =
                 await identity.getWhatsAppConversation(targetConversationId);
               if (
                 conversation.agentIdentityId !== identity.id ||
-                conversation.isGroup ||
-                conversation.participants.length !== 1
+                !Array.isArray(conversation.participants) || !conversation.participants.length ||
+                conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number)) ||
+                (conversation.unresolvedParticipantCount ?? 0) > 0
               )
                 throw new Error(
-                  "A direct conversation owned by this identity is required.",
+                  "A resolved conversation owned by this identity is required.",
                 );
-              recipient =
-                conversation.remoteNumber ?? conversation.participants[0];
+              recipients = conversation.participants;
             }
-            const block = checkOutboundRecipient(recipient, allowedRecipients);
+            const block = checkOutboundRecipients(recipients, allowedRecipients);
             if (block) throw new Error(block);
             await whatsappReady(identity);
-            const idempotencyKey = params.idempotencyKey ?? whatsappSendKey([
-              identity.id, source?.whatsapp ? source.sourceMessageId : callId,
-              targetConversationId ?? params.to, params.text, params.mediaIds,
-            ]);
+            const keyParts: unknown[] = [identity.id, source?.whatsapp ? source.sourceMessageId : callId,
+              targetConversationId ?? params.to, params.text, params.mediaIds];
+            if (replyToMessageId || params.groupName) keyParts.push({ replyToMessageId, groupName: params.groupName });
+            const idempotencyKey = params.idempotencyKey ?? whatsappSendKey(keyParts);
             if (bound) {
-              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}) }); }
+              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}) }); }
               catch (error) {
                 const result = mapInkboxError(error), priorKey = getMessageRequestKey(error);
                 result.content[0]!.text += "\nNo new WhatsApp request was attempted.";
@@ -109,7 +116,8 @@ export function registerWhatsAppTools(
             let message;
             try {
               message = await identity.sendWhatsApp({
-                ...(params.to && !bound ? { to: params.to } : { conversationId: targetConversationId }),
+                ...(params.to && !bound ? { to: explicitRecipients!.length === 1 ? explicitRecipients![0]! : explicitRecipients } : { conversationId: targetConversationId }),
+                ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}),
                 ...(params.text !== undefined ? { text: params.text } : {}),
                 ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), idempotencyKey,
               });
@@ -186,8 +194,8 @@ export function registerWhatsAppTools(
   );
   read(
     "inkbox_list_whatsapp_conversations",
-    "List direct WhatsApp conversations with local unread counts; retained history remains readable when sending is disabled.",
-    page,
+    "List direct and group WhatsApp conversations with local unread counts; retained history remains readable when sending is disabled.",
+    { ...page, includeGroups: Type.Optional(Type.Boolean()) },
     (i, p) => i.listWhatsAppConversations(p),
   );
   read(
@@ -202,6 +210,7 @@ export function registerWhatsAppTools(
     {
       ...page,
       conversationId: Type.Optional(Type.String()),
+      includeGroups: Type.Optional(Type.Boolean()), threadId: Type.Optional(Type.String()),
       isRead: Type.Optional(Type.Boolean()),
     },
     (i, p) => i.listWhatsAppMessages(p),
@@ -224,6 +233,49 @@ export function registerWhatsAppTools(
     { conversationId: Type.String(), throughMessageId: Type.String() },
     (i, p) => i.markWhatsAppRead(p.conversationId, p.throughMessageId),
   );
+  read("inkbox_get_whatsapp_thread", "Read a chronological quoted-reply thread with bounded pagination.",
+    { messageId: Type.String(), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })), cursor: Type.Optional(Type.String()) },
+    (i, p) => i.getWhatsAppThread(p.messageId, { limit: p.limit, cursor: p.cursor }));
+  read("inkbox_get_whatsapp_conversation_thread", "Read one owned conversation's quoted-reply thread.",
+    { conversationId: Type.String(), threadId: Type.String(), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })), cursor: Type.Optional(Type.String()) },
+    (i, p) => i.getWhatsAppConversationThread(p.conversationId, p.threadId, { limit: p.limit, cursor: p.cursor }));
+  read("inkbox_get_whatsapp_reaction", "Read the original reaction receipt; queued or uncertain is not applied.",
+    { reactionId: Type.String() }, (i, p) => i.getWhatsAppReaction(p.reactionId));
+  for (const remove of [false, true]) api.registerTool((context: { sessionKey?: string }) => {
+    const source = activeNativeSource(context.sessionKey);
+    return {
+      name: remove ? "inkbox_remove_whatsapp_reaction" : "inkbox_send_whatsapp_reaction",
+      description: remove ? "Remove this exact WhatsApp reaction revision. Preserve the original idempotency key after uncertainty."
+        : "React to one whole WhatsApp message with a named reaction or custom emoji. Preserve the original idempotency key; queued is not applied.",
+      parameters: Type.Object(remove ? { reactionId: Type.String(), idempotencyKey: Type.String({ minLength: 1 }) } : {
+        messageId: Type.String(), reaction: Type.Optional(Type.Union(["love", "like", "dislike", "laugh", "emphasize", "question", "eyes"].map((name) => Type.Literal(name)))),
+        customEmoji: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })), idempotencyKey: Type.String({ minLength: 1 }),
+      }, { additionalProperties: false }),
+      async execute(_id: string, params: any) { return runTool(async () => {
+        const identity = await runtime.getIdentity();
+        if (source) { assertNativeSource(source, identity.id); await source.validate(); }
+        if (!remove && Boolean(params.reaction) === Boolean(params.customEmoji)) throw new Error("Specify reaction or customEmoji.");
+        const receipt = remove ? await identity.getWhatsAppReaction(params.reactionId) : undefined;
+        const message = await identity.getWhatsAppMessage(receipt?.targetMessageId ?? params.messageId);
+        if (message.agentIdentityId !== identity.id) throw new Error("The WhatsApp reaction target is not owned by this identity.");
+        const conversation = await identity.getWhatsAppConversation(message.conversationId);
+        if (conversation.agentIdentityId !== identity.id || !Array.isArray(conversation.participants) || !conversation.participants.length || conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number)) || (conversation.unresolvedParticipantCount ?? 0) > 0) throw new Error("The WhatsApp conversation is unavailable.");
+        const block = checkOutboundRecipients(conversation.participants, allowedRecipients); if (block) throw new Error(block);
+        await whatsappReady(identity);
+        if (source) { assertNativeSource(source, identity.id); await source.validate(); assertNativeSource(source, identity.id); }
+        try {
+          const result = remove ? await identity.removeWhatsAppReaction(params.reactionId, params.idempotencyKey)
+            : await identity.sendWhatsAppReaction({ messageId: params.messageId, ...(params.reaction ? { reaction: params.reaction } : { customEmoji: params.customEmoji }), idempotencyKey: params.idempotencyKey });
+          return toolText(formatJson(result));
+        } catch (error) {
+          const result = mapInkboxError(error);
+          result.content[0]!.text += `\nOriginal reaction idempotency key: ${params.idempotencyKey}. Reuse this exact operation and key; do not create another request. Queued or uncertain is not applied.`;
+          result.details = { ...result.details, idempotencyKey: params.idempotencyKey };
+          return result;
+        }
+      }); },
+    };
+  }, { names: [remove ? "inkbox_remove_whatsapp_reaction" : "inkbox_send_whatsapp_reaction"] });
   api.registerTool((context: { sessionKey?: string }) => {
     const source = activeNativeSource(context.sessionKey);
     return {
