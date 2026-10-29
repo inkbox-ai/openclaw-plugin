@@ -2,7 +2,7 @@ import type { WhatsAppSendRejection } from "./whatsapp.js";
 import type { SlackRoute } from "./slack.js";
 import type { SlackUploadReceipt, SlackUploadIntent } from "./slack-files.js";
 
-export type WhatsAppSendIntent = { idempotencyKey: string; text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string };
+export type WhatsAppSendIntent = { idempotencyKey: string; text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string; destination?: { conversationId?: string; to?: string[] } };
 
 /** Trusted, short-lived source ownership captured by native tool factories. */
 export type NativeSource = {
@@ -13,7 +13,7 @@ export type NativeSource = {
   validateUpload?(automatic: boolean): Promise<void>;
   whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>;
   beforeSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>;
-  afterSend(callId: string, messageId: string, text?: string): Promise<void>;
+  afterSend(callId: string, messageId: string, text?: string, uncertain?: boolean, conversationId?: string): Promise<void>;
   rejectSend?(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>;
   progress?(update: { tool: string; id: string; status: "running" | "completed" | "error" }): void;
   afterUpload?(callId: string, receipt: SlackUploadReceipt): Promise<void>;

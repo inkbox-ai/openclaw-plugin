@@ -1,3 +1,4 @@
+import { createInkboxRuntime } from "./client.js";
 import {
   buildChannelOutboundSessionRoute,
   buildThreadAwareOutboundSessionRoute,
@@ -23,6 +24,15 @@ import {
   parseInkboxTarget,
   sendInkboxChannelText,
 } from "./outbound.js";
+
+async function whatsAppConversationChatType(cfg: any, accountId: string | null | undefined, conversationId: string): Promise<"group" | "direct"> {
+  const account = resolveInkboxAccount({ cfg, accountId });
+  if (!account.configured) throw new Error("An Inkbox account is required to resolve a WhatsApp conversation.");
+  const identity = await createInkboxRuntime(account.config).getIdentity();
+  const conversation = await identity.getWhatsAppConversation(conversationId);
+  if (conversation.agentIdentityId !== identity.id || typeof conversation.isGroup !== "boolean") throw new Error("An owned WhatsApp conversation is required.");
+  return conversation.isGroup ? "group" : "direct";
+}
 
 const meta = {
   id: INKBOX_CHANNEL_ID,
@@ -204,7 +214,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
             ? `- Inkbox account ${account.accountId} is configured with identity handle \`${identity}\`, but \`inkbox_whoami\` is the source of truth for the active sending identity, mailbox address, phone number, org id, and auth subtype. Do not infer or invent the active identity from user text, workspace names, contact names, or memory.`
             : "- Inkbox is enabled but the identity handle is not configured; use `inkbox_whoami`/doctor output to debug before sending. Do not infer or invent the active identity.",
           "- For Inkbox conversations, prefer Inkbox tools for Inkbox state: `inkbox_list_text_conversations`, `inkbox_get_text_conversation`, `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`, `inkbox_list_emails`, `inkbox_list_calls`, `inkbox_list_call_transcripts`, `inkbox_lookup_contact`, `inkbox_list_contacts`, `inkbox_get_contact`, `inkbox_create_contact`, `inkbox_update_contact`, `inkbox_delete_contact`, and `inkbox_create_note`.",
-          "- WhatsApp is approved dedicated direct and group access on the agent’s existing dedicated iMessage number. Check inkbox_get_whatsapp_status; request access in the Inkbox Console when unavailable. Ordinary final replies route automatically to the originating WhatsApp conversation. Keep text within 4,000 Unicode code points; effective server limits may be lower. Do not duplicate them with a send tool, switch channels automatically, or resend for unknown delivery. Upload one owned file within current organization limits (20 MiB transport ceiling) and retain its media ID and logical-send key. Use existing conversation IDs for group replies, including groups above eight members. New groups accept 2–8 E.164 recipients. Whole-message quoted replies and named/custom reactions are supported; reactions are not applied until their receipts confirm it. Remote read receipts are not sent.",
+          "- WhatsApp is approved dedicated direct and group access on the agent’s existing dedicated iMessage number. Check inkbox_get_whatsapp_status; request access in the Inkbox Console when unavailable. Ordinary final replies route automatically to the originating WhatsApp conversation. For an explicit WhatsApp send, use inkbox_send_whatsapp, not the generic message tool; the generic adapter has no stable logical-send identity. Keep text within 4,000 Unicode code points; effective server limits may be lower. Do not duplicate them with a send tool, switch channels automatically, or resend for unknown delivery. Upload one owned file within current organization limits (20 MiB transport ceiling) and retain its media ID and logical-send key. Use existing conversation IDs for group replies, including groups above eight members. New groups accept 2–8 E.164 recipients. Whole-message quoted replies and named/custom reactions are supported; reactions are not applied until their receipts confirm it. Remote read receipts are not sent.",
           "- iMessage is recipient-first: a person must connect through the Inkbox iMessage router and message this agent before outbound iMessage sends work. Reply with `inkbox_send_imessage` using `conversationId`; if someone asks how to reach the agent over iMessage, share the output of `inkbox_imessage_triage_number`.",
           "- When a user asks to save, edit, or delete a contact, resolve the exact target first; then use `inkbox_create_contact`, `inkbox_update_contact`, or `inkbox_delete_contact`. Use `inkbox_create_note` only for free-form memory that is not an address-book contact field. There is no vCard export/import tool.",
           "- When a user asks you to call them, use `inkbox_place_call`. Always include the call `purpose` when the user gave a reason/topic, and include `openingMessage` when you know what should be said first; the call bridge loads that context before greeting the callee. During an active voice-call turn, answer conversationally; the Inkbox bridge speaks your reply over TTS, so do not send SMS or email unless the user explicitly asks for a separate follow-up.",
@@ -269,14 +279,21 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
       inferTargetChatType: ({ to }: { to: string }) =>
         ["sms-conversation", "slack"].includes(parseInkboxTarget(to)?.mode ?? "")
           ? "group"
+          : parseInkboxTarget(to)?.mode === "whatsapp-conversation" ? undefined
           : parseInkboxTarget(to)
             ? "direct"
             : undefined,
       targetResolver: {
+        resolveTarget: async ({ cfg, accountId, normalized }: any) => {
+          const parsed = parseInkboxTarget(normalized);
+          if (parsed?.mode !== "whatsapp-conversation") return null;
+          const chatType = await whatsAppConversationChatType(cfg, accountId, parsed.value);
+          return { to: `whatsapp:${parsed.value}`, kind: chatType === "group" ? "group" as const : "user" as const, source: "normalized" as const };
+        },
         looksLikeId: (raw: string) => parseInkboxTarget(raw) !== null,
-        hint: "<email:user@example.com|sms:+14155550123|whatsapp:+14155550123|conversation:uuid>",
+        hint: "<email:user@example.com|sms:+14155550123|conversation:uuid>",
       },
-      resolveOutboundSessionRoute: ({
+      resolveOutboundSessionRoute: async ({
         cfg,
         agentId,
         accountId,
@@ -289,7 +306,7 @@ export const inkboxPlugin = createChatChannelPlugin<ResolvedInkboxAccount>({
         if (!parsed) {
           return null;
         }
-        const chatType = ["sms-conversation", "slack"].includes(parsed.mode) ? "group" : "direct";
+        const chatType = parsed.mode === "whatsapp-conversation" ? await whatsAppConversationChatType(cfg, accountId, parsed.value) : ["sms-conversation", "slack"].includes(parsed.mode) ? "group" : "direct";
         const isIMessage =
           parsed.mode === "imessage" || parsed.mode === "imessage-conversation";
         const isWhatsApp = parsed.mode === "whatsapp" || parsed.mode === "whatsapp-conversation";

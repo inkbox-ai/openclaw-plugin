@@ -7,7 +7,7 @@ import { checkOutboundRecipients } from "../allowlist.js";
 import { activeNativeSource, assertNativeSource } from "../native-source.js";
 import {
   acceptedWhatsApp,
-  assertWhatsAppText,
+  validateWhatsAppSend,
   whatsappFile,
   whatsappReady,
   whatsappSendRejection,
@@ -46,25 +46,15 @@ export function registerWhatsAppTools(
         ),
         async execute(callId: string, params: any) {
           return runTool(async () => {
+            const conversationId = params.conversationId !== undefined ? params.conversationId :
+              (params.to === undefined && source?.whatsapp ? source.conversationId : undefined);
+            validateWhatsAppSend({ ...params, conversationId });
             const identity = await runtime.getIdentity();
-            const conversationId =
-              params.conversationId ??
-              (!params.to && source?.whatsapp ? source.conversationId : undefined);
-            if (!!params.to === !!conversationId)
-              throw new Error("Specify exactly one of to or conversationId.");
-            if (!params.text?.trim() && !params.mediaIds?.length)
-              throw new Error("Provide text or one owned media ID.");
-            if ((params.mediaIds?.length ?? 0) > 1)
-              throw new Error("WhatsApp supports one attachment.");
-            assertWhatsAppText(params.text ?? "");
+            const explicitRecipients = params.to === undefined ? undefined : whatsappRecipients(params.to);
             if (source) {
               assertNativeSource(source, identity.id);
               await source.validate();
             }
-            if (params.replyToMessageId !== undefined && (typeof params.replyToMessageId !== "string" || !params.replyToMessageId.trim())) throw new Error("replyToMessageId must be a nonempty message ID.");
-            const explicitRecipients = params.to === undefined ? undefined : whatsappRecipients(params.to);
-            if (params.replyToMessageId && !conversationId) throw new Error("replyToMessageId requires conversationId.");
-            if (params.groupName && (!explicitRecipients || explicitRecipients.length < 2)) throw new Error("groupName is only a group creation hint.");
             const directRecipient = explicitRecipients?.length === 1 ? explicitRecipients[0] : "";
             const bound = Boolean(
               source?.whatsapp && (
@@ -80,6 +70,17 @@ export function registerWhatsAppTools(
                 ? await source!.whatsappReplyTarget?.(params.idempotencyKey)
                 : source!.replyToMessageId
               : undefined);
+            const request = {
+              ...(explicitRecipients && !bound ? { to: explicitRecipients.length === 1 ? explicitRecipients[0]! : explicitRecipients } : { conversationId: targetConversationId }),
+              ...(replyToMessageId !== undefined ? { replyToMessageId } : {}),
+              ...(params.groupName !== undefined ? { groupName: params.groupName } : {}),
+              ...(params.text !== undefined ? { text: params.text } : {}),
+              ...(params.mediaIds !== undefined ? { mediaIds: params.mediaIds } : {}),
+            };
+            validateWhatsAppSend(request);
+            if (!params.idempotencyKey && (typeof callId !== "string" || !callId.trim())) throw new Error("A stable host tool call ID or explicit idempotencyKey is required.");
+            const tracked = source?.whatsapp === true;
+            const destination = bound ? undefined : targetConversationId ? { conversationId: targetConversationId } : { to: explicitRecipients };
             if (targetConversationId) {
               const conversation =
                 await identity.getWhatsAppConversation(targetConversationId);
@@ -97,12 +98,12 @@ export function registerWhatsAppTools(
             const block = checkOutboundRecipients(recipients, allowedRecipients);
             if (block) throw new Error(block);
             await whatsappReady(identity);
-            const keyParts: unknown[] = [identity.id, source?.whatsapp ? source.sourceMessageId : callId,
-              targetConversationId ?? params.to, params.text, params.mediaIds];
+            const keyParts: unknown[] = [identity.id, [context.sessionKey, source?.whatsapp ? source.sourceMessageId : undefined, callId],
+              targetConversationId ?? explicitRecipients, params.text, params.mediaIds];
             if (replyToMessageId || params.groupName) keyParts.push({ replyToMessageId, groupName: params.groupName });
             const idempotencyKey = params.idempotencyKey ?? whatsappSendKey(keyParts);
-            if (bound) {
-              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}) }); }
+            if (tracked) {
+              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}), ...(destination ? { destination } : {}) }); }
               catch (error) {
                 const result = mapInkboxError(error), priorKey = getMessageRequestKey(error);
                 result.content[0]!.text += "\nNo new WhatsApp request was attempted.";
@@ -121,17 +122,12 @@ export function registerWhatsAppTools(
             }
             let message;
             try {
-              message = await identity.sendWhatsApp({
-                ...(params.to && !bound ? { to: explicitRecipients!.length === 1 ? explicitRecipients![0]! : explicitRecipients } : { conversationId: targetConversationId }),
-                ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}),
-                ...(params.text !== undefined ? { text: params.text } : {}),
-                ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), idempotencyKey,
-              });
+              message = await identity.sendWhatsApp({ ...request, idempotencyKey });
             } catch (error) {
               const key = getMessageRequestKey(error) ?? idempotencyKey;
               const policy = whatsappSendRejection(error);
               if (policy) {
-                if (bound && source!.rejectSend) {
+                if (tracked && source!.rejectSend) {
                   try { await source!.rejectSend(callId, idempotencyKey, policy); }
                   catch { /* The durable intent stays fenced if its rejection cannot be saved. */ }
                 }
@@ -143,9 +139,9 @@ export function registerWhatsAppTools(
               result.details = { ...result.details, idempotencyKey: key };
               return result;
             }
-            if (bound) {
+            if (tracked) {
               try {
-                await source!.afterSend(callId, message.id, params.text);
+                await source!.afterSend(callId, message.id, params.text, message.status === "uncertain", message.conversationId);
               } catch {
                 /* Accepted send remains accepted even if optional tracking fails. */
               }

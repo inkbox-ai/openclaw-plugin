@@ -75,6 +75,30 @@ export function assertWhatsAppText(text: string) {
       "WhatsApp text must contain at most 4,000 Unicode code points.",
     );
 }
+export class WhatsAppReadinessPending extends Error {}
+
+export function assertWhatsAppSendKey(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !value.trim() || value.length > 255 || /[^\x20-\x7e]/.test(value))
+    throw new Error("idempotencyKey must be a stable key of 1–255 printable ASCII characters.");
+}
+
+const whatsappUuid = (value: unknown): value is string =>
+  typeof value === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
+
+/** Validate the complete local request before recording a durable send intent. */
+export function validateWhatsAppSend(params: { to?: unknown; conversationId?: unknown; replyToMessageId?: unknown; groupName?: unknown; text?: unknown; mediaIds?: unknown; idempotencyKey?: unknown }) {
+  if ((params.to !== undefined) === (params.conversationId !== undefined)) throw new Error("Specify exactly one of to or conversationId.");
+  const recipients = params.to === undefined ? undefined : whatsappRecipients(params.to);
+  if (params.conversationId !== undefined && !whatsappUuid(params.conversationId)) throw new Error("conversationId must be a UUID.");
+  if (params.replyToMessageId !== undefined && (!params.conversationId || !whatsappUuid(params.replyToMessageId))) throw new Error("replyToMessageId requires conversationId and a message UUID.");
+  if (params.groupName !== undefined && (!recipients || recipients.length < 2 || typeof params.groupName !== "string" || !params.groupName.trim() || [...params.groupName].length > 100)) throw new Error("groupName requires a new group and 1–100 characters.");
+  if (params.text !== undefined && typeof params.text !== "string") throw new Error("text must be a string.");
+  if (params.mediaIds !== undefined && (!Array.isArray(params.mediaIds) || params.mediaIds.length > 1 || params.mediaIds.some(id => !whatsappUuid(id)))) throw new Error("Provide at most one media UUID.");
+  if (!(params.text as string | undefined)?.trim() && !(params.mediaIds as unknown[] | undefined)?.length) throw new Error("Provide text or one owned media ID.");
+  assertWhatsAppText(params.text as string ?? "");
+  if (params.idempotencyKey !== undefined) assertWhatsAppSendKey(params.idempotencyKey);
+}
+
 export async function whatsappReady(
   identity: AgentIdentity,
   expectedId = identity.id,
@@ -241,5 +265,5 @@ export function whatsappRecipients(value: unknown): string[] {
   const normalized = entries.map((entry) => typeof entry === "string" ? entry.replace(/[\s().-]/g, "") : "");
   if (normalized.length < 1 || normalized.length > 8 || normalized.some((number) => !/^\+[1-9]\d{6,14}$/.test(number)) || new Set(normalized).size !== normalized.length)
     throw new Error("Use one through eight unique E.164 recipients.");
-  return normalized;
+  return normalized.sort();
 }

@@ -23,15 +23,15 @@ function fixture(allowed?: string[], sessionKey?: string) {
       remoteNumber: "+15555550123",
     })),
     sendWhatsApp: vi.fn(async () => ({
-      id: "message-a",
-      conversationId: "conversation-a",
+      id: "00000000-0000-4000-8000-000000000005",
+      conversationId: "00000000-0000-4000-8000-000000000001",
       status: "queued",
       deliveryState: "pending",
     })),
-    getWhatsAppMedia: vi.fn(async () => ({ id: "media-a", status: "ready" })),
+    getWhatsAppMedia: vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004", status: "ready" })),
     markWhatsAppRead: vi.fn(async () => ({ updatedCount: 1 })),
   };
-  const lookup = vi.fn(async () => "message-a");
+  const lookup = vi.fn(async () => "00000000-0000-4000-8000-000000000005");
   registerWhatsAppTools(
     {
       registerTool(def: any) {
@@ -60,7 +60,7 @@ describe("dedicated WhatsApp tools", () => {
   });
   it("treats email-address policy as a curated rejection without freeing unknown outcomes", async () => {
     const rejectSend = vi.fn(async () => {});
-    const release = bindNativeSource("wa-email-policy", { whatsapp: true, identityId: "identity-a", conversationId: "conversation-a",
+    const release = bindNativeSource("wa-email-policy", { whatsapp: true, identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001",
       author: "+15555550123", closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {}, rejectSend });
     try {
       const f = fixture(undefined, "wa-email-policy");
@@ -98,9 +98,9 @@ describe("dedicated WhatsApp tools", () => {
       new TypeError("lost response"),
     );
     const p = {
-      conversationId: "conversation-a",
+      conversationId: "00000000-0000-4000-8000-000000000001",
       text: "Brief",
-      mediaIds: ["media-a"],
+      mediaIds: ["00000000-0000-4000-8000-000000000004"],
     };
     const unknown = await f.tools.get("inkbox_send_whatsapp").execute("call-a", p);
     const key = unknown.details.idempotencyKey;
@@ -111,7 +111,7 @@ describe("dedicated WhatsApp tools", () => {
       f.identity.sendWhatsApp.mock.calls[1][0],
     );
     expect(f.identity.sendWhatsApp.mock.calls[1][0].mediaIds).toEqual([
-      "media-a",
+      "00000000-0000-4000-8000-000000000004",
     ]);
   });
   it("rejects disabled, group-shaped, overlong and locally blocked sends without fallback", async () => {
@@ -153,7 +153,7 @@ describe("dedicated WhatsApp tools", () => {
   });
   it("journals the exact source-bound recovery key before dispatch and permits an explicit different recipient", async () => {
     const beforeSend = vi.fn(async () => {});
-    const release = bindNativeSource("wa-source-test", { whatsapp: true, sourceMessageId: "incoming-a", identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123", closed: false,
+    const release = bindNativeSource("wa-source-test", { whatsapp: true, sourceMessageId: "incoming-a", identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false,
       validate: async () => {}, beforeSend, afterSend: async () => {} });
     try {
       const f = fixture(undefined, "wa-source-test");
@@ -161,16 +161,16 @@ describe("dedicated WhatsApp tools", () => {
       const key = JSON.parse(first.content[0].text.replace(/^```json\n|\n```$/g, "")).idempotencyKey;
       expect(beforeSend).toHaveBeenCalledWith("call-a", { idempotencyKey: key, text: "Reply" });
       const second = await f.tools.get("inkbox_send_whatsapp").execute("call-b", { text: "Reply" });
-      expect(JSON.parse(second.content[0].text.replace(/^```json\n|\n```$/g, "")).idempotencyKey).toBe(key);
+      expect(JSON.parse(second.content[0].text.replace(/^```json\n|\n```$/g, "")).idempotencyKey).not.toBe(key);
       const explicit = await f.tools.get("inkbox_send_whatsapp").execute("call-c", { to: "+15555550124", text: "Explicit outreach" });
       expect(explicit.isError).not.toBe(true);
       expect(f.identity.sendWhatsApp.mock.calls[2][0].to).toBe("+15555550124");
-      expect(beforeSend).toHaveBeenCalledTimes(2);
+      expect(beforeSend).toHaveBeenCalledTimes(3);
     } finally { release(); }
   });
 
   it("reports the earlier key, not a new unattempted key, when the source fence rejects a second intent", async () => {
-    const release = bindNativeSource("wa-rejected-test", { whatsapp: true, sourceMessageId: "incoming-a", identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123", closed: false,
+    const release = bindNativeSource("wa-rejected-test", { whatsapp: true, sourceMessageId: "incoming-a", identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false,
       validate: async () => {}, beforeSend: async () => { throw Object.assign(new Error("Earlier send uncertain"), { idempotencyKey: "earlier-actual-key" }); }, afterSend: async () => {} });
     try {
       const f = fixture(undefined, "wa-rejected-test");
@@ -186,7 +186,7 @@ describe("dedicated WhatsApp tools", () => {
     let validations = 0;
     const release = bindNativeSource(`wa-closed-${phase}`, {
       whatsapp: true, sourceMessageId: "incoming-a", identityId: "identity-a",
-      conversationId: "conversation-a", author: "+15555550123", closed: false,
+      conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false,
       validate: async () => { if (++validations > 1 && phase === "validation") release(); },
       beforeSend: async () => { if (phase === "intent") release(); }, afterSend: async () => {},
     });
@@ -199,7 +199,7 @@ describe("dedicated WhatsApp tools", () => {
       if (phase === "readiness") f.identity.getWhatsAppStatus.mockImplementation(async () => {
         release(); return { enabled: true, status: "ready" };
       });
-      const target = phase === "conversation" ? { conversationId: "conversation-b" }
+      const target = phase === "conversation" ? { conversationId: "00000000-0000-4000-8000-000000000002" }
         : phase === "intent" ? {} : { to: "+15555550124" };
       const result = await f.tools.get("inkbox_send_whatsapp").execute("call-a", { ...target, text: "Answer" });
       expect(result.isError).toBe(true);
@@ -213,14 +213,14 @@ describe("dedicated WhatsApp tools", () => {
     writeFileSync(filePath, "Notes");
     let validations = 0;
     const release = bindNativeSource("wa-upload-closed", {
-      whatsapp: true, identityId: "identity-a", conversationId: "conversation-a",
+      whatsapp: true, identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001",
       author: "+15555550123", closed: false,
       validate: async () => { if (++validations === 2) release(); },
       beforeSend: async () => {}, afterSend: async () => {},
     });
     try {
       const f = fixture(undefined, "wa-upload-closed");
-      f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "media-a" }));
+      f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
       const result = await f.tools.get("inkbox_upload_whatsapp_media").execute("upload-a", { filePath });
       expect(result.isError).toBe(true);
       expect(f.identity.uploadWhatsAppMedia).not.toHaveBeenCalled();
@@ -243,15 +243,15 @@ describe("WhatsApp groups, explicit quotes, and reaction receipts", () => {
   });
   it("supports existing larger groups by ID and journals explicit quotes without inferring one", async () => {
     const beforeSend = vi.fn(async () => {});
-    const release = bindNativeSource("wa-v2-group", { whatsapp: true, isGroup: true, sourceMessageId: "incoming", identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123", closed: false, validate: async () => {}, beforeSend, afterSend: async () => {} });
+    const release = bindNativeSource("wa-v2-group", { whatsapp: true, isGroup: true, sourceMessageId: "incoming", identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false, validate: async () => {}, beforeSend, afterSend: async () => {} });
     try {
       const f = fixture(undefined, "wa-v2-group");
       f.identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: "identity-a", isGroup: true, participants: Array.from({length: 10}, (_,i) => `+15555550${String(120+i)}`) });
       const send = f.tools.get("inkbox_send_whatsapp");
-      await send.execute("quoted", { conversationId: "conversation-a", replyToMessageId: "parent", text: "Answer", idempotencyKey: "quote-key" });
-      expect(beforeSend).toHaveBeenCalledWith("quoted", { text: "Answer", replyToMessageId: "parent", idempotencyKey: "quote-key" });
-      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "conversation-a", replyToMessageId: "parent" });
-      await send.execute("plain", { conversationId: "conversation-a", text: "Plain", idempotencyKey: "plain-key" });
+      await send.execute("quoted", { conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000007", text: "Answer", idempotencyKey: "quote-key" });
+      expect(beforeSend).toHaveBeenCalledWith("quoted", { text: "Answer", replyToMessageId: "00000000-0000-4000-8000-000000000007", idempotencyKey: "quote-key" });
+      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000007" });
+      await send.execute("plain", { conversationId: "00000000-0000-4000-8000-000000000001", text: "Plain", idempotencyKey: "plain-key" });
       expect(f.identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
       await send.execute("author-dm", { to: "+15555550123", text: "Private", idempotencyKey: "private-key" });
       expect(f.identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({ to: "+15555550123" });
@@ -260,12 +260,12 @@ describe("WhatsApp groups, explicit quotes, and reaction receipts", () => {
   });
   it("retains exact reaction key and receipt status, checks all participants, and removes the exact ID", async () => {
     const f = fixture();
-    f.identity.getWhatsAppMessage = vi.fn(async () => ({ agentIdentityId: "identity-a", conversationId: "conversation-a" }));
+    f.identity.getWhatsAppMessage = vi.fn(async () => ({ agentIdentityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001" }));
     f.identity.sendWhatsAppReaction = vi.fn().mockRejectedValueOnce(new TypeError("timeout")).mockResolvedValue({ id: "reaction-a", status: "queued", revision: 1 });
-    f.identity.getWhatsAppReaction = vi.fn(async () => ({ targetMessageId: "message-a" }));
+    f.identity.getWhatsAppReaction = vi.fn(async () => ({ targetMessageId: "00000000-0000-4000-8000-000000000005" }));
     f.identity.removeWhatsAppReaction = vi.fn(async () => ({ id: "reaction-a", status: "removed" }));
     const send = f.tools.get("inkbox_send_whatsapp_reaction");
-    const args = { messageId: "message-a", reaction: "eyes", idempotencyKey: "reaction-key" };
+    const args = { messageId: "00000000-0000-4000-8000-000000000005", reaction: "eyes", idempotencyKey: "reaction-key" };
     const failed = await send.execute("attempt", args);
     expect(failed.details.idempotencyKey).toBe("reaction-key");
     const accepted = await send.execute("retry", args);
@@ -281,13 +281,13 @@ describe("WhatsApp groups, explicit quotes, and reaction receipts", () => {
 
 
 it("fences reaction writes against blocked group peers and a source revoked during reads", async () => {
-  const release = bindNativeSource("wa-reaction-fence", { whatsapp: true, isGroup: true, identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123", closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {} });
+  const release = bindNativeSource("wa-reaction-fence", { whatsapp: true, isGroup: true, identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {} });
   try {
     const f = fixture(["+15555550123"], "wa-reaction-fence");
-    f.identity.getWhatsAppMessage = vi.fn(async () => ({ agentIdentityId: "identity-a", conversationId: "conversation-a" }));
+    f.identity.getWhatsAppMessage = vi.fn(async () => ({ agentIdentityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001" }));
     f.identity.sendWhatsAppReaction = vi.fn();
     f.identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: "identity-a", participants: ["+15555550123", "+15555550124"] });
-    const args = { messageId: "message-a", reaction: "eyes", idempotencyKey: "reaction-key" }, tool = f.tools.get("inkbox_send_whatsapp_reaction");
+    const args = { messageId: "00000000-0000-4000-8000-000000000005", reaction: "eyes", idempotencyKey: "reaction-key" }, tool = f.tools.get("inkbox_send_whatsapp_reaction");
     expect((await tool.execute("blocked-peer", args)).isError).toBe(true);
     f.identity.getWhatsAppConversation.mockImplementation(async () => { release(); return { agentIdentityId: "identity-a", participants: ["+15555550123"] }; });
     expect((await tool.execute("revoked", args)).isError).toBe(true);
@@ -298,7 +298,7 @@ it("fences reaction writes against blocked group peers and a source revoked duri
 
 it.each(["", " ", "\n", null])("does not silently omit an explicit invalid quote target %j", async (replyToMessageId) => {
   const f = fixture();
-  const result = await f.tools.get("inkbox_send_whatsapp").execute("invalid-quote", { conversationId: "conversation-a", replyToMessageId, text: "Never plain" });
+  const result = await f.tools.get("inkbox_send_whatsapp").execute("invalid-quote", { conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId, text: "Never plain" });
   expect(result.isError).toBe(true); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
 });
 
@@ -306,21 +306,77 @@ it.each(["", " ", "\n", null])("does not silently omit an explicit invalid quote
 it.each([false, true])("inherits a source quote only for its own destination (group=%s)", async (isGroup) => {
   const beforeSend = vi.fn(async () => {});
   const release = bindNativeSource("autoquote-source", { whatsapp: true, isGroup,
-    sourceMessageId: "source-message", replyToMessageId: "source-message",
-    identityId: "identity-a", conversationId: "conversation-a", author: "+15555550123",
+    sourceMessageId: "00000000-0000-4000-8000-000000000006", replyToMessageId: "00000000-0000-4000-8000-000000000006",
+    identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123",
     closed: false, validate: async () => {}, beforeSend, afterSend: async () => {} });
   try {
     const f = fixture(undefined, "autoquote-source"), send = f.tools.get("inkbox_send_whatsapp");
     await send.execute("source", { text: "Answer" });
-    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "conversation-a",
-      replyToMessageId: "source-message" });
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "00000000-0000-4000-8000-000000000001",
+      replyToMessageId: "00000000-0000-4000-8000-000000000006" });
     await send.execute("other", { to: "+15555550124", text: "Outreach" });
     expect(f.identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({ to: "+15555550124" });
     expect(f.identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
-    await send.execute("room", { conversationId: "other-room", text: "Outreach" });
-    expect(f.identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({ conversationId: "other-room" });
+    await send.execute("room", { conversationId: "00000000-0000-4000-8000-000000000003", text: "Outreach" });
+    expect(f.identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({ conversationId: "00000000-0000-4000-8000-000000000003" });
     expect(f.identity.sendWhatsApp.mock.calls[2][0]).not.toHaveProperty("replyToMessageId");
     await send.execute("old-key", { text: "Old send", idempotencyKey: "legacy-plain-key" });
     expect(f.identity.sendWhatsApp.mock.calls[3][0]).not.toHaveProperty("replyToMessageId");
   } finally { release(); }
+});
+
+it.each([
+  { replyToMessageId: "not-a-uuid" },
+  { replyToMessageId: "reaction:00000000-0000-4000-8000-000000000005:1:applied" },
+  { conversationId: "not-a-uuid" },
+  { conversationId: null },
+  { to: "+15555550124", conversationId: "00000000-0000-4000-8000-000000000001" },
+  { mediaIds: ["not-a-uuid"] },
+  { mediaIds: "not-an-array" },
+  { mediaIds: [null] },
+  { mediaIds: null },
+  { text: 123 },
+  { idempotencyKey: " " },
+  { idempotencyKey: "key\n" },
+  { idempotencyKey: "🔑" },
+  { idempotencyKey: "a".repeat(256) },
+  { groupName: " " },
+  { to: ["+15555550124", "+15555550125"], groupName: " " },
+  { to: ["+15555550124", "+15555550125"], groupName: "x".repeat(101) },
+])("preflights malformed requests before any durable intent: %j", async (invalid) => {
+  const beforeSend = vi.fn(), afterSend = vi.fn();
+  const release = bindNativeSource("preflight", { whatsapp: true, identityId: "identity-a",
+    conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false,
+    validate: async () => {}, beforeSend, afterSend });
+  try {
+    const f = fixture(undefined, "preflight");
+    const result = await f.tools.get("inkbox_send_whatsapp").execute("preflight-call", { text: "Hello", ...invalid });
+    expect(result.isError).toBe(true);
+    expect(beforeSend).not.toHaveBeenCalled(); expect(afterSend).not.toHaveBeenCalled();
+    expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  } finally { release(); }
+});
+
+it("normalizes exact logical retries while keeping identical distinct sends independent", async () => {
+  const f = fixture(), send = f.tools.get("inkbox_send_whatsapp");
+  f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("response lost"));
+  const params = { to: ["+1 (555) 555-0124", "+15555550123"], groupName: "Team", text: "Hello" };
+  const first = await send.execute("logical-attempt-a", params);
+  await send.execute("logical-attempt-a", { ...params, to: ["+15555550123", "+15555550124"] });
+  await send.execute("logical-attempt-b", { ...params, to: ["+15555550123", "+15555550124"] });
+  const requests = f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request);
+  expect(requests).toHaveLength(3);
+  expect(requests[0].to).toEqual(["+15555550123", "+15555550124"]);
+  expect(requests[0]).toEqual(requests[1]);
+  expect(requests[0].idempotencyKey).toBe(first.details.idempotencyKey);
+  expect(requests[2].idempotencyKey).not.toBe(requests[0].idempotencyKey);
+});
+
+it("requires an explicit stable key without a host logical call ID", async () => {
+  const f = fixture(), send = f.tools.get("inkbox_send_whatsapp");
+  const params = { to: "+15555550123", text: "Hello" };
+  expect((await send.execute("", params)).isError).toBe(true);
+  expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  await send.execute("", { ...params, idempotencyKey: "explicit-attempt" });
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({ ...params, idempotencyKey: "explicit-attempt" });
 });

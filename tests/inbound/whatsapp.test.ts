@@ -27,6 +27,7 @@ import { createInkboxSessionBridge } from "../../src/inbound/session.js";
 import { createCompanionReceiver } from "../../src/inbound/companion.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
 import { bindNativeSource } from "../../src/native-source.js";
+import { registerSendIMessage } from "../../src/tools/send-imessage.js";
 import { registerWhatsAppTools } from "../../src/tools/whatsapp.js";
 function fixture() {
   const identity: any = {
@@ -35,12 +36,12 @@ function fixture() {
     getWhatsAppConversation: vi.fn(async () => ({ agentIdentityId: "11111111-1111-4111-8111-111111111111", isGroup: true, participants: ["+15555550123", "+15555550124"], unresolvedParticipantCount: 0 })),
     sendWhatsApp: vi.fn(async () => ({
       id: "sent-a",
-      conversationId: "conversation-a",
+      conversationId: "00000000-0000-4000-8000-000000000001",
       status: "queued",
       deliveryState: "pending",
     })),
     getWhatsAppMedia: vi.fn(async () => ({
-      id: "media-a",
+      id: "00000000-0000-4000-8000-000000000004",
       status: "unavailable",
       url: null,
     })),
@@ -74,14 +75,14 @@ function fixture() {
 const event = (
   identityId = "11111111-1111-4111-8111-111111111111",
   id = "event-a",
-  conversation = "conversation-a",
+  conversation = "00000000-0000-4000-8000-000000000001",
 ): any => ({
   id,
   event_type: "whatsapp.received",
   timestamp: "2026-10-26T09:00:00Z",
   data: {
     message: {
-      id: "message-a",
+      id: "00000000-0000-4000-8000-000000000005",
       agent_identity_id: identityId,
       conversation_id: conversation,
       direction: "inbound",
@@ -160,9 +161,9 @@ describe("WhatsApp native receive/reply", () => {
     expect(f.dispatchReply).toHaveBeenCalledOnce();
     expect(f.identity.sendWhatsApp).toHaveBeenCalledWith(
       expect.objectContaining({
-        conversationId: "conversation-a",
+        conversationId: "00000000-0000-4000-8000-000000000001",
         text: "WhatsApp answer",
-        replyToMessageId: "message-a",
+        replyToMessageId: "00000000-0000-4000-8000-000000000005",
         idempotencyKey: expect.stringContaining("openclaw:whatsapp:"),
       }),
     );
@@ -178,12 +179,12 @@ describe("WhatsApp native receive/reply", () => {
   it("keeps concurrent conversation ownership separate and records late status without another turn", async () => {
     const f=fixture(), b=f.bridge();
     f.identity.sendWhatsApp.mockImplementation(async (p:any)=>({id:`sent-${p.conversationId}`,conversationId:p.conversationId,status:"sent",deliveryState:"pending"}));
-    const a=event(undefined,"event-a","conversation-a"), c=event(undefined,"event-b","conversation-b");c.data.message.id="message-b";
+    const a=event(undefined,"event-a","00000000-0000-4000-8000-000000000001"), c=event(undefined,"event-b","00000000-0000-4000-8000-000000000002");c.data.message.id="message-b";
     await Promise.all([dispatchInbound(a,b.handlers),dispatchInbound(c,b.handlers)]);await settle(b);
-    expect(f.identity.sendWhatsApp.mock.calls.map(([p]:any)=>p.conversationId).sort()).toEqual(["conversation-a","conversation-b"]);
-    const receipt=event(undefined,"receipt-a");receipt.event_type="whatsapp.delivery_unconfirmed";receipt.data.message.id="sent-conversation-a";receipt.data.message.status="sent";receipt.data.message.delivery_state="unknown";
+    expect(f.identity.sendWhatsApp.mock.calls.map(([p]:any)=>p.conversationId).sort()).toEqual(["00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002"]);
+    const receipt=event(undefined,"receipt-a");receipt.event_type="whatsapp.delivery_unconfirmed";receipt.data.message.id="sent-00000000-0000-4000-8000-000000000001";receipt.data.message.status="sent";receipt.data.message.delivery_state="unknown";
     await dispatchInbound(receipt,b.handlers);await settle(b);expect(f.dispatchReply).toHaveBeenCalledTimes(2);expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
-    const files=await readdir(state.dir);const contexts=files.filter(n=>n.startsWith("group-context-"));expect(contexts.length).toBeGreaterThan(0);
+    const files=await readdir(state.dir);const contexts=files.filter(n=>n.startsWith("companion-") && n.endsWith(".json"));expect(contexts.length).toBeGreaterThan(0);
     expect((await Promise.all(contexts.map(n=>readFile(join(state.dir,n),"utf8")))).join("")).toContain("delivery_unconfirmed");
     const next=event(undefined,"event-c");next.data.message.id="message-c";
     await dispatchInbound(next,b.handlers);await settle(b);
@@ -199,7 +200,7 @@ describe("WhatsApp native receive/reply", () => {
     e.data.message.content = null;
     e.data.message.media = [
       {
-        id: "media-a",
+        id: "00000000-0000-4000-8000-000000000004",
         filename: "brief.pdf",
         content_type: "application/pdf",
         size: 10,
@@ -213,7 +214,7 @@ describe("WhatsApp native receive/reply", () => {
     expect(
       JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0]),
     ).toContain("unavailable");
-    expect(f.identity.getWhatsAppMedia).toHaveBeenCalledWith("media-a");
+    expect(f.identity.getWhatsAppMedia).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000004");
   });
   it("treats lifecycle and unknown WhatsApp events as status only, never external/model work", async () => {
     const f = fixture(),
@@ -282,7 +283,7 @@ describe("WhatsApp native receive/reply", () => {
       runtime: { getIdentity: async () => f.identity, getClient: async () => ({ messageSends: { lookup } }) }, submit: model, deliver };
     const first = createCompanionReceiver(options), incoming = event();
     incoming._openclawWhatsApp = true;
-    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "conversation-a", conversation_id: "conversation-a" };
+    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "00000000-0000-4000-8000-000000000001", conversation_id: "00000000-0000-4000-8000-000000000001" };
     incoming.data.message._ordinaryAddressed = true;
     await first.accept(incoming); await first.idle(); first.close();
     const path = (await readdir(state.dir)).find((name) => name.startsWith("companion-") && name.endsWith(".json"))!;
@@ -294,7 +295,7 @@ describe("WhatsApp native receive/reply", () => {
     const next = createCompanionReceiver(options); await next.recover(); await next.idle(); next.close();
     expect(lookup).toHaveBeenCalledWith({ senderKind: "whatsapp_identity", senderId: f.identity.id, operation: "whatsapp.send", idempotencyKey: "original-logical-key" });
     expect(model).toHaveBeenCalledOnce(); expect(deliver).not.toHaveBeenCalled();
-    expect(await next.whatsappDeliveryConversation("accepted-original-message")).toBe("conversation-a");
+    expect(await next.whatsappDeliveryConversation("accepted-original-message")).toBe("00000000-0000-4000-8000-000000000001");
   });
 
   it.each([
@@ -334,15 +335,15 @@ describe("WhatsApp native receive/reply", () => {
       runtime: f.runtime, submit, deliver });
     const incoming = event();
     incoming._openclawWhatsApp = true;
-    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "conversation-a", conversation_id: "conversation-a" };
+    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "00000000-0000-4000-8000-000000000001", conversation_id: "00000000-0000-4000-8000-000000000001" };
     incoming.data.message._ordinaryAddressed = true;
     try {
       await receiver.accept(incoming); await receiver.idle();
       expect(submitError).toBeUndefined();
       expect(submit).toHaveBeenCalledOnce();
       expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
-      expect(deliver).toHaveBeenCalledTimes(bound ? 0 : 1);
-      if (bound && !uncertain) expect(await receiver.whatsappDeliveryConversation("sent-a")).toBe("conversation-a");
+      expect(deliver).toHaveBeenCalledTimes(bound || uncertain ? 0 : 1);
+      if (bound && !uncertain) expect(await receiver.whatsappDeliveryConversation("sent-a")).toBe("00000000-0000-4000-8000-000000000001");
     } finally { receiver.close(); }
   });
 
@@ -374,12 +375,12 @@ describe("WhatsApp native receive/reply", () => {
           tools.set(tool.name, tool);
         } }, f.runtime);
         const send = tools.get("inkbox_send_whatsapp");
-        const payload = { text: "Saved answer", mediaIds: ["owned-media"], idempotencyKey: "original-logical-key" };
+        const payload = { text: "Saved answer", mediaIds: ["00000000-0000-4000-8000-000000000009"], idempotencyKey: "original-logical-key" };
         const first = await send.execute("first-call", payload);
         expect(first.isError).toBe(true);
         const saved = Object.values((await readJournal()).jobs)[0] as any;
         expect(saved.toolSends["first-call"]).toMatchObject({
-          whatsappKey: "original-logical-key", whatsappMediaIds: ["owned-media"], text: "Saved answer",
+          whatsappKey: "original-logical-key", whatsappMediaIds: ["00000000-0000-4000-8000-000000000009"], text: "Saved answer",
         });
         expect(saved.toolSends["first-call"].whatsappRejection?.error).toBe(rejected ? "whatsapp_daily_limit_exceeded" : undefined);
         expect(first.details?.requestAccepted).toBe(rejected ? false : undefined);
@@ -387,9 +388,9 @@ describe("WhatsApp native receive/reply", () => {
           expect(first.details).toEqual({ error: "whatsapp_daily_limit_exceeded", status_code: 429,
             quota: "whatsapp.texts_per_agent_identity_per_24h", limit: 50, used: 50,
             retry_condition: "window_reset", reset_at: "2026-10-27T00:00:00Z", retry_after_seconds: 60,
-            idempotencyKey: "original-logical-key", requestAccepted: false, mediaIds: ["owned-media"] });
+            idempotencyKey: "original-logical-key", requestAccepted: false, mediaIds: ["00000000-0000-4000-8000-000000000009"] });
           expect(JSON.stringify(first)).not.toContain("private-provider-note");
-          for (const changed of [{ ...payload, idempotencyKey: "new-key" }, { ...payload, text: "Changed answer" }, { ...payload, mediaIds: ["replacement-media"] }]) {
+          for (const changed of [{ ...payload, idempotencyKey: "new-key" }, { ...payload, text: "Changed answer" }, { ...payload, mediaIds: ["00000000-0000-4000-8000-000000000010"] }]) {
             const blocked = await send.execute("changed-intent", changed);
             expect(blocked.isError).toBe(true);
             expect(blocked.details.idempotencyKey).toBe("original-logical-key");
@@ -419,7 +420,7 @@ describe("WhatsApp native receive/reply", () => {
     const receiver = createCompanionReceiver(options);
     const incoming = event();
     incoming._openclawWhatsApp = true;
-    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "conversation-a", conversation_id: "conversation-a" };
+    incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "00000000-0000-4000-8000-000000000001", conversation_id: "00000000-0000-4000-8000-000000000001" };
     incoming.data.message._ordinaryAddressed = true;
     try {
       await receiver.accept(incoming);
@@ -429,7 +430,7 @@ describe("WhatsApp native receive/reply", () => {
       expect(deliver).not.toHaveBeenCalled();
       if (rejected && retry) {
         expect(Object.keys((await readJournal()).jobs)).toHaveLength(0);
-        expect(await receiver.whatsappDeliveryConversation("sent-a")).toBe("conversation-a");
+        expect(await receiver.whatsappDeliveryConversation("sent-a")).toBe("00000000-0000-4000-8000-000000000001");
       } else {
         const saved = Object.values((await readJournal()).jobs)[0] as any;
         expect(saved.state).toBe("paused");
@@ -490,8 +491,8 @@ describe("WhatsApp v2 native group admission", () => {
     expect(JSON.stringify(built)).toContain("group");
     expect(JSON.stringify(built)).toContain("parent-a");
     expect(JSON.stringify(built)).toContain("thread-a");
-    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "conversation-a" });
-    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toHaveProperty("replyToMessageId", "message-a");
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "00000000-0000-4000-8000-000000000001" });
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).toHaveProperty("replyToMessageId", "00000000-0000-4000-8000-000000000005");
   });
   it("preserves group mention admission rather than waking for every peer message", async () => {
     const f = fixture(), b = createInkboxSessionBridge({ cfg: {}, account: { accountId: "default", identity: "example", config: { identity: "example", groupReplyMode: "mention" } }, runtime: f.runtime, channelRuntime: f.core } as any);
@@ -505,7 +506,7 @@ describe("WhatsApp v2 native group admission", () => {
   it("admits peer reaction transitions into the original group once, without treating the target as a new command", async () => {
     const f = fixture(), b = f.bridge(), e = event();
     e.event_type = "whatsapp.reaction_received"; e.data.message.is_group = true; e.data.message.direction = "outbound"; e.data.message.participants = ["+15555550123", "+15555550124"]; e.data.message.sender_access = "direct";
-    e.data.reaction = { id: "reaction-a", target_message_id: e.data.message.id, conversation_id: "conversation-a", agent_identity_id: f.identity.id, direction: "inbound", remote_number: "+15555550123", emoji: "👀", status: "applied", revision: 1 };
+    e.data.reaction = { id: "reaction-a", target_message_id: e.data.message.id, conversation_id: "00000000-0000-4000-8000-000000000001", agent_identity_id: f.identity.id, direction: "inbound", remote_number: "+15555550123", emoji: "👀", status: "applied", revision: 1 };
     await dispatchInbound(e, b.handlers); await settle(b); await dispatchInbound(e, b.handlers); await settle(b);
     expect(f.dispatchReply).toHaveBeenCalledOnce();
     expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0])).toContain("context, not a new instruction");
@@ -537,14 +538,14 @@ it("keeps a recovered uncertain explicit quote fenced against reformatted plain 
   f.dispatchReply.mockImplementation(async (input: any) => {
     const tools = new Map<string, any>();
     registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
-    await tools.get("inkbox_send_whatsapp").execute("quoted-attempt", { conversationId: "conversation-a", replyToMessageId: "original-parent", text: "Answer\n", idempotencyKey: "original-quote-key" });
+    await tools.get("inkbox_send_whatsapp").execute("quoted-attempt", { conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000008", text: "Answer\n", idempotencyKey: "original-quote-key" });
     await input.delivery.deliver({ text: "Answer" }, { kind: "final" }); return { dispatched: true };
   });
   const first = f.bridge(); await dispatchInbound(event(), first.handlers); await settle(first);
   const next = f.bridge(); await settle(next);
   expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(lookup).toHaveBeenCalled();
   expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
-  expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ replyToMessageId: "original-parent", text: "Answer\n", idempotencyKey: "original-quote-key" });
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ replyToMessageId: "00000000-0000-4000-8000-000000000008", text: "Answer\n", idempotencyKey: "original-quote-key" });
 });
 
 
@@ -586,16 +587,16 @@ it("replays a legacy saved plain reply with its exact original hash after restar
   const path = join(state.dir, filename), journal = JSON.parse(await readFile(path, "utf8"));
   const id = Object.keys(journal.jobs)[0]!, job = journal.jobs[id];
   job.state = "reply_pending"; job.nativeComplete = true; job.sendUnconfirmed = false;
-  job.replies = ["Legacy answer"]; job.reply = { channel: "whatsapp", identityId: f.identity.id, conversationId: "conversation-a" };
+  job.replies = ["Legacy answer"]; job.reply = { channel: "whatsapp", identityId: f.identity.id, conversationId: "00000000-0000-4000-8000-000000000001" };
   delete job.retryAt;
   await writeFile(path, JSON.stringify(journal));
   beforeSend.mockResolvedValue({ enabled: true, status: "ready" });
   const restarted = f.bridge(); await settle(restarted);
   const key = `openclaw:whatsapp:${createHash("sha256").update(JSON.stringify([
-    f.identity.id, id, "conversation-a", "Legacy answer",
+    f.identity.id, id, "00000000-0000-4000-8000-000000000001", "Legacy answer",
   ])).digest("hex")}`;
   expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
-  expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({ conversationId: "conversation-a",
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({ conversationId: "00000000-0000-4000-8000-000000000001",
     text: "Legacy answer", idempotencyKey: key });
   expect(f.dispatchReply).not.toHaveBeenCalled();
 });
@@ -618,7 +619,7 @@ it.each(["accepted", "uncertain", "rejected"])("inherits a tool quote and suppre
       const send = tools.get("inkbox_send_whatsapp");
       const result = await send.execute("first", { text: "Tool answer" });
       expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({
-        conversationId: "conversation-a", replyToMessageId: "message-a", text: "Tool answer" });
+        conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000005", text: "Tool answer" });
       if (outcome !== "accepted") {
         const originalKey = result.details.idempotencyKey;
         const replacement = await send.execute("replacement", { text: "Replacement", idempotencyKey: "new-key" });
@@ -639,4 +640,258 @@ it.each(["accepted", "uncertain", "rejected"])("inherits a tool quote and suppre
   expect(caught).toBeUndefined();
   expect(f.dispatchReply).toHaveBeenCalledOnce();
   expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(outcome === "rejected" ? 2 : 1);
+});
+
+it.each(["lost-response", "uncertain-response"])("fences a plain source send from a changed final after recovery (%s)", async (outcome) => {
+  const f = fixture(), lookup = vi.fn(async () => "accepted-plain");
+  let retry: any;
+  if (outcome === "lost-response") f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("response lost"));
+  else f.identity.sendWhatsApp.mockResolvedValueOnce({ id: "accepted-plain", conversationId: "00000000-0000-4000-8000-000000000001", status: "uncertain" });
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup } });
+  f.dispatchReply.mockImplementation(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    await tools.get("inkbox_send_whatsapp").execute("plain-attempt", { conversationId: "00000000-0000-4000-8000-000000000001", text: "Answer\n", idempotencyKey: "original-plain-key" });
+    retry = await tools.get("inkbox_send_whatsapp").execute("new-attempt", { conversationId: "00000000-0000-4000-8000-000000000001", text: "Answer", idempotencyKey: "replacement-key" });
+    await input.delivery.deliver({ text: "Answer" }, { kind: "final" }); return { dispatched: true };
+  });
+  const first = f.bridge(); await dispatchInbound(event(), first.handlers); await settle(first);
+  const next = f.bridge(); await settle(next); await settle(f.bridge());
+  expect(f.dispatchReply).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).toEqual({ conversationId: "00000000-0000-4000-8000-000000000001", text: "Answer\n", idempotencyKey: "original-plain-key" });
+  expect(retry.isError).toBe(true);
+  expect(retry.details).toMatchObject({ sendAttempted: false, idempotencyKey: "original-plain-key" });
+  if (outcome === "lost-response") expect(lookup).toHaveBeenCalled();
+});
+
+it("allows explicit permitted iMessage outreach in a WhatsApp turn with iMessage threading disabled", async () => {
+  const f = fixture();
+  f.identity.sendIMessage = vi.fn(async () => ({ id: "imessage-send", status: "sent" }));
+  f.dispatchReply.mockImplementation(async (input: any) => {
+    let tool: any;
+    registerSendIMessage({ registerTool(def: any) { tool = def({ sessionKey: input.routeSessionKey }); } }, f.runtime, ["+15555550124"], () => false);
+    expect((await tool.execute("outreach", { to: "+15555550124", text: "Requested outreach" })).isError).not.toBe(true);
+    expect((await tool.execute("blocked", { to: "+15555550125", text: "Blocked outreach" })).isError).toBe(true);
+    expect((await tool.execute("implicit", { text: "No destination" })).isError).toBe(true);
+    await input.delivery.deliver({ text: "WhatsApp answer" }, { kind: "final" }); return { dispatched: true };
+  });
+  const b = f.bridge(); await dispatchInbound(event(), b.handlers); await settle(b);
+  expect(f.identity.sendIMessage).toHaveBeenCalledOnce();
+  expect(f.identity.sendIMessage).toHaveBeenCalledWith({ to: "+15555550124", text: "Requested outreach" });
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+});
+
+it.each(["automatic", "tool", "lookup"])("retains authenticated early lifecycle context exactly once after %s ownership", async (mode) => {
+  const f = fixture(), b = f.bridge();
+  let release!: () => void, entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const lookup = vi.fn(async () => undefined as string | undefined);
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup } });
+  f.identity.sendWhatsApp.mockImplementationOnce(async () => {
+    entered(); await held;
+    if (mode === "lookup") throw new TypeError("response lost");
+    return { id: "early-send", conversationId: "00000000-0000-4000-8000-000000000001", status: "queued" };
+  });
+  if (mode !== "automatic") f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    await tools.get("inkbox_send_whatsapp").execute("held-send", { text: "Answer", idempotencyKey: "held-key" });
+    await input.delivery.deliver({ text: "Answer" }, { kind: "final" }); return { dispatched: true };
+  });
+  await dispatchInbound(event(), b.handlers); await started;
+  const receipt = event(undefined, "early-event", "untrusted-conversation");
+  receipt.event_type = "whatsapp.delivery_failed"; receipt.data.message.id = "early-send"; receipt.data.message.status = "failed";
+  async function signed(e: any, valid = true) {
+    const body = JSON.stringify(e), timestamp = String(Math.floor(Date.now() / 1000)), requestId = "early-request";
+    return handleInkboxWebhook(body, { "x-inkbox-request-id": requestId, "x-inkbox-timestamp": timestamp,
+      "x-inkbox-signature": valid ? "sha256=" + createHmac("sha256", "synthetic-key").update(`${requestId}.${timestamp}.${body}`).digest("hex") : "invalid" },
+      { signingKey: "synthetic-key", handlers: b.handlers });
+  }
+  try {
+    expect((await signed(receipt, false)).status).toBe(403);
+    const beforeFile = (await readdir(state.dir)).find((name) => name.startsWith("companion-") && name.endsWith(".json"))!;
+    expect(JSON.parse(await readFile(join(state.dir, beforeFile), "utf8")).whatsappObservations).toBeUndefined();
+    const foreign = structuredClone(receipt); foreign.data.message.agent_identity_id = "another-identity";
+    await expect(dispatchInbound(foreign, b.handlers)).rejects.toThrow("identity mismatch");
+    expect((await signed(receipt)).status).toBe(200);
+    expect((await signed(receipt)).status).toBe(200);
+    const journalFile = (await readdir(state.dir)).find((name) => name.startsWith("companion-") && name.endsWith(".json"))!;
+    const journal = JSON.parse(await readFile(join(state.dir, journalFile), "utf8"));
+    expect(Object.values(journal.whatsappObservations ?? {})).toEqual([expect.objectContaining({ messageId: "early-send", identityId: f.identity.id })]);
+    expect(Object.values(journal.whatsappObservations)[0]).not.toHaveProperty("conversationId");
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  } finally { release(); await settle(b); }
+  lookup.mockResolvedValue("early-send");
+  const recovered = f.bridge(); await settle(recovered);
+  expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  const wrong = event(undefined, "other-turn", "untrusted-conversation"); wrong.data.message.id = "other-message";
+  await dispatchInbound(wrong, recovered.handlers); await settle(recovered);
+  expect(JSON.stringify(f.core.inbound.buildContext.mock.calls.at(-1)[0])).not.toContain("whatsapp.delivery_failed");
+  const next = event(undefined, "next-turn"); next.data.message.id = "next-message";
+  await dispatchInbound(next, recovered.handlers); await settle(recovered);
+  expect(f.core.inbound.buildContext.mock.calls.at(-1)[0].message.bodyForAgent.match(/whatsapp.delivery_failed/g)).toHaveLength(1);
+  await signed(receipt);
+  const later = event(undefined, "later-turn"); later.data.message.id = "later-message";
+  const restarted = f.bridge(); await dispatchInbound(later, restarted.handlers); await settle(restarted);
+  expect(JSON.stringify(f.core.inbound.buildContext.mock.calls.at(-1)[0])).not.toContain("whatsapp.delivery_failed");
+});
+
+it("keeps legacy plain receipts without certainty evidence fenced on restart", async () => {
+  const f = fixture(), deliver = vi.fn(async () => "must-not-send");
+  const submit = vi.fn(async (input: any) => {
+    await input.validateBeforeDispatch();
+    await input.beforeToolSend("legacy-call", { idempotencyKey: "legacy-key", text: "Answer\n" });
+    return ["Answer"];
+  });
+  const options: any = { accountId: "default", config: { identity: "example" }, runtime: f.runtime, submit, deliver };
+  const first = createCompanionReceiver(options), incoming = event();
+  incoming._openclawWhatsApp = true;
+  incoming.companion = { channel: "whatsapp", phase: "ordinary", sequence: 1, scope_id: "00000000-0000-4000-8000-000000000001", conversation_id: "00000000-0000-4000-8000-000000000001" };
+  incoming.data.message._ordinaryAddressed = true;
+  await first.accept(incoming); await first.idle(); first.close();
+  const path = join(state.dir, (await readdir(state.dir)).find((name) => name.startsWith("companion-") && name.endsWith(".json"))!);
+  const journal = JSON.parse(await readFile(path, "utf8")), job: any = Object.values(journal.jobs)[0];
+  delete job.toolSends["legacy-call"].whatsappUncertain;
+  job.toolSends["legacy-call"].messageId = "legacy-accepted";
+  job.outboundIds = ["legacy-accepted"]; job.state = "reply_pending";
+  await writeFile(path, JSON.stringify(journal));
+  const recovered = createCompanionReceiver(options); await recovered.recover(); await recovered.idle(); recovered.close();
+  expect(submit).toHaveBeenCalledOnce(); expect(deliver).not.toHaveBeenCalled();
+  expect(await recovered.whatsappDeliveryConversation("legacy-accepted")).toBe("00000000-0000-4000-8000-000000000001");
+});
+
+it.each(["pending", "access_required", "read-error"])("retains readiness %s across repeated polls and restart, then dispatches once", async (status) => {
+  const f = fixture();
+  if (status === "read-error") f.identity.getWhatsAppStatus.mockRejectedValue(new InkboxAPIError(403, "Unavailable"));
+  else f.identity.getWhatsAppStatus.mockResolvedValue({ enabled: status === "pending", status });
+  let now = Date.now();
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+  let bridge = f.bridge();
+  try {
+    const incoming = event();
+    await dispatchInbound(incoming, bridge.handlers); await settle(bridge);
+    for (let poll = 0; poll < 7; poll++) {
+      const filename = (await readdir(state.dir)).find(name => name.startsWith("companion-") && name.endsWith(".json"))!;
+      const journal = JSON.parse(await readFile(join(state.dir, filename), "utf8"));
+      const job: any = Object.values(journal.jobs)[0];
+      expect(job.state).toBe("pending");
+      expect(job.nativeComplete).not.toBe(true);
+      expect(job.uncertaintyRecorded).not.toBe(true);
+      expect(JSON.stringify(journal.context ?? {})).not.toContain("uncertain");
+      expect(f.dispatchReply).not.toHaveBeenCalled();
+      expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+      await bridge.shutdownA2A(); now += 31_000; bridge = f.bridge(); await settle(bridge);
+    }
+    f.identity.getWhatsAppStatus.mockResolvedValue({ enabled: true, status: "ready" });
+    await bridge.shutdownA2A(); now += 31_000; bridge = f.bridge();
+    await settle(bridge); await dispatchInbound(incoming, bridge.handlers); await settle(bridge);
+    await bridge.shutdownA2A(); bridge = f.bridge(); await settle(bridge);
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    expect(f.identity.sendWhatsApp.mock.calls[0][0].replyToMessageId).toBe(incoming.data.message.id);
+    expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0])).not.toContain("Prior turn outcome is uncertain");
+  } finally { await bridge.shutdownA2A(); clock.mockRestore(); }
+});
+
+it("preflight bad UUID has zero send effect and cannot wedge the ordinary quoted final", async () => {
+  const f = fixture(), bridge = f.bridge();
+  let result: any, saved: any;
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    result = await tools.get("inkbox_send_whatsapp").execute("bad-quote", { text: "Bad tool attempt", replyToMessageId: "not-a-uuid" });
+    const filename = (await readdir(state.dir)).find(name => name.startsWith("companion-") && name.endsWith(".json"))!;
+    saved = Object.values(JSON.parse(await readFile(join(state.dir, filename), "utf8")).jobs)[0];
+    await input.delivery.deliver({ text: "Ordinary final" }, { kind: "final" }); return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(result.isError).toBe(true); expect(saved.toolSends ?? {}).toEqual({});
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ text: "Ordinary final", replyToMessageId: event().data.message.id });
+});
+
+it.each([
+  { to: "+15555550125" },
+  { to: ["+1 (555) 555-0125", "+15555550124"], groupName: "Team" },
+  { conversationId: "00000000-0000-4000-8000-000000000002" },
+])("fences uncertain other-destination sends on the owning turn: %j", async (destination) => {
+  const f = fixture(), bridge = f.bridge();
+  f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("response lost"));
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup: async () => undefined } });
+  let first: any, second: any;
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    const send = tools.get("inkbox_send_whatsapp");
+    first = await send.execute("outreach-attempt", { ...destination, text: "Hello" });
+    second = await send.execute("replacement-attempt", { ...destination, text: "Hello", idempotencyKey: "replacement-key" });
+    await input.delivery.deliver({ text: "Hello again" }, { kind: "final" }); return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(first.isError).toBe(true);
+  expect(second.details).toMatchObject({ sendAttempted: false, idempotencyKey: first.details.idempotencyKey });
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  await bridge.shutdownA2A(); const restarted = f.bridge(); await settle(restarted);
+  expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+});
+
+it("uses distinct logical keys for intentional identical replies to the same quote", async () => {
+  const f = fixture(), bridge = f.bridge();
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    const send = tools.get("inkbox_send_whatsapp");
+    await send.execute("intentional-first", { text: "Same reply" });
+    await send.execute("intentional-second", { text: "Same reply" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
+  const [first, second] = f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request);
+  expect(first.replyToMessageId).toBe(event().data.message.id); expect(second.replyToMessageId).toBe(first.replyToMessageId);
+  expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+});
+
+it("keeps normalized rejected group retries on the original key and destination", async () => {
+  const f = fixture(), bridge = f.bridge();
+  f.identity.sendWhatsApp.mockRejectedValueOnce(new InkboxAPIError(429, { error: "whatsapp_new_group_limit", retry_condition: "window_reset" }));
+  f.identity.sendWhatsApp.mockResolvedValue({ id: "outreach-message", conversationId: "00000000-0000-4000-8000-000000000002", status: "queued" });
+  let first: any, retry: any;
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    const send = tools.get("inkbox_send_whatsapp");
+    first = await send.execute("group-attempt", { to: ["+1 (555) 555-0125", "+15555550124"], groupName: "Team", text: "Hello" });
+    retry = await send.execute("group-attempt", { to: ["+15555550124", "+15555550125"], groupName: "Team", text: "Hello" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(first.details.requestAccepted).toBe(false); expect(retry.isError).not.toBe(true);
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
+  const [original, retried] = f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request);
+  expect(retried).toEqual(original);
+  // A lifecycle observation follows the outreach destination, not its owning turn.
+  const observation = event(undefined, "outreach-status", event().data.message.conversation_id);
+  observation.event_type = "whatsapp.delivered"; observation.data.message.id = "outreach-message";
+  await dispatchInbound(observation, bridge.handlers); await settle(bridge);
+  const next = event(undefined, "outreach-inbound", "00000000-0000-4000-8000-000000000002");
+  next.data.message.id = "00000000-0000-4000-8000-000000000011";
+  await dispatchInbound(next, bridge.handlers); await settle(bridge);
+  expect(JSON.stringify(f.core.inbound.buildContext.mock.calls.at(-1)[0])).toContain("whatsapp.delivered");
+});
+
+it("keeps reaction dedup identities out of addressable message context", async () => {
+  const f = fixture(), bridge = f.bridge(), incoming = event();
+  incoming.event_type = "whatsapp.reaction_received"; incoming.data.message.direction = "outbound";
+  incoming.data.reaction = { id: "00000000-0000-4000-8000-000000000012", target_message_id: incoming.data.message.id,
+    conversation_id: incoming.data.message.conversation_id, agent_identity_id: f.identity.id, direction: "inbound",
+    remote_number: "+15555550123", emoji: "👀", status: "applied", revision: 1 };
+  await dispatchInbound(incoming, bridge.handlers); await settle(bridge);
+  const body = f.core.inbound.buildContext.mock.calls[0][0].message.bodyForAgent;
+  expect(body).toContain(`"id":"${incoming.data.message.id}"`);
+  expect(body).not.toContain(`reaction:${incoming.data.reaction.id}`);
+  const duplicate = structuredClone(incoming); duplicate.id = "redelivery-new-event";
+  await dispatchInbound(duplicate, bridge.handlers); await settle(bridge);
+  expect(f.dispatchReply).toHaveBeenCalledOnce();
 });

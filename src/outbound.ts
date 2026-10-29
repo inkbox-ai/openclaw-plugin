@@ -1,4 +1,4 @@
-import { assertWhatsAppText, whatsappReady, whatsappSendKey } from "./whatsapp.js";
+import { assertWhatsAppSendKey, assertWhatsAppText, whatsappReady } from "./whatsapp.js";
 import { slackMrkdwn } from "./slack-style.js";
 import { createHash, randomUUID } from "node:crypto";
 import { ownSlackConnection, slackText } from "./slack.js";
@@ -30,6 +30,7 @@ export interface InkboxChannelSendParams {
   to: string;
   text: string;
   subject?: string | null;
+  idempotencyKey?: string;
   threadId?: string | number | null;
   replyToId?: string | number | null;
 }
@@ -267,13 +268,20 @@ export async function sendInkboxChannelText(
   }
   if (target.mode === "whatsapp" || target.mode === "whatsapp-conversation") {
     assertWhatsAppText(params.text);
+    const replyToMessageId = params.replyToId == null ? undefined : String(params.replyToId);
+    if (replyToMessageId !== undefined && (!looksLikeConversationId(replyToMessageId) || target.mode !== "whatsapp-conversation"))
+      throw new Error("WhatsApp quoted replies require a conversation target and a message UUID.");
+    if (typeof params.idempotencyKey !== "string" || !params.idempotencyKey.trim())
+      throw new Error("WhatsApp requires a stable logical-send key. Use inkbox_send_whatsapp with idempotencyKey; generic host sends do not supply an attempt ID.");
+    assertWhatsAppSendKey(params.idempotencyKey);
     const identity = await createInkboxRuntime(account.config).getIdentity();
     let recipients = [target.value];
     if (target.mode === "whatsapp-conversation") { const conversation = await identity.getWhatsAppConversation(target.value); if (conversation.agentIdentityId !== identity.id || !conversation.participants.length || (conversation.unresolvedParticipantCount ?? 0) > 0) throw new Error("An owned resolved WhatsApp conversation is required."); recipients = conversation.participants; }
     for (const recipient of recipients) { const blocked = checkOutboundRecipient(recipient, account.config.allowedRecipients); if (blocked) throw new Error(blocked); }
     await whatsappReady(identity);
     const message = await identity.sendWhatsApp({ ...(target.mode === "whatsapp" ? { to: target.value } : { conversationId: target.value }), text: params.text,
-      idempotencyKey: whatsappSendKey([identity.id, target.value, params.replyToId ?? randomUUID(), params.text]) });
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+      idempotencyKey: params.idempotencyKey });
     return { messageId: message.id };
   }
   if (target.mode === "imessage" || target.mode === "imessage-conversation") {

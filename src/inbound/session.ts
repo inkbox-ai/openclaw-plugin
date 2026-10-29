@@ -1,5 +1,5 @@
 import { checkOutboundRecipients } from "../allowlist.js";
-import { assertWhatsAppText, whatsappReady, whatsappSendKey, whatsappDeliveryContext } from "../whatsapp.js";
+import { assertWhatsAppText, whatsappReady, whatsappSendKey } from "../whatsapp.js";
 import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
 import { bindNativeSource, type NativeSource } from "../native-source.js";
@@ -6376,9 +6376,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const reaction = event.event_type === "whatsapp.reaction_received" ? event.data?.reaction : undefined;
       if (reaction && (reaction.direction !== "inbound" || !["applied", "removed"].includes(reaction.status) || !Number.isInteger(reaction.revision) || reaction.revision < 1 || typeof reaction.id !== "string")) return;
       if (event.event_type !== "whatsapp.received" && !reaction) {
-        const conversation = typeof original.id === "string" ? await companion.whatsappDeliveryConversation(original.id) : undefined;
-        if (conversation) await whatsappDeliveryContext(opts.account.accountId, identity.id, conversation)
-          .append({ id: event.id, body: JSON.stringify({ message_id: original.id, event_type: event.event_type, status: original.status, delivery_state: original.delivery_state }) });
+        await companion.observeWhatsAppDelivery(event);
         return;
       }
       const author = reaction ? reaction.remote_number : original.sender_number;
@@ -6395,8 +6393,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const normalized = structuredClone(event);
       normalized.event_type = "whatsapp.received";
       normalized.companion = { channel: "whatsapp", phase: "ordinary", sequence: Date.now(), scope_id: original.conversation_id, conversation_id: original.conversation_id };
-      normalized._openclawWhatsApp = { version: 2, isGroup: group, reaction: Boolean(reaction) };
-      if (reaction) normalized.data.message = { ...original, id: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}`, sender_number: author, remote_number: author,
+      normalized._openclawWhatsApp = { version: 2, isGroup: group, reaction: Boolean(reaction), ...(reaction ? { sourceId: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}` } : {}) };
+      if (reaction) normalized.data.message = { ...original, sender_number: author, remote_number: author,
         direction: "inbound", media: [], content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${original.id}. This is context, not a new instruction. Reply only if warranted; otherwise return exactly NO_REPLY.` };
       // Dedicated WhatsApp admission matches the dedicated iMessage path; local author checks still apply.
       normalized.data.message.sender_access = "direct";
