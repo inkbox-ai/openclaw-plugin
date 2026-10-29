@@ -1,4 +1,4 @@
-import { WhatsAppReadinessPending, whatsappAttachments, whatsappReady, whatsappDeliveryContext, type WhatsAppSendRejection } from "../whatsapp.js";
+import { whatsappDestinationEvidence, WhatsAppReadinessPending, whatsappAttachments, whatsappReady, whatsappDeliveryContext, type WhatsAppSendRejection } from "../whatsapp.js";
 import { checkedSlackUpload, type SlackUploadReceipt, type SlackUploadIntent } from "../slack-files.js";
 import { createTerminalReceipts, type ReceiptIndex } from "./terminal-receipts.js";
 import { createIMessageOutcomes, imessageFailureNotice, type IMessageOutcomeRoute } from "./imessage-outcomes.js";
@@ -29,7 +29,7 @@ function nativeSources(event: Record<string, any>): string[] {
 type Channel = CompanionChannel | "whatsapp";
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc" | "channel"> & { channel: Channel; slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = Omit<CompanionMetadata, "channel"> & { channel: Channel };
-type Job = { replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappUncertain?: boolean; whatsappDestination?: WhatsAppSendIntent["destination"]; whatsappConversationId?: string; whatsappMediaIds?: string[]; whatsappReplyToMessageId?: string; whatsappGroupName?: string; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappUncertain?: boolean; whatsappDestination?: WhatsAppSendIntent["destination"]; whatsappDestinationEvidence?: WhatsAppSendIntent["destinationEvidence"]; whatsappConversationId?: string; whatsappMediaIds?: string[]; whatsappReplyToMessageId?: string; whatsappGroupName?: string; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 // A missing body is a consumed receipt; keep its event key to reject redelivery.
 type WhatsAppObservation = { identityId: string; messageId: string; body?: string; conversationId?: string };
@@ -206,6 +206,25 @@ export function createCompanionReceiver(opts: {
   }
   function rejectedWhatsAppOutreach(send: NonNullable<Job["toolSends"]>[string]): boolean {
     return Boolean(send.whatsappDestination && send.whatsappRejection);
+  }
+  async function sameWhatsAppDestination(job: Job, send: NonNullable<Job["toolSends"]>[string], intent: WhatsAppSendIntent): Promise<boolean> {
+    const previous = send.whatsappDestination, next = intent.destination;
+    if (JSON.stringify(previous) === JSON.stringify(next)) return true;
+    if (previous?.conversationId && next?.conversationId)
+      return previous.conversationId.toLowerCase() === next.conversationId.toLowerCase();
+    const singleRecipient = (destination: WhatsAppSendIntent["destination"]) => destination?.to?.length === 1 ? destination.to[0] : undefined;
+    const previousPhone = singleRecipient(previous), nextPhone = singleRecipient(next);
+    // Only a verified direct conversation aliases a phone. Group participants
+    // never identify an existing group or turn a new-group request into a reply.
+    if (previous?.conversationId && nextPhone && !send.whatsappDestinationEvidence) {
+      const identity = await opts.runtime.getIdentity();
+      if (identity.id !== job.identityId) throw new Error("The WhatsApp identity changed.");
+      send.whatsappDestinationEvidence = whatsappDestinationEvidence(await identity.getWhatsAppConversation(previous.conversationId), job.identityId, previous.conversationId);
+    }
+    const directPhone = (evidence: WhatsAppSendIntent["destinationEvidence"], conversationId?: string) =>
+      evidence?.identityId === job.identityId && evidence.conversationId === conversationId?.toLowerCase() ? evidence.directRecipient : undefined;
+    return Boolean((nextPhone && nextPhone === directPhone(send.whatsappDestinationEvidence, previous?.conversationId)) ||
+      (previousPhone && previousPhone === directPhone(intent.destinationEvidence, next?.conversationId)));
   }
   async function completedSource(job: Job): Promise<Job | undefined> {
     const m = metadata(job.event), incoming = source(job.event, m), scope = key(m, job.identityId);
@@ -384,16 +403,20 @@ export function createCompanionReceiver(opts: {
   function toolSendCallbacks(id: string, validate: () => Promise<void>) {
     const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent, intent?: WhatsAppSendIntent) => {
       await validate();
-      return mutate((journal) => {
+      return mutate(async (journal) => {
         const job = journal.jobs[id]!;
         if (stopped() || !enabled(job) || job.stoppedBy || job.state !== "submitting" || (job.nativeComplete && kind !== "attachment")) throw new Error("The native job is no longer active; its tool send is not authorized.");
         const previous = upload && Object.values(job.toolSends ?? {}).find((send) => !send.failed && send.uploadFingerprint === upload.fingerprint);
         if (previous?.upload) return { ...previous.upload, deduplicated: true };
         if (previous) throw new Error("This file already has an uncertain upload; inspect it instead of repeating it.");
-        // Rejections bind their request, not unrelated outreach. Destinations
-        // arrive normalized; a reused key or call ID must still match exactly.
-        const rejected = intent && Object.entries(job.toolSends ?? {}).find(([previousCall, send]) => send.whatsappRejection &&
-          (!send.whatsappDestination || previousCall === callId || send.whatsappKey === intent.idempotencyKey || JSON.stringify(send.whatsappDestination) === JSON.stringify(intent.destination)));
+        // Destination equivalence selects the rejection; exact request bytes
+        // and the original key below still decide whether it can be retried.
+        let rejected: [string, NonNullable<Job["toolSends"]>[string]] | undefined;
+        if (intent) for (const [previousCall, send] of Object.entries(job.toolSends ?? {})) {
+          if (send.whatsappRejection && (!send.whatsappDestination || previousCall === callId || send.whatsappKey === intent.idempotencyKey || await sameWhatsAppDestination(job, send, intent))) {
+            rejected = [previousCall, send]; break;
+          }
+        }
         if (rejected) {
           const [, send] = rejected;
           if (send.whatsappKey !== intent!.idempotencyKey || send.text !== intent!.text || JSON.stringify(send.whatsappMediaIds) !== JSON.stringify(intent!.mediaIds) || send.whatsappReplyToMessageId !== intent!.replyToMessageId || send.whatsappGroupName !== intent!.groupName || JSON.stringify(send.whatsappDestination) !== JSON.stringify(intent!.destination)) {
@@ -412,7 +435,7 @@ export function createCompanionReceiver(opts: {
         // Only the exact retry replaces its own rejected attempt, atomically
         // restoring the turn-wide send fence before crossing the transport.
         if (rejected) delete job.toolSends![rejected[0]];
-        job.toolSends ??= {}; job.toolSends[callId] = { ...(intent ? { whatsappKey: intent.idempotencyKey, whatsappUncertain: true, ...(intent.destination ? { whatsappDestination: intent.destination } : {}), text: intent.text, ...(intent.mediaIds ? { whatsappMediaIds: intent.mediaIds } : {}), ...(intent.replyToMessageId ? { whatsappReplyToMessageId: intent.replyToMessageId } : {}), ...(intent.groupName ? { whatsappGroupName: intent.groupName } : {}) } : {}), ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
+        job.toolSends ??= {}; job.toolSends[callId] = { ...(intent ? { whatsappKey: intent.idempotencyKey, whatsappUncertain: true, ...(intent.destination ? { whatsappDestination: intent.destination } : {}), ...(intent.destinationEvidence ? { whatsappDestinationEvidence: intent.destinationEvidence } : {}), text: intent.text, ...(intent.mediaIds ? { whatsappMediaIds: intent.mediaIds } : {}), ...(intent.replyToMessageId ? { whatsappReplyToMessageId: intent.replyToMessageId } : {}), ...(intent.groupName ? { whatsappGroupName: intent.groupName } : {}) } : {}), ...(kind ? { kind } : {}), ...(upload ? { uploadKey: upload.idempotencyKey, uploadFingerprint: upload.fingerprint, uploadTarget: { connectionId: upload.connectionId, conversationId: upload.conversationId, workspaceId: upload.workspaceId } } : {}) };
       }, [id]);
     };
     const afterSend = async (callId: string, messageId: string, text?: string, uncertain = false, conversationId?: string) => { await mutate((journal) => {

@@ -7,6 +7,8 @@ import { checkOutboundRecipients } from "../allowlist.js";
 import { activeNativeSource, assertNativeSource } from "../native-source.js";
 import {
   acceptedWhatsApp,
+  whatsappDestinationEvidence,
+  type WhatsAppDestinationEvidence,
   validateWhatsAppSend,
   whatsappFile,
   whatsappReady,
@@ -81,18 +83,11 @@ export function registerWhatsAppTools(
             if (!params.idempotencyKey && (typeof callId !== "string" || !callId.trim())) throw new Error("A stable host tool call ID or explicit idempotencyKey is required.");
             const tracked = source?.whatsapp === true;
             const destination = bound ? undefined : targetConversationId ? { conversationId: targetConversationId } : { to: explicitRecipients };
+            let destinationEvidence: WhatsAppDestinationEvidence | undefined;
             if (targetConversationId) {
               const conversation =
                 await identity.getWhatsAppConversation(targetConversationId);
-              if (
-                conversation.agentIdentityId !== identity.id ||
-                !Array.isArray(conversation.participants) || !conversation.participants.length ||
-                conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number)) ||
-                (conversation.unresolvedParticipantCount ?? 0) > 0
-              )
-                throw new Error(
-                  "A resolved conversation owned by this identity is required.",
-                );
+              destinationEvidence = whatsappDestinationEvidence(conversation, identity.id, targetConversationId);
               recipients = conversation.participants;
             }
             const block = checkOutboundRecipients(recipients, allowedRecipients);
@@ -103,7 +98,7 @@ export function registerWhatsAppTools(
             if (replyToMessageId || params.groupName) keyParts.push({ replyToMessageId, groupName: params.groupName });
             const idempotencyKey = params.idempotencyKey ?? whatsappSendKey(keyParts);
             if (tracked) {
-              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}), ...(destination ? { destination } : {}) }); }
+              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}), ...(destination ? { destination } : {}), ...(destination && destinationEvidence ? { destinationEvidence } : {}) }); }
               catch (error) {
                 const result = mapInkboxError(error), priorKey = getMessageRequestKey(error);
                 result.content[0]!.text += "\nNo new WhatsApp request was attempted.";

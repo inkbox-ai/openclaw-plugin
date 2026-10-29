@@ -85,6 +85,22 @@ export function assertWhatsAppSendKey(value: unknown): asserts value is string {
 const whatsappUuid = (value: unknown): value is string =>
   typeof value === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
 
+export type WhatsAppDestinationEvidence = { identityId: string; conversationId: string; directRecipient?: string };
+
+/** Comparison metadata only; never substitute it for a saved request selector. */
+export function whatsappDestinationEvidence(conversation: { id?: string; agentIdentityId: string; isGroup: boolean; participants: string[]; unresolvedParticipantCount?: number }, identityId: string, conversationId: string): WhatsAppDestinationEvidence {
+  if (conversation.agentIdentityId !== identityId ||
+      (conversation.id !== undefined && conversation.id.toLowerCase() !== conversationId.toLowerCase()) ||
+      typeof conversation.isGroup !== "boolean" ||
+      !Array.isArray(conversation.participants) || !conversation.participants.length ||
+      (!conversation.isGroup && conversation.participants.length !== 1) ||
+      conversation.participants.some(number => !/^\+[1-9]\d{6,14}$/.test(number)) ||
+      (conversation.unresolvedParticipantCount ?? 0) > 0)
+    throw new Error("A resolved conversation owned by this identity is required.");
+  return { identityId, conversationId: conversationId.toLowerCase(),
+    ...(conversation.isGroup === false && conversation.participants.length === 1 ? { directRecipient: conversation.participants[0]! } : {}) };
+}
+
 /** Validate the complete local request before recording a durable send intent. */
 export function validateWhatsAppSend(params: { to?: unknown; conversationId?: unknown; replyToMessageId?: unknown; groupName?: unknown; text?: unknown; mediaIds?: unknown; idempotencyKey?: unknown }) {
   if ((params.to !== undefined) === (params.conversationId !== undefined)) throw new Error("Specify exactly one of to or conversationId.");

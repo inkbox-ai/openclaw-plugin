@@ -1200,3 +1200,96 @@ it("never replaces a rejected source quote with a new-key plain send or an autom
   await bridge.shutdownA2A(); const restarted = f.bridge(); await settle(restarted);
   expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce(); await restarted.shutdownA2A();
 });
+
+const aliasConversation = "abcdefab-0000-4000-8000-000000000002";
+const aliasQuote = "abcdefab-0000-4000-8000-000000000009";
+const destinationAliasCases = [
+  { name: "conversation to phone", original: { conversationId: aliasConversation, replyToMessageId: aliasQuote }, replacement: { to: "+15555550124" } },
+  { name: "phone to conversation", original: { to: "+15555550124" }, replacement: { conversationId: aliasConversation } },
+  { name: "UUID case", original: { conversationId: aliasConversation.toUpperCase(), replyToMessageId: aliasQuote }, replacement: { conversationId: aliasConversation } },
+];
+it.each(destinationAliasCases.flatMap(test => [false, true, "legacy"].map(restart => ({ ...test, restart }))))(
+  "retains destination identity for $name (restart=$restart)", async ({ original, replacement, restart }) => {
+    const f = fixture(); let bridge = f.bridge();
+    f.identity.getWhatsAppConversation.mockImplementation(async (id: string) => ({ id: id.toLowerCase(), agentIdentityId: f.identity.id, isGroup: false,
+      participants: [id.toLowerCase() === aliasConversation ? "+15555550124" : "+15555550123"], unresolvedParticipantCount: 0 }));
+    f.identity.sendWhatsApp.mockRejectedValueOnce(new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }));
+    const payload = { ...original, text: "Answer\n", mediaIds: [], idempotencyKey: "original-alias-key" };
+    let caught: unknown, saved: any;
+    const exercise = async (input: any, first: boolean) => {
+      const tools = new Map<string, any>();
+      registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+      const send = tools.get("inkbox_send_whatsapp");
+      if (first) {
+        expect((await send.execute("original-alias", payload)).details.requestAccepted).toBe(false);
+        saved = (await currentWhatsAppJob()).toolSends["original-alias"];
+      }
+      if (restart && first) return;
+      for (const changed of [
+        { ...replacement, text: payload.text, mediaIds: [], idempotencyKey: "replacement-alias-key" },
+        { ...replacement, text: "Changed", idempotencyKey: "another-alias-key" },
+        { ...replacement, text: payload.text, mediaIds: [], idempotencyKey: payload.idempotencyKey },
+      ]) {
+        const result = await send.execute("replacement-alias", changed);
+        expect(result.details).toMatchObject({ sendAttempted: false, idempotencyKey: payload.idempotencyKey });
+      }
+      expect((await currentWhatsAppJob()).toolSends["original-alias"]).toEqual(saved);
+      expect((await send.execute("independent-alias", { to: "+15555550125", text: payload.text })).isError).not.toBe(true);
+      expect((await send.execute("exact-alias", payload)).isError).not.toBe(true);
+      expect(f.identity.sendWhatsApp.mock.calls.at(-1)[0]).toEqual(f.identity.sendWhatsApp.mock.calls[0][0]);
+    };
+    f.dispatchReply.mockImplementationOnce(async (input: any) => { try { await exercise(input, true); } catch (error) { caught = error; } return { dispatched: true }; });
+    try {
+      await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+      expect(caught).toBeUndefined();
+      if (restart) {
+        await bridge.shutdownA2A(); bridge = f.bridge(); await settle(bridge);
+        expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce(); expect(f.dispatchReply).toHaveBeenCalledOnce();
+        await bridge.shutdownA2A();
+        // Model an explicitly resumed source turn using only its persisted intent.
+        const path = join(state.dir, (await readdir(state.dir)).find(name => name.startsWith("companion-") && name.endsWith(".json"))!);
+        const journal = JSON.parse(await readFile(path, "utf8")), job: any = Object.values(journal.jobs)[0];
+        job.state = "pending"; job.nativeComplete = false;
+        if (restart === "legacy") { delete job.toolSends["original-alias"].whatsappDestinationEvidence; delete saved.whatsappDestinationEvidence; }
+        await writeFile(path, JSON.stringify(journal));
+        f.dispatchReply.mockImplementationOnce(async (input: any) => { try { await exercise(input, false); } catch (error) { caught = error; } return { dispatched: true }; });
+        bridge = f.bridge(); await settle(bridge);
+        expect(f.dispatchReply).toHaveBeenCalledTimes(2); expect(caught).toBeUndefined();
+      }
+      expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(3);
+    } finally { await bridge.shutdownA2A(); }
+  },
+);
+
+it("keeps distinct groups with identical members and explicit new groups independent", async () => {
+  const f = fixture(), bridge = f.bridge();
+  const firstId = aliasConversation, secondId = "abcdefab-0000-4000-8000-000000000003";
+  const participants = ["+15555550124", "+15555550125"];
+  f.identity.getWhatsAppConversation.mockImplementation(async (id: string) => ({ id: id.toLowerCase(), agentIdentityId: f.identity.id,
+    isGroup: true, participants, unresolvedParticipantCount: 0 }));
+  f.identity.sendWhatsApp.mockRejectedValueOnce(new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }));
+  let caught: unknown;
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    try {
+      const tools = new Map<string, any>();
+      registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+      const send = tools.get("inkbox_send_whatsapp");
+      const original = { conversationId: firstId, replyToMessageId: aliasQuote, text: "Answer", idempotencyKey: "group-original" };
+      expect((await send.execute("group-first", original)).details.requestAccepted).toBe(false);
+      expect((await send.execute("group-case", { conversationId: firstId.toUpperCase(), text: "Answer", idempotencyKey: "group-case" })).details)
+        .toMatchObject({ sendAttempted: false, idempotencyKey: original.idempotencyKey });
+      expect((await send.execute("group-second", { conversationId: secondId, text: "Answer" })).isError).not.toBe(true);
+      expect((await send.execute("group-create", { to: participants, groupName: "Team", text: "Answer" })).isError).not.toBe(true);
+      expect((await send.execute("group-repeat", { to: participants, groupName: "Team", text: "Answer" })).isError).not.toBe(true);
+      expect((await send.execute("group-exact", original)).isError).not.toBe(true);
+    } catch (error) { caught = error; }
+    return { dispatched: true };
+  });
+  try {
+    await dispatchInbound(event(), bridge.handlers); await settle(bridge); expect(caught).toBeUndefined();
+    const requests = f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request);
+    expect(requests).toHaveLength(5); expect(requests[1].conversationId).toBe(secondId);
+    expect(requests[2]).toMatchObject({ to: participants, groupName: "Team" }); expect(requests[2]).not.toHaveProperty("conversationId");
+    expect(requests[3].idempotencyKey).not.toBe(requests[2].idempotencyKey); expect(requests[4]).toEqual(requests[0]);
+  } finally { await bridge.shutdownA2A(); }
+});

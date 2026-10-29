@@ -380,3 +380,24 @@ it("requires an explicit stable key without a host logical call ID", async () =>
   await send.execute("", { ...params, idempotencyKey: "explicit-attempt" });
   expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({ ...params, idempotencyKey: "explicit-attempt" });
 });
+
+it.each([
+  { agentIdentityId: "other-identity" },
+  { id: "abcdefab-0000-4000-8000-000000000002" },
+  { unresolvedParticipantCount: 1 },
+  { isGroup: undefined },
+  { isGroup: false, participants: ["+15555550123", "+15555550124"] },
+])("does not journal destination evidence from an unverified conversation (%j)", async (metadata) => {
+  const beforeSend = vi.fn(async () => {});
+  const release = bindNativeSource("wa-destination-evidence", { whatsapp: true, identityId: "identity-a",
+    conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false,
+    validate: async () => {}, beforeSend, afterSend: async () => {} });
+  try {
+    const f = fixture(undefined, "wa-destination-evidence");
+    f.identity.getWhatsAppConversation.mockResolvedValue({ id: "abcdefab-0000-4000-8000-000000000003",
+      agentIdentityId: "identity-a", isGroup: false, participants: ["+15555550124"], ...metadata });
+    const result = await f.tools.get("inkbox_send_whatsapp").execute("unverified", {
+      conversationId: "abcdefab-0000-4000-8000-000000000003", text: "Answer", idempotencyKey: "evidence-key" });
+    expect(result.isError).toBe(true); expect(beforeSend).not.toHaveBeenCalled(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  } finally { release(); }
+});

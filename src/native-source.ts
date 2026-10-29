@@ -1,8 +1,8 @@
-import type { WhatsAppSendRejection } from "./whatsapp.js";
+import type { WhatsAppSendRejection, WhatsAppDestinationEvidence } from "./whatsapp.js";
 import type { SlackRoute } from "./slack.js";
 import type { SlackUploadReceipt, SlackUploadIntent } from "./slack-files.js";
 
-export type WhatsAppSendIntent = { idempotencyKey: string; text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string; destination?: { conversationId?: string; to?: string[] } };
+export type WhatsAppSendIntent = { idempotencyKey: string; text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string; destinationEvidence?: WhatsAppDestinationEvidence; destination?: { conversationId?: string; to?: string[] } };
 
 /** Trusted, short-lived source ownership captured by native tool factories. */
 export type NativeSource = {
