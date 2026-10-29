@@ -98,7 +98,7 @@ export function registerWhatsAppTools(
             if (replyToMessageId || params.groupName) keyParts.push({ replyToMessageId, groupName: params.groupName });
             const idempotencyKey = params.idempotencyKey ?? whatsappSendKey(keyParts);
             if (tracked) {
-              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}), ...(destination ? { destination } : {}), ...(destination && destinationEvidence ? { destinationEvidence } : {}) }); }
+              try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), ...(replyToMessageId ? { replyToMessageId } : {}), ...(params.groupName ? { groupName: params.groupName } : {}), ...(destination ? { destination } : {}), ...(destinationEvidence ? { destinationEvidence } : {}) }); }
               catch (error) {
                 const result = mapInkboxError(error), priorKey = getMessageRequestKey(error);
                 result.content[0]!.text += "\nNo new WhatsApp request was attempted.";

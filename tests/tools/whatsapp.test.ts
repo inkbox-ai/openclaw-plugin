@@ -159,7 +159,9 @@ describe("dedicated WhatsApp tools", () => {
       const f = fixture(undefined, "wa-source-test");
       const first = await f.tools.get("inkbox_send_whatsapp").execute("call-a", { text: "Reply" });
       const key = JSON.parse(first.content[0].text.replace(/^```json\n|\n```$/g, "")).idempotencyKey;
-      expect(beforeSend).toHaveBeenCalledWith("call-a", { idempotencyKey: key, text: "Reply" });
+      expect(beforeSend).toHaveBeenCalledWith("call-a", { idempotencyKey: key, text: "Reply", destinationEvidence: {
+        identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", directRecipient: "+15555550123",
+      } });
       const second = await f.tools.get("inkbox_send_whatsapp").execute("call-b", { text: "Reply" });
       expect(JSON.parse(second.content[0].text.replace(/^```json\n|\n```$/g, "")).idempotencyKey).not.toBe(key);
       const explicit = await f.tools.get("inkbox_send_whatsapp").execute("call-c", { to: "+15555550124", text: "Explicit outreach" });
@@ -249,7 +251,9 @@ describe("WhatsApp groups, explicit quotes, and reaction receipts", () => {
       f.identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: "identity-a", isGroup: true, participants: Array.from({length: 10}, (_,i) => `+15555550${String(120+i)}`) });
       const send = f.tools.get("inkbox_send_whatsapp");
       await send.execute("quoted", { conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000007", text: "Answer", idempotencyKey: "quote-key" });
-      expect(beforeSend).toHaveBeenCalledWith("quoted", { text: "Answer", replyToMessageId: "00000000-0000-4000-8000-000000000007", idempotencyKey: "quote-key" });
+      expect(beforeSend).toHaveBeenCalledWith("quoted", { text: "Answer", replyToMessageId: "00000000-0000-4000-8000-000000000007", idempotencyKey: "quote-key",
+        destinationEvidence: { identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001" },
+      });
       expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000007" });
       await send.execute("plain", { conversationId: "00000000-0000-4000-8000-000000000001", text: "Plain", idempotencyKey: "plain-key" });
       expect(f.identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");

@@ -208,7 +208,10 @@ export function createCompanionReceiver(opts: {
     return Boolean(send.whatsappDestination && send.whatsappRejection);
   }
   async function sameWhatsAppDestination(job: Job, send: NonNullable<Job["toolSends"]>[string], intent: WhatsAppSendIntent): Promise<boolean> {
-    const previous = send.whatsappDestination, next = intent.destination;
+    // An omitted selector is the bound source conversation, not every destination.
+    // Resolve it only for comparison; exact retries retain their saved selector.
+    const sourceDestination = { conversationId: metadata(job.event).conversation_id };
+    const previous = send.whatsappDestination ?? sourceDestination, next = intent.destination ?? sourceDestination;
     if (JSON.stringify(previous) === JSON.stringify(next)) return true;
     if (previous?.conversationId && next?.conversationId)
       return previous.conversationId.toLowerCase() === next.conversationId.toLowerCase();
@@ -413,7 +416,7 @@ export function createCompanionReceiver(opts: {
         // and the original key below still decide whether it can be retried.
         let rejected: [string, NonNullable<Job["toolSends"]>[string]] | undefined;
         if (intent) for (const [previousCall, send] of Object.entries(job.toolSends ?? {})) {
-          if (send.whatsappRejection && (!send.whatsappDestination || previousCall === callId || send.whatsappKey === intent.idempotencyKey || await sameWhatsAppDestination(job, send, intent))) {
+          if (send.whatsappRejection && (previousCall === callId || send.whatsappKey === intent.idempotencyKey || await sameWhatsAppDestination(job, send, intent))) {
             rejected = [previousCall, send]; break;
           }
         }
@@ -423,7 +426,7 @@ export function createCompanionReceiver(opts: {
             throw Object.assign(new Error("Retry the rejected WhatsApp request with its original key and unchanged payload."), { idempotencyKey: send.whatsappKey, whatsappRejection: send.whatsappRejection });
           }
         }
-        const unresolved = Object.values(job.toolSends ?? {}).find((send) => send !== rejected?.[1] && !rejectedWhatsAppOutreach(send) && send.kind !== "approval" && !send.failed && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false)));
+        const unresolved = Object.values(job.toolSends ?? {}).find((send) => !send.whatsappRejection && send.kind !== "approval" && !send.failed && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false)));
         const existing = Object.entries(job.toolSends ?? {}).find(([previousCall, send]) => previousCall !== rejected?.[0] &&
           (previousCall === callId || (intent && send.whatsappKey === intent.idempotencyKey)))?.[1];
         if ((kind !== "approval" && unresolved) || existing) {
