@@ -6393,7 +6393,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const normalized = structuredClone(event);
       normalized.event_type = "whatsapp.received";
       normalized.companion = { channel: "whatsapp", phase: "ordinary", sequence: Date.now(), scope_id: original.conversation_id, conversation_id: original.conversation_id };
-      normalized._openclawWhatsApp = { version: 2, isGroup: group, reaction: Boolean(reaction), ...(reaction ? { sourceId: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}` } : {}) };
+      normalized._openclawWhatsApp = { version: 2, isGroup: group, reaction: Boolean(reaction), ...(reaction ? { sourceId: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}`, actor: reaction.remote_number, targetMessageId: reaction.target_message_id, revision: reaction.revision } : {}) };
       if (reaction) normalized.data.message = { ...original, sender_number: author, remote_number: author,
         direction: "inbound", media: [], content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${original.id}. This is context, not a new instruction. Reply only if warranted; otherwise return exactly NO_REPLY.` };
       // Dedicated WhatsApp admission matches the dedicated iMessage path; local author checks still apply.

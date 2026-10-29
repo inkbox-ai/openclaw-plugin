@@ -519,6 +519,58 @@ describe("WhatsApp v2 native group admission", () => {
     const removed = structuredClone(e); removed.id = "removed-event"; removed.data.reaction.revision = 2; removed.data.reaction.status = "removed";
     await dispatchInbound(removed, b.handlers); await settle(b); expect(f.dispatchReply).toHaveBeenCalledTimes(2);
   });
+
+  it("does not admit an older reaction after a newer removal for the same sender and message", async () => {
+    const f = fixture(), first = f.bridge();
+    const base = event();
+    base.event_type = "whatsapp.reaction_received";
+    base.data.message.is_group = true;
+    base.data.message.direction = "outbound";
+    base.data.message.participants = ["+15555550123", "+15555550124"];
+    const reaction = (id: string, reactionId: string, revision: number, status: "applied" | "removed", remote: string, emoji: string) => {
+      const incoming = structuredClone(base);
+      incoming.id = id;
+      incoming.data.reaction = {
+        id: reactionId, target_message_id: incoming.data.message.id, conversation_id: incoming.data.message.conversation_id,
+        agent_identity_id: f.identity.id, direction: "inbound", remote_number: remote, emoji, status, revision,
+      };
+      return incoming;
+    };
+    await dispatchInbound(reaction("removed-event", "reaction-newer", 2, "removed", "+15555550123", "👀"), first.handlers);
+    await settle(first);
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0])).toContain("WhatsApp reaction removed: 👀");
+    const contexts = () => JSON.stringify(f.core.inbound.buildContext.mock.calls);
+    for (const incoming of [
+      reaction("stale-same-id", "reaction-newer", 1, "applied", "+15555550123", "👻"),
+      reaction("stale-other-id", "reaction-older", 1, "applied", "+15555550123", "👻"),
+    ]) {
+      await dispatchInbound(incoming, first.handlers);
+      await settle(first);
+    }
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+    expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    expect(f.core.inbound.buildContext).toHaveBeenCalledOnce();
+    expect(contexts()).not.toContain("👻");
+    expect(contexts()).not.toContain("WhatsApp reaction received");
+    await first.shutdownA2A();
+    const restarted = f.bridge();
+    await dispatchInbound(reaction("stale-after-restart", "reaction-replayed", 1, "applied", "+15555550123", "👻"), restarted.handlers);
+    await settle(restarted);
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+    expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    expect(f.core.inbound.buildContext).toHaveBeenCalledOnce();
+    expect(contexts()).not.toContain("👻");
+    await dispatchInbound(reaction("other-sender", "reaction-peer", 1, "applied", "+15555550124", "🔥"), restarted.handlers);
+    await settle(restarted);
+    await dispatchInbound(reaction("newer-applied", "reaction-newest", 3, "applied", "+15555550123", "🎉"), restarted.handlers);
+    await settle(restarted);
+    expect(f.dispatchReply).toHaveBeenCalledTimes(3);
+    expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(3);
+    expect(contexts()).toContain("WhatsApp reaction received: 🔥");
+    expect(contexts()).toContain("WhatsApp reaction received: 🎉");
+    expect(contexts()).not.toContain("👻");
+  });
 });
 
 

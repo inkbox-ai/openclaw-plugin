@@ -33,7 +33,8 @@ type Job = { replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTa
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 // A missing body is a consumed receipt; keep its event key to reject redelivery.
 type WhatsAppObservation = { identityId: string; messageId: string; body?: string; conversationId?: string };
-type Journal = { whatsappObservations?: Record<string, WhatsAppObservation>; jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
+type WhatsAppReactionCursor = { identityId: string; actor: string; targetMessageId: string; revision: number };
+type Journal = { whatsappObservations?: Record<string, WhatsAppObservation>; whatsappReactionOrder?: Record<string, WhatsAppReactionCursor>; jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
 export type CompanionInput = { key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string, uncertain?: boolean, conversationId?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
@@ -105,6 +106,20 @@ function source(event: Record<string, any>, m: Metadata): { message: any; author
     throw new Error("Companion source conversation or sender is invalid.");
   }
   return { message: event._openclawWhatsApp?.sourceId ? { ...message, id: event._openclawWhatsApp.sourceId } : message, author: m.channel === "mail" ? email(author) : author };
+}
+// Source identity includes the reaction revision, so it cannot order an older event. Keep one cursor per sender and target.
+function admitWhatsAppReaction(journal: Journal, event: Record<string, any>, identityId: string): boolean {
+  const marker = event._openclawWhatsApp;
+  if (!marker?.reaction) return true;
+  const actor = marker.actor, targetMessageId = marker.targetMessageId, revision = marker.revision;
+  if (typeof actor !== "string" || !/^\+[1-9]\d{6,14}$/.test(actor) || typeof targetMessageId !== "string" || !targetMessageId || !Number.isInteger(revision) || revision < 1) throw new Error("WhatsApp reaction ordering metadata is invalid.");
+  const key = hash(JSON.stringify([identityId, actor, targetMessageId]));
+  journal.whatsappReactionOrder ??= {};
+  const current = journal.whatsappReactionOrder[key];
+  if (current && (current.identityId !== identityId || current.actor !== actor || current.targetMessageId !== targetMessageId || !Number.isInteger(current.revision) || current.revision < 1)) throw new Error("WhatsApp reaction ordering state is invalid.");
+  if (current && current.revision >= revision) return false;
+  journal.whatsappReactionOrder[key] = { identityId, actor, targetMessageId, revision };
+  return true;
 }
 function metadata(event: Record<string, any>): Metadata {
   const m = event.companion;
@@ -1162,6 +1177,7 @@ export function createCompanionReceiver(opts: {
           throw new Error("Companion event id has conflicting scope metadata.");
         }
         if (previous) { duplicate = true; return; }
+        if (!admitWhatsAppReaction(j, event, identityId)) { duplicate = true; return; }
         const job: Job = { event: structuredClone(event), identityId, state: "pending", ...(event.companion.channel === "imessage" && opts.config.imessageThreadedReplies ? { nativeThreaded: true } : {}) };
         if (slackStop) job.slackStopTarget = slackStopTarget;
         j.jobs[receipt] = job;
