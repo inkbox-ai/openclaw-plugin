@@ -90,6 +90,7 @@ const event = (
       remote_number: "+15555550123",
       sender_number: "+15555550123",
       participants: ["+15555550123"],
+      recipients: [],
       content: "Please review the brief",
       media: [],
     },

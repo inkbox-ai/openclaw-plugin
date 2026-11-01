@@ -93,7 +93,8 @@ export function isUnsupportedWhatsAppShape(value: unknown): boolean {
   const row = value as Record<string, unknown>;
   return [row.is_group, row.isGroup].some(flag => flag != null && flag !== false) ||
     Object.keys(row).some(key => /^(group(?:_|[A-Z])|whatsappGroup)/.test(key) && row[key] != null) ||
-    [row.participants, row.recipients].some(list => list !== undefined && (!Array.isArray(list) || list.length !== 1)) ||
+    (row.participants !== undefined && (!Array.isArray(row.participants) || row.participants.length !== 1)) ||
+    (row.recipients !== undefined && (!Array.isArray(row.recipients) || row.recipients.length > 1)) ||
     Number(row.unresolvedParticipantCount ?? row.unresolved_participant_count ?? 0) > 0;
 }
 
