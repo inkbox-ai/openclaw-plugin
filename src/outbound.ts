@@ -1,4 +1,4 @@
-import { assertWhatsAppSendKey, assertWhatsAppText, whatsappReady } from "./whatsapp.js";
+import { whatsappDestinationEvidence, assertWhatsAppSendKey, assertWhatsAppText, whatsappReady } from "./whatsapp.js";
 import { slackMrkdwn } from "./slack-style.js";
 import { createHash, randomUUID } from "node:crypto";
 import { ownSlackConnection, slackText } from "./slack.js";
@@ -276,7 +276,7 @@ export async function sendInkboxChannelText(
     assertWhatsAppSendKey(params.idempotencyKey);
     const identity = await createInkboxRuntime(account.config).getIdentity();
     let recipients = [target.value];
-    if (target.mode === "whatsapp-conversation") { const conversation = await identity.getWhatsAppConversation(target.value); if (conversation.agentIdentityId !== identity.id || !conversation.participants.length || (conversation.unresolvedParticipantCount ?? 0) > 0) throw new Error("An owned resolved WhatsApp conversation is required."); recipients = conversation.participants; }
+    if (target.mode === "whatsapp-conversation") { const conversation = await identity.getWhatsAppConversation(target.value); whatsappDestinationEvidence(conversation, identity.id, target.value); recipients = conversation.participants; }
     for (const recipient of recipients) { const blocked = checkOutboundRecipient(recipient, account.config.allowedRecipients); if (blocked) throw new Error(blocked); }
     await whatsappReady(identity);
     const message = await identity.sendWhatsApp({ ...(target.mode === "whatsapp" ? { to: target.value } : { conversationId: target.value }), text: params.text,

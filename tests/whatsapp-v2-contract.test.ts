@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Inkbox } from "@inkbox/sdk";
 import { afterEach, expect, it, vi } from "vitest";
-import { whatsappRecipients } from "../src/whatsapp.js";
+import { whatsappDestinationEvidence, whatsappRecipients } from "../src/whatsapp.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/whatsapp-v2.json", import.meta.url), "utf8"));
 afterEach(() => vi.unstubAllGlobals());
@@ -53,4 +53,16 @@ it("retains the real SDK's uncertainty limitation when a retry ends in a public 
     .rejects.toMatchObject({ statusCode: 422, detail: { error: "whatsapp_reply_required_for_links" }, idempotencyKey: "retained-quote-key" });
   expect(requests).toHaveLength(2);
   expect(requests[0]).toEqual(requests[1]);
+});
+
+it("accepts direct conversation facts from the SDK without requiring a group flag", async () => {
+  vi.stubGlobal("fetch", vi.fn(async url => {
+    const data = new URL(String(url)).pathname.includes("/identities/")
+      ? { id: fixture.conversation.agent_identity_id, organization_id: "org_fixture", agent_handle: "example", created_at: fixture.conversation.created_at, updated_at: fixture.conversation.updated_at }
+      : fixture.conversation;
+    return new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json" } });
+  }));
+  const identity = await new Inkbox({ apiKey: "synthetic-contract-key", baseUrl: "https://contract.example" }).getIdentity("example");
+  const conversation = await identity.getWhatsAppConversation(fixture.conversation.id);
+  expect(whatsappDestinationEvidence(conversation, identity.id, conversation.id)).toMatchObject({ directRecipient: fixture.conversation.participants[0] });
 });

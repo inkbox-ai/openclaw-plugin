@@ -49,10 +49,10 @@ export const WHATSAPP_EVENTS = [
 ] as const;
 const rejectedSendCodes: Record<number, readonly string[]> = {
   403: ["whatsapp_not_eligible", "whatsapp_access_required", "whatsapp_contact_not_allowed", "whatsapp_media_source_not_allowed"],
-  409: ["whatsapp_capability_not_ready", "whatsapp_quote_unavailable", "whatsapp_membership_unresolved", "whatsapp_group_unavailable", "whatsapp_reaction_pending", "whatsapp_reaction_target_unavailable"],
+  409: ["whatsapp_capability_not_ready", "whatsapp_quote_unavailable", "whatsapp_reaction_pending", "whatsapp_reaction_target_unavailable"],
   413: ["whatsapp_media_too_large"],
   422: ["whatsapp_groups_not_supported", "whatsapp_invalid_recipient", "whatsapp_text_too_long", "whatsapp_unanswered_followup_limit", "whatsapp_opening_message_too_long", "whatsapp_reply_required_for_media", "whatsapp_reply_required_for_links", "whatsapp_reply_required_for_phone_numbers", "whatsapp_reply_required_for_email_addresses"],
-  429: ["whatsapp_daily_limit_exceeded", "whatsapp_unanswered_message_limit", "whatsapp_conversation_rate_limited", "whatsapp_new_contact_rate_limited", "whatsapp_new_contact_spacing", "whatsapp_follow_up_rate_limited", "whatsapp_new_group_limit", "whatsapp_group_unanswered_limit"],
+  429: ["whatsapp_daily_limit_exceeded", "whatsapp_unanswered_message_limit", "whatsapp_conversation_rate_limited", "whatsapp_new_contact_rate_limited", "whatsapp_new_contact_spacing", "whatsapp_follow_up_rate_limited"],
 };
 export type WhatsAppSendRejection = { error: string; status_code: number; quota?: string; limit?: number; used?: number; retry_condition?: string; reset_at?: string; retry_after_seconds?: number };
 export function whatsappSendRejection(error: unknown): WhatsAppSendRejection | undefined {
@@ -87,27 +87,33 @@ const whatsappUuid = (value: unknown): value is string =>
 
 export type WhatsAppDestinationEvidence = { identityId: string; conversationId: string; directRecipient?: string };
 
-/** Comparison metadata only; never substitute it for a saved request selector. */
-export function whatsappDestinationEvidence(conversation: { id?: string; agentIdentityId: string; isGroup: boolean; participants: string[]; unresolvedParticipantCount?: number }, identityId: string, conversationId: string): WhatsAppDestinationEvidence {
+/** Reject unsupported legacy shapes before routing or replay. */
+export function isUnsupportedWhatsAppShape(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return [row.is_group, row.isGroup].some(flag => flag != null && flag !== false) ||
+    Object.keys(row).some(key => /^(group(?:_|[A-Z])|whatsappGroup)/.test(key) && row[key] != null) ||
+    [row.participants, row.recipients].some(list => list !== undefined && (!Array.isArray(list) || list.length !== 1)) ||
+    Number(row.unresolvedParticipantCount ?? row.unresolved_participant_count ?? 0) > 0;
+}
+
+export function whatsappDestinationEvidence(conversation: { id?: string; agentIdentityId: string; participants: string[] }, identityId: string, conversationId: string): WhatsAppDestinationEvidence {
   if (conversation.agentIdentityId !== identityId ||
       (conversation.id !== undefined && conversation.id.toLowerCase() !== conversationId.toLowerCase()) ||
-      typeof conversation.isGroup !== "boolean" ||
-      !Array.isArray(conversation.participants) || !conversation.participants.length ||
-      (!conversation.isGroup && conversation.participants.length !== 1) ||
-      conversation.participants.some(number => !/^\+[1-9]\d{6,14}$/.test(number)) ||
-      (conversation.unresolvedParticipantCount ?? 0) > 0)
-    throw new Error("A resolved conversation owned by this identity is required.");
-  return { identityId, conversationId: conversationId.toLowerCase(),
-    ...(conversation.isGroup === false && conversation.participants.length === 1 ? { directRecipient: conversation.participants[0]! } : {}) };
+      isUnsupportedWhatsAppShape(conversation) ||
+      !Array.isArray(conversation.participants) || conversation.participants.length !== 1 ||
+      conversation.participants.some(number => !/^\+[1-9]\d{6,14}$/.test(number)))
+    throw new Error("A direct conversation owned by this identity is required.");
+  return { identityId, conversationId: conversationId.toLowerCase(), directRecipient: conversation.participants[0]! };
 }
 
 /** Validate the complete local request before recording a durable send intent. */
-export function validateWhatsAppSend(params: { to?: unknown; conversationId?: unknown; replyToMessageId?: unknown; groupName?: unknown; text?: unknown; mediaIds?: unknown; idempotencyKey?: unknown }) {
+export function validateWhatsAppSend(params: { to?: unknown; conversationId?: unknown; replyToMessageId?: unknown; text?: unknown; mediaIds?: unknown; idempotencyKey?: unknown }) {
   if ((params.to !== undefined) === (params.conversationId !== undefined)) throw new Error("Specify exactly one of to or conversationId.");
-  const recipients = params.to === undefined ? undefined : whatsappRecipients(params.to);
+  if (params.to !== undefined) whatsappRecipients(params.to);
+  if (isUnsupportedWhatsAppShape(params) || Object.keys(params).some(key => /^group(?:_|[A-Z])/.test(key))) throw new Error("WhatsApp supports direct messages only.");
   if (params.conversationId !== undefined && !whatsappUuid(params.conversationId)) throw new Error("conversationId must be a UUID.");
   if (params.replyToMessageId !== undefined && (!params.conversationId || !whatsappUuid(params.replyToMessageId))) throw new Error("replyToMessageId requires conversationId and a message UUID.");
-  if (params.groupName !== undefined && (!recipients || recipients.length < 2 || typeof params.groupName !== "string" || !params.groupName.trim() || [...params.groupName].length > 100)) throw new Error("groupName requires a new group and 1–100 characters.");
   if (params.text !== undefined && typeof params.text !== "string") throw new Error("text must be a string.");
   if (params.mediaIds !== undefined && (!Array.isArray(params.mediaIds) || params.mediaIds.length > 1 || params.mediaIds.some(id => !whatsappUuid(id)))) throw new Error("Provide at most one media UUID.");
   if (!(params.text as string | undefined)?.trim() && !(params.mediaIds as unknown[] | undefined)?.length) throw new Error("Provide text or one owned media ID.");
@@ -275,11 +281,9 @@ export function acceptedWhatsApp(message: WhatsAppMessage, idempotencyKey?: stri
 }
 
 
-/** Normalize explicit phone recipients without interpreting a group address as a phone. */
+/** Accept exactly one E.164 destination; arrays are never send selectors. */
 export function whatsappRecipients(value: unknown): string[] {
-  const entries = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
-  const normalized = entries.map((entry) => typeof entry === "string" ? entry.replace(/[\s().-]/g, "") : "");
-  if (normalized.length < 1 || normalized.length > 8 || normalized.some((number) => !/^\+[1-9]\d{6,14}$/.test(number)) || new Set(normalized).size !== normalized.length)
-    throw new Error("Use one through eight unique E.164 recipients.");
-  return normalized.sort();
+  if (typeof value !== "string" || !/^\+[1-9]\d{6,14}$/.test(value))
+    throw new Error("Use one E.164 recipient string; arrays and lists are not supported.");
+  return [value];
 }

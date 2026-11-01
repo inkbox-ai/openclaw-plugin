@@ -6,7 +6,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Added
 
-- Approved dedicated direct/group WhatsApp messaging, fifteen native tools for explicit quoted replies, paginated threads and named/custom reactions, signed incoming events, source-bound durable replies, owned attachments, and status-only delivery notifications.
+- Approved dedicated direct-message WhatsApp messaging, fifteen native tools for explicit quoted replies, paginated threads and named/custom reactions, signed incoming events, source-bound durable replies, owned attachments, and status-only delivery notifications.
 - Require SDK 0.7.24; candidate checks build the pinned public source package before normal publication.
 
 - Deliver local Slack attachments through the SDK with source-owned durable outcomes and file-operation inspection.

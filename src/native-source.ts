@@ -1,12 +1,12 @@
-import type { WhatsAppSendRejection, WhatsAppDestinationEvidence } from "./whatsapp.js";
+import { isUnsupportedWhatsAppShape, type WhatsAppSendRejection, type WhatsAppDestinationEvidence } from "./whatsapp.js";
 import type { SlackRoute } from "./slack.js";
 import type { SlackUploadReceipt, SlackUploadIntent } from "./slack-files.js";
 
-export type WhatsAppSendIntent = { idempotencyKey: string; text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string; destinationEvidence?: WhatsAppDestinationEvidence; destination?: { conversationId?: string; to?: string[] } };
+export type WhatsAppSendIntent = { idempotencyKey: string; text?: string; mediaIds?: string[]; replyToMessageId?: string; destinationEvidence?: WhatsAppDestinationEvidence; destination?: { conversationId?: string; to?: string } };
 
 /** Trusted, short-lived source ownership captured by native tool factories. */
 export type NativeSource = {
-  whatsapp?: boolean; isGroup?: boolean; sourceMessageId?: string;
+  whatsapp?: boolean; sourceMessageId?: string;
   identityId: string; conversationId: string; replyToMessageId?: string; slackRoute?: SlackRoute;
   author: string; companion?: boolean; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
   validate(): Promise<void>;
@@ -34,6 +34,7 @@ export function bindNativeSource(sessionKey: string, source: NativeSource): () =
   return () => { source.closed = true; if (sources.get(sessionKey) === source) sources.delete(sessionKey); };
 }
 export function assertNativeSource(source: NativeSource, identityId: string): void {
+  if (source.whatsapp && isUnsupportedWhatsAppShape(source)) throw new Error("WhatsApp supports direct messages only.");
   if (source.closed || source.identityId !== identityId) throw new Error("The native reply source is no longer active.");
 }
 export function revokeNativeSourceRun(sessionKey: string, runId: string): void {

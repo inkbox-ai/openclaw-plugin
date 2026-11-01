@@ -10,7 +10,7 @@
     },
     {
       "name": "direct_list",
-      "valid": true,
+      "valid": false,
       "body": {
         "to": [
           "+14155550100"
@@ -20,7 +20,7 @@
     },
     {
       "name": "group",
-      "valid": true,
+      "valid": false,
       "body": {
         "to": [
           "+14155550101",
@@ -107,7 +107,6 @@
     "participants": [
       "+15555550101"
     ],
-    "is_group": false,
     "content": "Hello 👋",
     "media": [],
     "status": "sent",
@@ -161,18 +160,13 @@
   "conversation": {
     "agent_identity_id": "10000000-0000-4000-8000-000000000001",
     "local_number": "+15555550100",
-    "remote_number": null,
+    "remote_number": "+15555550101",
     "participants": [
-      "+15555550101",
-      "+15555550102"
+      "+15555550101"
     ],
-    "is_group": true,
     "created_at": "2026-10-01T12:00:00Z",
     "updated_at": "2026-10-01T12:00:00Z",
-    "id": "20000000-0000-4000-8000-000000000002",
-    "group_name": "Example group",
-    "group_creation_status": "uncertain",
-    "unresolved_participant_count": 1
+    "id": "20000000-0000-4000-8000-000000000002"
   },
   "reaction": {
     "id": "55555555-5555-4555-8555-555555555555",
@@ -238,7 +232,6 @@
         "participants": [
           "+15555550101"
         ],
-        "is_group": false,
         "content": "Original group question",
         "media": [],
         "status": "received",
@@ -272,7 +265,6 @@
         "participants": [
           "+15555550101"
         ],
-        "is_group": false,
         "content": "Hello 👋",
         "media": [],
         "status": "sent",
@@ -360,7 +352,6 @@
         "participants": [
           "+15555550101"
         ],
-        "is_group": false,
         "content": "Hello 👋",
         "media": [],
         "status": "sent",

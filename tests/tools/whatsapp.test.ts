@@ -18,7 +18,6 @@ function fixture(allowed?: string[], sessionKey?: string) {
     })),
     getWhatsAppConversation: vi.fn(async () => ({
       agentIdentityId: "identity-a",
-      isGroup: false,
       participants: ["+15555550123"],
       remoteNumber: "+15555550123",
     })),
@@ -196,7 +195,7 @@ describe("dedicated WhatsApp tools", () => {
       const f = fixture(undefined, `wa-closed-${phase}`);
       if (phase === "conversation") f.identity.getWhatsAppConversation.mockImplementation(async () => {
         release();
-        return { agentIdentityId: "identity-a", isGroup: false, participants: ["+15555550124"] };
+        return { agentIdentityId: "identity-a", participants: ["+15555550124"] };
       });
       if (phase === "readiness") f.identity.getWhatsAppStatus.mockImplementation(async () => {
         release(); return { enabled: true, status: "ready" };
@@ -232,35 +231,17 @@ describe("dedicated WhatsApp tools", () => {
 });
 
 
-describe("WhatsApp groups, explicit quotes, and reaction receipts", () => {
-  it("checks every new group recipient and rejects duplicate numbers or group identifiers", async () => {
-    const f = fixture(["+15555550123", "+15555550124"]);
-    const send = f.tools.get("inkbox_send_whatsapp");
-    await send.execute("group", { to: ["+1 (555) 555-0123", "+15555550124"], groupName: "Team", text: "Hello", idempotencyKey: "group-key" });
-    expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({ to: ["+15555550123", "+15555550124"], groupName: "Team", text: "Hello", idempotencyKey: "group-key" });
-    for (const to of [["+15555550123", "+15555550125"], ["+15555550123", "+1 (555)555-0123"], ["123@g.us"]]) {
-      expect((await send.execute("bad", { to, text: "No" })).isError).toBe(true);
-    }
-    expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+describe("WhatsApp direct messages, explicit quotes, and reaction receipts", () => {
+  it.each([{ to: ["+15555550123"] }, { to: ["+15555550123", "+15555550124"] }, { to: "+15555550123,+15555550124" }])("rejects non-scalar or list destinations %j", async ({ to }) => {
+    const f = fixture();
+    const result = await f.tools.get("inkbox_send_whatsapp").execute("unsupported", { to, text: "Hello" });
+    expect(result.isError).toBe(true); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
   });
-  it("supports existing larger groups by ID and journals explicit quotes without inferring one", async () => {
-    const beforeSend = vi.fn(async () => {});
-    const release = bindNativeSource("wa-v2-group", { whatsapp: true, isGroup: true, sourceMessageId: "incoming", identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false, validate: async () => {}, beforeSend, afterSend: async () => {} });
-    try {
-      const f = fixture(undefined, "wa-v2-group");
-      f.identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: "identity-a", isGroup: true, participants: Array.from({length: 10}, (_,i) => `+15555550${String(120+i)}`) });
-      const send = f.tools.get("inkbox_send_whatsapp");
-      await send.execute("quoted", { conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000007", text: "Answer", idempotencyKey: "quote-key" });
-      expect(beforeSend).toHaveBeenCalledWith("quoted", { text: "Answer", replyToMessageId: "00000000-0000-4000-8000-000000000007", idempotencyKey: "quote-key",
-        destinationEvidence: { identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001" },
-      });
-      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000007" });
-      await send.execute("plain", { conversationId: "00000000-0000-4000-8000-000000000001", text: "Plain", idempotencyKey: "plain-key" });
-      expect(f.identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
-      await send.execute("author-dm", { to: "+15555550123", text: "Private", idempotencyKey: "private-key" });
-      expect(f.identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({ to: "+15555550123" });
-      expect(f.identity.sendWhatsApp.mock.calls[2][0]).not.toHaveProperty("conversationId");
-    } finally { release(); }
+  it.each([{ isGroup: true, participants: ["+15555550123"] }, { participants: ["+15555550123", "+15555550124"] }, { group_name: "Team", participants: ["+15555550123"] }])("rejects group conversation metadata %j", async metadata => {
+    const f = fixture();
+    f.identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: "identity-a", ...metadata });
+    const result = await f.tools.get("inkbox_send_whatsapp").execute("unsupported", { conversationId: "00000000-0000-4000-8000-000000000001", text: "Hello" });
+    expect(result.isError).toBe(true); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
   });
   it("retains exact reaction key and receipt status, checks all participants, and removes the exact ID", async () => {
     const f = fixture();
@@ -285,7 +266,7 @@ describe("WhatsApp groups, explicit quotes, and reaction receipts", () => {
 
 
 it("fences reaction writes against blocked group peers and a source revoked during reads", async () => {
-  const release = bindNativeSource("wa-reaction-fence", { whatsapp: true, isGroup: true, identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {} });
+  const release = bindNativeSource("wa-reaction-fence", { whatsapp: true, identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123", closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {} });
   try {
     const f = fixture(["+15555550123"], "wa-reaction-fence");
     f.identity.getWhatsAppMessage = vi.fn(async () => ({ agentIdentityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001" }));
@@ -307,9 +288,9 @@ it.each(["", " ", "\n", null])("does not silently omit an explicit invalid quote
 });
 
 
-it.each([false, true])("inherits a source quote only for its own destination (group=%s)", async (isGroup) => {
+it("inherits a source quote only for its own destination", async () => {
   const beforeSend = vi.fn(async () => {});
-  const release = bindNativeSource("autoquote-source", { whatsapp: true, isGroup,
+  const release = bindNativeSource("autoquote-source", { whatsapp: true,
     sourceMessageId: "00000000-0000-4000-8000-000000000006", replyToMessageId: "00000000-0000-4000-8000-000000000006",
     identityId: "identity-a", conversationId: "00000000-0000-4000-8000-000000000001", author: "+15555550123",
     closed: false, validate: async () => {}, beforeSend, afterSend: async () => {} });
@@ -364,13 +345,13 @@ it.each([
 it("normalizes exact logical retries while keeping identical distinct sends independent", async () => {
   const f = fixture(), send = f.tools.get("inkbox_send_whatsapp");
   f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("response lost"));
-  const params = { to: ["+1 (555) 555-0124", "+15555550123"], groupName: "Team", text: "Hello" };
+  const params = { to: "+15555550124", text: "Hello" };
   const first = await send.execute("logical-attempt-a", params);
-  await send.execute("logical-attempt-a", { ...params, to: ["+15555550123", "+15555550124"] });
-  await send.execute("logical-attempt-b", { ...params, to: ["+15555550123", "+15555550124"] });
+  await send.execute("logical-attempt-a", params);
+  await send.execute("logical-attempt-b", params);
   const requests = f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request);
   expect(requests).toHaveLength(3);
-  expect(requests[0].to).toEqual(["+15555550123", "+15555550124"]);
+  expect(requests[0].to).toEqual("+15555550124");
   expect(requests[0]).toEqual(requests[1]);
   expect(requests[0].idempotencyKey).toBe(first.details.idempotencyKey);
   expect(requests[2].idempotencyKey).not.toBe(requests[0].idempotencyKey);
@@ -389,8 +370,8 @@ it.each([
   { agentIdentityId: "other-identity" },
   { id: "abcdefab-0000-4000-8000-000000000002" },
   { unresolvedParticipantCount: 1 },
-  { isGroup: undefined },
-  { isGroup: false, participants: ["+15555550123", "+15555550124"] },
+  { isGroup: true },
+  { participants: ["+15555550123", "+15555550124"] },
 ])("does not journal destination evidence from an unverified conversation (%j)", async (metadata) => {
   const beforeSend = vi.fn(async () => {});
   const release = bindNativeSource("wa-destination-evidence", { whatsapp: true, identityId: "identity-a",
@@ -399,7 +380,7 @@ it.each([
   try {
     const f = fixture(undefined, "wa-destination-evidence");
     f.identity.getWhatsAppConversation.mockResolvedValue({ id: "abcdefab-0000-4000-8000-000000000003",
-      agentIdentityId: "identity-a", isGroup: false, participants: ["+15555550124"], ...metadata });
+      agentIdentityId: "identity-a", participants: ["+15555550124"], ...metadata });
     const result = await f.tools.get("inkbox_send_whatsapp").execute("unverified", {
       conversationId: "abcdefab-0000-4000-8000-000000000003", text: "Answer", idempotencyKey: "evidence-key" });
     expect(result.isError).toBe(true); expect(beforeSend).not.toHaveBeenCalled(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
@@ -421,4 +402,15 @@ it("keeps unknown supplied keys plain while restoring only retained quote target
     await send.execute("quoted", { text: "Old quote", idempotencyKey: "retained-quoted-key" });
     expect(f.identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({ replyToMessageId: quote, idempotencyKey: "retained-quoted-key" });
   } finally { release(); }
+});
+
+it("exposes only scalar direct addressing and no group selectors", async () => {
+  const f = fixture();
+  const send = f.tools.get("inkbox_send_whatsapp").parameters.properties;
+  expect(send.to.type).toBe("string"); expect(send).not.toHaveProperty("groupName");
+  for (const name of ["inkbox_list_whatsapp_conversations", "inkbox_list_whatsapp_messages"]) {
+    const tool = f.tools.get(name);
+    expect(tool.parameters.properties).not.toHaveProperty("includeGroups");
+    expect((await tool.execute("unsupported", { includeGroups: true })).isError).toBe(true);
+  }
 });
