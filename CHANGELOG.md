@@ -8,8 +8,6 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 - iMessage tapback results report the resolved message ID and part index so follow-up reads address the correct message.
 
-## [Unreleased]
-
 ### Added
 
 - Deliver local Slack attachments through the SDK with source-owned durable outcomes and file-operation inspection.
