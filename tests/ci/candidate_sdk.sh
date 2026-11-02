@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Source before dependency installation. The ordinary manifest remains semver-based.
 set -euo pipefail
-candidate_revision=f9e83f9a20407b2fc29263be294be1b38faf23af
+candidate_revision=ce09cf9a75b507c0f3b5e8b94b253afb385fe7f3
 candidate_directory="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/inkbox-sdk-candidate.XXXXXX")"
 git clone --quiet --filter=blob:none --no-checkout https://github.com/inkbox-ai/inkbox.git "$candidate_directory/source"
 git -C "$candidate_directory/source" fetch --quiet --depth=1 origin "$candidate_revision"
@@ -13,7 +13,7 @@ printf 'Reviewed SDK source: %s\n' "$candidate_revision"
   npm run build
   npm pack --pack-destination "$candidate_directory" --silent
 )
-export INKBOX_SDK_CANDIDATE_TGZ="$candidate_directory/inkbox-sdk-0.7.24.tgz"
+export INKBOX_SDK_CANDIDATE_TGZ="$candidate_directory/inkbox-sdk-0.7.26.tgz"
 cp package.json "$candidate_directory/plugin-package.json"
 npm install --package-lock-only --ignore-scripts --no-audit --no-fund "$INKBOX_SDK_CANDIDATE_TGZ"
 cp "$candidate_directory/plugin-package.json" package.json
