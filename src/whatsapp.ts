@@ -320,7 +320,7 @@ export async function sendWhatsAppReplyFile(
   await authorize();
   const callId = `reply-file:${createHash("sha256").update(filePath).digest("hex")}`;
   const idempotencyKey = whatsappSendKey([identity.id, source.sourceMessageId, callId, text, media.id]);
-  const intent = { idempotencyKey, text, mediaIds: [media.id], ...(source.replyToMessageId ? { replyToMessageId: source.replyToMessageId } : {}) };
+  const intent = { idempotencyKey, ...(text ? { text } : {}), mediaIds: [media.id], ...(source.replyToMessageId ? { replyToMessageId: source.replyToMessageId } : {}) };
   await source.beforeSend(callId, intent, true);
   await authorize(callId);
   let message;
@@ -330,7 +330,7 @@ export async function sendWhatsAppReplyFile(
     if (policy && source.rejectSend) await source.rejectSend(callId, idempotencyKey, policy).catch(() => {});
     throw error;
   }
-  await source.afterSend(callId, message.id, text, message.status === "uncertain", message.conversationId);
+  await source.afterSend(callId, message.id, intent.text, message.status === "uncertain", message.conversationId);
   if (message.status === "uncertain") throw new Error("WhatsApp attachment delivery is unconfirmed; do not resend.");
   return message;
 }

@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 // Every value symbol the plugin imports from the host, by module — see
 // index.ts, src/channel.ts, src/health.ts, and src/inbound/session.ts.
 const HOST_SYMBOLS: Record<string, string[]> = {
+  "openclaw/plugin-sdk/media-mime": ["detectMime"],
   "openclaw/plugin-sdk/gateway-runtime": ["callGatewayFromCli"],
   "openclaw/plugin-sdk/routing": ["isSubagentSessionKey"],
   "openclaw/plugin-sdk/channel-core": [

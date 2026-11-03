@@ -1972,3 +1972,23 @@ it.each([false, true])("delivers buffered final media after model completion whi
   if (!stopped) expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ text: "Final image", mediaIds: ["00000000-0000-4000-8000-000000000004"] });
   await bridge.shutdownA2A();
 });
+
+
+it("omits an absent native file caption from the send request and retained intent", async () => {
+  const f = fixture(), bridge = f.bridge();
+  const path = join(state.dir, "captionless.png"); await writeFile(path, "image");
+  f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
+  f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("lost response"));
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup: async () => undefined } });
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    await input.delivery.deliver({ mediaUrl: path }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("text");
+  const saved: any = Object.values((await currentWhatsAppJob()).toolSends)[0];
+  expect(saved).not.toHaveProperty("text");
+  expect(saved.whatsappMediaIds).toEqual(["00000000-0000-4000-8000-000000000004"]);
+  await bridge.shutdownA2A();
+});
