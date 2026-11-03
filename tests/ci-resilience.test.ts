@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -12,6 +14,38 @@ const workflows = [
 ];
 
 describe("CI resilience contracts", () => {
+  it("limits manual channel exclusions to the two phone requests without changing default coverage", () => {
+    const workflow = readFileSync(resolve(".github/workflows/live-channels.yml"), "utf8");
+    const manual = workflow.split("  workflow_dispatch:")[1].split("permissions:")[0];
+    expect(manual).toMatch(/exclude_call_requests:[\s\S]*?type: boolean\s+default: false/);
+    expect(workflow.split("  workflow_dispatch:")[0]).not.toContain("exclude_call_requests");
+    expect(workflow).toContain("EXCLUDE_CALL_REQUESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.exclude_call_requests == true }}");
+    const step = workflow.split("      - name: Run live test")[1].split("      - name:")[0];
+    const script = step.split("        run: |\n")[1].replace(/^          /gm, "");
+    const root = mkdtempSync(resolve(tmpdir(), "channel-selection-"));
+    try {
+      writeFileSync(resolve(root, "python3"), '#!/bin/bash\nprintf "%s\\n" "$@" > "$CAPTURE_ARGS"\n', { mode: 0o755 });
+      writeFileSync(resolve(root, "ingress"), "https://example.test/webhook\n");
+      const run = (mode: string, exclude: string) => {
+        execFileSync("bash", ["-e", "-c", script.replaceAll("${{ matrix.mode }}", mode)], {
+          env: { ...process.env, PATH: `${root}:${process.env.PATH}`, EXCLUDE_CALL_REQUESTS: exclude,
+            AUT_WEBHOOK_URL_FILE: resolve(root, "ingress"), CAPTURE_ARGS: resolve(root, "args") },
+        });
+        return readFileSync(resolve(root, "args"), "utf8").trim().split("\n");
+      };
+      const defaults = ["tests/live/channel_failure_diagnostics.py", "tests/live", "-v", "--tb=short", "--maxfail=1"];
+      expect(run("real", "false")).toEqual(defaults);
+      expect(run("real", "")).toEqual(defaults);
+      expect(run("real", "arbitrary-filter")).toEqual(defaults);
+      expect(run("real", "true")).toEqual([...defaults,
+        "--deselect=tests/live/test_cross_channel.py::test_email_request_gets_call",
+        "--deselect=tests/live/test_cross_channel.py::test_sms_request_gets_call",
+      ]);
+      expect(run("mock", "true")).toEqual(["-m", "pytest", "tests/live", "-v", "--tb=short"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it("runs live gateways with the same host version outside the linked plugin tree", () => {
     for (const name of workflows.filter((value) => value.startsWith("live-"))) {
       const workflow = readFileSync(resolve(".github", "workflows", name), "utf8");

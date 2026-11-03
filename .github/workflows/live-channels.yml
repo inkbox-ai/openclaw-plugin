@@ -24,6 +24,10 @@ on:
         default: false
   workflow_dispatch:
     inputs:
+      exclude_call_requests:
+        description: "Exclude only the two cross-channel phone-call requests"
+        type: boolean
+        default: false
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
@@ -184,6 +188,7 @@ jobs:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           OPENCLAW_INKBOX_API_KEY: ${{ secrets.OPENCLAW_INKBOX_API_KEY }}
           LIVE_EMAIL_TIMEOUT: ${{ inputs.timeout_s || '150' }}
+          EXCLUDE_CALL_REQUESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.exclude_call_requests == true }}
           # The delivery-failure retry test forges a signed text.delivery_failed
           # webhook and POSTs it through the verified owned tunnel ingress. It needs
           # the AUT org's signing key (the same secret the gateway verifies
@@ -192,7 +197,14 @@ jobs:
         run: |
           if [ "${{ matrix.mode }}" = "real" ]; then
             export AUT_WEBHOOK_URL="$(cat "$AUT_WEBHOOK_URL_FILE")"
-            LIVE_REAL_MODEL=1 python3 tests/live/channel_failure_diagnostics.py tests/live -v --tb=short --maxfail=1
+            selection=()
+            if [ "$EXCLUDE_CALL_REQUESTS" = "true" ]; then
+              selection+=(
+                --deselect=tests/live/test_cross_channel.py::test_email_request_gets_call
+                --deselect=tests/live/test_cross_channel.py::test_sms_request_gets_call
+              )
+            fi
+            LIVE_REAL_MODEL=1 python3 tests/live/channel_failure_diagnostics.py tests/live -v --tb=short --maxfail=1 "${selection[@]}"
           else
             python3 -m pytest tests/live -v --tb=short
           fi
