@@ -1,6 +1,6 @@
 import { AgentIdentity, Inkbox } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bindNativeSource, revokeNativeSourceRun, type NativeSource } from "../src/native-source.js";
+import { bindNativeSource, guardNativeSourceTool, revokeNativeSourceRun, type NativeSource } from "../src/native-source.js";
 import { registerSendIMessage } from "../src/tools/send-imessage.js";
 import { registerIMessageReads } from "../src/tools/imessage-reads.js";
 import { registerSlackTools } from "../src/tools/slack.js";
@@ -160,4 +160,15 @@ describe("immutable native reply source", () => {
       expect(sendMessage).toHaveBeenCalledWith("connection", { conversationId: "CROOM", threadTs: null, text: "answer", idempotencyKey: "right" });
     } finally { close(); }
   });
+});
+
+
+it.each(["tool_call", "dispatch_action"])("fences generic message sends through %s only for the active run", (toolName) => {
+  const close = bindNativeSource("guard-wrapper", { ...source(), runId: "owned-run" });
+  try {
+    const event = { toolName, params: { id: "message", args: { action: "send", text: "hello" } } };
+    expect(guardNativeSourceTool(event, { sessionKey: "guard-wrapper", runId: "owned-run" })).toMatchObject({ block: true });
+    expect(guardNativeSourceTool(event, { sessionKey: "guard-wrapper", runId: "another-run" })).toBeUndefined();
+    expect(guardNativeSourceTool({ ...event, params: { id: "message", args: { action: "read" } } }, { sessionKey: "guard-wrapper", runId: "owned-run" })).toBeUndefined();
+  } finally { close(); }
 });

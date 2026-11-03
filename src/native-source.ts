@@ -48,8 +48,8 @@ export function bindNativeSourceRun(event: { prompt?: string }, context: { sessi
 }
 export function guardNativeSourceTool(event: { toolName?: string; params?: Record<string, any> }, context: { sessionKey?: string; runId?: string; sessionId?: string }) {
   const source = [...sources.entries()].find(([sessionKey, value]) => !value.closed && value.runId && value.runId === context.runId && (sessionKey === context.sessionKey || Boolean(value.nativeSessionId && value.nativeSessionId === context.sessionId)))?.[1];
-  const name = event.toolName === "tool_call" ? event.params?.name : event.toolName;
-  const args = event.toolName === "tool_call" ? event.params?.args : event.params;
+  const name = ["tool_call", "dispatch_action"].includes(event.toolName ?? "") ? (event.params?.id ?? event.params?.name) : event.toolName;
+  const args = ["tool_call", "dispatch_action"].includes(event.toolName ?? "") ? event.params?.args : event.params;
   if (source && name === "message" && [undefined, "send", "reply"].includes(args?.action)) return { block: true, blockReason: "Use the source-bound Inkbox send tool for this answer; generic message sends cannot preserve its native source ownership." };
 }
 
