@@ -1837,6 +1837,7 @@ it.each([false, true])("delivers native WhatsApp reply attachments once and reta
   f.dispatchReply.mockImplementationOnce(async (input: any) => {
     await input.delivery.deliver({ text: "An image", mediaUrl: path }, { kind: "final" });
     await input.delivery.deliver({ text: "An image", mediaUrl: path }, { kind: "final" });
+    await input.delivery.deliver({ text: "An image" }, { kind: "final" });
     return { dispatched: true };
   });
   await dispatchInbound(event(), bridge.handlers); await settle(bridge);
@@ -1910,5 +1911,25 @@ it.each(["oversized", "upload-failed"])("reports native attachment %s without re
   expect(request.text).toContain("attachment could not be confirmed sent");
   expect(request.text).not.toContain("private-upstream-error");
   expect(request).not.toHaveProperty("mediaIds");
+  await bridge.shutdownA2A();
+});
+
+
+it.each(["uncertain", "rejected"])("does not upload a native file after an earlier %s source send", async (outcome) => {
+  const f = fixture(), bridge = f.bridge();
+  const path = join(state.dir, "reply.png"); await writeFile(path, "synthetic-image");
+  f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
+  f.identity.sendWhatsApp.mockRejectedValueOnce(outcome === "uncertain" ? new TypeError("lost response") : new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }));
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup: async () => undefined } });
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    await tools.get("inkbox_send_whatsapp").execute("prior-send", { text: "Answer", replyToMessageId: event().data.message.id });
+    await input.delivery.deliver({ text: "Replacement", mediaUrl: path }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.uploadWhatsAppMedia).not.toHaveBeenCalled();
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
   await bridge.shutdownA2A();
 });

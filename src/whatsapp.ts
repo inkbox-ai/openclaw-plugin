@@ -314,6 +314,7 @@ export async function sendWhatsAppReplyFile(
   await whatsappReady(identity);
   const file = await whatsappFile(filePath);
   await authorize();
+  if (source.validateUpload) await source.validateUpload(true);
   const contentType = await detectMime({ buffer: file.content, filePath });
   const media = await identity.uploadWhatsAppMedia({ ...file, contentType });
   await authorize();
