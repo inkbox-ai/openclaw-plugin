@@ -1,5 +1,5 @@
 import { checkOutboundRecipients } from "../allowlist.js";
-import { assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey } from "../whatsapp.js";
+import { sendWhatsAppReplyFile, assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey } from "../whatsapp.js";
 import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
 import { bindNativeSource, type NativeSource } from "../native-source.js";
@@ -145,6 +145,7 @@ type WebhookMatchedContact = {
 };
 
 type InkboxInboundTurn = {
+  media?: { path: string; contentType: string }[];
   slackRoute?: SlackRoute;
   activity?: (phase: "waiting" | "resumed") => void;
   bindNativeOwner?: (sessionKey: string, runId: string) => Promise<void>;
@@ -2647,6 +2648,7 @@ async function dispatchInboundTurn(
       envelopeFrom: opts.turn.fromLabel,
     },
     extra: {
+      ...(opts.turn.media?.length ? { MediaPaths: opts.turn.media.map(item => item.path), MediaTypes: opts.turn.media.map(item => item.contentType), MediaPath: opts.turn.media[0]!.path, MediaType: opts.turn.media[0]!.contentType } : {}),
       InputProvenance: opts.turn.deliveryFailureNotification
         ? { kind: "internal_system", sourceChannel: "inkbox", sourceTool: "inkbox_delivery_failure" } : undefined,
       WasMentioned: opts.turn.wasMentioned ?? mentionsAgent(opts.turn.rawText ?? "", opts.account.config.identity),
@@ -6083,7 +6085,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   function companionTurn(input: CompanionInput): InkboxInboundTurn {
     const mode = input.channel === "whatsapp" ? "whatsapp" : input.channel === "slack" ? "slack" : input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
     return {
-      bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal,
+      bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal, media: input.media,
       nativeSource: !input.commandAuthorized && (input.channel === "whatsapp" || input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
         whatsapp: input.channel === "whatsapp", sourceMessageId: input.messageId,
         identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
@@ -6160,6 +6162,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       let completedSilently = false;
       const turn = companionTurn(input);
       const uploadedMedia = new Set<string>();
+      const whatsappMediaReplies = new Set<string>();
       const attachmentNotices = new Set<string>();
       if (input.commandAuthorized) {
         const aliases: Record<string, string> = { "/clear": "/new", "/cancel": "/stop", "/health": "/status" };
@@ -6172,6 +6175,28 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         deliveryOverride: {
           deliver: async (payload, info) => {
 
+            if (turn.mode === "whatsapp" && payload && typeof payload === "object" && info?.kind !== "tool") {
+              const raw = payload as { mediaUrl?: unknown; mediaUrls?: unknown };
+              const media = Array.isArray(raw.mediaUrls) ? raw.mediaUrls : raw.mediaUrl ? [raw.mediaUrl] : [];
+              if (media.length) {
+                const callbackKey = JSON.stringify([media, payloadText(payload)]);
+                if (whatsappMediaReplies.has(callbackKey)) return { visibleReplySent: false, suppression: { reason: "channel_transform" } };
+                whatsappMediaReplies.add(callbackKey);
+              }
+              if (media.length > 1) attachmentNotices.add("Only one WhatsApp attachment can be sent per reply.");
+              const location = media[0];
+              if (location && !uploadedMedia.has(String(location))) {
+                uploadedMedia.add(String(location));
+                try {
+                  if (typeof location !== "string" || !turn.nativeSource) throw new Error("No active attachment source.");
+                  const caption = payloadText(payload).trim();
+                  await sendWhatsAppReplyFile(opts.runtime, turn.nativeSource, location.startsWith("file://") ? fileURLToPath(location) : location,
+                    isInkboxSilentReply(caption) ? "" : caption, opts.account.config.allowedRecipients);
+                } catch {
+                  attachmentNotices.add("A WhatsApp attachment could not be confirmed sent. No automatic resend was attempted.");
+                }
+              }
+            }
             if (turn.slackRoute && payload && typeof payload === "object" && info?.kind !== "tool") {
               const raw = payload as { mediaUrl?: unknown; mediaUrls?: unknown };
               const media = Array.isArray(raw.mediaUrls) ? raw.mediaUrls : raw.mediaUrl ? [raw.mediaUrl] : [];

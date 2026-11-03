@@ -1,7 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { InkboxAPIError } from "@inkbox/sdk";
 import { handleInkboxWebhook } from "../../src/inbound/handler.js";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
@@ -26,7 +26,7 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
 import { createCompanionReceiver, readCompanionQueueSummary } from "../../src/inbound/companion.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
-import { bindNativeSource } from "../../src/native-source.js";
+import { activeNativeSource, bindNativeSource } from "../../src/native-source.js";
 import { registerSendIMessage } from "../../src/tools/send-imessage.js";
 import { registerWhatsAppTools } from "../../src/tools/whatsapp.js";
 function fixture() {
@@ -163,10 +163,10 @@ describe("WhatsApp native receive/reply", () => {
       expect.objectContaining({
         conversationId: "00000000-0000-4000-8000-000000000001",
         text: "WhatsApp answer",
-        replyToMessageId: "00000000-0000-4000-8000-000000000005",
         idempotencyKey: expect.stringContaining("openclaw:whatsapp:"),
       }),
     );
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
     const next = f.bridge();
     await dispatchInbound(event(), next.handlers);
     await settle(next);
@@ -215,6 +215,7 @@ describe("WhatsApp native receive/reply", () => {
       JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0]),
     ).toContain("unavailable");
     expect(f.identity.getWhatsAppMedia).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000004");
+    expect(f.core.inbound.buildContext.mock.calls[0][0].extra).not.toHaveProperty("MediaPaths");
   });
   it("treats lifecycle and unknown WhatsApp events as status only, never external/model work", async () => {
     const f = fixture(),
@@ -640,7 +641,7 @@ it("replays a legacy saved plain reply with its exact original hash after restar
 });
 
 
-it.each(["accepted", "uncertain", "rejected"])("inherits a tool quote and suppresses changed final output across restart (%s)", async (outcome) => {
+it.each(["accepted", "uncertain", "rejected"])("preserves an explicit tool quote and suppresses changed final output across restart (%s)", async (outcome) => {
   const f = fixture();
   const lookup = vi.fn(async () => "accepted-original");
   f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup } });
@@ -655,7 +656,7 @@ it.each(["accepted", "uncertain", "rejected"])("inherits a tool quote and suppre
         tools.set(tool.name, tool);
       } }, f.runtime);
       const send = tools.get("inkbox_send_whatsapp");
-      const result = await send.execute("first", { text: "Tool answer" });
+      const result = await send.execute("first", { text: "Tool answer", replyToMessageId: event().data.message.id });
       expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({
         conversationId: "00000000-0000-4000-8000-000000000001", replyToMessageId: "00000000-0000-4000-8000-000000000005", text: "Tool answer" });
       if (outcome !== "accepted") {
@@ -831,12 +832,12 @@ it.each(["pending", "access_required", "read-error"])("retains readiness %s acro
     await settle(bridge); await dispatchInbound(incoming, bridge.handlers); await settle(bridge);
     await bridge.shutdownA2A(); bridge = f.bridge(); await settle(bridge);
     expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
-    expect(f.identity.sendWhatsApp.mock.calls[0][0].replyToMessageId).toBe(incoming.data.message.id);
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
     expect(JSON.stringify(f.core.inbound.buildContext.mock.calls[0][0])).not.toContain("Prior turn outcome is uncertain");
   } finally { await bridge.shutdownA2A(); clock.mockRestore(); }
 });
 
-it("preflight bad UUID has zero send effect and cannot wedge the ordinary quoted final", async () => {
+it("preflight bad UUID has zero send effect and cannot wedge the ordinary plain final", async () => {
   const f = fixture(), bridge = f.bridge();
   let result: any, saved: any;
   f.dispatchReply.mockImplementationOnce(async (input: any) => {
@@ -850,7 +851,7 @@ it("preflight bad UUID has zero send effect and cannot wedge the ordinary quoted
   await dispatchInbound(event(), bridge.handlers); await settle(bridge);
   expect(result.isError).toBe(true); expect(saved.toolSends ?? {}).toEqual({});
   expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
-  expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ text: "Ordinary final", replyToMessageId: event().data.message.id });
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ text: "Ordinary final" });
 });
 
 it.each([
@@ -877,7 +878,7 @@ it.each([
   expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
 });
 
-it("uses distinct logical keys for intentional identical replies to the same quote", async () => {
+it("uses distinct logical keys for intentional identical plain replies", async () => {
   const f = fixture(), bridge = f.bridge();
   f.dispatchReply.mockImplementationOnce(async (input: any) => {
     const tools = new Map<string, any>();
@@ -890,7 +891,7 @@ it("uses distinct logical keys for intentional identical replies to the same quo
   await dispatchInbound(event(), bridge.handlers); await settle(bridge);
   expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
   const [first, second] = f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request);
-  expect(first.replyToMessageId).toBe(event().data.message.id); expect(second.replyToMessageId).toBe(first.replyToMessageId);
+  expect(first).not.toHaveProperty("replyToMessageId"); expect(second).not.toHaveProperty("replyToMessageId");
   expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
 });
 
@@ -951,7 +952,7 @@ it.each([
     const tools = new Map<string, any>();
     registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
     const send = tools.get("inkbox_send_whatsapp");
-    const original = { text: "Saved answer", ...(originalMedia !== undefined ? { mediaIds: originalMedia } : {}), ...(legacy ? { idempotencyKey: "retained-plain-key" } : {}) };
+    const original = { text: "Saved answer", ...(!legacy ? { replyToMessageId: event().data.message.id } : {}), ...(originalMedia !== undefined ? { mediaIds: originalMedia } : {}), ...(legacy ? { idempotencyKey: "retained-plain-key" } : {}) };
     if (legacy) {
       const saved = await savedWhatsAppJournal(), job: any = Object.values(saved.journal.jobs)[0];
       job.toolSends = { prior: { whatsappKey: "retained-plain-key", whatsappUncertain: true, text: "Saved answer",
@@ -1130,7 +1131,7 @@ it.each(independentOutreachCases.flatMap(destinations => [false, true].map(retry
     expect(requests[1].idempotencyKey).not.toBe(requests[0].idempotencyKey);
     expect(requests[2].idempotencyKey).not.toBe(requests[1].idempotencyKey);
     if (retryOriginal) { expect(retried.isError).not.toBe(true); expect(requests[3]).toEqual(requests[0]); }
-    expect(requests.at(-1)).toMatchObject({ conversationId: event().data.message.conversation_id, replyToMessageId: event().data.message.id, text: "Ordinary source final" });
+    expect(requests.at(-1)).toMatchObject({ conversationId: event().data.message.conversation_id, text: "Ordinary source final" });
     await bridge.shutdownA2A(); const restarted = f.bridge(); await settle(restarted);
     expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(requests.length);
     expect(f.dispatchReply).toHaveBeenCalledOnce();
@@ -1196,7 +1197,7 @@ it("retains each rejected destination when later outreach is also rejected", asy
   expect(retryFirst.isError).not.toBe(true); expect(retrySecond.isError).not.toBe(true);
   const requests = f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request);
   expect(requests).toHaveLength(5); expect(requests[2]).toEqual(requests[1]); expect(requests[3]).toEqual(requests[0]);
-  expect(requests[4]).toMatchObject({ text: "Ordinary source final", replyToMessageId: event().data.message.id });
+  expect(requests[4]).toMatchObject({ text: "Ordinary source final" });
   await bridge.shutdownA2A();
 });
 
@@ -1310,7 +1311,7 @@ it("never replaces a rejected source quote with a new-key plain send or an autom
     const tools = new Map<string, any>();
     registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
     const send = tools.get("inkbox_send_whatsapp");
-    first = await send.execute("source-quote", { text: "Answer" });
+    first = await send.execute("source-quote", { text: "Answer", replyToMessageId: event().data.message.id });
     plain = await send.execute("plain-replacement", { text: "Answer", idempotencyKey: "new-plain-key" });
     await input.delivery.deliver({ text: "Ordinary source final" }, { kind: "final" }); return { dispatched: true };
   });
@@ -1344,7 +1345,7 @@ it.each([undefined, [], ["00000000-0000-4000-8000-000000000004"]].flatMap(mediaI
         const tools = new Map<string, any>();
         registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
         const send = tools.get("inkbox_send_whatsapp");
-        const first = await send.execute("source-rejected", payload);
+        const first = await send.execute("source-rejected", { ...payload, replyToMessageId: incoming.data.message.id });
         expect(first.details.requestAccepted).toBeUndefined();
         saved = (await currentWhatsAppJob()).toolSends["source-rejected"];
         for (const [index, destination] of [
@@ -1464,7 +1465,7 @@ it.each([false, true])("matches a saved source rejection using verified direct m
     registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
     const send = tools.get("inkbox_send_whatsapp");
     if (first) {
-      expect((await send.execute("saved-source", payload)).details.requestAccepted).toBeUndefined();
+      expect((await send.execute("saved-source", { ...payload, replyToMessageId: event().data.message.id })).details.requestAccepted).toBeUndefined();
       saved = (await currentWhatsAppJob()).toolSends["saved-source"];
       expect(saved.whatsappReplyToMessageId).toBe(event().data.message.id);
       expect(saved.whatsappDestinationEvidence).toMatchObject({ identityId: f.identity.id, conversationId: aliasConversation, directRecipient: "+15555550124" });
@@ -1796,4 +1797,118 @@ it("never automatically sends to a conversation whose current metadata is group-
   expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
   await bridge.shutdownA2A(); const restarted = f.bridge(); await settle(restarted);
   expect(f.identity.sendWhatsApp).not.toHaveBeenCalled(); await restarted.shutdownA2A();
+});
+
+
+it.each(["image/png", "audio/ogg"])("passes refreshed captionless %s bytes into native media processing on consecutive turns", async (contentType) => {
+  const f = fixture(), bridge = f.bridge();
+  const bytes = Buffer.from("synthetic-media-bytes");
+  f.identity.getWhatsAppMedia.mockImplementation(async (id: string) => ({ id, status: "ready", url: `https://media.example.test/${id}`, contentType, size: bytes.length }));
+  const fetchMedia = vi.fn(async () => new Response(bytes));
+  vi.stubGlobal("fetch", fetchMedia);
+  for (let index = 0; index < 2; index++) {
+    const incoming = event(undefined, `captionless-${index}`);
+    incoming.data.message.id = `00000000-0000-4000-8000-00000000001${index}`;
+    const mediaId = `00000000-0000-4000-8000-00000000002${index}`;
+    incoming.data.message.content = null;
+    incoming.data.message.media = [{ id: mediaId, content_type: "application/octet-stream", status: "pending" }];
+    await dispatchInbound(incoming, bridge.handlers); await settle(bridge);
+    const context = f.core.inbound.buildContext.mock.calls[index][0];
+    expect(context.extra.MediaPaths).toHaveLength(1);
+    expect(context.extra.MediaTypes).toEqual([contentType]);
+    expect(context.extra.MediaPath).toBe(context.extra.MediaPaths[0]);
+    expect(context.extra.MediaType).toBe(contentType);
+    expect(await readFile(context.extra.MediaPath)).toEqual(bytes);
+    expect(context.message.bodyForAgent).toContain(mediaId);
+    expect(f.identity.sendWhatsApp.mock.calls[index][0]).not.toHaveProperty("replyToMessageId");
+  }
+  expect(f.dispatchReply).toHaveBeenCalledTimes(2);
+  expect(f.core.inbound.buildContext.mock.calls[0][0].extra.MediaPath).not.toBe(f.core.inbound.buildContext.mock.calls[1][0].extra.MediaPath);
+  expect(fetchMedia).toHaveBeenCalledTimes(2);
+  await bridge.shutdownA2A();
+});
+
+it.each([false, true])("delivers native WhatsApp reply attachments once and retains uncertain sends across restart (%s)", async (uncertain) => {
+  const f = fixture(), bridge = f.bridge();
+  const path = join(state.dir, "reply.png"); await writeFile(path, Buffer.from("synthetic-outbound-image"));
+  f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
+  if (uncertain) f.identity.sendWhatsApp.mockRejectedValueOnce(new TypeError("lost send response"));
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup: async () => undefined } });
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    await input.delivery.deliver({ text: "An image", mediaUrl: path }, { kind: "final" });
+    await input.delivery.deliver({ text: "An image", mediaUrl: path }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce();
+  expect(f.identity.uploadWhatsAppMedia.mock.calls[0][0].content).toEqual(Buffer.from("synthetic-outbound-image"));
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: event().data.message.conversation_id, text: "An image", mediaIds: ["00000000-0000-4000-8000-000000000004"] });
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+  const saved = await currentWhatsAppJob();
+  if (uncertain) expect(Object.values(saved.toolSends)[0]).toMatchObject({ whatsappMediaIds: ["00000000-0000-4000-8000-000000000004"], whatsappUncertain: true });
+  await bridge.shutdownA2A(); const restarted = f.bridge(); await settle(restarted);
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce();
+  await restarted.shutdownA2A();
+});
+
+it("refuses a native file reply after its source stops during upload", async () => {
+  const f = fixture(), bridge = f.bridge();
+  const path = join(state.dir, "reply.png"); await writeFile(path, "synthetic-image");
+  f.identity.uploadWhatsAppMedia = vi.fn(async () => {
+    const saved = await savedWhatsAppJournal();
+    const job: any = Object.values(saved.journal.jobs)[0]; job.stoppedBy = "stopped";
+    await writeFile(saved.path, JSON.stringify(saved.journal));
+    return { id: "00000000-0000-4000-8000-000000000004" };
+  });
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    await input.delivery.deliver({ mediaUrl: path }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  await bridge.shutdownA2A();
+});
+
+
+it("retains an accepted native attachment when its receipt checkpoint fails without resending", async () => {
+  const f = fixture(), bridge = f.bridge();
+  const path = join(state.dir, "reply.png"); await writeFile(path, "synthetic-image");
+  f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
+  const lookup = vi.fn(async () => "sent-a");
+  f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup } });
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    activeNativeSource(input.routeSessionKey)!.afterSend = async () => { throw new Error("checkpoint unavailable"); };
+    await input.delivery.deliver({ text: "Photo", mediaUrl: path }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  await bridge.shutdownA2A(); const restarted = f.bridge(); await settle(restarted);
+  expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(lookup).toHaveBeenCalled();
+  await restarted.shutdownA2A();
+});
+
+
+it.each(["oversized", "upload-failed"])("reports native attachment %s without retrying or leaking upstream errors", async (failure) => {
+  const f = fixture(), bridge = f.bridge();
+  const path = join(state.dir, "reply.png"); await writeFile(path, "synthetic-image");
+  if (failure === "oversized") await truncate(path, 20 * 1024 * 1024 + 1);
+  f.identity.uploadWhatsAppMedia = vi.fn(async () => { throw new Error("private-upstream-error"); });
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    await input.delivery.deliver({ mediaUrl: path }, { kind: "final" });
+    await input.delivery.deliver({ mediaUrl: path }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledTimes(failure === "oversized" ? 0 : 1);
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  const request = f.identity.sendWhatsApp.mock.calls[0][0];
+  expect(request.text).toContain("attachment could not be confirmed sent");
+  expect(request.text).not.toContain("private-upstream-error");
+  expect(request).not.toHaveProperty("mediaIds");
+  await bridge.shutdownA2A();
 });

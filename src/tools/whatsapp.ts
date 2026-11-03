@@ -33,7 +33,7 @@ export function registerWhatsAppTools(
       return {
         name: "inkbox_send_whatsapp",
         description:
-          "Send WhatsApp using one E.164 recipient string or an existing direct conversation with optional quoted reply and owned media. Active-source replies inherit their quote target; explicit destinations remain authoritative. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
+          "Send WhatsApp using one E.164 recipient string or an existing direct conversation with optional quoted reply and owned media. Active-source sends stay in their conversation and are plain by default; quote only with explicit replyToMessageId. Explicit destinations remain authoritative. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
         parameters: Type.Object(
           {
             to: Type.Optional(Type.String({ pattern: "^\\+[1-9]\\d{6,14}$" })),

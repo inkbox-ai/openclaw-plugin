@@ -1,3 +1,4 @@
+import { detectMime } from "openclaw/plugin-sdk/media-mime";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { open, mkdir, rename, readdir, lstat, unlink } from "node:fs/promises";
@@ -248,7 +249,7 @@ export async function whatsappAttachments(
         .update(JSON.stringify([identity.id, current.id]))
         .digest("hex");
       const path = await cacheMedia(directory, name, Buffer.concat(chunks));
-      attachments.push({ ...metadata, status: "ready", local_path: path });
+      attachments.push({ ...metadata, content_type: current.contentType ?? metadata.content_type, status: "ready", local_path: path });
     } catch {
       attachments.push({
         ...metadata,
@@ -287,4 +288,48 @@ export function whatsappRecipients(value: unknown): string[] {
   if (typeof value !== "string" || !/^\+[1-9]\d{6,14}$/.test(value))
     throw new Error("Use one E.164 recipient string; arrays and lists are not supported.");
   return [value];
+}
+
+/** Deliver a native attachment with the same durable source intent as tool sends. */
+export async function sendWhatsAppReplyFile(
+  runtime: InkboxRuntime,
+  source: import("./native-source.js").NativeSource,
+  filePath: string,
+  text: string,
+  allowedRecipients?: string[],
+) {
+  const { checkOutboundRecipients } = await import("./allowlist.js");
+  const identity = await runtime.getIdentity();
+  const authorize = async () => {
+    if (!source.whatsapp || source.closed || source.identityId !== identity.id || (await runtime.getIdentity()).id !== identity.id)
+      throw new Error("The WhatsApp attachment source is no longer active.");
+    await source.validate();
+  };
+  await authorize();
+  assertWhatsAppText(text);
+  const conversation = await identity.getWhatsAppConversation(source.conversationId);
+  whatsappDestinationEvidence(conversation, identity.id, source.conversationId);
+  const denied = checkOutboundRecipients(conversation.participants, allowedRecipients);
+  if (denied) throw new Error(denied);
+  await whatsappReady(identity);
+  const file = await whatsappFile(filePath);
+  await authorize();
+  const contentType = await detectMime({ buffer: file.content, filePath });
+  const media = await identity.uploadWhatsAppMedia({ ...file, contentType });
+  await authorize();
+  const callId = `reply-file:${createHash("sha256").update(filePath).digest("hex")}`;
+  const idempotencyKey = whatsappSendKey([identity.id, source.sourceMessageId, callId, text, media.id]);
+  const intent = { idempotencyKey, text, mediaIds: [media.id], ...(source.replyToMessageId ? { replyToMessageId: source.replyToMessageId } : {}) };
+  await source.beforeSend(callId, intent);
+  await authorize();
+  let message;
+  try { message = await identity.sendWhatsApp({ conversationId: source.conversationId, ...intent }); }
+  catch (error) {
+    const policy = whatsappSendRejection(error);
+    if (policy && source.rejectSend) await source.rejectSend(callId, idempotencyKey, policy).catch(() => {});
+    throw error;
+  }
+  await source.afterSend(callId, message.id, text, message.status === "uncertain", message.conversationId);
+  if (message.status === "uncertain") throw new Error("WhatsApp attachment delivery is unconfirmed; do not resend.");
+  return message;
 }

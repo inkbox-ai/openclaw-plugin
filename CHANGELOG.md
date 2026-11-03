@@ -7,19 +7,22 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 ### Added
 
 - Approved dedicated direct-message WhatsApp messaging, fifteen native tools for explicit quoted replies, paginated threads and named/custom reactions, signed incoming events, source-bound durable replies, owned attachments, and status-only delivery notifications.
-- Require SDK 0.7.24; candidate checks build the pinned public source package before normal publication.
+- Require the published SDK 0.7.26 release.
 
 - Deliver local Slack attachments through the SDK with source-owned durable outcomes and file-operation inspection.
 - Add Slack mrkdwn guidance and conservative formatting repair outside code blocks.
 - Show native tool progress in source-bound task streams when the SDK/workspace supports them, with one edited-message fallback and non-replaying uncertainty recovery.
 - Cover Stop followed by another message, late tool callbacks, attachment ownership, and restart recovery.
-- Require the SDK `0.7.26` candidate for the WhatsApp surface until its package release is published; native task-stream methods remain negotiated with the server.
+- Native task-stream methods remain negotiated with the server.
 
 - A resumable, non-interactive `openclaw inkbox bootstrap` command for existing identities, hosted Voice AI, explicit signing-key rotation, and gateway service startup.
 - A native three-option phone call voice-stack setup flow for Inkbox Voice AI, OpenAI Realtime API, and Inkbox TTS/STT.
 - Durable `call.ended` processing for hosted calls, including full transcript retrieval, post-call action reconciliation, replay after restart, and suppression of obsolete text replies.
 
 ### Changed
+
+- Send ordinary WhatsApp replies without a quote by default, retaining explicit quotes and saved retry targets.
+- Pass refreshed WhatsApp image and audio attachments into native media processing, including captionless messages, and deliver native file replies with retained send receipts.
 
 - Preserve WhatsApp source ownership for case-variant conversation IDs while keeping retained request selectors and quotes exact across recovery.
 - Bound WhatsApp delivery context without interrupting saved-answer checkpoints, and keep uncertain sends fenced with accurate recovery guidance.

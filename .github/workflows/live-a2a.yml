@@ -69,10 +69,9 @@ jobs:
 
       - name: Build plugin
         run: |
-          source "$GITHUB_WORKSPACE/tests/ci/candidate_sdk.sh"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            "$INKBOX_SDK_CANDIDATE_TGZ" openclaw@latest
+            openclaw@latest
           npm run build
 
       - name: Install the matching OpenClaw host
