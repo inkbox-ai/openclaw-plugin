@@ -26,6 +26,7 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
 import { createCompanionReceiver, readCompanionQueueSummary } from "../../src/inbound/companion.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
+import { bindNativeOwner, settleNativeOwner } from "../../src/native-owner.js";
 import { activeNativeSource, bindNativeSource } from "../../src/native-source.js";
 import { registerSendIMessage } from "../../src/tools/send-imessage.js";
 import { registerWhatsAppTools } from "../../src/tools/whatsapp.js";
@@ -1947,5 +1948,27 @@ it("suppresses a different automatic final after explicit source sends without s
   });
   await dispatchInbound(event(), bridge.handlers); await settle(bridge);
   expect(f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request.text)).toEqual(["First answer", "A deliberate follow-up"]);
+  await bridge.shutdownA2A();
+});
+
+
+it.each([false, true])("delivers buffered final media after model completion while preserving Stop (stopped=%s)", async (stopped) => {
+  const f = fixture(), bridge = f.bridge();
+  const path = join(state.dir, "final.png"); await writeFile(path, "final-image");
+  f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    await bindNativeOwner({ prompt: JSON.stringify(input.ctxPayload) }, { sessionKey: input.routeSessionKey, runId: "attachment-run" });
+    await settleNativeOwner({}, { sessionKey: input.routeSessionKey, runId: "attachment-run" });
+    const saved = await savedWhatsAppJournal();
+    const job: any = Object.values(saved.journal.jobs)[0];
+    expect(job.nativeComplete).toBe(true);
+    if (stopped) { job.stoppedBy = "stop-after-agent-end"; await writeFile(saved.path, JSON.stringify(saved.journal)); }
+    await input.delivery.deliver({ text: "Final image", mediaUrl: path }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledTimes(stopped ? 0 : 1);
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(stopped ? 0 : 1);
+  if (!stopped) expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ text: "Final image", mediaIds: ["00000000-0000-4000-8000-000000000004"] });
   await bridge.shutdownA2A();
 });

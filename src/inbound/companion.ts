@@ -37,7 +37,7 @@ const WHATSAPP_OBSERVATION_LIMIT = 1024;
 type WhatsAppObservation = { createdAt?: number; identityId: string; messageId: string; body?: string; conversationId?: string };
 type WhatsAppReactionCursor = { identityId: string; actor: string; targetMessageId: string; revision: number };
 type Journal = { whatsappObservations?: Record<string, WhatsAppObservation>; whatsappReactionOrder?: Record<string, WhatsAppReactionCursor>; jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
-export type CompanionInput = { media?: { path: string; contentType: string }[]; key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>; whatsappReplyDestination?(idempotencyKey: string): Promise<WhatsAppSendIntent["destination"]>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent): Promise<void>; validateToolUpload(automatic: boolean): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string, uncertain?: boolean, conversationId?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
+export type CompanionInput = { media?: { path: string; contentType: string }[]; key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>; whatsappReplyDestination?(idempotencyKey: string): Promise<WhatsAppSendIntent["destination"]>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent, automatic?: boolean): Promise<void>; validateToolUpload(automatic: boolean, ownCallId?: string): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string, uncertain?: boolean, conversationId?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
 class SenderNotPermitted extends Error {}
 function retryableRead(error: unknown, depth = 0): boolean {
   if (!error || typeof error !== "object" || depth > 4) return false;
@@ -432,11 +432,11 @@ export function createCompanionReceiver(opts: {
     }
   }
   function toolSendCallbacks(id: string, validate: () => Promise<void>) {
-    const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent, intent?: WhatsAppSendIntent) => {
+    const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent, intent?: WhatsAppSendIntent, automatic = false) => {
       await validate();
       return mutate(async (journal) => {
         const job = journal.jobs[id]!;
-        if (stopped() || !enabled(job) || job.stoppedBy || job.state !== "submitting" || (job.nativeComplete && kind !== "attachment")) throw new Error("The native job is no longer active; its tool send is not authorized.");
+        if (stopped() || !enabled(job) || job.stoppedBy || job.state !== "submitting" || (job.nativeComplete && kind !== "attachment" && !automatic)) throw new Error("The native job is no longer active; its tool send is not authorized.");
         const previous = upload && Object.values(job.toolSends ?? {}).find((send) => !send.failed && send.uploadFingerprint === upload.fingerprint);
         if (previous?.upload) return { ...previous.upload, deduplicated: true };
         if (previous) throw new Error("This file already has an uncertain upload; inspect it instead of repeating it.");
@@ -498,11 +498,11 @@ export function createCompanionReceiver(opts: {
         const send = j.jobs[id]?.toolSends?.[callId];
         if (send?.uploadKey && !send.upload && !send.messageId) send.failed = true;
       }, [id]); },
-      validateToolUpload: async (automatic: boolean) => {
+      validateToolUpload: async (automatic: boolean, ownCallId?: string) => {
         await validate();
         const job = await readJob(id);
         if (stopped() || !job || !enabled(job) || job.stoppedBy || job.state !== "submitting" || (job.nativeComplete && !automatic)) throw new Error("The original reply no longer owns this attachment delivery.");
-        if (automatic && metadata(job.event).channel === "whatsapp" && Object.values(job.toolSends ?? {}).some(send =>
+        if (automatic && metadata(job.event).channel === "whatsapp" && Object.entries(job.toolSends ?? {}).some(([callId, send]) => callId !== ownCallId &&
           send.kind !== "approval" && !send.failed && ((!send.whatsappRejection && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false))) || (send.whatsappRejection && sourceWhatsAppSend(send, job)))))
           throw new Error("An earlier WhatsApp send must be resolved before uploading a new reply attachment.");
       },
@@ -529,7 +529,7 @@ export function createCompanionReceiver(opts: {
         const job = (await read()).jobs[id];
         return Object.values(job?.toolSends ?? {}).find((send) => send.whatsappKey === idempotencyKey)?.whatsappReplyToMessageId;
       },
-      beforeToolSend: async (callId: string, intent?: WhatsAppSendIntent) => { await beforeSend(callId, undefined, undefined, intent); },
+      beforeToolSend: async (callId: string, intent?: WhatsAppSendIntent, automatic = false) => { await beforeSend(callId, undefined, undefined, intent, automatic); },
       afterToolSend: afterSend,
       rejectToolSend: async (callId: string, idempotencyKey: string, policy: WhatsAppSendRejection) => { await mutate((j) => {
         const send = j.jobs[id]?.toolSends?.[callId];

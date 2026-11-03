@@ -300,10 +300,11 @@ export async function sendWhatsAppReplyFile(
 ) {
   const { checkOutboundRecipients } = await import("./allowlist.js");
   const identity = await runtime.getIdentity();
-  const authorize = async () => {
+  const authorize = async (ownCallId?: string) => {
     if (!source.whatsapp || source.closed || source.identityId !== identity.id || (await runtime.getIdentity()).id !== identity.id)
       throw new Error("The WhatsApp attachment source is no longer active.");
-    await source.validate();
+    if (source.validateUpload) await source.validateUpload(true, ownCallId);
+    else await source.validate();
   };
   await authorize();
   assertWhatsAppText(text);
@@ -314,15 +315,14 @@ export async function sendWhatsAppReplyFile(
   await whatsappReady(identity);
   const file = await whatsappFile(filePath);
   await authorize();
-  if (source.validateUpload) await source.validateUpload(true);
   const contentType = await detectMime({ buffer: file.content, filePath });
   const media = await identity.uploadWhatsAppMedia({ ...file, contentType });
   await authorize();
   const callId = `reply-file:${createHash("sha256").update(filePath).digest("hex")}`;
   const idempotencyKey = whatsappSendKey([identity.id, source.sourceMessageId, callId, text, media.id]);
   const intent = { idempotencyKey, text, mediaIds: [media.id], ...(source.replyToMessageId ? { replyToMessageId: source.replyToMessageId } : {}) };
-  await source.beforeSend(callId, intent);
-  await authorize();
+  await source.beforeSend(callId, intent, true);
+  await authorize(callId);
   let message;
   try { message = await identity.sendWhatsApp({ conversationId: source.conversationId, ...intent }); }
   catch (error) {
