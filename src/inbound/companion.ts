@@ -765,8 +765,9 @@ export function createCompanionReceiver(opts: {
         throw new Error("An explicit send has an uncertain outcome; its saved automatic reply must not repeat it.");
       }
       // A recovered ID does not authorize a replacement. Legacy receipts without
-      // certainty evidence also stay fenced; quote intents are never replaced.
-      if (m.channel === "whatsapp" && Object.values(current.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send, current) && Boolean((sourceWhatsAppSend(send, current) && send.whatsappReplyToMessageId) || (send.whatsappKey && send.whatsappUncertain !== false)))) {
+      // certainty evidence also stay fenced. An accepted source response already
+      // answers this turn; do not append a redundant automatic acknowledgement.
+      if (m.channel === "whatsapp" && Object.values(current.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send, current) && Boolean((sourceWhatsAppSend(send, current) && (send.whatsappReplyToMessageId || (send.messageId && send.whatsappUncertain === false))) || (send.whatsappKey && send.whatsappUncertain !== false)))) {
         await mutate((j) => { j.jobs[id]!.replies = []; j.jobs[id]!.state = "done"; });
         activity(job.event, "completed"); return;
       }

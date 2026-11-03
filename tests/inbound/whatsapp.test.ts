@@ -1837,7 +1837,7 @@ it.each([false, true])("delivers native WhatsApp reply attachments once and reta
   f.dispatchReply.mockImplementationOnce(async (input: any) => {
     await input.delivery.deliver({ text: "An image", mediaUrl: path }, { kind: "final" });
     await input.delivery.deliver({ text: "An image", mediaUrl: path }, { kind: "final" });
-    await input.delivery.deliver({ text: "An image" }, { kind: "final" });
+    await input.delivery.deliver({ text: "Sent you a photo!" }, { kind: "final" });
     return { dispatched: true };
   });
   await dispatchInbound(event(), bridge.handlers); await settle(bridge);
@@ -1931,5 +1931,21 @@ it.each(["uncertain", "rejected"])("does not upload a native file after an earli
   await dispatchInbound(event(), bridge.handlers); await settle(bridge);
   expect(f.identity.uploadWhatsAppMedia).not.toHaveBeenCalled();
   expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  await bridge.shutdownA2A();
+});
+
+
+it("suppresses a different automatic final after explicit source sends without suppressing deliberate subsequent sends", async () => {
+  const f = fixture(), bridge = f.bridge();
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    await tools.get("inkbox_send_whatsapp").execute("first-send", { text: "First answer" });
+    await tools.get("inkbox_send_whatsapp").execute("second-send", { text: "A deliberate follow-up" });
+    await input.delivery.deliver({ text: "I sent both replies!" }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.sendWhatsApp.mock.calls.map(([request]: any) => request.text)).toEqual(["First answer", "A deliberate follow-up"]);
   await bridge.shutdownA2A();
 });
