@@ -437,6 +437,9 @@ export function createCompanionReceiver(opts: {
       return mutate(async (journal) => {
         const job = journal.jobs[id]!;
         if (stopped() || !enabled(job) || job.stoppedBy || job.state !== "submitting" || (job.nativeComplete && kind !== "attachment" && !automatic)) throw new Error("The native job is no longer active; its tool send is not authorized.");
+        if (automatic && metadata(job.event).channel === "whatsapp" && Object.values(job.toolSends ?? {}).some(send =>
+          sourceWhatsAppSend(send, job) && send.messageId && send.whatsappUncertain === false))
+          throw new Error("This WhatsApp source already has an accepted response; do not append an automatic attachment.");
         const previous = upload && Object.values(job.toolSends ?? {}).find((send) => !send.failed && send.uploadFingerprint === upload.fingerprint);
         if (previous?.upload) return { ...previous.upload, deduplicated: true };
         if (previous) throw new Error("This file already has an uncertain upload; inspect it instead of repeating it.");
@@ -503,7 +506,7 @@ export function createCompanionReceiver(opts: {
         const job = await readJob(id);
         if (stopped() || !job || !enabled(job) || job.stoppedBy || job.state !== "submitting" || (job.nativeComplete && !automatic)) throw new Error("The original reply no longer owns this attachment delivery.");
         if (automatic && metadata(job.event).channel === "whatsapp" && Object.entries(job.toolSends ?? {}).some(([callId, send]) => callId !== ownCallId &&
-          send.kind !== "approval" && !send.failed && ((!send.whatsappRejection && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false))) || (send.whatsappRejection && sourceWhatsAppSend(send, job)))))
+          send.kind !== "approval" && !send.failed && ((!send.whatsappRejection && (!send.messageId || (send.whatsappKey && send.whatsappUncertain !== false))) || (send.whatsappRejection && sourceWhatsAppSend(send, job)) || (sourceWhatsAppSend(send, job) && send.messageId && send.whatsappUncertain === false))))
           throw new Error("An earlier WhatsApp send must be resolved before uploading a new reply attachment.");
       },
       beforeToolUpload: (callId: string, intent: SlackUploadIntent) => beforeSend(callId, intent.automatic ? "attachment" : undefined, intent),

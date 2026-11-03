@@ -1992,3 +1992,25 @@ it("omits an absent native file caption from the send request and retained inten
   expect(saved.whatsappMediaIds).toEqual(["00000000-0000-4000-8000-000000000004"]);
   await bridge.shutdownA2A();
 });
+
+
+it.each([false, true])("suppresses accepted-source buffered attachments without suppressing independent outreach (outreach=%s)", async (outreach) => {
+  const f = fixture(), bridge = f.bridge();
+  const path = join(state.dir, "redundant.png"); await writeFile(path, "image");
+  f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
+  f.dispatchReply.mockImplementationOnce(async (input: any) => {
+    await bindNativeOwner({ prompt: JSON.stringify(input.ctxPayload) }, { sessionKey: input.routeSessionKey, runId: "already-answered" });
+    const tools = new Map<string, any>();
+    registerWhatsAppTools({ registerTool(def: any) { const tool = typeof def === "function" ? def({ sessionKey: input.routeSessionKey }) : def; tools.set(tool.name, tool); } }, f.runtime);
+    await tools.get("inkbox_send_whatsapp").execute("accepted-source", { text: "Answer already sent", ...(outreach ? { to: "+15555550125" } : {}) });
+    await settleNativeOwner({}, { sessionKey: input.routeSessionKey, runId: "already-answered" });
+    await input.delivery.deliver({ text: "Redundant final", mediaUrl: path }, { kind: "final" });
+    return { dispatched: true };
+  });
+  await dispatchInbound(event(), bridge.handlers); await settle(bridge);
+  expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledTimes(outreach ? 1 : 0);
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(outreach ? 2 : 1);
+  expect(f.identity.sendWhatsApp.mock.calls[0][0].text).toBe("Answer already sent");
+  if (outreach) expect(f.identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({ conversationId: event().data.message.conversation_id, mediaIds: ["00000000-0000-4000-8000-000000000004"] });
+  await bridge.shutdownA2A();
+});
