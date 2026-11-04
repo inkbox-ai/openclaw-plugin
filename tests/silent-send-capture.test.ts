@@ -313,16 +313,18 @@ describe("deferred send transport wrappers", () => {
     }, context);
     return capture;
   }
-  it.each(["tool_call", "tool_search_code"])("settles successful %s only with independently accepted children", (name) => {
+  it.each(["tool_call", "dispatch_action", "tool_search_code"])("settles successful %s only with independently accepted children", (name) => {
     expect(wrapped({ name }).transform(reply)).toBeNull();
   });
   it("accepts the current native tool_call child prefix with exact ownership", () => {
     expect(wrapped({ childPrefix: "tool_call" }).transform(reply)).toBeNull();
+    expect(wrapped({ name: "dispatch_action", childPrefix: "tool_call" }).transform(reply)).toBeNull();
+    expect(wrapped({ name: "dispatch_action", childPrefix: "tool_call", childParent: "another" }).transform(reply)).toBe(reply);
     expect(wrapped({ childPrefix: "tool_call", childParent: "another" }).transform(reply)).toBe(reply);
     expect(wrapped({ name: "tool_search_code", childPrefix: "tool_call" }).transform(reply)).toBe(reply);
     expect(wrapped({ childPrefix: "arbitrary" }).transform(reply)).toBe(reply);
   });
-  it.each(["tool_call", "tool_search_code"])("reconciles an earlier failed exchange without promoting it into %s completion evidence", (name) => {
+  it.each(["tool_call", "dispatch_action", "tool_search_code"])("reconciles an earlier failed exchange without promoting it into %s completion evidence", (name) => {
     const capture = wrapped({ name });
     recordSilentSendAfterToolCall({ toolName: "tool_describe", toolCallId: "describe-1", error: "schema rejection" }, context);
     const messages: any[] = failedDiscoveryHistory(capture.marker);
@@ -428,5 +430,17 @@ describe.each(["tool_search_code", "tool_call"])("native Code Mode final-send tr
     const capture = nativeExec(options);
     expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
     expect(capture.transform(nativeIncompleteReply)).toBe(nativeIncompleteReply);
+  });
+});
+
+
+describe("WhatsApp explicit final-send completion", () => {
+  it("recognizes accepted WhatsApp without suppressing an unrelated or failed outcome", () => {
+    const { capture, ctx } = begin();
+    const event={toolName:"inkbox_send_whatsapp",toolCallId:"wa-final",params:{completeSilently:true}};
+    recordSilentSendBeforeToolCall(event,ctx);
+    recordSilentSendAfterToolCall({...event,result:{terminate:true,details:{inkboxSendCompletion:{accepted:true,completeSilently:true}}}},ctx);
+    expect(capture.completedSilently()).toBe(true);
+    expect(capture.transform(nativeEmptyReply)).toBeNull();
   });
 });

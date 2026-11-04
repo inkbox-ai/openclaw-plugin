@@ -46,9 +46,9 @@ const captureRegistry = Symbol.for("inkbox.silent-send-captures.v1");
 const processState = globalThis as typeof globalThis & { [captureRegistry]?: Set<Capture> };
 const captures = processState[captureRegistry] ??= new Set<Capture>();
 const sendTools = new Set([
-  "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_forward_email",
+  "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_send_whatsapp", "inkbox_forward_email",
 ]);
-const transportTools = new Set(["tool_call", "tool_search_code"]);
+const transportTools = new Set(["tool_call", "dispatch_action", "tool_search_code"]);
 // OpenClaw 2026.9.6's inner source/incomplete-turn finalizers can overlook
 // intentional cross-channel tool completion. Neither exposes a public reason
 // discriminator. Match only their two verified fixed errors, with independent
@@ -69,7 +69,7 @@ function invalidate(capture: Capture, reason: "before_lifecycle" | "duplicate_be
     if (capture.missingBefore.has(id) && capture.missingBefore.get(id) !== event.toolName) capture.fatalInvalid = true;
     capture.missingBefore.set(id, event.toolName);
   } else capture.fatalInvalid = true;
-  const params = event.toolName === "tool_call"
+  const params = ["tool_call", "dispatch_action"].includes(event.toolName ?? "")
     ? event.params?.args as Record<string, unknown> | undefined : event.params;
   const value = params?.completeSilently;
   capture.invalidShape ??= {
@@ -141,9 +141,14 @@ function linkedNativeChild(id: string, parent: string, childName: string, wrappe
   // Current ToolSearchRuntime uses tool_call for both direct and native Code
   // Mode children. exec is eligible only after its native BEFORE tags prove
   // JavaScript Code Mode, never from the shell tool's shared name alone.
-  return ["tool_search_code", ...(wrapper.name === "tool_call" || wrapper.nativeCode === true ? ["tool_call"] : [])].some((transport) => {
-    const prefix = `${transport}:${parentIdSegment(parent)}:${childName}:`;
-    return id.startsWith(prefix) && /^[1-9]\d*$/.test(id.slice(prefix.length));
+  return ["tool_search_code", ...(["tool_call", "dispatch_action"].includes(wrapper.name) || wrapper.nativeCode === true ? ["tool_call"] : [])].some((transport) => {
+    const prefix = `${transport}:${parentIdSegment(parent)}:`;
+    if (!id.startsWith(prefix)) return false;
+    let child = id.slice(prefix.length);
+    // Native Code Mode adds its replay-scope digest between parent and child.
+    // The independently observed same-run wrapper/child acceptance remains mandatory.
+    if (transport === "tool_call" && wrapper.nativeCode === true && /^[a-f0-9]{24}:/.test(child)) child = child.slice(25);
+    return child.startsWith(`${childName}:`) && /^[1-9]\d*$/.test(child.slice(childName.length + 1));
   });
 }
 
@@ -158,7 +163,7 @@ function acceptedWrapper(
     return linkedNativeChild(key, id, child.name, attempt);
   });
   if (!children.length || children.some(([, child]) => !child.accepted)) return false;
-  if (attempt.name === "tool_call") {
+  if (["tool_call", "dispatch_action"].includes(attempt.name)) {
     const args = event.params?.args as Record<string, unknown> | undefined;
     return children.length === 1 && args?.completeSilently === true &&
       result.details?.tool?.name === children[0][1].name &&

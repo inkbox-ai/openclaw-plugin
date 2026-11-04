@@ -116,6 +116,10 @@ async function defaultVoiceInstructions(identity: any, client: any): Promise<str
       channels.push("Shared iMessage is enabled; use the current Inkbox connection instructions.");
     }
   }
+  if (typeof identity.getWhatsAppStatus === "function") {
+    const whatsapp = await identity.getWhatsAppStatus().catch(() => null);
+    if (whatsapp?.enabled && whatsapp.number) channels.push(`Approved WhatsApp number: ${whatsapp.number}; current status: ${whatsapp.status}.`);
+  }
   const configured = channels.join(" ") || "No direct communication channel is currently configured.";
   return `You are the hosted voice interface for Inkbox agent @${agentHandle}. Help callers connect using only these configured channels. ${configured}`;
 }

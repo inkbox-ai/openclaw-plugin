@@ -56,7 +56,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24.16.0"
+          node-version: "24.22.1"
           cache: npm
 
       - uses: actions/setup-python@v6
@@ -71,7 +71,7 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.15 openclaw@latest
+            openclaw@latest
           npm run build
 
       - name: Install the matching OpenClaw host

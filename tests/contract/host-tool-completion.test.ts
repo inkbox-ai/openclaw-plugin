@@ -73,7 +73,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     // Exercise both transports against the installed host. Code Mode's child
     // IDs come from ToolSearchRuntime too; a copied legacy exec fixture misses
     // the current prefix change even when direct tool_call remains compatible.
-    for (const transport of ["tool_call", "exec"]) {
+    for (const transport of [hostVersion.localeCompare("2026.10.10", undefined, { numeric: true }) >= 0 ? "dispatch_action" : "tool_call", "exec"]) {
       const priorRegistry = currentRegistry();
       const catalogRef = (await hostFunction("local-model-lean", "createToolSearchCatalogRef", ["tool-search"]))();
       const register = await hostFunction("local-model-lean", "registerHeadlessToolSearchCatalog", ["tool-search"]);
@@ -110,10 +110,11 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
           rawControl = nativeCore.compactTools([sendTool], { hookContext: context }).tools.find((tool: any) => tool.name === "exec");
         } else {
           register({ catalogRef, hookContext: context, tools: [sendTool] });
-          rawControl = createControls({ ...context, catalogRef, config: {}, executeTool }).find((tool: any) => tool.name === "tool_call");
+          rawControl = createControls({ ...context, catalogRef, config: {}, executeTool }).find((tool: any) => tool.name === transport);
         }
         expect(rawControl).toBeDefined();
-        const control = wrapToolWithBeforeToolCallHook(rawControl, context);
+        // compactTools owns the exec transport hook; wrapping it again fabricates a duplicate outer event.
+        const control = transport === "exec" ? rawControl : wrapToolWithBeforeToolCallHook(rawControl, context);
         const args = transport === "exec"
           ? { title: "Send only", code: "await inkbox_send_email({ completeSilently: true });" }
           : { id: "inkbox_send_email", args: { completeSilently: true } };
@@ -125,16 +126,18 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         expect(events.map((event) => event.runId)).toEqual([context.runId, context.runId]);
         expect(events[0].toolCallId).toBe(outerId);
         if (transport === "exec") expect(events[0]).toMatchObject({ toolKind: "code_mode_exec", toolInputKind: "javascript" });
-        expect(events[1].toolCallId).toBe(`${nativeToolCallPrefix}:outer-send_native-item:inkbox_send_email:1`);
+        if (transport === "exec" && hostVersion.localeCompare("2026.10.7", undefined, { numeric: true }) >= 0) {
+          expect(events[1].toolCallId).toMatch(/^tool_call:outer-send_native-item:[a-f0-9]{24}:inkbox_send_email:1$/);
+        } else expect(events[1].toolCallId).toBe(`${nativeToolCallPrefix}:outer-send_native-item:inkbox_send_email:1`);
         expect(result.terminate).toBe(succeeds ? true : undefined);
-        if (transport === "tool_call") {
+        if (transport !== "exec") {
           expect(result.details.tool.name).toBe("inkbox_send_email");
           if (succeeds) expect(result.details.result).toMatchObject({ terminate: true, details: { inkboxSendCompletion: receipt } });
         } else if (succeeds) expect(result.details.status).toBe("completed");
         expect(capture.shape().invalid).toBe(!succeeds);
         expect(capture.transform({ text: "A source acknowledgement" })).toEqual(succeeds ? null : { text: "A source acknowledgement" });
         if (requiredSourceFinalizer) {
-          const buildEmptyReply = await hostFunction("commentary-progress-owner", "buildEmptyInteractiveReplyPayload");
+          const buildEmptyReply = await hostFunction("commentary-progress-owner", "buildEmptyInteractiveReplyPayload", ["agent-runner-failure-reply"]);
           const nativeFailure = buildEmptyReply({ completion: { outcome: "missing" } });
           expect(capture.transform(nativeFailure)).toEqual(succeeds ? null : nativeFailure);
         }
@@ -194,7 +197,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     }
   });
   it.skipIf(!requiredSourceFinalizer).each([true, false])("handles the actual inner native empty-reply error with accepted final send=%s", async (accepted) => {
-    const buildEmptyReply = await hostFunction("commentary-progress-owner", "buildEmptyInteractiveReplyPayload");
+    const buildEmptyReply = await hostFunction("commentary-progress-owner", "buildEmptyInteractiveReplyPayload", ["agent-runner-failure-reply"]);
     // Use the native constructor, not a copied fixture: wording/metadata drift
     // must fail this compatibility check rather than silently hide a new error.
     const nativeFailure = buildEmptyReply({ completion: { outcome: "missing" } });
@@ -230,7 +233,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     }
   });
   it("recognizes only entirely successful, explicitly terminating batches", async () => {
-    const evidence = await hostFunction("builtin-openclaw", "resolveSettledToolBatchEvidence");
+    const evidence = await hostFunction("builtin-openclaw", "resolveSettledToolBatchEvidence", ["sdk"]);
     expect(evidence(settledAttempt([{ terminate: true }])).intentionalTermination).toBe(true);
     expect(evidence(settledAttempt([{ terminate: true }, { terminate: true }])).intentionalTermination).toBe(true);
     expect(evidence(settledAttempt([{ terminate: true }, {}])).intentionalTermination).toBe(false);
@@ -239,7 +242,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
   });
 
   it("skips isolated finalization only for intentional completed actions", async () => {
-    const continuation = await hostFunction("builtin-openclaw", "resolveSettledToolTerminalContinuationInstruction");
+    const continuation = await hostFunction("builtin-openclaw", "resolveSettledToolTerminalContinuationInstruction", ["sdk"]);
     const input = { executionContract: "strict-agentic", allowEmptyStopContinuation: true, payloadCount: 0, aborted: false, timedOut: false };
     expect(continuation({ ...input, attempt: settledAttempt([{ terminate: true }]) })).toBeNull();
     expect(continuation({ ...input, attempt: settledAttempt([{}]) })).toBeTypeOf("string");

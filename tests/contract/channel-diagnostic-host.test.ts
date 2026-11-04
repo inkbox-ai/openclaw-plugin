@@ -10,6 +10,10 @@ import { describe, expect, it } from "vitest";
 const require = createRequire(import.meta.url);
 const hostDist = dirname(dirname(require.resolve("openclaw/plugin-sdk/routing")));
 const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json"), "utf8")).version;
+// Current native stores require asynchronous runtime configuration preparation.
+const prepareRuntimeConfig = hostVersion.localeCompare("2026.10.10", undefined, { numeric: true }) >= 0
+  ? "const {captureRuntimeConfigAsyncReader}=await import('openclaw/plugin-sdk/runtime-config-snapshot'); await captureRuntimeConfigAsyncReader()();"
+  : "";
 const observer = resolve("tests/live/channel_native_observer.mjs");
 const scope = { inbound_id: "fixture-source", text: "Send email with code abcdef. Return NO_REPLY.", marker: "abcdef" };
 const sessionKey = "agent:main:inkbox:direct:fixture";
@@ -116,6 +120,7 @@ describe("exact-source post-outcome native diagnostics", () => {
       writeFileSync(join(state, "gateway.log"), log(scope.inbound_id, sessionKey, id) + "\n");
       if (hostVersion !== "2026.5.27") {
         const setup = `
+          ${prepareRuntimeConfig}
           import {upsertSessionEntry} from 'openclaw/plugin-sdk/session-store-runtime';
           import {appendSessionTranscriptMessageByIdentity} from 'openclaw/plugin-sdk/session-transcript-runtime';
           const target={agentId:'main',sessionKey:${JSON.stringify(sessionKey)}};
@@ -154,7 +159,8 @@ describe("exact-source post-outcome native diagnostics", () => {
         return;
       }
       const setup = `
-        import {upsertSessionEntry} from 'openclaw/plugin-sdk/session-store-runtime';
+        ${prepareRuntimeConfig}
+          import {upsertSessionEntry} from 'openclaw/plugin-sdk/session-store-runtime';
         import {appendSessionTranscriptMessageByIdentity} from 'openclaw/plugin-sdk/session-transcript-runtime';
         const target={agentId:'main',sessionKey:${JSON.stringify(sessionKey)}};
         await upsertSessionEntry({...target,entry:{sessionId:${JSON.stringify(id)},updatedAt:Date.now()}});
@@ -204,6 +210,7 @@ describe("exact-source post-outcome native diagnostics", () => {
       writeFileSync(join(state, "gateway.log"), log(scope.inbound_id, sessionKey, id) + "\n");
       if (hostVersion !== "2026.5.27") {
         const setup = `
+          ${prepareRuntimeConfig}
           import {upsertSessionEntry} from 'openclaw/plugin-sdk/session-store-runtime';
           import {appendSessionTranscriptMessageByIdentity} from 'openclaw/plugin-sdk/session-transcript-runtime';
           import {readdirSync,readFileSync} from 'node:fs';import {join} from 'node:path';import {pathToFileURL} from 'node:url';
@@ -213,11 +220,13 @@ describe("exact-source post-outcome native diagnostics", () => {
           const exports=await import(pathToFileURL(join(dist,file)).href);
           const maintain=Object.values(exports).find(f=>typeof f==='function'&&f.name==='runSessionColdStorageMaintenance');
           const target={agentId:'main',sessionKey:${JSON.stringify(sessionKey)}};
-          const realNow=Date.now;Date.now=()=>realNow()-60*86400000;
+          const realNow=Date.now;
           await upsertSessionEntry({...target,entry:{sessionId:${JSON.stringify(id)},updatedAt:Date.now()}});
           await appendSessionTranscriptMessageByIdentity({...target,sessionId:${JSON.stringify(id)},message:{role:'user',content:[{type:'text',text:${JSON.stringify(scope.text)}}],timestamp:Date.now()}});
-          Date.now=realNow;
+          // The transcript worker owns its write timestamp; advance the maintenance clock, not just the caller clock during writes.
+          Date.now=()=>realNow()+60*86400000;
           const result=await maintain({config:{agents:{list:[{id:'main'}]},session:{maintenance:{coldStorage:{enabled:true,afterDays:30}}}}});
+          Date.now=realNow;
           if(result.archivedTranscripts!==1)throw Error('native fixture did not archive exactly one transcript');
           process.exit(0);`;
         execFileSync(process.execPath, ["--input-type=module", "-e", setup], { env: env(state), cwd: process.cwd(),
