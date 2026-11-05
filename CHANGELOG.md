@@ -4,6 +4,10 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ## [Unreleased]
 
+### Fixed
+
+- iMessage tapback results report the resolved message ID and part index so follow-up reads address the correct message.
+
 ### Added
 
 - Approved dedicated direct-message WhatsApp messaging, fifteen native tools for explicit quoted replies, paginated threads and named/custom reactions, signed incoming events, source-bound durable replies, owned attachments, and status-only delivery notifications.
