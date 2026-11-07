@@ -9,10 +9,11 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 - Reply in inbound-observed WhatsApp groups without group creation, with native/typed mention attention, name-only mention rendering, media, reactions and explicit quotes.
 - Extend canonical Companion history and current activation checks to WhatsApp groups, retaining native silence and source-scoped permissions.
 - Retain saved attachment replies and uploaded media through preflight retries without repeating model work; preserve uncertain sends and settle definitive rejections.
-- Test both the published direct-message SDK floor and the compatible group SDK.
+- Test the published WhatsApp SDK against both the supported and current native host.
 
 - Approved dedicated direct-message WhatsApp messaging, fifteen native tools for explicit quoted replies, paginated threads and named/custom reactions, signed incoming events, source-bound durable replies, owned attachments, and status-only delivery notifications.
-- Require the published SDK 0.7.26 release.
+- Require the published SDK 0.7.29 release.
+- Present accessible inline-reply author, bounded text and attachment labels in ordinary and Companion messages, including quiet context. Optional parent-read failures retain the current message with an explicit unavailable marker and parent ID.
 
 - Deliver local Slack attachments through the SDK with source-owned durable outcomes and file-operation inspection.
 - Add Slack mrkdwn guidance and conservative formatting repair outside code blocks.

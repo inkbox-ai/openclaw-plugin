@@ -49,29 +49,15 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: 6f9fad715abbae8022789cfc1028a0335bf23212
-          path: .sdk-source
       - uses: actions/setup-node@v7
         with:
           node-version: "24.22.1"
           cache: npm
       - name: Install published plugin dependencies
         run: bash tests/ci/npm_with_retry.sh ci
-      - name: Build compatible WhatsApp SDK
-        id: sdk
-        working-directory: .sdk-source/sdk/typescript
+      - name: Install published WhatsApp SDK and current host
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          npm run build
-          SDK_ARCHIVE=$(npm pack --silent --pack-destination "$RUNNER_TEMP" | tail -1)
-          echo "archive=$RUNNER_TEMP/$SDK_ARCHIVE" >> "$GITHUB_OUTPUT"
-      - name: Install compatible SDK and current host without changing dependency floors
-        run: |
-          bash tests/ci/npm_with_retry.sh install --no-save --package-lock=false \
-            "${{ steps.sdk.outputs.archive }}" openclaw@latest
+          bash tests/ci/npm_with_retry.sh install --no-save --package-lock=false @inkbox/sdk@0.7.29 openclaw@latest
           node tests/ci/verify_sdk.mjs
       - run: npm run typecheck
       - run: npm test

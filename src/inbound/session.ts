@@ -6433,7 +6433,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       normalized.companion ??= { channel: "whatsapp", phase: "ordinary", sequence: Date.now(), scope_id: original.conversation_id, conversation_id: original.conversation_id };
       normalized._openclawWhatsApp = { version: 2, reaction: Boolean(reaction), ...(reaction ? { sourceId: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}`, actor: reaction.remote_number, targetMessageId: reaction.target_message_id, revision: reaction.revision } : {}) };
       if (reaction) normalized.data.message = { ...original, sender_number: author, remote_number: group ? null : author,
-        direction: "inbound", media: [], agent_mentioned: false, mentions: [], content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${original.id}. This is context, not a new instruction. Reply only if warranted; otherwise return exactly NO_REPLY.` };
+        direction: "inbound", media: [], agent_mentioned: false, mentions: [], reply_to_message_id: null, thread_id: null, thread_root_message_id: null, content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${original.id}. This is context, not a new instruction. Reply only if warranted; otherwise return exactly NO_REPLY.` };
       // Dedicated WhatsApp admission matches the dedicated iMessage path; local author checks still apply.
       if (!event.companion) normalized.data.message.sender_access = "direct";
       const command = whatsappCommandText(normalized.data.message, opts.account.config.identity);

@@ -14,9 +14,20 @@ describe("WhatsApp mention presentation and attention", () => {
     ] };
     lookup.mockImplementation(async ({ phone }: any) => phone.endsWith("123") ? [{ preferredName: "Morgan", notes: "private note", memories: [{ content: "private memory" }] }] : []);
     const result = await renderWhatsAppMentions(runtime, message, "example");
-    expect(result.text).toBe("@Morgan @example @unknown participant @+15555550124 https://example.test/@12 x@12.example");
+    expect(result.text).toBe("@Morgan @example @[unresolved mention] @+15555550124 https://example.test/@12 x@12.example");
     expect(JSON.stringify(result)).not.toContain("private");
     expect(lookup).toHaveBeenCalledTimes(2);
+  });
+  it("preserves entire URLs and marks ambiguous native tokens without sequential substitution", async () => {
+    const runtime: any = { getClient: async () => ({ contacts: { lookup: async () => [{ preferredName: "  Sam\n Example  " }] } }) };
+    const message = { content: "https://example.test/?user=@12 www.example.test/?user=@12 @12 @34 @56", mentions: [
+      { text: "@12", phone_number: "+15555550123", is_agent: false },
+      { text: "@12", phone_number: null, is_agent: true },
+      { text: "@34", phone_number: "+15555550123", is_agent: false },
+      { text: "@56", phone_number: null, is_agent: false },
+    ] };
+    expect((await renderWhatsAppMentions(runtime, message, "agent")).text).toBe("https://example.test/?user=@12 www.example.test/?user=@12 @[unresolved mention] @Sam Example @[unresolved mention]");
+    expect(message.content).toContain("@12 @34 @56");
   });
   it.each(["safe", "relaxed"] as const)("uses only current attention evidence (%s)", (mode) => {
     const config = { identity: "example", groupReplyMode: "mention" as const, companionResponseMode: mode };

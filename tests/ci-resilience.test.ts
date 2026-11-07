@@ -97,7 +97,7 @@ describe("CI resilience contracts", () => {
       expect(workflow).not.toContain("./.github/actions/inkbox-sdk");
       expect(workflow).not.toContain("INKBOX_SDK_PATH");
       expect(workflow).not.toContain("INKBOX_PYTHON_SDK_PATH");
-      if (name.startsWith("live-")) expect(workflow).toContain("inkbox==0.7.6");
+      if (name.startsWith("live-")) expect(workflow).toContain("inkbox==0.7.29");
     }
   });
 
