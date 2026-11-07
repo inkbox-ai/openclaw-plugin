@@ -6436,7 +6436,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         direction: "inbound", media: [], agent_mentioned: false, mentions: [], content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${original.id}. This is context, not a new instruction. Reply only if warranted; otherwise return exactly NO_REPLY.` };
       // Dedicated WhatsApp admission matches the dedicated iMessage path; local author checks still apply.
       if (!event.companion) normalized.data.message.sender_access = "direct";
-      normalized.data.message._ordinaryAddressed = !group;
+      const command = controlText(whatsappControlText(normalized.data.message), opts.account.config.identity);
+      normalized.data.message._ordinaryAddressed = !group || (!event.companion &&
+        (isLocalControl(command) || isCompanionControl(command) || /^\/approve(?:\s|$)/i.test(command)));
       await companion.accept(normalized);
     },
     async onIMessage(event) {

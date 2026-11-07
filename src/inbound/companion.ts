@@ -5,7 +5,7 @@ import { createTerminalReceipts, type ReceiptIndex } from "./terminal-receipts.j
 import { createIMessageOutcomes, imessageFailureNotice, type IMessageOutcomeRoute } from "./imessage-outcomes.js";
 import { fenceNativeOwner } from "../native-owner.js";
 import { SLACK_EVENTS, type SlackRoute, ownSlackConnection, slackAuthorAllowed, slackRouteKey } from "../slack.js";
-import { companionWakes, controlText, isCompanionControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
+import { companionWakes, controlText, isCompanionControl, isLocalControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
@@ -30,7 +30,7 @@ function nativeSources(event: Record<string, any>): string[] {
 type Channel = CompanionChannel | "whatsapp";
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc" | "channel"> & { channel: Channel; slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = Omit<CompanionMetadata, "channel"> & { channel: Channel };
-type Job = { mediaReplies?: { path: string; text: string }[]; mediaUploads?: Record<string, { id?: string }>; replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappUncertain?: boolean; whatsappDestination?: WhatsAppSendIntent["destination"]; whatsappDestinationEvidence?: WhatsAppSendIntent["destinationEvidence"]; whatsappConversationId?: string; whatsappMediaIds?: string[]; whatsappReplyToMessageId?: string; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { nativeMediaDelivered?: boolean; mediaReplies?: { path: string; text: string }[]; mediaUploads?: Record<string, { id?: string }>; replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappUncertain?: boolean; whatsappDestination?: WhatsAppSendIntent["destination"]; whatsappDestinationEvidence?: WhatsAppSendIntent["destinationEvidence"]; whatsappConversationId?: string; whatsappMediaIds?: string[]; whatsappReplyToMessageId?: string; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 // Context-only lifecycle history is bounded; send and source receipts are not expired.
 const WHATSAPP_OBSERVATION_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -468,6 +468,15 @@ export function createCompanionReceiver(opts: {
       if (current.scopeId !== m.scope_id || current.activationId !== m.activation_id || current.channel !== "slack" || current.conversationId !== m.conversation_id || current.replyContext.connectionId !== route.connectionId || current.replyContext.slackConversationId !== route.conversationId) throw new Error("Slack Companion activation is no longer current.");
     }
   }
+  async function admitWhatsAppSource(id: string, job: Job): Promise<boolean> {
+    if (metadata(job.event).channel !== "whatsapp") return true;
+    try { await validateSource(job); return true; }
+    catch (error) {
+      if (!(error instanceof SenderNotPermitted) && ![403, 404].includes((error as { statusCode?: number })?.statusCode ?? 0)) throw error;
+      await mutate(j => { j.jobs[id]!.state = "done"; j.jobs[id]!.nativeComplete = true; j.jobs[id]!.reason = "WhatsApp source is no longer locally permitted."; }, [id]);
+      return false;
+    }
+  }
   function toolSendCallbacks(id: string, validate: () => Promise<void>) {
     const beforeSend = async (callId: string, kind?: "approval" | "attachment", upload?: SlackUploadIntent, intent?: WhatsAppSendIntent, automatic = false) => {
       await validate();
@@ -684,7 +693,7 @@ export function createCompanionReceiver(opts: {
     try {
       if (m.channel === "whatsapp") {
         if (!/^\/approve(?:\s|$)/i.test(controlText(whatsappControlText(message), opts.config.identity))) return false;
-        await validateSource(job);
+        if (!await admitWhatsAppSource(id, job)) return true;
       }
       const resolved = await opts.resolveApproval(job.event, key(m, job.identityId), async () => mutate((j) => {
         if (j.jobs[id]?.state !== "pending") return false;
@@ -734,6 +743,7 @@ export function createCompanionReceiver(opts: {
     let claimed = false;
     try {
       if ((await read()).jobs[id]?.state !== "pending") return true;
+      if (!await admitWhatsAppSource(id, job)) return true;
       checkSponsor(parent.sponsor, parent.sponsorContactId, job.event._openclawSlack?.route);
       const input: CompanionInput = {
         key: scope, messageId: id, channel: m.channel, body: raw, rawText: raw, author,
@@ -796,12 +806,7 @@ export function createCompanionReceiver(opts: {
       catch (error) {
         throw new WhatsAppReadinessPending("WhatsApp readiness is pending; no send was attempted.", { cause: error });
       }
-      try { await validateSource(job); }
-      catch (error) {
-        if (!(error instanceof SenderNotPermitted) && ![403, 404].includes((error as { statusCode?: number })?.statusCode ?? 0)) throw error;
-        await mutate(j => { j.jobs[id]!.state = "done"; j.jobs[id]!.nativeComplete = true; j.jobs[id]!.reason = "WhatsApp source is no longer locally permitted."; }, [id]);
-        return;
-      }
+      if (!await admitWhatsAppSource(id, job)) return;
       message.attachments = await whatsappAttachments(opts.runtime, message);
     }
     let rawText = String(m.channel === "slack" ? job.event._openclawSlack.rawText : ["imessage", "whatsapp"].includes(m.channel) ? message.content ?? message.text ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.body ?? "");
@@ -812,7 +817,7 @@ export function createCompanionReceiver(opts: {
       ...(m.channel === "whatsapp" ? { media: (message.attachments ?? []).filter((item: any) => !item.unavailable && typeof item.local_path === "string").map((item: any) => ({ path: item.local_path, contentType: item.content_type ?? "application/octet-stream" })) } : {}),
       rawText: controlText(m.channel === "whatsapp" ? whatsappControlText(message) : rawText, opts.config.identity),
       wasMentioned: m.channel === "slack" ? message.mentioned === true : (m.channel === "whatsapp" && message.agent_mentioned === true) || mentionsAgent(rawText, opts.config.identity),
-      commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, m.channel === "slack" ? job.event._openclawSlack?.route?.author : sponsor) && isCompanionControl(controlText(m.channel === "whatsapp" ? whatsappControlText(message) : rawText, opts.config.identity)),
+      commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, m.channel === "slack" ? job.event._openclawSlack?.route?.author : sponsor) && (isCompanionControl(controlText(m.channel === "whatsapp" ? whatsappControlText(message) : rawText, opts.config.identity)) || (m.channel === "whatsapp" && m.phase === "ordinary" && isLocalControl(controlText(whatsappControlText(message), opts.config.identity)))),
       validateBeforeDispatch: async () => {
         checkSponsor(sponsor, m.channel === "whatsapp" ? await checkSender(sponsor, m.channel) : sponsorContactId, job.event._openclawSlack?.route);
         await validateSource(job);
@@ -833,7 +838,7 @@ export function createCompanionReceiver(opts: {
       // A recovered ID does not authorize a replacement. Legacy receipts without
       // certainty evidence also stay fenced. An accepted source response already
       // answers this turn; do not append a redundant automatic acknowledgement.
-      if (m.channel === "whatsapp" && Object.values(current.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send, current) && Boolean((sourceWhatsAppSend(send, current) && (send.whatsappReplyToMessageId || (send.messageId && send.whatsappUncertain === false))) || (send.whatsappKey && send.whatsappUncertain !== false)))) {
+      if (m.channel === "whatsapp" && Object.values(current.toolSends ?? {}).some((send) => !rejectedWhatsAppOutreach(send, current) && Boolean((sourceWhatsAppSend(send, current) && (send.whatsappReplyToMessageId || (send.messageId && send.whatsappUncertain === false && !current.nativeMediaDelivered))) || (send.whatsappKey && send.whatsappUncertain !== false)))) {
         await mutate((j) => { j.jobs[id]!.replies = []; j.jobs[id]!.state = "done"; });
         activity(job.event, "completed"); return;
       }
@@ -846,15 +851,19 @@ export function createCompanionReceiver(opts: {
           await opts.deliverMedia(input, media.path, media.text);
         } catch (error) {
           const saved = (await readJob(id))!;
-          if (saved.stoppedBy || stopped() || !enabled(saved) || retryableRead(error) || Object.values(saved.toolSends ?? {}).some(send => !send.failed && (!send.messageId || send.whatsappUncertain))) throw error;
+          if (saved.stoppedBy || stopped() || !enabled(saved) || retryableRead(error) || Object.values(saved.mediaUploads ?? {}).some(upload => !upload.id) || Object.values(saved.toolSends ?? {}).some(send => !send.failed && (!send.messageId || send.whatsappUncertain))) throw error;
           const notice = "A WhatsApp attachment could not be confirmed sent. No automatic resend was attempted.";
           const replies = [[...(current.replies ?? []), notice].filter(Boolean).join("\n\n")];
           await mutate(j => { j.jobs[id]!.mediaReplies = []; j.jobs[id]!.replies = replies; }, [id]);
           current.replies = replies;
           break;
         }
-        await mutate(j => { j.jobs[id]!.mediaReplies = []; j.jobs[id]!.replies = []; j.jobs[id]!.state = "done"; }, [id]);
-        activity(job.event, "completed"); return;
+        const extraMedia = (current.mediaReplies?.length ?? 0) > 1;
+        const replies = [...(current.replies ?? []), ...(extraMedia ? ["Additional attachments were not sent; only one automatic attachment is supported per turn."] : [])];
+        await mutate(j => { j.jobs[id]!.mediaReplies = []; j.jobs[id]!.replies = replies; j.jobs[id]!.nativeMediaDelivered = true; }, [id]);
+        current.replies = replies;
+        current.toolSends = (await readJob(id))!.toolSends;
+        break;
       }
       for (const text of current.replies ?? []) {
         const pending = (await read()).jobs[id]!;

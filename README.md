@@ -503,7 +503,7 @@ Send and email-forward tools accept optional `completeSilently: true` when the s
 
 ## Group replies and Companion mode
 
-Group SMS and iMessage participants share a conversation session, including
+Group SMS, iMessage, and WhatsApp participants share a conversation session, including
 reactions. Different groups and direct conversations remain separate. Automatic
 email replies use the stored message's reply-all route, preserving visible To/CC
 and threading without adding BCC recipients or the agent itself. Explicit new-email
@@ -528,7 +528,7 @@ queue/steering settings; the plugin does not replace that scheduler or force an
 abort-and-restart on every new message. Quiet messages never enter that queue.
 Companion model turns are processed serially within their conversation scope.
 
-Automatic SMS/iMessage groups allow the model to remain silent during ordinary
+Automatic SMS/iMessage/WhatsApp groups allow the model to remain silent during ordinary
 chatter. The dispatch uses OpenClaw's Inkbox-only
 `surfaces.inkbox.silentReply.group="allow"` default without changing saved config;
 explicit surface or agent-default silence settings are preserved. Current mentions
