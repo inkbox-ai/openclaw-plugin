@@ -1,5 +1,6 @@
+import { whatsappGroup, validWhatsAppGroup, validWhatsAppCompanion, whatsappControlText } from "../whatsapp-groups.js";
 import { checkOutboundRecipients } from "../allowlist.js";
-import { sendWhatsAppReplyFile, assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey } from "../whatsapp.js";
+import { sendWhatsAppReplyFile, assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey, whatsappSendRejection } from "../whatsapp.js";
 import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
 import { bindNativeSource, type NativeSource } from "../native-source.js";
@@ -1706,19 +1707,25 @@ async function deliverReply(
     const identity = await params.runtime.getIdentity();
     if (!params.turn.conversationId) throw new Error("WhatsApp replies require the originating conversation.");
     if (params.turn.companionReply?.identityId && identity.id !== params.turn.companionReply.identityId) throw new Error("The WhatsApp reply identity changed.");
-    if (params.turn.conversationKind === "group") throw new Error("WhatsApp supports direct messages only.");
     const conversation = await identity.getWhatsAppConversation(params.turn.conversationId);
-    whatsappDestinationEvidence(conversation, identity.id, params.turn.conversationId);
-    const blocked = checkOutboundRecipients(conversation.participants, params.allowedRecipients);
+    whatsappDestinationEvidence(conversation, identity.id, params.turn.conversationId, params.turn.nativeSource?.companion ? undefined : params.allowedRecipients);
+    const blocked = params.turn.nativeSource?.companion && whatsappGroup(conversation) ? null : checkOutboundRecipients(conversation.participants, params.allowedRecipients);
     if (blocked) throw new Error(blocked);
     await whatsappReady(identity);
     await params.beforeSend?.();
     const replyToMessageId = params.turn.companionReply?.replyToMessageId;
     const parts: unknown[] = [identity.id, params.turn.messageId, params.turn.conversationId, text];
     if (replyToMessageId) parts.push({ replyToMessageId });
-    const message = await identity.sendWhatsApp({ conversationId: params.turn.conversationId, text,
-      ...(replyToMessageId ? { replyToMessageId } : {}), idempotencyKey: whatsappSendKey(parts) });
-    return message.id;
+    try {
+      const message = await identity.sendWhatsApp({ conversationId: params.turn.conversationId, text,
+        ...(replyToMessageId ? { replyToMessageId } : {}), idempotencyKey: whatsappSendKey(parts) });
+      if (message.status === "uncertain") throw new Error("WhatsApp reply outcome is uncertain; do not resend.");
+      return message.id;
+    } catch (error) {
+      const policy = whatsappSendRejection(error);
+      if (policy && error instanceof Error) Object.assign(error, { whatsappRejected: policy });
+      throw error;
+    }
   }
   if (params.turn.mode === "imessage") {
     // Length guard stays a plain throw before the send: an over-limit reply is
@@ -6087,16 +6094,16 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     return {
       bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal, media: input.media,
       nativeSource: !input.commandAuthorized && (input.channel === "whatsapp" || input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
-        whatsapp: input.channel === "whatsapp", sourceMessageId: input.messageId,
+        whatsapp: input.channel === "whatsapp", whatsappGroup: whatsappGroup(input.event.data?.message), sourceMessageId: input.messageId,
         identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
-        slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, validate: input.validateBeforeDispatch, validateUpload: input.validateToolUpload, beforeSend: input.beforeToolSend, whatsappReplyTarget: input.whatsappReplyTarget, whatsappReplyDestination: input.whatsappReplyDestination, afterSend: input.afterToolSend, rejectSend: input.rejectToolSend, afterUpload: input.afterToolUpload, rejectUpload: input.rejectToolUpload, beforeUpload: input.beforeToolUpload, inspectUpload: input.inspectToolUpload,
+        slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, validate: input.validateBeforeDispatch, validateUpload: input.validateToolUpload, beforeSend: input.beforeToolSend, whatsappMediaUpload: input.whatsappMediaUpload, whatsappReplyTarget: input.whatsappReplyTarget, whatsappReplyDestination: input.whatsappReplyDestination, afterSend: input.afterToolSend, rejectSend: input.rejectToolSend, afterUpload: input.afterToolUpload, rejectUpload: input.rejectToolUpload, beforeUpload: input.beforeToolUpload, inspectUpload: input.inspectToolUpload,
         progress: input.reply.slackRoute ? (update) => slackProgress.observe(input.reply.slackRoute!, update) : undefined,
         recordIMessageAccepted: input.recordIMessageAccepted,
       } : undefined,
       slackRoute: input.reply.slackRoute,
       activity: input.reply.slackRoute ? (phase) => { slackActivity.notify(input.reply.slackRoute!, phase); slackProgress.notify(input.reply.slackRoute!, phase); } : undefined,
       mode, contactKey: input.key, approvalRoute: input.key, sessionKeyOverride: input.event._openclawNativeIMessage ? `native-imessage:${input.reply.identityId}:${input.reply.conversationId}` : input.key,
-      conversationKind: input.channel === "whatsapp" ? "direct" : "group", conversationLabel: input.channel === "whatsapp" ? "WhatsApp conversation" : "Inkbox Companion conversation",
+      conversationKind: input.channel === "whatsapp" && !whatsappGroup(input.event.data?.message) ? "direct" : "group", conversationLabel: input.channel === "whatsapp" ? input.event.data?.message?.group_name || "WhatsApp conversation" : "Inkbox Companion conversation",
       conversationId: input.reply.conversationId,
       fromLabel: input.author, remoteAddress: input.author, body: input.body,
       reaction: input.event._openclawNativeIMessage?.reaction ?? input.event._openclawWhatsApp?.reaction, nativeEventKind: input.channel === "slack" && input.event.companion.phase !== "ordinary" ? "room_event" : input.event._openclawWhatsApp?.reaction ? "room_event" : input.event._openclawNativeIMessage?.nativeEventKind,
@@ -6190,8 +6197,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
                 try {
                   if (typeof location !== "string" || !turn.nativeSource) throw new Error("No active attachment source.");
                   const caption = payloadText(payload).trim();
-                  await sendWhatsAppReplyFile(opts.runtime, turn.nativeSource, location.startsWith("file://") ? fileURLToPath(location) : location,
-                    isInkboxSilentReply(caption) ? "" : caption, opts.account.config.allowedRecipients);
+                  await input.recordMediaReply(location.startsWith("file://") ? fileURLToPath(location) : location, isInkboxSilentReply(caption) ? "" : caption);
                 } catch {
                   attachmentNotices.add("A WhatsApp attachment could not be confirmed sent. No automatic resend was attempted.");
                 }
@@ -6235,13 +6241,18 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       // A proven final send must not resurrect earlier progress as a new reply.
       return finals.length ? finals : blocks.filter((block) => !completedSilently || block.isError).map((block) => block.text);
     },
+    async deliverMedia(input, filePath, text) {
+      const source = companionTurn(input).nativeSource;
+      if (!source) throw new Error("No active WhatsApp attachment source.");
+      await sendWhatsAppReplyFile(opts.runtime, source, filePath, text, opts.account.config.allowedRecipients);
+    },
     async canApprove(input) { return acceptsApproval(companionTurn(input), opts.account); },
     async resolveApproval(event, key, beforeResolve) {
       const channel = event.companion.channel;
       const message = channel === "phone" ? event.data.text_message : event.data.message;
       const author = channel === "slack" ? message.author : channel === "mail" ? message.from_address : channel === "phone" ? message.sender_phone_number ?? message.remote_phone_number : message.sender_number ?? message.remote_number;
       return resolveNativeApproval({ scope: nativeApprovalScope(opts.account, key + (channel === "slack" ? `:source:${slackRouteKey(event._openclawSlack.route)}` : "")), author, channel, accountId: opts.account.accountId },
-        controlText(String(channel === "slack" ? event._openclawSlack.rawText : channel === "phone" ? message.text ?? message.body ?? "" : ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
+        controlText(String(channel === "whatsapp" ? whatsappControlText(message) : channel === "slack" ? event._openclawSlack.rawText : channel === "phone" ? message.text ?? message.body ?? "" : ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
     },
     async deliver(input, text, beforeSend) {
       const turn = companionTurn(input);
@@ -6394,9 +6405,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     async onWhatsApp(event) {
       const identity = await opts.runtime.getIdentity();
       const original = event.data?.message;
-      if (!original || original.agent_identity_id !== identity.id) throw new Error("WhatsApp event identity mismatch.");
-      if (original.is_blocked === true || isUnsupportedWhatsAppShape(original) || isUnsupportedWhatsAppShape(event.data?.reaction)) return;
-      if (event.companion != null) throw new Error("WhatsApp Companion activations are not supported.");
+      if (!original || original.agent_identity_id !== identity.id) { if (whatsappGroup(original)) return; throw new Error("WhatsApp event identity mismatch."); }
+      if ((original.is_blocked === true && (!event.companion || event.companion.phase === "ordinary")) || isUnsupportedWhatsAppShape(original) || isUnsupportedWhatsAppShape(event.data?.reaction)) return;
+      const group = whatsappGroup(original);
+      if (event.companion != null && (!group || event.event_type !== "whatsapp.received" || !validWhatsAppCompanion(event.companion, original))) return;
       const reaction = event.event_type === "whatsapp.reaction_received" ? event.data?.reaction : undefined;
       if (reaction && (reaction.direction !== "inbound" || !["applied", "removed"].includes(reaction.status) || !Number.isInteger(reaction.revision) || reaction.revision < 1 || typeof reaction.id !== "string")) return;
       if (event.event_type !== "whatsapp.received" && !reaction) {
@@ -6409,19 +6421,20 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
           !Array.isArray(original.participants) || !original.participants.length ||
           original.participants.some((number: unknown) => typeof number !== "string" || !/^\+[1-9]\d{6,14}$/.test(number)) ||
           new Set(original.participants).size !== original.participants.length || !original.participants.includes(author) ||
-          (original.participants.length !== 1 || (!reaction && original.remote_number !== author)) || author === original.local_number ||
+          (!group && (original.participants.length !== 1 || (!reaction && original.remote_number !== author))) || author === original.local_number ||
           typeof original.conversation_id !== "string" ||
           (reaction && (reaction.agent_identity_id !== identity.id || reaction.conversation_id !== original.conversation_id || reaction.target_message_id !== original.id)))
-        throw new Error("An owned WhatsApp conversation and admitted phone author are required.");
+        return;
+      if (group && (!validWhatsAppGroup(original) || !Array.isArray(original.media) || original.media.length > 1 || (!reaction && (typeof original.content !== "string" || !original.content.trim()) && !original.media.length))) return;
       const normalized = structuredClone(event);
       normalized.event_type = "whatsapp.received";
-      normalized.companion = { channel: "whatsapp", phase: "ordinary", sequence: Date.now(), scope_id: original.conversation_id, conversation_id: original.conversation_id };
+      normalized.companion ??= { channel: "whatsapp", phase: "ordinary", sequence: Date.now(), scope_id: original.conversation_id, conversation_id: original.conversation_id };
       normalized._openclawWhatsApp = { version: 2, reaction: Boolean(reaction), ...(reaction ? { sourceId: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}`, actor: reaction.remote_number, targetMessageId: reaction.target_message_id, revision: reaction.revision } : {}) };
-      if (reaction) normalized.data.message = { ...original, sender_number: author, remote_number: author,
-        direction: "inbound", media: [], content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${original.id}. This is context, not a new instruction. Reply only if warranted; otherwise return exactly NO_REPLY.` };
+      if (reaction) normalized.data.message = { ...original, sender_number: author, remote_number: group ? null : author,
+        direction: "inbound", media: [], agent_mentioned: false, mentions: [], content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${original.id}. This is context, not a new instruction. Reply only if warranted; otherwise return exactly NO_REPLY.` };
       // Dedicated WhatsApp admission matches the dedicated iMessage path; local author checks still apply.
-      normalized.data.message.sender_access = "direct";
-      normalized.data.message._ordinaryAddressed = true;
+      if (!event.companion) normalized.data.message.sender_access = "direct";
+      normalized.data.message._ordinaryAddressed = !group;
       await companion.accept(normalized);
     },
     async onIMessage(event) {

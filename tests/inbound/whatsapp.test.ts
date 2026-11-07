@@ -71,7 +71,7 @@ function fixture() {
     channelRuntime: core,
   };
   const bridge = () => createInkboxSessionBridge(options);
-  return { identity, runtime, core, dispatchReply, bridge };
+  return { identity, runtime, core, dispatchReply, bridge, options };
 }
 const event = (
   identityId = "11111111-1111-4111-8111-111111111111",
@@ -1881,8 +1881,15 @@ it("retains an accepted native attachment when its receipt checkpoint fails with
   f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
   const lookup = vi.fn(async () => "sent-a");
   f.runtime.getClient = async () => ({ contacts: { lookup: async () => [] }, messageSends: { lookup } });
+  // Delivery runs from the durable saved answer after native completion. Fail
+  // its real journal checkpoint, rather than replacing a finished host binding.
+  const filesystem = await import("node:fs/promises");
+  let checkpoint: ReturnType<typeof vi.spyOn> | undefined;
+  f.identity.sendWhatsApp.mockImplementationOnce(async () => {
+    checkpoint = vi.spyOn(filesystem, "rename").mockImplementationOnce(async () => { throw new Error("checkpoint unavailable"); });
+    return { id: "sent-a", conversationId: event().data.message.conversation_id, status: "queued", deliveryState: "pending" };
+  });
   f.dispatchReply.mockImplementationOnce(async (input: any) => {
-    activeNativeSource(input.routeSessionKey)!.afterSend = async () => { throw new Error("checkpoint unavailable"); };
     await input.delivery.deliver({ text: "Photo", mediaUrl: path }, { kind: "final" });
     return { dispatched: true };
   });
@@ -1891,6 +1898,7 @@ it("retains an accepted native attachment when its receipt checkpoint fails with
   expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce();
   expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
   expect(lookup).toHaveBeenCalled();
+  checkpoint?.mockRestore();
   await restarted.shutdownA2A();
 });
 
@@ -2013,4 +2021,167 @@ it.each([false, true])("suppresses accepted-source buffered attachments without 
   expect(f.identity.sendWhatsApp.mock.calls[0][0].text).toBe("Answer already sent");
   if (outreach) expect(f.identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({ conversationId: event().data.message.conversation_id, mediaIds: ["00000000-0000-4000-8000-000000000004"] });
   await bridge.shutdownA2A();
+});
+
+describe("WhatsApp existing groups", () => {
+  function groupFixture() {
+    const f = fixture();
+    const item = event();
+    Object.assign(item.data.message, { is_group: true, group_name: "Team", remote_number: null,
+      participants: ["+15555550123", "+15555550124"], unresolved_participant_count: 0 });
+    const conversation = { id: item.data.message.conversation_id, agentIdentityId: f.identity.id,
+      isGroup: true, groupName: "Team", remoteNumber: null, localNumber: "+15555550100",
+      participants: [...item.data.message.participants], unresolvedParticipantCount: 0 };
+    f.identity.getWhatsAppConversation.mockImplementation(async () => structuredClone(conversation));
+    return { ...f, item, conversation };
+  }
+  it.each([false, true])("preserves native group attention and plain replies (mention=%s)", async (mention) => {
+    const f = groupFixture();
+    f.options.account.config.groupReplyMode = "mention";
+    f.item.data.message.content = "@22334455 review this";
+    f.item.data.message.agent_mentioned = mention;
+    f.item.data.message.mentions = [{ text: "@22334455", phone_number: "+15555550100", is_agent: true }];
+    const bridge = f.bridge();
+    await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(f.dispatchReply).toHaveBeenCalledTimes(mention ? 1 : 0);
+    expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(mention ? 1 : 0);
+    if (mention) {
+      expect(f.core.inbound.buildContext.mock.calls[0][0].conversation.kind).toBe("group");
+      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: f.item.data.message.conversation_id });
+      expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+    }
+    await bridge.shutdownA2A();
+  });
+  it("rechecks the complete group roster before sending a saved answer", async () => {
+    const f = groupFixture();
+    f.options.account.config.allowedRecipients = [...f.conversation.participants];
+    f.dispatchReply.mockImplementation(async (p: any) => {
+      f.conversation.participants.push("+15555550125");
+      await p.delivery.deliver({ text: "retained answer" }, { kind: "final" });
+      return { dispatched: true };
+    });
+    const bridge = f.bridge();
+    await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(f.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    await bridge.shutdownA2A();
+  });
+  it.each([false, true])("unknown members require unrestricted local policy (restricted=%s)", async (restricted) => {
+    const f = groupFixture();
+    f.item.data.message.unresolved_participant_count = 1;
+    f.conversation.unresolvedParticipantCount = 1;
+    if (restricted) f.options.account.config.allowedRecipients = [...f.conversation.participants];
+    const bridge = f.bridge();
+    await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(f.dispatchReply).toHaveBeenCalledTimes(restricted ? 0 : 1);
+    await bridge.shutdownA2A();
+  });
+  it("ignores malformed group sources without poisoning the signed inbox", async () => {
+    const f = groupFixture(); f.item.data.message.sender_number = null;
+    const bridge = f.bridge();
+    await expect(bridge.handlers.onWhatsApp!(f.item)).resolves.toBeUndefined();
+    expect(f.dispatchReply).not.toHaveBeenCalled(); await bridge.shutdownA2A();
+  });
+  it("does not accept changed immutable source content as a duplicate", async () => {
+    const f = groupFixture(), bridge = f.bridge();
+    await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    f.item.data.message.content = "changed instruction";
+    await expect(bridge.handlers.onWhatsApp!(f.item)).rejects.toThrow("conflicting source metadata");
+    expect(f.dispatchReply).toHaveBeenCalledTimes(1); await bridge.shutdownA2A();
+  });
+  function activate(f: ReturnType<typeof groupFixture>, phase = "initialization") {
+    f.item.companion = { channel: "whatsapp", phase, sequence: 1, scope_id: "group-scope", activation_id: "activation-one", conversation_id: f.item.data.message.conversation_id };
+    f.item.data.message.sender_access = phase === "initialization" ? "direct" : "sponsored";
+    const replyContext = { channel: "whatsapp", conversationId: f.item.data.message.conversation_id };
+    const proof = { scopeId: "group-scope", activationId: "activation-one", channel: "whatsapp", conversationId: f.item.data.message.conversation_id, replyContext };
+    const companion = {
+      activationMessages: vi.fn(async () => proof),
+      loadInitialization: vi.fn(async () => ({ ...proof, text: "Prior conversation, not a new command", notices: [], entries: [{ id: phase === "initialization" ? f.item.data.message.id : "trigger", author: "+15555550123", text: "start", isTrigger: true, historical: false, senderAccess: "direct" }] })),
+    };
+    f.runtime.getClient = async () => ({ companion, contacts: { lookup: async ({ phone }: any) => phone === "+15555550123" ? [{ id: "sponsor", preferredName: "Sponsor" }] : [] } });
+    f.options.account.config.allowedInboundContactIds = ["sponsor"];
+    f.options.account.config.allowedRecipients = ["+15555550123"];
+    return companion;
+  }
+  it("uses canonical history and the current group grant without requiring sponsored members on the local allowlist", async () => {
+    const f = groupFixture(); const api = activate(f);
+    const bridge = f.bridge();
+    await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(api.loadInitialization).toHaveBeenCalledTimes(1);
+    expect(api.activationMessages).toHaveBeenCalled();
+    expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(1);
+    expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("to");
+    await bridge.shutdownA2A();
+  });
+  it.each(["safe", "relaxed"])("keeps sponsored current native mentions subject to %s attention", async mode => {
+    const f = groupFixture(); activate(f, "live");
+    f.item.data.message.sender_number = "+15555550124";
+    f.item.data.message.is_blocked = true;
+    f.item.data.message.agent_mentioned = true;
+    f.item.data.message.content = "@22334455 current question";
+    f.options.account.config.groupReplyMode = "mention";
+    f.options.account.config.companionResponseMode = mode;
+    const bridge = f.bridge();
+    await dispatchInbound(f.item, bridge.handlers, ["sponsor"]); await settle(bridge);
+    expect(f.dispatchReply).toHaveBeenCalledTimes(mode === "relaxed" ? 1 : 0);
+    await bridge.shutdownA2A();
+  });
+  it("retains a saved answer across an ambiguous activation 409 and retries without another model turn", async () => {
+    const f = groupFixture(); const api = activate(f);
+    let unavailable = false;
+    api.activationMessages.mockImplementation(async () => {
+      if (unavailable) throw new InkboxAPIError(409, { error: "membership_unavailable" });
+      return { scopeId: "group-scope", activationId: "activation-one", channel: "whatsapp", conversationId: f.item.data.message.conversation_id, replyContext: { channel: "whatsapp", conversationId: f.item.data.message.conversation_id } };
+    });
+    f.dispatchReply.mockImplementation(async (input: any) => {
+      await input.delivery.deliver({ text: "retained group answer" }, { kind: "final" });
+      unavailable = true; return { dispatched: true };
+    });
+    let now = Date.now(); const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let bridge = f.bridge();
+    try {
+      await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+      expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+      await bridge.shutdownA2A(); unavailable = false; now += 65_000;
+      bridge = f.bridge(); await settle(bridge);
+      expect(f.dispatchReply).toHaveBeenCalledTimes(1);
+      expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(1);
+      expect(f.identity.sendWhatsApp.mock.calls[0][0].text).toBe("retained group answer");
+    } finally { clock.mockRestore(); await bridge.shutdownA2A(); }
+  });
+  it("ignores invalid signed Companion group metadata instead of retrying poison input", async () => {
+    const f = groupFixture(); activate(f); f.item.companion.activation_id = null;
+    const bridge = f.bridge();
+    await expect(bridge.handlers.onWhatsApp!(f.item)).resolves.toBeUndefined();
+    expect(f.dispatchReply).not.toHaveBeenCalled(); await bridge.shutdownA2A();
+  });
+
+  it("does not wake from a reaction target's historical native mention", async () => {
+    const f = groupFixture(); f.options.account.config.groupReplyMode = "mention";
+    f.item.event_type = "whatsapp.reaction_received";
+    f.item.data.message.agent_mentioned = true;
+    f.item.data.message.mentions = [{ text: "@12", phone_number: "+15555550100", is_agent: true }];
+    f.item.data.reaction = { id: "reaction-one", agent_identity_id: f.identity.id, conversation_id: f.item.data.message.conversation_id,
+      target_message_id: f.item.data.message.id, remote_number: "+15555550123", direction: "inbound", status: "applied", revision: 1, emoji: "👍" };
+    const bridge = f.bridge(); await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(f.dispatchReply).not.toHaveBeenCalled(); await bridge.shutdownA2A();
+  });
+  it("reuses uploaded media after a late authority failure without another model turn", async () => {
+    const f = groupFixture(), api = activate(f);
+    const proof = await api.activationMessages(); let unavailable = false;
+    api.activationMessages.mockImplementation(async () => { if (unavailable) throw new InkboxAPIError(503, "temporary proof failure"); return proof; });
+    const path = join(state.dir, "group-reply.png"); await writeFile(path, "synthetic-image");
+    f.identity.uploadWhatsAppMedia = vi.fn(async () => { unavailable = true; return { id: "00000000-0000-4000-8000-000000000004" }; });
+    f.dispatchReply.mockImplementation(async input => { await input.delivery.deliver({ text: "Photo", mediaUrl: path }, { kind: "final" }); return { dispatched: true }; });
+    let now = Date.now(); const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let bridge = f.bridge();
+    try {
+      await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+      expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+      await bridge.shutdownA2A(); unavailable = false; now += 65_000; bridge = f.bridge(); await settle(bridge);
+      expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ text: "Photo", mediaIds: ["00000000-0000-4000-8000-000000000004"] });
+    } finally { clock.mockRestore(); await bridge.shutdownA2A(); }
+  });
+
 });

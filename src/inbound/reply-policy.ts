@@ -33,6 +33,7 @@ export function companionWakes(config: Partial<InkboxPluginConfig>, message: any
   if (message._ordinaryAddressed === true) return true;
   if (config.companionResponseMode !== "relaxed" && message.sender_access !== "direct") return false;
   if (config.groupReplyMode !== "mention") return true;
+  if (channel === "whatsapp" && message.agent_mentioned === true) return true;
   if (channel === "slack") return message.mentioned === true || message._slackDirect === true;
   const raw = ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text : channel === "phone" ? message.text ?? message.body : message.body;
   if (mentionsAgent(String(raw ?? ""), config.identity)) return true;
