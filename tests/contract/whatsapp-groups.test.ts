@@ -23,5 +23,12 @@ describe("installed WhatsApp SDK group wire contract", () => {
     expect(conversation).toMatchObject({ isGroup: true, groupName: "Team", remoteNumber: null, unresolvedParticipantCount: 0 });
     expect(whatsappDestinationEvidence(conversation, owner, id)).toEqual({ identityId: owner, conversationId: id });
     expect(fetch).toHaveBeenCalledTimes(1);
+    const activation = "00000000-0000-4000-8000-000000000002";
+    fetch.mockImplementationOnce(async () => new Response(JSON.stringify({ scope_id: "00000000-0000-4000-8000-000000000003", activation_id: activation,
+      channel: "whatsapp", conversation_id: id, items: [], history_complete: true, next_cursor: null,
+      reply_context: { channel: "whatsapp", conversation_id: id } }), { headers: { "content-type": "application/json" } }));
+    const proof = await sdk.companion.activationMessages("example", activation, { limit: 1 });
+    expect(proof).toMatchObject({ activationId: activation, channel: "whatsapp", conversationId: id, replyContext: { channel: "whatsapp", conversationId: id } });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

@@ -154,6 +154,7 @@ type InkboxInboundTurn = {
   nativeSource?: NativeSource;
   approvalRoute?: string;
   companionReply?: CompanionReply;
+  companionActive?: boolean;
   companionValidateBeforeDispatch?: () => Promise<void>;
   companionRecordDelivery?: (messageId: string) => Promise<void>;
   recordIMessageAccepted?: (message: any) => Promise<void>;
@@ -1708,8 +1709,8 @@ async function deliverReply(
     if (!params.turn.conversationId) throw new Error("WhatsApp replies require the originating conversation.");
     if (params.turn.companionReply?.identityId && identity.id !== params.turn.companionReply.identityId) throw new Error("The WhatsApp reply identity changed.");
     const conversation = await identity.getWhatsAppConversation(params.turn.conversationId);
-    whatsappDestinationEvidence(conversation, identity.id, params.turn.conversationId, params.turn.nativeSource?.companion ? undefined : params.allowedRecipients);
-    const blocked = params.turn.nativeSource?.companion && whatsappGroup(conversation) ? null : checkOutboundRecipients(conversation.participants, params.allowedRecipients);
+    whatsappDestinationEvidence(conversation, identity.id, params.turn.conversationId, params.turn.companionActive ? undefined : params.allowedRecipients);
+    const blocked = params.turn.companionActive && whatsappGroup(conversation) ? null : checkOutboundRecipients(conversation.participants, params.allowedRecipients);
     if (blocked) throw new Error(blocked);
     await whatsappReady(identity);
     await params.beforeSend?.();
@@ -6111,6 +6112,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       messageId: input.messageId, raw: input.event,
       subject: input.channel === "mail" ? input.event.data?.message?.subject : undefined,
       companionReply: structuredClone(input.reply),
+      companionActive: input.event.companion.phase !== "ordinary",
       companionValidateBeforeDispatch: input.validateBeforeDispatch,
       companionRecordDelivery: input.recordDelivery,
       recordIMessageAccepted: input.recordIMessageAccepted,

@@ -2184,4 +2184,31 @@ describe("WhatsApp existing groups", () => {
     } finally { clock.mockRestore(); await bridge.shutdownA2A(); }
   });
 
+  it.each([false, true])("routes a current native self mention Stop through the running native group session (companion=%s)", async companionMode => {
+    const f = groupFixture();
+    if (companionMode) activate(f); f.options.account.config.groupReplyMode = "mention";
+    Object.assign(f.item.data.message, { content: "@22334455 long task", agent_mentioned: true,
+      mentions: [{ text: "@22334455", phone_number: "+15555550100", is_agent: true }] });
+    let release!: () => void; const running = new Promise<void>(resolve => { release = resolve; });
+    let generating = 0;
+    f.dispatchReply.mockImplementation(async input => {
+      if (input.ctxPayload.message.commandBody === "/stop") {
+        expect(input.ctxPayload.extra.CommandAuthorized).toBe(true);
+        await input.delivery.deliver({ text: "Stopped" }); release();
+      } else { generating++; await running; }
+      return { dispatched: true };
+    });
+    const bridge = f.bridge();
+    try {
+      await bridge.handlers.onWhatsApp!(f.item);
+      await vi.waitFor(() => expect(generating).toBe(1));
+      const stop = structuredClone(f.item); stop.id = "stop-native-mention";
+      stop.data.message.id = "00000000-0000-4000-8000-000000000006"; stop.data.message.content = "@22334455 /stop";
+      if (companionMode) { stop.companion.phase = "live"; stop.companion.sequence = 2; }
+      await bridge.handlers.onWhatsApp!(stop);
+      expect(f.dispatchReply).toHaveBeenCalledTimes(2);
+      expect(generating).toBe(1);
+    } finally { release(); await settle(bridge); await bridge.shutdownA2A(); }
+  });
+
 });

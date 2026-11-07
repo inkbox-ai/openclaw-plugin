@@ -178,21 +178,23 @@ describe("WhatsApp channel adapter and session routes", () => {
     await expect(sendInkboxChannelText({ cfg, ...target, text: "Answer" })).rejects.toThrow("quoted replies require");
     expect(identity.sendWhatsApp).not.toHaveBeenCalled();
   });
-  it("rejects group routes and resolves a direct route without a group flag", async () => {
+  it("preserves existing group routes and resolves a legacy direct route without a group flag", async () => {
     const { inkboxPlugin } = await import("../src/channel.js");
     for (const id of [groupA, groupB]) {
-      await expect(inkboxPlugin.messaging!.resolveOutboundSessionRoute!({ cfg, agentId: "main", target: `whatsapp:${id}` } as any)).rejects.toThrow("direct conversation");
-      await expect(sendInkboxChannelText({ cfg, to: `whatsapp:${id}`, text: "No", idempotencyKey: "unsupported" })).rejects.toThrow("direct conversation");
+      const groupRoute = await inkboxPlugin.messaging!.resolveOutboundSessionRoute!({ cfg, agentId: "main", target: `whatsapp:${id}` } as any);
+      expect(groupRoute?.chatType).toBe("group");
+      await sendInkboxChannelText({ cfg, to: `whatsapp:${id}`, text: "Reply", idempotencyKey: `reply-${id}` });
+      expect(identity.sendWhatsApp).toHaveBeenLastCalledWith(expect.objectContaining({ conversationId: id }));
     }
     identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: identity.id, participants: ["+15555550123"] });
     const route = await inkboxPlugin.messaging!.resolveOutboundSessionRoute!({ cfg, agentId: "main", target: `whatsapp:${dm}` } as any);
     expect(route?.chatType).toBe("direct");
-    expect(identity.sendWhatsApp).not.toHaveBeenCalled();
+    expect(identity.sendWhatsApp).toHaveBeenCalledTimes(2);
   });
   it("rejects foreign conversation routing", async () => {
     const { inkboxPlugin } = await import("../src/channel.js");
     identity.getWhatsAppConversation.mockResolvedValue({ agentIdentityId: "another-identity", isGroup: true });
-    await expect(Promise.resolve().then(() => inkboxPlugin.messaging!.resolveOutboundSessionRoute!({ cfg, agentId: "main", target: `whatsapp:${groupA}` } as any))).rejects.toThrow("direct conversation owned");
+    await expect(Promise.resolve().then(() => inkboxPlugin.messaging!.resolveOutboundSessionRoute!({ cfg, agentId: "main", target: `whatsapp:${groupA}` } as any))).rejects.toThrow("conversation owned");
   });
 });
 

@@ -1,3 +1,4 @@
+import { whatsappGroup } from "./whatsapp-groups.js";
 import { whatsappDestinationEvidence } from "./whatsapp.js";
 import { createInkboxRuntime } from "./client.js";
 import {
@@ -26,13 +27,13 @@ import {
   sendInkboxChannelText,
 } from "./outbound.js";
 
-async function whatsAppConversationChatType(cfg: any, accountId: string | null | undefined, conversationId: string): Promise<"direct"> {
+async function whatsAppConversationChatType(cfg: any, accountId: string | null | undefined, conversationId: string): Promise<"direct" | "group"> {
   const account = resolveInkboxAccount({ cfg, accountId });
   if (!account.configured) throw new Error("An Inkbox account is required to resolve a WhatsApp conversation.");
   const identity = await createInkboxRuntime(account.config).getIdentity();
   const conversation = await identity.getWhatsAppConversation(conversationId);
   whatsappDestinationEvidence(conversation, identity.id, conversationId);
-  return "direct";
+  return whatsappGroup(conversation) ? "group" : "direct";
 }
 
 const meta = {
