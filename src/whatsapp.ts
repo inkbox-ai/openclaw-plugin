@@ -78,6 +78,11 @@ export function assertWhatsAppText(text: string) {
     );
 }
 export class WhatsAppReadinessPending extends Error {}
+class WhatsAppPreflightFailure extends Error { override name = "WhatsAppPreflightFailure"; }
+async function whatsappPreflight<T>(read: () => Promise<T>): Promise<T> {
+  try { return await read(); }
+  catch (error) { throw new WhatsAppPreflightFailure("WhatsApp attachment authority is unavailable; no send was attempted.", { cause: error }); }
+}
 
 export function assertWhatsAppSendKey(value: unknown): asserts value is string {
   if (typeof value !== "string" || !value.trim() || value.length > 255 || /[^\x20-\x7e]/.test(value))
@@ -302,20 +307,20 @@ export async function sendWhatsAppReplyFile(
   allowedRecipients?: string[],
 ) {
   const { checkOutboundRecipients } = await import("./allowlist.js");
-  const identity = await runtime.getIdentity();
-  const authorize = async (ownCallId?: string) => {
+  const identity = await whatsappPreflight(() => runtime.getIdentity());
+  const authorize = async (ownCallId?: string) => whatsappPreflight(async () => {
     if (!source.whatsapp || source.closed || source.identityId !== identity.id || (await runtime.getIdentity()).id !== identity.id)
       throw new Error("The WhatsApp attachment source is no longer active.");
     if (source.validateUpload) await source.validateUpload(true, ownCallId);
     else await source.validate();
-  };
+  });
   await authorize();
   assertWhatsAppText(text);
-  const conversation = await identity.getWhatsAppConversation(source.conversationId);
+  const conversation = await whatsappPreflight(() => identity.getWhatsAppConversation(source.conversationId));
   whatsappDestinationEvidence(conversation, identity.id, source.conversationId, source.companion && source.whatsappGroup ? undefined : allowedRecipients);
   const denied = source.companion && source.whatsappGroup ? null : checkOutboundRecipients(conversation.participants, allowedRecipients);
   if (denied) throw new Error(denied);
-  await whatsappReady(identity);
+  await whatsappPreflight(() => whatsappReady(identity));
   // A saved reply keeps its first uploaded bytes even if the local file changes.
   const fingerprint = createHash("sha256").update(filePath).digest("hex");
   const prepareUpload = async () => {

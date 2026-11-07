@@ -40,14 +40,15 @@ type WhatsAppReactionCursor = { identityId: string; actor: string; targetMessage
 type Journal = { whatsappObservations?: Record<string, WhatsAppObservation>; whatsappReactionOrder?: Record<string, WhatsAppReactionCursor>; jobs: Record<string, Job>; activations: Record<string, Activation>; context?: Record<string, string[]> };
 export type CompanionInput = { recordMediaReply(path: string, text: string): Promise<void>; whatsappMediaUpload(fingerprint: string, prepare: () => Promise<() => Promise<string>>): Promise<string>; media?: { path: string; contentType: string }[]; key: string; messageId: string; channel: Channel; body: string; reply: CompanionReply; event: Record<string, any>; author: string; rawText: string; wasMentioned: boolean; commandAuthorized: boolean; validateBeforeDispatch(): Promise<void>; recordDelivery(messageId: string): Promise<void>; recordIMessageAccepted?(message: any): Promise<void>; bindNativeOwner(sessionKey: string, runId: string): Promise<void>; nativeTerminal(): Promise<void>; beforeApprovalSend(approvalId: string): Promise<void>; afterApprovalSend(approvalId: string, messageId: string): Promise<void>; whatsappReplyTarget?(idempotencyKey: string): Promise<string | undefined>; whatsappReplyDestination?(idempotencyKey: string): Promise<WhatsAppSendIntent["destination"]>; beforeToolSend(callId: string, intent?: WhatsAppSendIntent, automatic?: boolean): Promise<void>; validateToolUpload(automatic: boolean, ownCallId?: string): Promise<void>; beforeToolUpload(callId: string, intent: SlackUploadIntent): Promise<SlackUploadReceipt | undefined>; afterToolSend(callId: string, messageId: string, text?: string, uncertain?: boolean, conversationId?: string): Promise<void>; rejectToolSend(callId: string, idempotencyKey: string, policy: WhatsAppSendRejection): Promise<void>; rejectToolUpload(callId: string): Promise<void>; afterToolUpload(callId: string, receipt: SlackUploadReceipt): Promise<void>; inspectToolUpload(receipt: SlackUploadReceipt): Promise<void> };
 class SenderNotPermitted extends Error {}
-function retryableRead(error: unknown, depth = 0, retryConflict = false): boolean {
+function retryableRead(error: unknown, depth = 0): boolean {
+  if (error instanceof WhatsAppReadinessPending) return true;
   if (!error || typeof error !== "object" || depth > 4) return false;
   const detail = error as { name?: string; statusCode?: number; status_code?: number; code?: string; cause?: unknown };
   const status = detail.statusCode ?? detail.status_code;
-  return detail.name === "InkboxConnectionError" || detail.name === "TimeoutError" || (retryConflict && status === 409) || status === 429 ||
+  return detail.name === "WhatsAppPreflightFailure" || detail.name === "InkboxConnectionError" || detail.name === "TimeoutError" || status === 429 ||
     (typeof status === "number" && status >= 500 && status < 600) ||
     ["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH"].includes(detail.code ?? "") ||
-    (detail.cause !== error && retryableRead(detail.cause, depth + 1, retryConflict));
+    (detail.cause !== error && retryableRead(detail.cause, depth + 1));
 }
 const registry = Symbol.for("inkbox.companion-coordinator.v2");
 type Coordinator = { retries: Map<string, ReturnType<typeof setTimeout>>; chains: Map<string, Promise<unknown>>; workers: Map<string, Promise<void>>; controls: Set<string> };
@@ -420,18 +421,27 @@ export function createCompanionReceiver(opts: {
       } finally { controls.delete(controlKey); }
     }
   }
+  async function whatsappProofRead<T>(read: () => Promise<T>): Promise<T> {
+    try { return await read(); }
+    catch (error) {
+      if ((error as { statusCode?: number })?.statusCode === 409) throw new WhatsAppReadinessPending("WhatsApp membership proof is temporarily unavailable.", { cause: error });
+      throw error;
+    }
+  }
   async function validateSource(job: Job) {
     const metadataValue = metadata(job.event);
     if (metadataValue.channel === "whatsapp") {
       const identity = await opts.runtime.getIdentity();
       if (identity.id !== job.identityId) throw new Error("WhatsApp source identity changed.");
       if (!whatsappGroup(job.event.data.message)) return;
-      const conversation = await identity.getWhatsAppConversation(metadataValue.conversation_id);
-      whatsappDestinationEvidence(conversation, identity.id, metadataValue.conversation_id);
-      if (!validWhatsAppGroup(conversation)) throw new Error("WhatsApp group metadata is unavailable; update the Inkbox SDK.");
+      const conversation = await whatsappProofRead(() => identity.getWhatsAppConversation(metadataValue.conversation_id));
+      try { whatsappDestinationEvidence(conversation, identity.id, metadataValue.conversation_id); }
+      catch { throw new SenderNotPermitted("WhatsApp group metadata is unavailable or no longer owned by this identity."); }
+      if (!validWhatsAppGroup(conversation)) throw new SenderNotPermitted("WhatsApp group metadata is unavailable; update the Inkbox SDK.");
       if (!conversation.participants.includes(source(job.event, metadataValue).author)) throw new SenderNotPermitted("The WhatsApp source author is no longer in the group.");
       if (metadataValue.phase !== "ordinary") {
-        const current = await (await opts.runtime.getClient()).companion.activationMessages(opts.config.identity!, metadataValue.activation_id!, { limit: 1 });
+        const api = (await opts.runtime.getClient()).companion;
+        const current = await whatsappProofRead(() => api.activationMessages(opts.config.identity!, metadataValue.activation_id!, { limit: 1 }));
         if (current.scopeId !== metadataValue.scope_id || current.activationId !== metadataValue.activation_id || String(current.channel) !== "whatsapp" || current.conversationId !== metadataValue.conversation_id || String(current.replyContext.channel) !== "whatsapp" || current.replyContext.conversationId !== metadataValue.conversation_id) throw new Error("WhatsApp Companion activation is no longer current.");
         if (job.sponsor) {
           const contactId = await checkSender(job.sponsor, "whatsapp");
@@ -441,7 +451,7 @@ export function createCompanionReceiver(opts: {
         if ((conversation as any).unresolvedParticipantCount > 0 && (opts.config.allowedInboundContactIds?.length || opts.config.allowedRecipients?.length)) throw new SenderNotPermitted("Unresolved WhatsApp participants cannot satisfy a local allowlist.");
         for (const participant of conversation.participants) {
           await checkSender(participant, "whatsapp");
-          checkOutboundSponsor(participant);
+          try { checkOutboundSponsor(participant); } catch { throw new SenderNotPermitted("A WhatsApp participant is not on the outbound allowlist."); }
         }
       }
       return;
@@ -784,10 +794,14 @@ export function createCompanionReceiver(opts: {
     if (m.channel === "whatsapp") {
       try { await whatsappReady(identity, job.identityId); }
       catch (error) {
-        if (job.state === "pending") throw new WhatsAppReadinessPending("WhatsApp readiness is pending; the turn has not started.", { cause: error });
-        throw error;
+        throw new WhatsAppReadinessPending("WhatsApp readiness is pending; no send was attempted.", { cause: error });
       }
-      await validateSource(job);
+      try { await validateSource(job); }
+      catch (error) {
+        if (!(error instanceof SenderNotPermitted) && ![403, 404].includes((error as { statusCode?: number })?.statusCode ?? 0)) throw error;
+        await mutate(j => { j.jobs[id]!.state = "done"; j.jobs[id]!.nativeComplete = true; j.jobs[id]!.reason = "WhatsApp source is no longer locally permitted."; }, [id]);
+        return;
+      }
       message.attachments = await whatsappAttachments(opts.runtime, message);
     }
     let rawText = String(m.channel === "slack" ? job.event._openclawSlack.rawText : ["imessage", "whatsapp"].includes(m.channel) ? message.content ?? message.text ?? "" : m.channel === "phone" ? message.text ?? message.body ?? "" : message.body ?? "");
@@ -823,7 +837,8 @@ export function createCompanionReceiver(opts: {
         await mutate((j) => { j.jobs[id]!.replies = []; j.jobs[id]!.state = "done"; });
         activity(job.event, "completed"); return;
       }
-      const input = makeInput(current.reply!);
+      const savedSponsor = current.sponsor ?? (await read()).activations[scope]?.sponsor ?? author;
+      const input = makeInput(current.reply!, "", savedSponsor);
       for (const media of current.mediaReplies ?? []) {
         if (!opts.deliverMedia) throw new Error("WhatsApp attachment delivery is unavailable.");
         await validateSource(job);
@@ -831,10 +846,11 @@ export function createCompanionReceiver(opts: {
           await opts.deliverMedia(input, media.path, media.text);
         } catch (error) {
           const saved = (await readJob(id))!;
-          if (saved.stoppedBy || retryableRead(error, 0, true) || Object.values(saved.toolSends ?? {}).some(send => !send.failed && (!send.messageId || send.whatsappUncertain))) throw error;
+          if (saved.stoppedBy || stopped() || !enabled(saved) || retryableRead(error) || Object.values(saved.toolSends ?? {}).some(send => !send.failed && (!send.messageId || send.whatsappUncertain))) throw error;
           const notice = "A WhatsApp attachment could not be confirmed sent. No automatic resend was attempted.";
-          await mutate(j => { j.jobs[id]!.mediaReplies = []; j.jobs[id]!.replies = [notice]; }, [id]);
-          current.replies = [notice];
+          const replies = [[...(current.replies ?? []), notice].filter(Boolean).join("\n\n")];
+          await mutate(j => { j.jobs[id]!.mediaReplies = []; j.jobs[id]!.replies = replies; }, [id]);
+          current.replies = replies;
           break;
         }
         await mutate(j => { j.jobs[id]!.mediaReplies = []; j.jobs[id]!.replies = []; j.jobs[id]!.state = "done"; }, [id]);
@@ -895,7 +911,8 @@ export function createCompanionReceiver(opts: {
       if (!activation) {
         const api = (await opts.runtime.getClient()).companion;
         if (!api?.loadInitialization || !opts.config.identity || !m.activation_id) throw new Error("Companion mode requires the current Inkbox SDK and identity.");
-        const snapshot = await api.loadInitialization(opts.config.identity, m.activation_id, { maxBytes: COMPANION_MAX_BYTES });
+        const load = () => api.loadInitialization(opts.config.identity!, m.activation_id!, { maxBytes: COMPANION_MAX_BYTES });
+        const snapshot = await (m.channel === "whatsapp" ? whatsappProofRead(load) : load());
         if (snapshot.scopeId !== m.scope_id || snapshot.activationId !== m.activation_id || snapshot.conversationId !== m.conversation_id || snapshot.channel !== m.channel) throw new Error("Companion snapshot scope mismatch.");
         if (m.channel === "slack") {
           const route: SlackRoute = job.event._openclawSlack.route;
@@ -1069,7 +1086,7 @@ export function createCompanionReceiver(opts: {
               saved.reason = "WhatsApp reply was definitively rejected; no automatic replacement was sent.";
               return;
             }
-            if (metadata(saved.event).channel === "whatsapp" && saved.state === "reply_pending" && !saved.sendUnconfirmed && !retryableRead(error, 0, true)) saved.replyNotAttempted = true;
+            if (metadata(saved.event).channel === "whatsapp" && saved.state === "reply_pending" && !saved.sendUnconfirmed && !retryableRead(error)) saved.replyNotAttempted = true;
             if (saved.stoppedBy) { saved.state = saved.nativeComplete && !crossedSend(saved) ? "done" : "paused"; return; }
             if (saved.state === "reply_pending" && (stopped() || !enabled(saved))) { deferred = true; return; }
             if (error instanceof WhatsAppReadinessPending && saved.state === "pending") {
@@ -1083,7 +1100,7 @@ export function createCompanionReceiver(opts: {
               if (saved.state === "reply_pending") saved.sendUnconfirmed = false;
               saved.nativeComplete = true;
               saved.attempts = (saved.attempts ?? 0) + 1;
-              if (!retryableRead(error, 0, metadata(saved.event).channel === "whatsapp") && (saved.state === "reply_pending" || saved.attempts > 5)) saved.state = "paused";
+              if (!retryableRead(error) && (saved.state === "reply_pending" || saved.attempts > 5)) saved.state = "paused";
               else saved.retryAt = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(saved.attempts, 6));
             }
             j.jobs[id]!.reason = error instanceof Error ? error.message : "Companion delivery failed.";

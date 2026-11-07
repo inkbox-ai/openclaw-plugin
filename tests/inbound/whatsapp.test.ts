@@ -1909,8 +1909,8 @@ it.each(["oversized", "upload-failed"])("reports native attachment %s without re
   if (failure === "oversized") await truncate(path, 20 * 1024 * 1024 + 1);
   f.identity.uploadWhatsAppMedia = vi.fn(async () => { throw new Error("private-upstream-error"); });
   f.dispatchReply.mockImplementationOnce(async (input: any) => {
-    await input.delivery.deliver({ mediaUrl: path }, { kind: "final" });
-    await input.delivery.deliver({ mediaUrl: path }, { kind: "final" });
+    await input.delivery.deliver({ text: "The saved answer", mediaUrl: path }, { kind: "final" });
+    await input.delivery.deliver({ text: "The saved answer", mediaUrl: path }, { kind: "final" });
     return { dispatched: true };
   });
   await dispatchInbound(event(), bridge.handlers); await settle(bridge);
@@ -1918,6 +1918,7 @@ it.each(["oversized", "upload-failed"])("reports native attachment %s without re
   expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
   const request = f.identity.sendWhatsApp.mock.calls[0][0];
   expect(request.text).toContain("attachment could not be confirmed sent");
+  expect(request.text).toContain("The saved answer");
   expect(request.text).not.toContain("private-upstream-error");
   expect(request).not.toHaveProperty("mediaIds");
   await bridge.shutdownA2A();
@@ -2074,6 +2075,10 @@ describe("WhatsApp existing groups", () => {
     const bridge = f.bridge();
     await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
     expect(f.dispatchReply).toHaveBeenCalledTimes(restricted ? 0 : 1);
+    if (restricted) {
+      const summary = await readCompanionQueueSummary("default", f.options.account.config, f.identity.id);
+      expect(summary.pending).toBe(0); expect(summary.unconfirmed).toBe(0);
+    }
     await bridge.shutdownA2A();
   });
   it("ignores malformed group sources without poisoning the signed inbox", async () => {
@@ -2166,8 +2171,9 @@ describe("WhatsApp existing groups", () => {
     const bridge = f.bridge(); await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
     expect(f.dispatchReply).not.toHaveBeenCalled(); await bridge.shutdownA2A();
   });
-  it("reuses uploaded media after a late authority failure without another model turn", async () => {
-    const f = groupFixture(), api = activate(f);
+  it.each(["initialization", "live"])("reuses uploaded media after a late authority failure without another model turn (%s)", async phase => {
+    const f = groupFixture(), api = activate(f, phase);
+    if (phase === "live") { f.item.data.message.sender_number = "+15555550124"; f.options.account.config.companionResponseMode = "relaxed"; }
     const proof = await api.activationMessages(); let unavailable = false;
     api.activationMessages.mockImplementation(async () => { if (unavailable) throw new InkboxAPIError(503, "temporary proof failure"); return proof; });
     const path = join(state.dir, "group-reply.png"); await writeFile(path, "synthetic-image");
@@ -2209,6 +2215,36 @@ describe("WhatsApp existing groups", () => {
       expect(f.dispatchReply).toHaveBeenCalledTimes(2);
       expect(generating).toBe(1);
     } finally { release(); await settle(bridge); await bridge.shutdownA2A(); }
+  });
+
+  it("passes native optional group silence to the host while keeping direct requests required", async () => {
+    const f = groupFixture(); f.options.account.config.groupReplyMode = "auto";
+    f.dispatchReply.mockImplementation(async input => {
+      expect(input.cfg.surfaces.inkbox.silentReply.group).toBe("allow");
+      expect(input.ctxPayload.conversation.kind).toBe("group");
+      await input.delivery.deliver({ text: "NO_REPLY" }, { kind: "final" });
+      return { dispatched: true };
+    });
+    const bridge = f.bridge(); await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    expect(f.options.cfg).toEqual({}); await bridge.shutdownA2A();
+  });
+  it("retains a saved attachment when channel readiness changes before upload", async () => {
+    const f = groupFixture(); activate(f);
+    const path = join(state.dir, "pending-group.png"); await writeFile(path, "synthetic-image");
+    let unavailable = false;
+    f.identity.getWhatsAppStatus.mockImplementation(async () => ({ enabled: true, status: unavailable ? "recovering" : "ready" }));
+    f.identity.uploadWhatsAppMedia = vi.fn(async () => ({ id: "00000000-0000-4000-8000-000000000004" }));
+    f.dispatchReply.mockImplementation(async input => { await input.delivery.deliver({ text: "Retained photo", mediaUrl: path }, { kind: "final" }); unavailable = true; return { dispatched: true }; });
+    let now = Date.now(); const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let bridge = f.bridge();
+    try {
+      await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+      expect(f.identity.uploadWhatsAppMedia).not.toHaveBeenCalled(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+      await bridge.shutdownA2A(); unavailable = false; now += 65_000; bridge = f.bridge(); await settle(bridge);
+      expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+      expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ text: "Retained photo", mediaIds: ["00000000-0000-4000-8000-000000000004"] });
+    } finally { clock.mockRestore(); await bridge.shutdownA2A(); }
   });
 
 });

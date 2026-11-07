@@ -2549,7 +2549,7 @@ async function dispatchInboundTurn(
   });
 
   const conversationKind = opts.turn.conversationKind ?? "direct";
-  const groupMessaging = conversationKind === "group" && ["sms", "imessage", "slack"].includes(opts.turn.mode);
+  const groupMessaging = conversationKind === "group" && ["sms", "imessage", "whatsapp", "slack"].includes(opts.turn.mode);
   const dispatchCfg = groupMessaging && (opts.account.config.groupReplyMode !== "mention" || (opts.turn.mode === "slack" && (opts.turn.raw as any)?.companion?.phase !== "ordinary"))
     ? withInkboxGroupSilenceDefault(opts.cfg) : opts.cfg;
   const channelThreadRouteId =
