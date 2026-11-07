@@ -2303,6 +2303,22 @@ describe("WhatsApp existing groups", () => {
     } finally { clock.mockRestore(); await bridge.shutdownA2A(); }
   });
 
+  it.each(["initialization", "live"])("ignores inconsistent blocked direct Companion receipts (%s)", async phase => {
+    const f = groupFixture(), api = activate(f, phase);
+    f.item.data.message.sender_access = "direct";
+    f.item.data.message.is_blocked = true;
+    f.options.account.config.companionResponseMode = "relaxed";
+    const bridge = f.bridge();
+    await expect(bridge.handlers.onWhatsApp!(f.item)).resolves.toBeUndefined();
+    await settle(bridge);
+    expect(api.activationMessages).not.toHaveBeenCalled();
+    expect(f.dispatchReply).not.toHaveBeenCalled();
+    expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    const summary = await readCompanionQueueSummary("default", f.options.account.config, f.identity.id);
+    expect(summary.pending).toBe(0);
+    await bridge.shutdownA2A();
+  });
+
   it.each([403, 404])("rejects a previously signed sponsored source when current grant proof returns %s", async status => {
     const f = groupFixture(), api = activate(f, "live");
     f.item.data.message.sender_number = "+15555550124"; f.item.data.message.is_blocked = true;

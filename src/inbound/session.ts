@@ -6408,7 +6408,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const identity = await opts.runtime.getIdentity();
       const original = event.data?.message;
       if (!original || original.agent_identity_id !== identity.id) { if (whatsappGroup(original)) return; throw new Error("WhatsApp event identity mismatch."); }
-      if ((original.is_blocked === true && (!event.companion || event.companion.phase === "ordinary")) || isUnsupportedWhatsAppShape(original) || isUnsupportedWhatsAppShape(event.data?.reaction)) return;
+      if ((original.is_blocked === true && (!event.companion || event.companion.phase === "ordinary" || original.sender_access !== "sponsored")) || isUnsupportedWhatsAppShape(original) || isUnsupportedWhatsAppShape(event.data?.reaction)) return;
       const group = whatsappGroup(original);
       if (event.companion != null && (!group || event.event_type !== "whatsapp.received" || !validWhatsAppCompanion(event.companion, original))) return;
       const reaction = event.event_type === "whatsapp.reaction_received" ? event.data?.reaction : undefined;
