@@ -1,3 +1,4 @@
+import { whatsappGroup, validWhatsAppGroup } from "./whatsapp-groups.js";
 import { detectMime } from "openclaw/plugin-sdk/media-mime";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
@@ -50,7 +51,7 @@ export const WHATSAPP_EVENTS = [
 ] as const;
 const rejectedSendCodes: Record<number, readonly string[]> = {
   403: ["whatsapp_not_eligible", "whatsapp_access_required", "whatsapp_contact_not_allowed", "whatsapp_media_source_not_allowed"],
-  409: ["whatsapp_capability_not_ready", "whatsapp_quote_unavailable", "whatsapp_reaction_pending", "whatsapp_reaction_target_unavailable"],
+  409: ["whatsapp_group_reply_required", "whatsapp_capability_not_ready", "whatsapp_quote_unavailable", "whatsapp_reaction_pending", "whatsapp_reaction_target_unavailable"],
   413: ["whatsapp_media_too_large"],
   422: ["whatsapp_groups_not_supported", "whatsapp_invalid_recipient", "whatsapp_text_too_long", "whatsapp_unanswered_followup_limit", "whatsapp_opening_message_too_long", "whatsapp_reply_required_for_media", "whatsapp_reply_required_for_links", "whatsapp_reply_required_for_phone_numbers", "whatsapp_reply_required_for_email_addresses"],
   429: ["whatsapp_daily_limit_exceeded", "whatsapp_unanswered_message_limit", "whatsapp_conversation_rate_limited", "whatsapp_new_contact_rate_limited", "whatsapp_new_contact_spacing", "whatsapp_follow_up_rate_limited"],
@@ -77,6 +78,11 @@ export function assertWhatsAppText(text: string) {
     );
 }
 export class WhatsAppReadinessPending extends Error {}
+class WhatsAppPreflightFailure extends Error { override name = "WhatsAppPreflightFailure"; }
+async function whatsappPreflight<T>(read: () => Promise<T>): Promise<T> {
+  try { return await read(); }
+  catch (error) { throw new WhatsAppPreflightFailure("WhatsApp attachment authority is unavailable; no send was attempted.", { cause: error }); }
+}
 
 export function assertWhatsAppSendKey(value: unknown): asserts value is string {
   if (typeof value !== "string" || !value.trim() || value.length > 255 || /[^\x20-\x7e]/.test(value))
@@ -92,6 +98,7 @@ export type WhatsAppDestinationEvidence = { identityId: string; conversationId: 
 export function isUnsupportedWhatsAppShape(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
+  if (whatsappGroup(row)) return !validWhatsAppGroup(row);
   return [row.is_group, row.isGroup].some(flag => flag != null && flag !== false) ||
     Object.keys(row).some(key => /^(group(?:_|[A-Z])|whatsappGroup)/.test(key) && row[key] != null) ||
     (row.participants !== undefined && (!Array.isArray(row.participants) || row.participants.length !== 1)) ||
@@ -99,21 +106,22 @@ export function isUnsupportedWhatsAppShape(value: unknown): boolean {
     Number(row.unresolvedParticipantCount ?? row.unresolved_participant_count ?? 0) > 0;
 }
 
-export function whatsappDestinationEvidence(conversation: { id?: string; agentIdentityId: string; participants: string[] }, identityId: string, conversationId: string): WhatsAppDestinationEvidence {
+export function whatsappDestinationEvidence(conversation: { id?: string; agentIdentityId: string; participants: string[] }, identityId: string, conversationId: string, allowedRecipients?: string[]): WhatsAppDestinationEvidence {
+  if (allowedRecipients?.length && Number((conversation as any).unresolvedParticipantCount ?? 0) > 0) throw new Error("Unresolved WhatsApp participants cannot satisfy an outbound allowlist.");
   if (conversation.agentIdentityId !== identityId ||
       (conversation.id !== undefined && conversation.id.toLowerCase() !== conversationId.toLowerCase()) ||
       isUnsupportedWhatsAppShape(conversation) ||
-      !Array.isArray(conversation.participants) || conversation.participants.length !== 1 ||
+      !Array.isArray(conversation.participants) || (!whatsappGroup(conversation) && conversation.participants.length !== 1) ||
       conversation.participants.some(number => !/^\+[1-9]\d{6,14}$/.test(number)))
-    throw new Error("A direct conversation owned by this identity is required.");
-  return { identityId, conversationId: conversationId.toLowerCase(), directRecipient: conversation.participants[0]! };
+    throw new Error("An existing conversation owned by this identity is required.");
+  return { identityId, conversationId: conversationId.toLowerCase(), ...(!whatsappGroup(conversation) ? { directRecipient: conversation.participants[0]! } : {}) };
 }
 
 /** Validate the complete local request before recording a durable send intent. */
 export function validateWhatsAppSend(params: { to?: unknown; conversationId?: unknown; replyToMessageId?: unknown; text?: unknown; mediaIds?: unknown; idempotencyKey?: unknown }) {
   if ((params.to !== undefined) === (params.conversationId !== undefined)) throw new Error("Specify exactly one of to or conversationId.");
   if (params.to !== undefined) whatsappRecipients(params.to);
-  if (isUnsupportedWhatsAppShape(params) || Object.keys(params).some(key => /^group(?:_|[A-Z])/.test(key))) throw new Error("WhatsApp supports direct messages only.");
+  if (isUnsupportedWhatsAppShape(params) || Object.keys(params).some(key => /^group(?:_|[A-Z])/.test(key))) throw new Error("Use one direct recipient or an existing conversation ID; group creation and recipient lists are not supported.");
   if (params.conversationId !== undefined && !whatsappUuid(params.conversationId)) throw new Error("conversationId must be a UUID.");
   if (params.replyToMessageId !== undefined && (!params.conversationId || !whatsappUuid(params.replyToMessageId))) throw new Error("replyToMessageId requires conversationId and a message UUID.");
   if (params.text !== undefined && typeof params.text !== "string") throw new Error("text must be a string.");
@@ -299,35 +307,40 @@ export async function sendWhatsAppReplyFile(
   allowedRecipients?: string[],
 ) {
   const { checkOutboundRecipients } = await import("./allowlist.js");
-  const identity = await runtime.getIdentity();
-  const authorize = async (ownCallId?: string) => {
+  const identity = await whatsappPreflight(() => runtime.getIdentity());
+  const authorize = async (ownCallId?: string) => whatsappPreflight(async () => {
     if (!source.whatsapp || source.closed || source.identityId !== identity.id || (await runtime.getIdentity()).id !== identity.id)
       throw new Error("The WhatsApp attachment source is no longer active.");
     if (source.validateUpload) await source.validateUpload(true, ownCallId);
     else await source.validate();
-  };
+  });
   await authorize();
   assertWhatsAppText(text);
-  const conversation = await identity.getWhatsAppConversation(source.conversationId);
-  whatsappDestinationEvidence(conversation, identity.id, source.conversationId);
-  const denied = checkOutboundRecipients(conversation.participants, allowedRecipients);
+  const conversation = await whatsappPreflight(() => identity.getWhatsAppConversation(source.conversationId));
+  whatsappDestinationEvidence(conversation, identity.id, source.conversationId, source.companion && source.whatsappGroup ? undefined : allowedRecipients);
+  const denied = source.companion && source.whatsappGroup ? null : checkOutboundRecipients(conversation.participants, allowedRecipients);
   if (denied) throw new Error(denied);
-  await whatsappReady(identity);
-  const file = await whatsappFile(filePath);
-  await authorize();
-  const contentType = await detectMime({ buffer: file.content, filePath });
-  const media = await identity.uploadWhatsAppMedia({ ...file, contentType });
+  await whatsappPreflight(() => whatsappReady(identity));
+  // A saved reply keeps its first uploaded bytes even if the local file changes.
+  const fingerprint = createHash("sha256").update(filePath).digest("hex");
+  const prepareUpload = async () => {
+    const file = await whatsappFile(filePath);
+    await authorize();
+    const contentType = await detectMime({ buffer: file.content, filePath });
+    return async () => (await identity.uploadWhatsAppMedia({ ...file, contentType })).id;
+  };
+  const media = { id: source.whatsappMediaUpload ? await source.whatsappMediaUpload(fingerprint, prepareUpload) : await (await prepareUpload())() };
   await authorize();
   const callId = `reply-file:${createHash("sha256").update(filePath).digest("hex")}`;
   const idempotencyKey = whatsappSendKey([identity.id, source.sourceMessageId, callId, text, media.id]);
   const intent = { idempotencyKey, ...(text ? { text } : {}), mediaIds: [media.id], ...(source.replyToMessageId ? { replyToMessageId: source.replyToMessageId } : {}) };
   await source.beforeSend(callId, intent, true);
-  await authorize(callId);
   let message;
   try { message = await identity.sendWhatsApp({ conversationId: source.conversationId, ...intent }); }
   catch (error) {
     const policy = whatsappSendRejection(error);
     if (policy && source.rejectSend) await source.rejectSend(callId, idempotencyKey, policy).catch(() => {});
+    if (policy && error instanceof Error) Object.assign(error, { whatsappRejected: policy });
     throw error;
   }
   await source.afterSend(callId, message.id, intent.text, message.status === "uncertain", message.conversationId);

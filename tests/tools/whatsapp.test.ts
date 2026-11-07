@@ -414,3 +414,45 @@ it("exposes only scalar direct addressing and no group selectors", async () => {
     expect((await tool.execute("unsupported", { includeGroups: true })).isError).toBe(true);
   }
 });
+
+describe("WhatsApp group target authorization", () => {
+  const sourceId = "00000000-0000-4000-8000-000000000001";
+  const otherId = "00000000-0000-4000-8000-000000000002";
+  it.each(["same", "other", "direct"])("does not borrow a group grant for %s destination", async target => {
+    const release = bindNativeSource("group-grant", {
+      whatsapp: true, whatsappGroup: true, companion: true, identityId: "identity-a", conversationId: sourceId,
+      author: "+15555550123", closed: false, validate: async () => {}, beforeSend: async () => {}, afterSend: async () => {},
+    });
+    try {
+      const f = fixture(["+15555550123"], "group-grant");
+      f.identity.getWhatsAppConversation.mockImplementation(async (id: string) => ({ id, agentIdentityId: "identity-a", isGroup: true,
+        groupName: "Existing group", remoteNumber: null, participants: ["+15555550123", "+15555550124"], unresolvedParticipantCount: 0 }));
+      const destination = target === "direct" ? { to: "+15555550123" } : { conversationId: target === "same" ? sourceId : otherId };
+      const result = await f.tools.get("inkbox_send_whatsapp").execute("call", { ...destination, text: "reply" });
+      expect(Boolean(result.isError)).toBe(target === "other");
+      expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(target === "other" ? 0 : 1);
+      if (target === "direct") {
+        expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ to: "+15555550123" });
+        expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("conversationId");
+      }
+    } finally { release(); }
+  });
+  it("rejects unresolved members for an independent allowlisted group destination", async () => {
+    const f = fixture(["+15555550123"]);
+    f.identity.getWhatsAppConversation.mockResolvedValue({ id: sourceId, agentIdentityId: "identity-a", isGroup: true,
+      remoteNumber: null, participants: ["+15555550123"], unresolvedParticipantCount: 1 });
+    const result = await f.tools.get("inkbox_send_whatsapp").execute("call", { conversationId: sourceId, text: "reply" });
+    expect(result.isError).toBe(true); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  });
+  it("does not persist a send intent when the final source authority read fails", async () => {
+    const beforeSend = vi.fn(); let reads = 0;
+    const release = bindNativeSource("preflight", { whatsapp: true, whatsappGroup: true, companion: true,
+      identityId: "identity-a", conversationId: sourceId, author: "+15555550123", closed: false,
+      validate: async () => { if (++reads === 2) throw new InkboxAPIError(503, "temporary membership failure"); }, beforeSend, afterSend: async () => {} });
+    try {
+      const f = fixture(undefined, "preflight");
+      const result = await f.tools.get("inkbox_send_whatsapp").execute("call", { text: "reply" });
+      expect(result.isError).toBe(true); expect(beforeSend).not.toHaveBeenCalled(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    } finally { release(); }
+  });
+});

@@ -65,7 +65,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
       - name: Install protocol driver from published SDK
-        run: uv pip install --system inkbox==0.7.6 pytest
+        run: uv pip install --system inkbox==0.7.29 pytest
 
       - name: Build plugin
         run: |

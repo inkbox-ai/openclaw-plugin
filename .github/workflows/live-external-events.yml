@@ -65,7 +65,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Install live-test deps (published SDK + pytest)
         run: |
-          uv pip install --system inkbox==0.7.6 pytest
+          uv pip install --system inkbox==0.7.29 pytest
 
       - name: Build the plugin
         run: |
