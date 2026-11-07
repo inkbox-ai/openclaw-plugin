@@ -2204,6 +2204,19 @@ describe("WhatsApp existing groups", () => {
     } finally { clock.mockRestore(); await bridge.shutdownA2A(); }
   });
 
+  it.each(["question", "/stop", "/approve once"])("does not address another native participant through a numeric agent alias (%s)", async command => {
+    const f = groupFixture();
+    f.options.account.config.identity = "12345";
+    f.options.account.config.groupReplyMode = "mention";
+    Object.assign(f.item.data.message, { content: `@12345 ${command}`, agent_mentioned: false,
+      mentions: [{ text: "@12345", phone_number: "+15555550124", is_agent: false }] });
+    const bridge = f.bridge();
+    await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(f.dispatchReply).not.toHaveBeenCalled();
+    expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    await bridge.shutdownA2A();
+  });
+
   it.each([[false, true], [true, true], [false, false]])("routes a current group Stop through the running native session (companion=%s, mentioned=%s)", async (companionMode, mentioned) => {
     const f = groupFixture();
     if (companionMode) activate(f); f.options.account.config.groupReplyMode = "mention";

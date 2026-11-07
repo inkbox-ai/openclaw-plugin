@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderWhatsAppMentions, whatsappControlText, validWhatsAppGroup } from "../../src/whatsapp-groups.js";
-import { companionWakes } from "../../src/inbound/reply-policy.js";
+import { companionWakes, whatsappCommandText } from "../../src/inbound/reply-policy.js";
 
 describe("WhatsApp mention presentation and attention", () => {
   it.each([false, true])("resolves only contact names in direct/group input (group=%s)", async (group) => {
@@ -24,6 +24,24 @@ describe("WhatsApp mention presentation and attention", () => {
     expect(companionWakes(config, { content: "@12", sender_access: "direct", mentions: [{ text: "@12", is_agent: true }] }, "whatsapp")).toBe(false);
     expect(companionWakes(config, { content: "@example", sender_access: "sponsored" }, "whatsapp")).toBe(mode === "relaxed");
     expect(companionWakes(config, { content: "ambient", sender_access: "direct", history: "@example", quoted: { agent_mentioned: true } }, "whatsapp")).toBe(false);
+  });
+  it("does not mistake another person's native token for a numeric agent handle", () => {
+    const config = { identity: "12345", groupReplyMode: "mention" as const, companionResponseMode: "relaxed" as const };
+    const message = { content: "@12345 question", sender_access: "direct", agent_mentioned: false,
+      mentions: [{ text: "@12345", phone_number: "+15555550123", is_agent: false }] };
+    expect(companionWakes(config, message, "whatsapp")).toBe(false);
+    expect(companionWakes(config, { ...message, agent_mentioned: true }, "whatsapp")).toBe(true);
+    expect(companionWakes(config, { ...message, content: "@12345 @agent question" }, "whatsapp")).toBe(true);
+    expect(companionWakes(config, { ...message, mentions: [] }, "whatsapp")).toBe(true);
+    expect(companionWakes(config, { ...message, content: "@123456 question" }, "whatsapp")).toBe(false);
+  });
+  it.each(["/stop", "/approve once"])("does not address native other-person tokens as control aliases (%s)", command => {
+    const message = { content: `@12345 ${command}`, agent_mentioned: false,
+      mentions: [{ text: "@12345", phone_number: "+15555550123", is_agent: false }] };
+    expect(whatsappCommandText(message, "12345")).toBe(message.content);
+    expect(whatsappCommandText({ ...message, content: command }, "12345")).toBe(command);
+    expect(whatsappCommandText({ ...message, mentions: [] }, "12345")).toBe(command);
+    expect(whatsappCommandText({ ...message, agent_mentioned: true, mentions: [{ ...message.mentions[0], is_agent: true }] }, "12345")).toBe(command);
   });
   it("strips only a current native self token for native controls", () => {
     const message = { content: "@12 /stop", agent_mentioned: true, mentions: [{ text: "@12", phone_number: null, is_agent: true }] };

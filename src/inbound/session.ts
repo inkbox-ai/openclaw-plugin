@@ -1,4 +1,4 @@
-import { whatsappGroup, validWhatsAppGroup, validWhatsAppCompanion, whatsappControlText } from "../whatsapp-groups.js";
+import { whatsappGroup, validWhatsAppGroup, validWhatsAppCompanion } from "../whatsapp-groups.js";
 import { checkOutboundRecipients } from "../allowlist.js";
 import { sendWhatsAppReplyFile, assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey, whatsappSendRejection } from "../whatsapp.js";
 import { slackMrkdwn } from "../slack-style.js";
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { contextBuffer } from "./context-buffer.js";
 import { ensureNativeApprovalContext, nativeApprovalScope, resolveNativeApproval, trackNativeApprovalTurn, type NativeApprovalBinding } from "./native-approvals.js";
 import { verifyNativeIMessageTarget } from "../imessage-threading.js";
-import { mentionsAgent, isLocalControl, sameAuthor, controlText, isCompanionControl } from "./reply-policy.js";
+import { mentionsAgent, isLocalControl, sameAuthor, controlText, whatsappCommandText, isCompanionControl } from "./reply-policy.js";
 import { createInkboxTextReplyCapture } from "../reply-capture.js";
 import { beginSilentSendCapture } from "../silent-send-capture.js";
 import { isInkboxSilentReply, transformInkboxReplyPayload, withInkboxGroupSilenceDefault } from "../silent-reply.js";
@@ -6254,7 +6254,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       const message = channel === "phone" ? event.data.text_message : event.data.message;
       const author = channel === "slack" ? message.author : channel === "mail" ? message.from_address : channel === "phone" ? message.sender_phone_number ?? message.remote_phone_number : message.sender_number ?? message.remote_number;
       return resolveNativeApproval({ scope: nativeApprovalScope(opts.account, key + (channel === "slack" ? `:source:${slackRouteKey(event._openclawSlack.route)}` : "")), author, channel, accountId: opts.account.accountId },
-        controlText(String(channel === "whatsapp" ? whatsappControlText(message) : channel === "slack" ? event._openclawSlack.rawText : channel === "phone" ? message.text ?? message.body ?? "" : ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
+        channel === "whatsapp" ? whatsappCommandText(message, opts.account.config.identity) : controlText(String(channel === "slack" ? event._openclawSlack.rawText : channel === "phone" ? message.text ?? message.body ?? "" : ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text ?? "" : message.body ?? ""), opts.account.config.identity), opts.cfg, beforeResolve);
     },
     async deliver(input, text, beforeSend) {
       const turn = companionTurn(input);
@@ -6436,7 +6436,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         direction: "inbound", media: [], agent_mentioned: false, mentions: [], content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${original.id}. This is context, not a new instruction. Reply only if warranted; otherwise return exactly NO_REPLY.` };
       // Dedicated WhatsApp admission matches the dedicated iMessage path; local author checks still apply.
       if (!event.companion) normalized.data.message.sender_access = "direct";
-      const command = controlText(whatsappControlText(normalized.data.message), opts.account.config.identity);
+      const command = whatsappCommandText(normalized.data.message, opts.account.config.identity);
       normalized.data.message._ordinaryAddressed = !group || (!event.companion &&
         (isLocalControl(command) || isCompanionControl(command) || /^\/approve(?:\s|$)/i.test(command)));
       await companion.accept(normalized);

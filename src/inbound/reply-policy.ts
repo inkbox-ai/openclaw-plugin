@@ -1,3 +1,4 @@
+import { whatsappControlText, whatsappMentions } from "../whatsapp-groups.js";
 import type { InkboxPluginConfig } from "../client.js";
 
 export function mentionsAgent(text: string, handle?: string): boolean {
@@ -21,6 +22,14 @@ export function controlText(text: string, handle?: string): string {
     ? rest.join(" ") : text.trim();
 }
 
+/** Native numeric tokens are not typed aliases, even when the configured handle is numeric. */
+export function whatsappCommandText(message: any, handle?: string): string {
+  const raw = whatsappControlText(message);
+  const first = raw.trim().split(/\s+/)[0]?.replace(/[,:]$/, "");
+  if (whatsappMentions(message).some(mention => mention.text === first)) return raw.trim();
+  return controlText(raw, handle);
+}
+
 export function isLocalControl(text: string): boolean {
   return /^\/(?:stop|abort|clear|new|reset|resume|status|help)(?:\s|$)/i.test(text.trim());
 }
@@ -36,7 +45,13 @@ export function companionWakes(config: Partial<InkboxPluginConfig>, message: any
   if (channel === "whatsapp" && message.agent_mentioned === true) return true;
   if (channel === "slack") return message.mentioned === true || message._slackDirect === true;
   const raw = ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text : channel === "phone" ? message.text ?? message.body : message.body;
-  if (mentionsAgent(String(raw ?? ""), config.identity)) return true;
+  let literal = String(raw ?? "");
+  if (channel === "whatsapp") {
+    for (const mention of whatsappMentions(message)) {
+      if (mention.text) literal = literal.replace(new RegExp(`(?<![\\p{L}\\p{N}_@.+/:-])${mention.text}(?![\\p{L}\\p{N}_])`, "gu"), " ");
+    }
+  }
+  if (mentionsAgent(literal, config.identity)) return true;
   return channel === "mail" && Boolean(mailbox) && Array.isArray(message.to_addresses) &&
     message.to_addresses.some((value: unknown) => typeof value === "string" && normalizeEmail(value) === normalizeEmail(mailbox!));
 }
