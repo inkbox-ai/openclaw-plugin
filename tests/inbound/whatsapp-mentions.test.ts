@@ -30,6 +30,9 @@ describe("WhatsApp mention presentation and attention", () => {
     const message = { content: "@12345 question", sender_access: "direct", agent_mentioned: false,
       mentions: [{ text: "@12345", phone_number: "+15555550123", is_agent: false }] };
     expect(companionWakes(config, message, "whatsapp")).toBe(false);
+    for (const content of ["cc:@12345 question", "/@12345 question", "@12345@agent question", "@12345.example"]) {
+      expect(companionWakes(config, { ...message, content }, "whatsapp")).toBe(false);
+    }
     expect(companionWakes(config, { ...message, agent_mentioned: true }, "whatsapp")).toBe(true);
     expect(companionWakes(config, { ...message, content: "@12345 @agent question" }, "whatsapp")).toBe(true);
     expect(companionWakes(config, { ...message, mentions: [] }, "whatsapp")).toBe(true);

@@ -2217,6 +2217,22 @@ describe("WhatsApp existing groups", () => {
     await bridge.shutdownA2A();
   });
 
+  it("passes false native mention evidence in Auto mode for another person's numeric token", async () => {
+    const f = groupFixture();
+    f.options.account.config.identity = "12345";
+    f.options.account.config.groupReplyMode = "auto";
+    Object.assign(f.item.data.message, { content: "cc:@12345 question", agent_mentioned: false,
+      mentions: [{ text: "@12345", phone_number: "+15555550124", is_agent: false }] });
+    f.dispatchReply.mockImplementation(async input => {
+      expect(input.ctxPayload.extra.WasMentioned).toBe(false);
+      await input.delivery.deliver({ text: "NO_REPLY" }, { kind: "final" });
+      return { dispatched: true };
+    });
+    const bridge = f.bridge(); await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(f.dispatchReply).toHaveBeenCalledOnce(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    await bridge.shutdownA2A();
+  });
+
   it.each([[false, true], [true, true], [false, false]])("routes a current group Stop through the running native session (companion=%s, mentioned=%s)", async (companionMode, mentioned) => {
     const f = groupFixture();
     if (companionMode) activate(f); f.options.account.config.groupReplyMode = "mention";

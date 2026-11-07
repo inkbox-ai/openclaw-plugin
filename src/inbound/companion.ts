@@ -5,7 +5,7 @@ import { createTerminalReceipts, type ReceiptIndex } from "./terminal-receipts.j
 import { createIMessageOutcomes, imessageFailureNotice, type IMessageOutcomeRoute } from "./imessage-outcomes.js";
 import { fenceNativeOwner } from "../native-owner.js";
 import { SLACK_EVENTS, type SlackRoute, ownSlackConnection, slackAuthorAllowed, slackRouteKey } from "../slack.js";
-import { companionWakes, controlText, whatsappCommandText, isCompanionControl, isLocalControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
+import { companionWakes, controlText, whatsappCommandText, whatsappMentioned, isCompanionControl, isLocalControl, mentionsAgent, sameAuthor } from "./reply-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
@@ -747,7 +747,7 @@ export function createCompanionReceiver(opts: {
       checkSponsor(parent.sponsor, parent.sponsorContactId, job.event._openclawSlack?.route);
       const input: CompanionInput = {
         key: scope, messageId: id, channel: m.channel, body: raw, rawText: raw, author,
-        wasMentioned: m.channel === "slack" ? message.mentioned === true : (m.channel === "whatsapp" && message.agent_mentioned === true) || mentionsAgent(originalText, opts.config.identity),
+        wasMentioned: m.channel === "slack" ? message.mentioned === true : m.channel === "whatsapp" ? whatsappMentioned(message, opts.config.identity) : mentionsAgent(originalText, opts.config.identity),
         reply: structuredClone(parent.reply), event: job.event, commandAuthorized: true,
         validateBeforeDispatch: async () => {
           checkSponsor(parent.sponsor!, parent.sponsorContactId, job.event._openclawSlack?.route);
@@ -816,7 +816,7 @@ export function createCompanionReceiver(opts: {
       key: scope, messageId: id, channel: m.channel, body, reply, event: job.event, author,
       ...(m.channel === "whatsapp" ? { media: (message.attachments ?? []).filter((item: any) => !item.unavailable && typeof item.local_path === "string").map((item: any) => ({ path: item.local_path, contentType: item.content_type ?? "application/octet-stream" })) } : {}),
       rawText: (m.channel === "whatsapp" ? whatsappCommandText(message, opts.config.identity) : controlText(rawText, opts.config.identity)),
-      wasMentioned: m.channel === "slack" ? message.mentioned === true : (m.channel === "whatsapp" && message.agent_mentioned === true) || mentionsAgent(rawText, opts.config.identity),
+      wasMentioned: m.channel === "slack" ? message.mentioned === true : m.channel === "whatsapp" ? whatsappMentioned(message, opts.config.identity) : mentionsAgent(rawText, opts.config.identity),
       commandAuthorized: m.phase !== "initialization" && sameAuthor(m.channel, author, m.channel === "slack" ? job.event._openclawSlack?.route?.author : sponsor) && (isCompanionControl((m.channel === "whatsapp" ? whatsappCommandText(message, opts.config.identity) : controlText(rawText, opts.config.identity))) || (m.channel === "whatsapp" && m.phase === "ordinary" && isLocalControl(whatsappCommandText(message, opts.config.identity)))),
       validateBeforeDispatch: async () => {
         checkSponsor(sponsor, m.channel === "whatsapp" ? await checkSender(sponsor, m.channel) : sponsorContactId, job.event._openclawSlack?.route);

@@ -38,20 +38,23 @@ export function isCompanionControl(text: string): boolean {
   return /^\/(?:clear|new|stop|cancel|resume|status|usage|health)$/i.test(text.trim());
 }
 
+export function whatsappMentioned(message: any, handle?: string): boolean {
+  if (message.agent_mentioned === true) return true;
+  let literal = String(message.content ?? message.text ?? "");
+  for (const mention of whatsappMentions(message)) {
+    if (mention.text) literal = literal.replace(new RegExp(`(?<![\\p{L}\\p{N}_@.+-])${mention.text}(?![\\p{L}\\p{N}_-])(?!\\.[\\p{L}\\p{N}_])`, "gu"), "native_mention");
+  }
+  return mentionsAgent(literal, handle);
+}
+
 export function companionWakes(config: Partial<InkboxPluginConfig>, message: any, channel: string, mailbox?: string): boolean {
   if (message._ordinaryAddressed === true) return true;
   if (config.companionResponseMode !== "relaxed" && message.sender_access !== "direct") return false;
   if (config.groupReplyMode !== "mention") return true;
-  if (channel === "whatsapp" && message.agent_mentioned === true) return true;
+  if (channel === "whatsapp") return whatsappMentioned(message, config.identity);
   if (channel === "slack") return message.mentioned === true || message._slackDirect === true;
   const raw = ["imessage", "whatsapp"].includes(channel) ? message.content ?? message.text : channel === "phone" ? message.text ?? message.body : message.body;
-  let literal = String(raw ?? "");
-  if (channel === "whatsapp") {
-    for (const mention of whatsappMentions(message)) {
-      if (mention.text) literal = literal.replace(new RegExp(`(?<![\\p{L}\\p{N}_@.+/:-])${mention.text}(?![\\p{L}\\p{N}_])`, "gu"), " ");
-    }
-  }
-  if (mentionsAgent(literal, config.identity)) return true;
+  if (mentionsAgent(String(raw ?? ""), config.identity)) return true;
   return channel === "mail" && Boolean(mailbox) && Array.isArray(message.to_addresses) &&
     message.to_addresses.some((value: unknown) => typeof value === "string" && normalizeEmail(value) === normalizeEmail(mailbox!));
 }
