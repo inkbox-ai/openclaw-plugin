@@ -1838,20 +1838,28 @@ it.each([false, true])("delivers native WhatsApp reply attachments once and reta
   f.dispatchReply.mockImplementationOnce(async (input: any) => {
     await input.delivery.deliver({ text: "An image", mediaUrl: path }, { kind: "final" });
     await input.delivery.deliver({ text: "An image", mediaUrl: path }, { kind: "final" });
-    await input.delivery.deliver({ text: "Sent you a photo!" }, { kind: "final" });
+    await input.delivery.deliver({ text: "The highlighted section needs a revised deadline." }, { kind: "final" });
     return { dispatched: true };
   });
   await dispatchInbound(event(), bridge.handlers); await settle(bridge);
   expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce();
   expect(f.identity.uploadWhatsAppMedia.mock.calls[0][0].content).toEqual(Buffer.from("synthetic-outbound-image"));
-  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(uncertain ? 1 : 2);
   expect(f.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({ conversationId: event().data.message.conversation_id, text: "An image", mediaIds: ["00000000-0000-4000-8000-000000000004"] });
   expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+  if (!uncertain) {
+    expect(f.identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({
+      conversationId: event().data.message.conversation_id,
+      text: "The highlighted section needs a revised deadline.",
+    });
+    expect(f.identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("mediaIds");
+  }
   const saved = await currentWhatsAppJob();
   if (uncertain) expect(Object.values(saved.toolSends)[0]).toMatchObject({ whatsappMediaIds: ["00000000-0000-4000-8000-000000000004"], whatsappUncertain: true });
   await bridge.shutdownA2A(); const restarted = f.bridge(); await settle(restarted);
-  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(uncertain ? 1 : 2);
   expect(f.identity.uploadWhatsAppMedia).toHaveBeenCalledOnce();
+  expect(f.dispatchReply).toHaveBeenCalledOnce();
   await restarted.shutdownA2A();
 });
 
