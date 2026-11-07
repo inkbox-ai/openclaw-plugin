@@ -2295,4 +2295,15 @@ describe("WhatsApp existing groups", () => {
     } finally { clock.mockRestore(); await bridge.shutdownA2A(); }
   });
 
+  it.each([403, 404])("rejects a previously signed sponsored source when current grant proof returns %s", async status => {
+    const f = groupFixture(), api = activate(f, "live");
+    f.item.data.message.sender_number = "+15555550124"; f.item.data.message.is_blocked = true;
+    f.options.account.config.companionResponseMode = "relaxed";
+    api.activationMessages.mockRejectedValue(new InkboxAPIError(status, "current group access denied"));
+    const bridge = f.bridge(); await bridge.handlers.onWhatsApp!(f.item); await settle(bridge);
+    expect(f.dispatchReply).not.toHaveBeenCalled(); expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+    const summary = await readCompanionQueueSummary("default", f.options.account.config, f.identity.id);
+    expect(summary.pending).toBe(0); expect(summary.unconfirmed).toBe(0); await bridge.shutdownA2A();
+  });
+
 });
