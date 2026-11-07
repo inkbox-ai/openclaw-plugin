@@ -45,6 +45,25 @@ jobs:
           node tests/ci/verify_package.mjs
           node tests/ci/verify_installed_package.mjs
 
+  whatsapp-sdk:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.22.1"
+          cache: npm
+      - name: Install published plugin dependencies
+        run: bash tests/ci/npm_with_retry.sh ci
+      - name: Install published WhatsApp SDK and current host
+        run: |
+          bash tests/ci/npm_with_retry.sh install --no-save --package-lock=false @inkbox/sdk@0.7.29 openclaw@latest
+          node tests/ci/verify_sdk.mjs
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: node tests/ci/verify_package.mjs
+
   # Contract suite + full typecheck against the LATEST OpenClaw host. This is
   # the lane that catches upstream interface drift (a moved plugin-sdk symbol,
   # a changed entry shape, a type break in the channel APIs) before it reaches

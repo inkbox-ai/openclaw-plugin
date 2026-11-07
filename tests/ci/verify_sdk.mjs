@@ -10,12 +10,13 @@ const manifest = JSON.parse(
   readFileSync(join(dirname(entry), "..", "package.json"), "utf8"),
 );
 const [major, minor, patch] = manifest.version.split(".").map(Number);
-const supportedVersion = major === 0 && (minor > 7 || (minor === 7 && patch >= 26));
+const supportedVersion = major === 0 && (minor > 7 || (minor === 7 && patch >= 29));
 const { Inkbox } = await import(entry);
 const client = new Inkbox({ apiKey: "synthetic-local-contract" });
 if (
   !supportedVersion ||
   typeof client.whatsapp?.send !== "function" ||
+  typeof client.whatsapp?.get !== "function" ||
   typeof client.whatsapp?.uploadMedia !== "function" ||
   typeof client.whatsapp?.getLimits !== "function" ||
   typeof client.whatsapp?.getThread !== "function" ||

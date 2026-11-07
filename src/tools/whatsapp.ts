@@ -33,7 +33,7 @@ export function registerWhatsAppTools(
       return {
         name: "inkbox_send_whatsapp",
         description:
-          "Send WhatsApp using one E.164 recipient string or an existing direct conversation with optional quoted reply and owned media. Active-source sends stay in their conversation and are plain by default; quote only with explicit replyToMessageId. Explicit destinations remain authoritative. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
+          "Send WhatsApp using one E.164 recipient string or an existing direct or inbound-observed group conversation with optional quoted reply and owned media. Active-source sends stay in their conversation and are plain by default; quote only with explicit replyToMessageId. Explicit destinations remain authoritative. Approved access required. Preserve idempotencyKey after uncertainty. Ordinary final replies are sent automatically; do not send them twice.",
         parameters: Type.Object(
           {
             to: Type.Optional(Type.String({ pattern: "^\\+[1-9]\\d{6,14}$" })),
@@ -61,7 +61,7 @@ export function registerWhatsAppTools(
             const bound = Boolean(
               source?.whatsapp && (
                 (!params.to && conversationId?.toLowerCase() === source.conversationId.toLowerCase()) ||
-                (/^\+[1-9]\d{6,14}$/.test(directRecipient) && directRecipient === source.author)
+                (!source?.whatsappGroup && /^\+[1-9]\d{6,14}$/.test(directRecipient) && directRecipient === source.author)
               ),
             );
             const retainedDestination = bound && params.idempotencyKey
@@ -91,16 +91,17 @@ export function registerWhatsAppTools(
             if (targetConversationId) {
               const conversation =
                 await identity.getWhatsAppConversation(targetConversationId);
-              destinationEvidence = whatsappDestinationEvidence(conversation, identity.id, targetConversationId);
+              destinationEvidence = whatsappDestinationEvidence(conversation, identity.id, targetConversationId, source?.companion && source.whatsappGroup && targetConversationId === source.conversationId ? undefined : allowedRecipients);
               recipients = conversation.participants;
             }
-            const block = checkOutboundRecipients(recipients, allowedRecipients);
+            const block = source?.companion && source.whatsappGroup && targetConversationId === source.conversationId ? null : checkOutboundRecipients(recipients, allowedRecipients);
             if (block) throw new Error(block);
             await whatsappReady(identity);
             const keyParts: unknown[] = [identity.id, [context.sessionKey, source?.whatsapp ? source.sourceMessageId : undefined, callId],
               targetConversationId ?? explicitRecipients, params.text, params.mediaIds];
             if (replyToMessageId) keyParts.push({ replyToMessageId });
             const idempotencyKey = params.idempotencyKey ?? whatsappSendKey(keyParts);
+            if (source) { await source.validate(); assertNativeSource(source, identity.id); }
             if (tracked) {
               try { await source!.beforeSend(callId, { idempotencyKey, text: params.text, ...(params.mediaIds ? { mediaIds: params.mediaIds } : {}), ...(replyToMessageId ? { replyToMessageId } : {}), ...(destination ? { destination } : {}), ...(destinationEvidence ? { destinationEvidence } : {}) }); }
               catch (error) {
@@ -116,7 +117,6 @@ export function registerWhatsAppTools(
             }
             if (source) {
               assertNativeSource(source, identity.id);
-              await source.validate();
               assertNativeSource(source, identity.id);
             }
             let message;
@@ -259,8 +259,8 @@ export function registerWhatsAppTools(
         const message = await identity.getWhatsAppMessage(receipt?.targetMessageId ?? params.messageId);
         if (message.agentIdentityId !== identity.id || isUnsupportedWhatsAppShape(message)) throw new Error("The WhatsApp reaction target is not owned by this identity.");
         const conversation = await identity.getWhatsAppConversation(message.conversationId);
-        whatsappDestinationEvidence(conversation, identity.id, message.conversationId);
-        const block = checkOutboundRecipients(conversation.participants, allowedRecipients); if (block) throw new Error(block);
+        whatsappDestinationEvidence(conversation, identity.id, message.conversationId, source?.companion && source.whatsappGroup && message.conversationId === source.conversationId ? undefined : allowedRecipients);
+        const block = source?.companion && source.whatsappGroup && message.conversationId === source.conversationId ? null : checkOutboundRecipients(conversation.participants, allowedRecipients); if (block) throw new Error(block);
         await whatsappReady(identity);
         if (source) { assertNativeSource(source, identity.id); await source.validate(); assertNativeSource(source, identity.id); }
         try {
