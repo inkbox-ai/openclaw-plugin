@@ -136,6 +136,7 @@ jobs:
           # Per-run GitHub webhook secret: shared by the gateway (to verify) and
           # the tests (to sign). Generated fresh so nothing is committed.
           GH_SECRET="$(openssl rand -hex 24)"
+          echo "::add-mask::$GH_SECRET"
           echo "INKBOX_WEBHOOK_SECRET_GITHUB=$GH_SECRET" >> "$GITHUB_ENV"
 
       - name: Start gateway and wait for readiness

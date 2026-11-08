@@ -27,6 +27,8 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ### Changed
 
+- Mask generated webhook secrets in workflow output.
+
 - Send ordinary WhatsApp replies without a quote by default, retaining explicit quotes and saved retry targets.
 - Pass refreshed WhatsApp image and audio attachments into native media processing, including captionless messages, and deliver native file replies with retained send receipts.
 
