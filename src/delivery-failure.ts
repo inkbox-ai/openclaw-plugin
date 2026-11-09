@@ -344,6 +344,144 @@ export function claimDeliveryFailure(params: {
   return true;
 }
 
+// ── Outbound delivery context (async webhook correlation) ───────────────────
+//
+// A send can queue successfully and only fail later. The failure webhook may
+// omit the recipient, conversation, or original body. Recording context at
+// queue time (keyed by the Inkbox message id) lets the recovery path restore
+// those fields before falling back to whatever the webhook still carries.
+// Fleet standard item 3 in #22; mirrors hermes-agent-plugin#60.
+
+export const OUTBOUND_CONTEXT_TTL_MS = 2 * 60 * 60 * 1000;
+export const OUTBOUND_CONTEXT_MAX_ENTRIES = 1000;
+
+export interface OutboundDeliveryContext {
+  channel: DeliveryFailureChannel;
+  /** Contact / session key the send belonged to (OpenClaw contactKey / chat id). */
+  chatId: string;
+  recipient: string;
+  bodySnippet: string;
+  conversationId?: string;
+  emailThreadId?: string;
+  emailRfcMessageId?: string;
+  emailSubject?: string;
+  at: number;
+}
+
+export interface SaveOutboundContextInput {
+  messageId: string;
+  channel: DeliveryFailureChannel;
+  chatId: string;
+  recipient?: string | null;
+  body?: string | null;
+  conversationId?: string | null;
+  emailThreadId?: string | null;
+  emailRfcMessageId?: string | null;
+  emailSubject?: string | null;
+  now?: number;
+}
+
+let outboundContextStore = new Map<string, OutboundDeliveryContext>();
+
+function pruneOutboundContext(now: number): void {
+  const cutoff = now - OUTBOUND_CONTEXT_TTL_MS;
+  for (const [key, entry] of outboundContextStore) {
+    if (entry.at < cutoff) {
+      outboundContextStore.delete(key);
+    }
+  }
+  while (outboundContextStore.size >= OUTBOUND_CONTEXT_MAX_ENTRIES) {
+    const oldest = outboundContextStore.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    outboundContextStore.delete(oldest);
+  }
+}
+
+/**
+ * Record metadata for a successfully queued outbound send so a later
+ * delivery-failure webhook can recover the original thread and body.
+ */
+export function saveOutboundContext(input: SaveOutboundContextInput): void {
+  const messageId = nonEmpty(input.messageId);
+  const chatId = nonEmpty(input.chatId);
+  if (!messageId || !chatId) return;
+  const now = input.now ?? Date.now();
+  pruneOutboundContext(now);
+  let snippet = (input.body ?? "").trim();
+  if (snippet.length > OUTBOUND_FAILURE_BODY_SNIPPET_CHARS) {
+    snippet = snippet.slice(0, OUTBOUND_FAILURE_BODY_SNIPPET_CHARS) + "…";
+  }
+  outboundContextStore.set(messageId, {
+    channel: input.channel,
+    chatId,
+    recipient: nonEmpty(input.recipient) ?? "",
+    bodySnippet: snippet,
+    conversationId: nonEmpty(input.conversationId),
+    emailThreadId: nonEmpty(input.emailThreadId),
+    emailRfcMessageId: nonEmpty(input.emailRfcMessageId),
+    emailSubject: nonEmpty(input.emailSubject),
+    at: now,
+  });
+}
+
+/** Look up outbound context by Inkbox message id, honouring the TTL. */
+export function getOutboundContext(messageId?: string | null): OutboundDeliveryContext | undefined {
+  const id = nonEmpty(messageId);
+  if (!id) return undefined;
+  const entry = outboundContextStore.get(id);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > OUTBOUND_CONTEXT_TTL_MS) {
+    outboundContextStore.delete(id);
+    return undefined;
+  }
+  return entry;
+}
+
+/** Retrieve and remove outbound context for a terminal failure event. */
+export function popOutboundContext(messageId?: string | null): OutboundDeliveryContext | undefined {
+  const entry = getOutboundContext(messageId);
+  const id = nonEmpty(messageId);
+  if (entry && id) {
+    outboundContextStore.delete(id);
+  }
+  return entry;
+}
+
+/** Drop outbound context (e.g. on a delivered receipt). */
+export function removeOutboundContext(messageId?: string | null): void {
+  const id = nonEmpty(messageId);
+  if (id) {
+    outboundContextStore.delete(id);
+  }
+}
+
+/**
+ * Merge stored outbound context into a webhook-derived failure. Context wins
+ * for recipient, conversation, thread metadata, and the original body; the
+ * webhook fills in whatever the context does not have.
+ */
+export function applyOutboundContext(
+  failure: DeliveryFailure,
+  ctx: OutboundDeliveryContext,
+): DeliveryFailure {
+  return {
+    ...failure,
+    recipient: nonEmpty(ctx.recipient) ?? failure.recipient,
+    conversationId: nonEmpty(ctx.conversationId) ?? failure.conversationId,
+    emailThreadId: nonEmpty(ctx.emailThreadId) ?? failure.emailThreadId,
+    rfcMessageId: nonEmpty(ctx.emailRfcMessageId) ?? failure.rfcMessageId,
+    subject: nonEmpty(ctx.emailSubject) ?? failure.subject,
+    // Prefer the body we sent: thin mail webhooks often only carry a subject
+    // or a truncated snippet that is not what the agent wrote.
+    failedBody: nonEmpty(ctx.bodySnippet) ?? failure.failedBody,
+  };
+}
+
+// Test hook: number of entries in the outbound context store.
+export function outboundContextSizeForTest(): number {
+  return outboundContextStore.size;
+}
+
 // ── Synchronous send-rejection classification ───────────────────────────────
 
 // Statuses the host gateway retries on its own — waking the agent about them
@@ -619,4 +757,5 @@ export function noteOutboundDeliveryFailure(
 export function resetDeliveryFailureStateForTest(): void {
   outboundFailureState = new Map();
   seenFailures = new Map();
+  outboundContextStore = new Map();
 }
