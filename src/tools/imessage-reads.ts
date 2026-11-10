@@ -198,7 +198,7 @@ export function registerIMessageReads(api: any, runtime: InkboxRuntime, nativeEn
             partIndex: params.partIndex ?? 0,
           });
           return toolText(
-            `Sent ${reaction.reaction} tapback to message ${params.messageId} (reaction id=${reaction.id}).`,
+            `Sent ${reaction.reaction} tapback to message ${reaction.targetMessageId} part ${reaction.partIndex} (reaction id=${reaction.id}).`,
           );
         });
       },
