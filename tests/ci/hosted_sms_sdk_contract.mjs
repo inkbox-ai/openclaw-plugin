@@ -1,7 +1,7 @@
 // Credential-free published SDK + actual native loader snapshot contract.
 import { strict as assert } from "node:assert";
 import { createServer } from "node:http";
-import { cp, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createRequire, registerHooks } from "node:module";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -29,10 +29,13 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const baseUrl = `http://127.0.0.1:${server.address().port}`;
 const pluginRoots = [];
-await symlink(join(root, "node_modules"), join(state, "node_modules"), "dir");
+const sdk = await realpath(join(root, "node_modules", "@inkbox", "sdk"));
 for (const id of ["sdk-observer-one", "sdk-observer-two"]) {
   const dir = join(state, id); await mkdir(join(dir, "node_modules", "@inkbox"), { recursive: true });
-  await cp(join(root, "node_modules", "@inkbox", "sdk"), join(dir, "node_modules", "@inkbox", "sdk"), { recursive: true, dereference: true });
+  const copiedSdk = join(dir, "node_modules", "@inkbox", "sdk");
+  await cp(sdk, copiedSdk, { recursive: true, dereference: true });
+  // A copied package also needs its pnpm sibling dependencies to load.
+  await symlink(dirname(dirname(sdk)), join(copiedSdk, "node_modules"), "dir");
   await writeFile(join(dir, "package.json"), JSON.stringify({ name: id, version: "1.0.0", type: "module", openclaw: { extensions: ["./index.mjs"] } }));
   await writeFile(join(dir, "openclaw.plugin.json"), JSON.stringify({ id, name: id, contracts: { tools: [id.replaceAll("-", "_")] }, configSchema: { type: "object", additionalProperties: false, properties: {} } }));
   await writeFile(join(dir, "index.mjs"), `import {AgentIdentity} from '@inkbox/sdk'; import {HttpTransport} from './node_modules/@inkbox/sdk/dist/_http.js'; import {TextsResource} from './node_modules/@inkbox/sdk/dist/phone/resources/texts.js';\nexport default {id:${JSON.stringify(id)},name:'Fixture',register(api){api.registerTool({name:${JSON.stringify(id.replaceAll("-", "_"))},label:'Fixture',description:'Fixture',parameters:{type:'object',properties:{}},execute:async()=>{const identity=new AgentIdentity({id:'fixture-identity',phoneNumber:{id:'fixture-number'}},{_texts:new TextsResource(new HttpTransport('synthetic-only',${JSON.stringify(baseUrl + '/api/v1/phone')},3000))}); const result=await identity.sendText({to:${JSON.stringify(target)},text:${JSON.stringify(marker)}}); return {content:[{type:'text',text:'Accepted'}],details:{accepted:!!result.id}};}});}};\n`);
@@ -56,7 +59,7 @@ for (const name of ["loadPluginRegistryHandle", "loadOpenClawPlugins"]) {
 }
 assert.equal(typeof load, "function", "Actual native loader entrypoint missing");
 const registry = load({ config: cfg, workspaceDir: state, cache: false, activate: false, logger: { info(){}, warn(){}, error(){}, debug(){} } });
-assert.equal(registry.tools.length, 2, "Native plugin registration failed");
+assert.equal(registry.tools.length, 2, `Native plugin registration failed: ${JSON.stringify(registry.diagnostics)}`);
 for (const entry of registry.tools) {
   const produced = entry.factory({ config: cfg, workspaceDir: state, agentId: "main", sessionKey: "agent:main:fixture" });
   const tools = Array.isArray(produced) ? produced : [produced];
