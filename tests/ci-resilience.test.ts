@@ -56,13 +56,13 @@ describe("CI resilience contracts", () => {
       expect(workflow).not.toContain("openclaw@2026.5.27");
     }
   });
-  it("bounds setup-only npm retries in every host workflow", () => {
+  it("uses the frozen source dependency graph in every host workflow", () => {
     for (const name of workflows) {
       const workflow = readFileSync(
         resolve(".github", "workflows", name),
         "utf8",
       );
-      expect(workflow).toContain("tests/ci/npm_with_retry.sh");
+      expect(workflow).toContain("pnpm@10.28.0 install --frozen-lockfile");
       expect(workflow).not.toMatch(/^\s*npm (?:ci|install)/m);
     }
   });

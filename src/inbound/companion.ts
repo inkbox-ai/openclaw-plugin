@@ -1202,6 +1202,22 @@ export function createCompanionReceiver(opts: {
     return task;
   }
   return {
+    async eventState(eventId: string): Promise<"absent" | "pending" | "completed" | "uncertain"> {
+      const identityId = (await opts.runtime.getIdentity()).id;
+      let job = await readJob(hash(`${identityId}:${eventId}`));
+      if (!job) return "absent";
+      const visited = new Set<string>();
+      while (job.mergedInto) {
+        if (visited.has(job.mergedInto) || visited.size >= 8) return "uncertain";
+        visited.add(job.mergedInto);
+        const parent = await readJob(job.mergedInto);
+        if (!parent || parent.identityId !== identityId) return "uncertain";
+        job = parent;
+      }
+      if (job.state === "done") return "completed";
+      if (job.state === "paused") return "uncertain";
+      return "pending";
+    },
     async recordIMessageFailure(message: Record<string, any> | undefined): Promise<boolean> {
       if (!message || typeof message.id !== "string" || !message.id) return opts.config.imessageThreadedReplies === true;
       const identityId = (await opts.runtime.getIdentity()).id;

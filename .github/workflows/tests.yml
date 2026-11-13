@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   # Offline unit suite + typecheck against the pinned OpenClaw host from
-  # package-lock. Fast signal on our own code — cheap enough to run on every
+  # pnpm-lock. Fast signal on our own code — cheap enough to run on every
   # push, including draft PRs (the heavy live suite is what we gate).
   unit:
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -26,12 +26,11 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
-          cache: npm
 
-      - name: Install published dependencies
+      - name: Install pinned dependencies
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@2026.5.27
+          npx --yes pnpm@10.28.0 install --frozen-lockfile
+          npx --yes pnpm@10.28.0 add --save-dev --lockfile=false openclaw@2026.5.27
 
       - name: Typecheck
         run: npm run typecheck
@@ -52,12 +51,11 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24.22.1"
-          cache: npm
-      - name: Install published plugin dependencies
-        run: bash tests/ci/npm_with_retry.sh ci
-      - name: Install published WhatsApp SDK and current host
+      - name: Install pinned plugin dependencies
+        run: npx --yes pnpm@10.28.0 install --frozen-lockfile
+      - name: Verify pinned SDK and current host
         run: |
-          bash tests/ci/npm_with_retry.sh install --no-save --package-lock=false @inkbox/sdk@0.7.29 openclaw@latest
+          npx --yes pnpm@10.28.0 add --save-dev --lockfile=false openclaw@latest
           node tests/ci/verify_sdk.mjs
       - run: npm run typecheck
       - run: npm test
@@ -77,12 +75,11 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24.22.1"
-          cache: npm
 
-      - name: Install published dependencies + latest OpenClaw host
+      - name: Install pinned dependencies + latest OpenClaw host
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@latest
+          npx --yes pnpm@10.28.0 install --frozen-lockfile
+          npx --yes pnpm@10.28.0 add --save-dev --lockfile=false openclaw@latest
           node tests/ci/verify_sdk.mjs
           npm ls openclaw || true
 

@@ -1,6 +1,6 @@
 {
   "name": "@inkbox/inkbox",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "description": "Inkbox plugin for OpenClaw \u2014 adds email, SMS, iMessage, WhatsApp, Slack, voice, and A2A tools with inbound webhook handling",
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,8 @@
     "dist",
     "skills",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "REMOTE_TOOLS.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -20,7 +21,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@inkbox/sdk": "^0.7.29",
+    "@inkbox/sdk": ">=0.7.38 <1.0.0",
     "json5": "^2.2.3",
     "qrcode-terminal": "^0.12.0",
     "typebox": "^1.1.38",
@@ -97,6 +98,12 @@
     "build": {
       "openclawVersion": "2026.5.27",
       "pluginSdkVersion": "2026.5.27"
+    }
+  },
+  "packageManager": "pnpm@10.28.0",
+  "pnpm": {
+    "overrides": {
+      "@inkbox/sdk": "github:inkbox-ai/inkbox#5ebde74b33bd560e9c9818f675ff0c5c6f1cb962&path:/sdk/typescript"
     }
   }
 }

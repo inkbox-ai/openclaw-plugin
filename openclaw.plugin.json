@@ -1,5 +1,6 @@
 {
   "id": "inkbox",
+  "version": "0.2.19",
   "name": "Inkbox",
   "description": "Adds Inkbox messaging and A2A tools (email, SMS, iMessage, WhatsApp, voice) to OpenClaw",
   "contracts": {
@@ -83,7 +84,10 @@
       "inkbox_credentials_get_ssh_key",
       "inkbox_totp_code",
       "inkbox_whoami",
-      "inkbox_place_call"
+      "inkbox_place_call",
+      "inkbox_remote_tools",
+      "inkbox_remote_call",
+      "inkbox_reply_current"
     ]
   },
   "skills": ["./skills"],
