@@ -2,6 +2,19 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.19]
+
+### Added
+
+- Discover current remote Inkbox tools with complete schemas and structured results through native approval hooks.
+- Preserve call identity and continuation state across retries; retain local setup for admin and unclaimed credentials.
+- Reply to the current email or direct SMS with a source-bound final-reply helper and durable acceptance evidence.
+- Expose per-event completion evidence for integrations, including merged message bursts.
+
+### Changed
+
+- Require SDK 0.7.38; source development installs its pinned revision with pnpm.
+
 ## [Unreleased]
 
 ### Added

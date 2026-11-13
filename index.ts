@@ -1,3 +1,4 @@
+import { RemoteTools } from "./src/remote-tools.js";
 import { bindNativeSourceRun, guardNativeSourceTool, recordNativeSourceProgress } from "./src/native-source.js";
 import { bindNativeOwner, settleNativeOwner, guardRetiredNativeRun } from "./src/native-owner.js";
 import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall, reconcileSilentSendAgentEnd } from "./src/silent-send-capture.js";
@@ -80,6 +81,8 @@ function registerInkboxCli(api: any): void {
   );
 }
 
+const remoteTools = new WeakMap<object, RemoteTools>();
+
 function registerInkboxTools(api: any): void {
   const resolveCfg = () =>
     resolveInkboxToolsConfig({
@@ -94,6 +97,10 @@ function registerInkboxTools(api: any): void {
   }
 
   const runtime = createInkboxRuntime(resolveCfg, api.logger);
+  const remote = new RemoteTools(runtime, resolveCfg);
+  remote.register(api);
+  remoteTools.set(api, remote);
+  api = remote.wrap(api);
 
   // Required outbound tools — registered without { optional: true } so they
   // light up as soon as the plugin is enabled. Recipient allowlist is
@@ -183,6 +190,7 @@ function registerHostedCallSettlementHooks(api: any): void {
     bindNativeSourceRun(event, context);
     const ownerDecision = await bindNativeOwner(event, context);
     if (ownerDecision) return ownerDecision;
+    remoteTools.get(api)?.begin(context);
     bindNativeApprovalTurnToRun(api.runtime?.channel, listInkboxAccountIds(api.runtime?.config?.current?.()), event, context);
     bindHostedSmsCaptureToRun(event, context);
     bindSilentSendCaptureToRun(event, context);
@@ -204,13 +212,16 @@ function registerHostedCallSettlementHooks(api: any): void {
         );
       }
     }
-    return decision;
+    return decision ?? await remoteTools.get(api)?.before(event, context);
   });
   api.on("model_call_started", recordSilentSendModelStarted);
   api.on("after_tool_call", recordSilentSendAfterToolCall);
   api.on("after_tool_call", (event: any, context: any) => recordNativeSourceProgress(event, context, true));
   api.on("agent_end", reconcileSilentSendAgentEnd);
-  api.on("agent_end", settleNativeOwner);
+  api.on("agent_end", (event: any, context: any) => {
+    remoteTools.get(api)?.end(context);
+    return settleNativeOwner(event, context);
+  });
   api.on("after_tool_call", recordHostedSmsAfterToolCall);
   api.on("model_call_ended", recordHostedModelCallEnded);
 }

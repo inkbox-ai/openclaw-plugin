@@ -470,6 +470,11 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 
 ## Tools
 
+Claimed identities can discover and execute the current remote catalog with
+`inkbox_remote_tools` and `inkbox_remote_call`. `inkbox_reply_current` declares a
+final reply to the current incoming email or direct SMS. See [remote tools](REMOTE_TOOLS.md)
+for approval, retry and compatibility behavior.
+
 Required by default:
 
 - Outbound: `inkbox_send_email`, `inkbox_send_sms`, `inkbox_send_imessage`
@@ -480,7 +485,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The dependency floor is the published `@inkbox/sdk` 0.7.29 release.
+- The dependency floor is `@inkbox/sdk` 0.7.38. Source development pins its exact Git revision.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
@@ -604,6 +609,7 @@ The package includes all `skills/*/SKILL.md` files in npm tarballs.
 ## Development Commands
 
 ```bash
+npx --yes pnpm@10.28.0 install --frozen-lockfile
 npm run typecheck
 npm test
 npm run build

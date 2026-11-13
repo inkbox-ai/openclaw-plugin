@@ -3,7 +3,8 @@ import { checkOutboundRecipients } from "../allowlist.js";
 import { sendWhatsAppReplyFile, assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey, whatsappSendRejection } from "../whatsapp.js";
 import { slackMrkdwn } from "../slack-style.js";
 import { trackNativeOwner } from "../native-owner.js";
-import { bindNativeSource, type NativeSource } from "../native-source.js";
+import { terminalReceipt } from "../terminal-reply.js";
+import { acquireNativeSource, type NativeSource } from "../native-source.js";
 import { join } from "node:path";
 import { statePaths } from "../state.js";
 import { SLACK_REPLY_STYLE, parseSlack, prepareSlackSource, ownSlackConnection, slackControlText, slackRouteKey, sendSlackReply, reconcileSlackSubscription, type SlackRoute } from "../slack.js";
@@ -268,6 +269,8 @@ export interface InkboxSessionBridge {
   handlers: InboundHandlers;
   wsHandler: InkboxWsHandler;
   activeCalls: Map<string, ActiveCall>;
+  eventState(eventId: string): Promise<"absent" | "pending" | "completed" | "uncertain">;
+  deliveryState(event: Record<string, any>): Promise<"absent" | "pending" | "completed" | "uncertain">;
   catchUpA2A(): Promise<void>;
   catchUpHostedCalls(): Promise<void>;
   catchUpCompanion(): Promise<void>;
@@ -1670,12 +1673,17 @@ async function deliverReply(
     imessageTyping?: IMessageTypingPulse;
     logger?: PluginLogger;
     beforeSend?: () => Promise<void>;
+    automaticFinal?: boolean;
     allowedRecipients?: string[];
   },
 ): Promise<string | undefined> {
   const text = params.text.trim();
   if (!text || isInkboxSilentReply(text)) {
     return undefined;
+  }
+  if (params.automaticFinal && params.turn.nativeSource?.replyChannel) {
+    const receipt = await terminalReceipt(params.runtime, params.turn.nativeSource);
+    if (receipt) return receipt;
   }
   if (params.turn.mode === "warmup" || params.turn.mode === "external") {
     // No delivery channel: warmup turns are hidden, and external events have
@@ -2596,6 +2604,17 @@ async function dispatchInboundTurn(
   const nativeOwner = opts.turn.bindNativeOwner && opts.turn.nativeTerminal ? trackNativeOwner(effectiveSessionKey, opts.turn.bindNativeOwner, opts.turn.nativeTerminal) : undefined;
   if (opts.turn.nativeSource && nativeOwner) opts.turn.nativeSource.marker = nativeOwner.marker;
   const approvalMarker = (silentSendCapture?.marker ?? `[Inkbox turn correlation: ${randomUUID()}]`) + (nativeOwner ? `\n${nativeOwner.marker}` : "");
+  if (!opts.turn.deliveryFailureNotification && ["message.received", "text.received"].includes(String((opts.turn.raw as any)?.event_type)) && !opts.turn.nativeSource && !opts.turn.commandAuthorized && (opts.turn.mode === "email" && (opts.turn.storedMessageId || opts.turn.companionReply?.replyToMessageId) || opts.turn.mode === "sms" && opts.turn.conversationKind !== "group" && opts.turn.remoteAddress)) {
+    const identity = await opts.runtime.getIdentity();
+    opts.turn.nativeSource = {
+      replyChannel: opts.turn.mode as "email" | "sms", replySourceId: opts.turn.storedMessageId ?? opts.turn.companionReply?.replyToMessageId ?? opts.turn.messageId,
+      replyRoute: opts.turn.conversationId ?? opts.turn.contactKey,
+      identityId: identity.id, conversationId: opts.turn.conversationId ?? opts.turn.contactKey, author: opts.turn.remoteAddress ?? "", closed: false, marker: approvalMarker,
+      validate: async () => { if (opts.abortSignal?.aborted) throw new Error("The incoming turn was cancelled."); await opts.turn.companionValidateBeforeDispatch?.(); },
+      beforeSend: async () => { await opts.turn.companionValidateBeforeDispatch?.(); },
+      afterSend: async (_call, id) => { await opts.turn.companionRecordDelivery?.(id); },
+    };
+  }
   if (opts.turn.companionReply && Buffer.byteLength(`${body}\n\n${approvalMarker}`) > COMPANION_MAX_BYTES) {
     silentSendCapture?.finish();
     throw new Error("Companion initialization exceeds the host input limit.");
@@ -2724,6 +2743,7 @@ async function dispatchInboundTurn(
         messageId = await deliverReply({
           turn: opts.turn,
           text,
+          automaticFinal: info?.kind === "final" || !info?.kind,
           runtime: opts.runtime,
           activeCalls: opts.activeCalls,
           imessageTyping: opts.imessageTyping,
@@ -2740,6 +2760,7 @@ async function dispatchInboundTurn(
           // transient failure, which wakeOnSendRejection rethrows for the host
           // gateway to retry.
           if (opts.turn.companionReply) throw error;
+          releaseNativeSource?.(); releaseNativeSource = undefined;
           await wakeOnSendRejection({ ...opts }, opts.turn, text, error);
           return { visibleReplySent: false };
         }
@@ -2792,12 +2813,13 @@ async function dispatchInboundTurn(
     }, ready: opts.turn.companionApprovalReady, activity: opts.turn.activity,
   };
   const releaseApprovalTurn = trackNativeApprovalTurn(core, approvalBinding);
-  const releaseNativeSource = opts.turn.nativeSource ? bindNativeSource(effectiveSessionKey, opts.turn.nativeSource) : undefined;
+  let releaseNativeSource: (() => void) | undefined;
   const acknowledgeBackgroundContext = async () => {
     try { await opts.turn.contextAcknowledged?.(); }
     catch { opts.logger?.warn?.("Inkbox background context could not be acknowledged; retaining it for the next model turn."); }
   };
   try {
+    releaseNativeSource = opts.turn.nativeSource ? await acquireNativeSource(effectiveSessionKey, opts.turn.nativeSource, opts.dispatchAbortSignal ?? opts.abortSignal) : undefined;
     await opts.turn.companionValidateBeforeDispatch?.();
     const result = await core.inbound.dispatchReply({
       cfg: dispatchCfg as any,
@@ -4658,6 +4680,7 @@ async function handleDeliveryFailure(
     reaction: undefined,
     nativeEventKind: undefined,
     deliveryFailureNotification: true,
+    nativeSource: undefined,
     wasMentioned: false,
     commandAuthorized: false,
     contextAcknowledged: undefined,
@@ -6094,7 +6117,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     const mode = input.channel === "whatsapp" ? "whatsapp" : input.channel === "slack" ? "slack" : input.channel === "mail" ? "email" : input.channel === "phone" ? "sms" : "imessage";
     return {
       bindNativeOwner: input.bindNativeOwner, nativeTerminal: input.nativeTerminal, media: input.media,
-      nativeSource: !input.commandAuthorized && (input.channel === "whatsapp" || input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
+      nativeSource: !input.commandAuthorized && (input.channel === "mail" || input.channel === "whatsapp" || input.channel === "slack" || (input.channel === "imessage" && opts.account.config.imessageThreadedReplies)) ? {
+        ...(input.channel === "mail" ? { replyChannel: "email" as const, replySourceId: input.reply.replyToMessageId ?? input.messageId, replyRoute: input.reply.conversationId } : {}),
         whatsapp: input.channel === "whatsapp", whatsappGroup: whatsappGroup(input.event.data?.message), sourceMessageId: input.messageId,
         identityId: input.reply.identityId!, conversationId: input.reply.conversationId, replyToMessageId: input.reply.replyToMessageId ?? undefined,
         slackRoute: input.reply.slackRoute, author: input.author, companion: input.event.companion.phase !== "ordinary", closed: false, validate: input.validateBeforeDispatch, validateUpload: input.validateToolUpload, beforeSend: input.beforeToolSend, whatsappMediaUpload: input.whatsappMediaUpload, whatsappReplyTarget: input.whatsappReplyTarget, whatsappReplyDestination: input.whatsappReplyDestination, afterSend: input.afterToolSend, rejectSend: input.rejectToolSend, afterUpload: input.afterToolUpload, rejectUpload: input.rejectToolUpload, beforeUpload: input.beforeToolUpload, inspectUpload: input.inspectToolUpload,
@@ -6259,7 +6283,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     async deliver(input, text, beforeSend) {
       const turn = companionTurn(input);
       if (opts.account.config.groupReplyMode === "mention" && /\/approve\s/.test(text)) text += "\nInclude @agent before /approve when answering in mention mode.";
-      const messageId = await deliverReply({ turn, text, runtime: opts.runtime, activeCalls, logger: opts.logger, allowedRecipients: opts.account.config.allowedRecipients, beforeSend });
+      const messageId = await deliverReply({ turn, text, runtime: opts.runtime, activeCalls, logger: opts.logger, allowedRecipients: opts.account.config.allowedRecipients, beforeSend, automaticFinal: !/\/approve\s/.test(text) });
       await rememberApprovals(turn, opts.account, text);
       return messageId;
     },
@@ -6824,6 +6848,26 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     handlers,
     wsHandler,
     activeCalls,
+    eventState: (id) => companion.eventState(id),
+    deliveryState: async (event) => {
+      const companionState = await companion.eventState(event.id);
+      if (companionState !== "absent") return companionState;
+      if (["a2a.task.created", "a2a.task.message"].includes(event.event_type)) {
+        const data = event.data ?? {}, key = `${data.task_id}:${data.message_id ?? event.id}`;
+        const entry = (await readA2ARegistry())[key];
+        if (!entry) return "absent";
+        if (entry.state === "finalized") return "completed";
+        return a2aRuns.has(data.task_id) || a2aAcknowledgementRetries.has(data.task_id) ? "pending" : "uncertain";
+      }
+      if (event.event_type === "call.ended" && event.data?.call?.mode === "hosted_agent") {
+        const key = hostedCallRegistryKey(opts.account.accountId, event.data.call.id);
+        const entry = (await readHostedCallRegistry())[key];
+        if (!entry) return "absent";
+        if (entry.state === "completed") return "completed";
+        return hostedCallRuns.has(key) ? "pending" : "uncertain";
+      }
+      return "absent";
+    },
     catchUpA2A,
     catchUpHostedCalls,
     catchUpCompanion: async () => { await slackActivity.recover(); await companion.recover(); await slackProgress.recover(); },

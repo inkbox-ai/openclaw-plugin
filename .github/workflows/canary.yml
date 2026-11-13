@@ -19,12 +19,11 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24.22.1"
-          cache: npm
 
       - name: Install deps + latest OpenClaw host
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false openclaw@latest
+          npx --yes pnpm@10.28.0 install --frozen-lockfile
+          npx --yes pnpm@10.28.0 add --save-dev --lockfile=false openclaw@latest
           node tests/ci/verify_sdk.mjs
           npm ls openclaw || true
 
