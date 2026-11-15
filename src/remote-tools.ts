@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { RemoteMcp, type RemoteTool } from "@inkbox/sdk/remote-mcp";
@@ -19,7 +19,9 @@ type Context = { sessionKey?: string; sessionId?: string; runId?: string; toolCa
 type Catalog = { remote?: RemoteMcp; tools: RemoteTool[]; legacy?: boolean; identity: string };
 type Turn = { key: string; scope: string; runId?: string; retired: boolean; source?: NativeSource; catalog?: Promise<Catalog>; approvals: Map<string, string> };
 const turnsKey = Symbol.for("inkbox.remote-tool-turns.v1");
-const sharedTurns = globalThis as typeof globalThis & { [turnsKey]?: Map<string, Turn> };
+const scopeKey = Symbol.for("inkbox.remote-tool-scope-key.v1");
+const sharedTurns = globalThis as typeof globalThis & { [turnsKey]?: Map<string, Turn>; [scopeKey]?: Uint8Array };
+const scopeSecret = sharedTurns[scopeKey] ??= randomBytes(32);
 // Native hooks and lazy tool factories can load separate plugin registrations.
 const turns = sharedTurns[turnsKey] ??= new Map<string, Turn>();
 export type ManagedToolPolicy = { mode: "ask" | "yolo"; runId?: string; validate(): Promise<void>; ask?(request: { name: string; arguments: Record<string, unknown>; callId: string }): Promise<boolean> };
@@ -50,7 +52,7 @@ export class RemoteTools {
   constructor(private readonly runtime: InkboxRuntime, private readonly config: () => Partial<InkboxPluginConfig>, private readonly home = statePaths().dir) {}
   private scope(): string {
     const config = this.config();
-    return hash([this.home, config.apiKey, config.baseUrl, config.identity]);
+    return createHmac("sha256", scopeSecret).update(JSON.stringify([this.home, config.apiKey, config.baseUrl, config.identity])).digest("hex");
   }
   private key(context: Context): string { return hash([this.scope(), context.sessionKey, context.sessionId]); }
   private turn(context: Context): Turn {
