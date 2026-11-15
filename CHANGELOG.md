@@ -14,6 +14,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 ### Changed
 
 - Require SDK 0.7.38; source development installs its pinned revision with pnpm.
+- Preserve the active remote-tool turn and approvals when the native host loads tools lazily.
 
 ## [Unreleased]
 

@@ -17,7 +17,11 @@ const aliases: Record<string, string> = {
 };
 type Context = { sessionKey?: string; sessionId?: string; runId?: string; toolCallId?: string };
 type Catalog = { remote?: RemoteMcp; tools: RemoteTool[]; legacy?: boolean; identity: string };
-type Turn = { key: string; runId?: string; retired: boolean; source?: NativeSource; catalog?: Promise<Catalog>; approvals: Map<string, string> };
+type Turn = { key: string; scope: string; runId?: string; retired: boolean; source?: NativeSource; catalog?: Promise<Catalog>; approvals: Map<string, string> };
+const turnsKey = Symbol.for("inkbox.remote-tool-turns.v1");
+const sharedTurns = globalThis as typeof globalThis & { [turnsKey]?: Map<string, Turn> };
+// Native hooks and lazy tool factories can load separate plugin registrations.
+const turns = sharedTurns[turnsKey] ??= new Map<string, Turn>();
 export type ManagedToolPolicy = { mode: "ask" | "yolo"; runId?: string; validate(): Promise<void>; ask?(request: { name: string; arguments: Record<string, unknown>; callId: string }): Promise<boolean> };
 const policyKey = Symbol.for("inkbox.managed-tool-policy.v1");
 const sharedPolicies = globalThis as typeof globalThis & { [policyKey]?: Map<string, ManagedToolPolicy> };
@@ -42,16 +46,21 @@ function contactArguments(name: string, args: Record<string, any>, operation: st
 }
 
 export class RemoteTools {
-  private readonly turns = new Map<string, Turn>();
+  private readonly turns = turns;
   constructor(private readonly runtime: InkboxRuntime, private readonly config: () => Partial<InkboxPluginConfig>, private readonly home = statePaths().dir) {}
+  private scope(): string {
+    const config = this.config();
+    return hash([this.home, config.apiKey, config.baseUrl, config.identity]);
+  }
+  private key(context: Context): string { return hash([this.scope(), context.sessionKey, context.sessionId]); }
   private turn(context: Context): Turn {
     if (!context.sessionKey || !context.sessionId) throw new Error("Remote tools require a native session identity.");
-    const key = hash([context.sessionKey, context.sessionId]);
+    const key = this.key(context);
     let turn = this.turns.get(key);
     if (!turn || context.runId && turn.runId && context.runId !== turn.runId) {
       if (turn) turn.retired = true;
       if (this.turns.size >= 4096) throw new Error("Remote session capacity reached; reconnect inactive sessions.");
-      turn = { key, runId: context.runId, retired: false, source: activeNativeSource(context.sessionKey), approvals: new Map() };
+      turn = { key, scope: this.scope(), runId: context.runId, retired: false, source: activeNativeSource(context.sessionKey), approvals: new Map() };
       this.turns.set(key, turn);
     }
     if (context.runId && !turn.runId) turn.runId = context.runId;
@@ -59,17 +68,18 @@ export class RemoteTools {
   }
   begin(context: Context): void {
     if (!context.sessionKey || !context.sessionId) return;
-    const key = hash([context.sessionKey, context.sessionId]); const previous = this.turns.get(key);
+    const key = this.key(context); const previous = this.turns.get(key);
     if (previous?.runId === context.runId) return;
     if (previous) { previous.retired = true; this.turns.delete(key); }
     this.turn(context);
   }
   end(context: Context): void {
     if (!context.sessionKey || !context.sessionId) return;
-    const key = hash([context.sessionKey, context.sessionId]); const turn = this.turns.get(key);
+    const key = this.key(context); const turn = this.turns.get(key);
     if (turn && turn.runId === context.runId) { turn.retired = true; this.turns.delete(key); }
   }
   private async validate(turn: Turn, context: Context): Promise<void> {
+    if (turn.scope !== this.scope()) throw new Error("The tool connection changed during this turn.");
     if (turn.retired || turn.runId && context.runId && turn.runId !== context.runId || guardRetiredNativeRun({}, context)) throw new Error("The native turn is no longer active.");
     const source = turn.source;
     if (source) {

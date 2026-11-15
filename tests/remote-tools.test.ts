@@ -24,6 +24,24 @@ async function approve(id:string,args:any,decision='allow-once'){
  expect(result.requireApproval.allowedDecisions).toEqual(['allow-once','deny']);result.requireApproval.onResolution(decision);
 }
 describe('remote native tools',()=>{
+ it('shares a turn with lazy tool registrations but isolates different credentials',async()=>{
+  const runtime={getClient:async()=>({_apiKey:'synthetic',_baseUrl:'https://example.test',whoami:async()=>({authSubtype:authority})}),getIdentity:async()=>({id:'identity-test'})} as any;
+  const lazy=new RemoteTools(runtime,()=>({}),home);
+  let tools:any[]=[];lazy.register({registerTool:(factory:any)=>{tools=factory({sessionKey:context.sessionKey,sessionId:context.sessionId})}});
+  const args={name:'example_write',arguments:{text:'hello'}};
+  const release=bindManagedToolPolicy(context.sessionKey,{mode:'ask',runId:context.runId,validate:async()=>{},ask:async()=>true});
+  try{
+   expect(await remote.before({toolName:'inkbox_remote_call',toolCallId:'lazy',params:args},context)).toBeUndefined();
+   expect((await tools.find(tool=>tool.name==='inkbox_remote_call').execute('lazy',args)).structuredContent).toEqual({id:'receipt'});
+   expect(calls).toHaveLength(2);
+   const other=new RemoteTools(runtime,()=>({apiKey:'another-key'}),home);
+   other.register({registerTool:(factory:any)=>{tools=factory({sessionKey:context.sessionKey,sessionId:context.sessionId})}});
+   await expect(tools.find(tool=>tool.name==='inkbox_remote_call').execute('lazy',args)).rejects.toThrow();
+   expect(calls).toHaveLength(2);
+   remote.end(context);
+   await expect(lazy.before({toolName:'inkbox_remote_call',toolCallId:'late',params:args},{...context,runId:undefined})).resolves.toMatchObject({block:true});
+  }finally{release()}
+ });
  it('retains full schemas and structured results; server annotations never grant approval',async()=>{
   const listed=JSON.parse((await discover().execute('list',{})).content[0].text);expect(listed.tools).toEqual(descriptors);
   const args={name:'example_write',arguments:{text:'hello'}};
@@ -35,6 +53,14 @@ describe('remote native tools',()=>{
   await expect(call().execute('a',args)).rejects.toThrow('not been approved');
   await approve('b',args);await expect(call().execute('b',{...args,arguments:{text:'changed'}})).rejects.toThrow('not been approved');
   const invalid={name:'example_write',arguments:{text:'x'}};await approve('c',invalid);await expect(call().execute('c',invalid)).rejects.toThrow('remote schema');expect(calls).toEqual([]);
+ });
+ it('rejects a credential change while a prepared write is in flight',async()=>{
+  let apiKey='initial-key';native=[];
+  remote=new RemoteTools({getClient:async()=>({_apiKey:apiKey,_baseUrl:'https://example.test',whoami:async()=>({authSubtype:authority})}),getIdentity:async()=>({id:'identity-test'})} as any,()=>({apiKey}),home);
+  remote.begin(context);remote.register({registerTool:(factory:any)=>native.push(...factory(context))});
+  const args={name:'example_write',arguments:{text:'hello'}};await approve('rotate',args);
+  response=()=>{apiKey='replacement-key';return {resultType:'input_required',requestState:'prepared'}};
+  await expect(call().execute('rotate',args)).rejects.toThrow('connection changed');expect(calls).toHaveLength(1);
  });
  it('refreshes at turn boundaries without changing the active catalog',async()=>{
   expect(JSON.parse((await discover().execute('list',{})).content[0].text).tools[0].description).toBe('first');
