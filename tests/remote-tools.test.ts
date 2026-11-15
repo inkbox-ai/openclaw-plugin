@@ -108,7 +108,7 @@ it('binds the final SMS destination and suppresses only an accepted terminal rec
  const runtime={getClient:async()=>({_apiKey:'synthetic',_baseUrl:'https://example.test'}),getIdentity:async()=>({id:'identity-test'})} as any;
  const source={replyChannel:'sms' as const,replySourceId:'incoming-message',replyRoute:'conversation',identityId:'identity-test',conversationId:'conversation',author:'+15550000002',closed:false,runId:context.runId,nativeSessionId:context.sessionId,validate:async()=>{},beforeSend:vi.fn(async()=>{}),afterSend:vi.fn(async()=>{})};
  const release=bindNativeSource(context.sessionKey,source);remote.end(context);remote.begin(context);
- descriptors=[{name:'inkbox_text_send',inputSchema:{type:'object',properties:{to:{type:'array',items:{type:'string'}},text:{type:'string'},idempotency_key:{type:'string'}},required:['to','text','idempotency_key']}}];
+ descriptors=[{name:'inkbox_text_send',inputSchema:{type:'object',properties:{to:{type:'array',items:{type:'string'}},text:{type:'string'}},required:['to','text'],additionalProperties:false}}];
  response=params=>params.requestState?{content:[],structuredContent:{message_id:'accepted-sms',recipients:['+15550000002'],delivery_status:'queued'}}:{resultType:'input_required',requestState:'prepared'};
  try{
   const args={text:'Final answer'};expect(await remote.before({toolName:'inkbox_reply_current',toolCallId:'reply-1',params:args},context)).toBeUndefined();

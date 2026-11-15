@@ -44,6 +44,8 @@ export async function terminalReply(remote: RemoteMcp, runtime: InkboxRuntime, s
   }
   await validate();
   journal.reserve(key, operation, hash([name, args]));
+  // Preserve existing receipt fingerprints; execution identity travels separately.
+  delete args.idempotency_key;
   try {
     const result = await call(name, args, operation, path, async () => {
       await validate(); await source.beforeSend(operation);

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.21
+
+- Keep contact and terminal-reply MCP arguments within the advertised schema while retaining durable operation identity and retry receipts.
+
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
 ## 0.2.20

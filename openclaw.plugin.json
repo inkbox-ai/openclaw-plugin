@@ -1,6 +1,6 @@
 {
   "id": "inkbox",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "name": "Inkbox",
   "description": "Adds Inkbox messaging and A2A tools (email, SMS, iMessage, WhatsApp, voice) to OpenClaw",
   "contracts": {

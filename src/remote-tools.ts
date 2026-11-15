@@ -32,17 +32,16 @@ export function bindManagedToolPolicy(sessionKey: string, policy: ManagedToolPol
   return () => { if (policies.get(sessionKey) === policy) policies.delete(sessionKey); };
 }
 
-function contactArguments(name: string, args: Record<string, any>, operation: string): Record<string, unknown> {
+export function contactArguments(name: string, args: Record<string, any>): Record<string, unknown> {
   const result: Record<string, any> = Object.fromEntries(Object.entries(args).map(([key, value]) => [key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`), value]));
   if (name === "inkbox_lookup_contact" && Object.values(result).filter(Boolean).length !== 1) throw new Error("Contact lookup requires exactly one criterion.");
   if (name === "inkbox_list_contacts") return { limit: 25, ...result };
-  if (name === "inkbox_delete_contact") return { ...result, idempotency_key: operation };
   if (!["inkbox_create_contact", "inkbox_update_contact"].includes(name)) return result;
   const contactId = result.contact_id; delete result.contact_id;
   for (const [field, valueKey] of [["emails", "value"], ["phones", "value_e164"]]) {
     if (Array.isArray(result[field])) result[field] = result[field].map((entry: any) => ({ [valueKey]: entry.value, label: entry.label ?? null, is_primary: Boolean(entry.isPrimary) }));
   }
-  return { ...(name === "inkbox_create_contact" ? { contact: result } : { contact_id: contactId, patch: result }), idempotency_key: operation };
+  return { ...(name === "inkbox_create_contact" ? { contact: result } : { contact_id: contactId, patch: result }) };
 }
 
 export class RemoteTools {
@@ -155,8 +154,7 @@ export class RemoteTools {
         api.registerTool((context: Context) => ({ ...definition, execute: async (id: string, args: any, signal?: AbortSignal) => {
           const turn = this.turn(context); const catalog = await this.catalog(turn, context, signal);
           if (catalog.legacy) return definition.execute(id, args, signal);
-          const operation = hash([context.sessionId, id]);
-          return this.call(definition.name, aliases[definition.name]!, contactArguments(definition.name, args, operation), args, id, context, signal);
+          return this.call(definition.name, aliases[definition.name]!, contactArguments(definition.name, args), args, id, context, signal);
         } }), { ...options, names: [definition.name] });
       } else api.registerTool(definition, options);
     } };
