@@ -2,6 +2,10 @@
 
 All notable changes to the Inkbox OpenClaw plugin are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.2.20
+
+- Deduplicate webhook retries by event ID even when each delivery has a new request ID.
+
 ## [0.2.19]
 
 ### Added

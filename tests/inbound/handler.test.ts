@@ -347,3 +347,18 @@ describe("handleInkboxWebhook", () => {
     expect(dedup.has("req-1")).toBe(false);
   });
 });
+
+describe("event replay", () => {
+  it.each([false, true])("does not redispatch a completed event with a new request id (initial failure: %s)", async (failsFirst) => {
+    vi.mocked(verifyWebhook).mockReturnValue(true);
+    const onMail = vi.fn(async () => {});
+    if (failsFirst) onMail.mockRejectedValueOnce(new Error("retry"));
+    const options = { signingKey: "whsec_x", handlers: { onMail }, dedup: new RequestIdDedup() };
+    const body = JSON.stringify({ ...JSON.parse(mailBody), id: "evt-mail" });
+    const send = (requestId: string) => handleInkboxWebhook(body, { ...baseHeaders, "x-inkbox-request-id": requestId }, options);
+    if (failsFirst) await expect(send("failed")).rejects.toThrow("retry");
+    expect((await send("original")).status).toBe(200);
+    expect((await send("replay")).body).toBe("dup");
+    expect(onMail).toHaveBeenCalledTimes(failsFirst ? 2 : 1);
+  });
+});
