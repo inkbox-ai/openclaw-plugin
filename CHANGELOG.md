@@ -4,7 +4,7 @@ All notable changes to the Inkbox OpenClaw plugin are listed here. The format fo
 
 ## 0.2.20
 
-- Deduplicate webhook retries by event ID even when each delivery has a new request ID.
+- Deduplicate incoming message and call-completion retries by event ID even when each delivery has a new request ID.
 
 ## [0.2.19]
 

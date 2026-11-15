@@ -362,3 +362,15 @@ describe("event replay", () => {
     expect(onMail).toHaveBeenCalledTimes(failsFirst ? 2 : 1);
   });
 });
+
+it("preserves distinct forwarded updates with the same object id", async () => {
+  vi.mocked(verifyWebhook).mockReturnValue(true);
+  const onExternal = vi.fn();
+  const options = { signingKey: "whsec_x", handlers: { onExternal }, dedup: new RequestIdDedup(), externalEvents: true };
+  for (const requestId of ["update-1", "update-2"]) {
+    const result = await handleInkboxWebhook(JSON.stringify({ id: "object-1", event_type: "external.updated" }),
+      { ...baseHeaders, "x-inkbox-request-id": requestId }, options);
+    expect(result.status).toBe(200);
+  }
+  expect(onExternal).toHaveBeenCalledTimes(2);
+});

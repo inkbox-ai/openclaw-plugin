@@ -144,7 +144,9 @@ export async function handleInkboxWebhook(
   if (!parsed) {
     return { status: 400, body: "invalid json" };
   }
-  const eventId = typeof parsed.id === "string" ? parsed.id : "";
+  const eventId =
+    ["message.received", "text.received", "imessage.received", "call.ended"].includes(String(parsed.event_type)) &&
+    typeof parsed.id === "string" ? parsed.id : "";
   const dedupId = eventId ? `inkbox:event:${eventId}` : requestId;
   const durableCompanion = "companion" in parsed && parsed.companion != null &&
     ["message.received", "text.received", "imessage.received"].includes(String(parsed.event_type));
