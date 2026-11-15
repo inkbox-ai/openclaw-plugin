@@ -19,7 +19,7 @@ it.each(['create', 'update', 'delete'])('validates %s contact arguments and reus
     let result;
     if (request.method === 'server/discover') result = { supportedVersions: ['2026-07-28'] };
     else if (request.method === 'tools/list') result = { tools: [{ name, inputSchema: { type: 'object', properties, required: Object.keys(properties), additionalProperties: false } }] };
-    else { calls.push(request.params); result = request.params.requestState ? { content: [], structuredContent: { id: 'contact' } } : { resultType: 'input_required', requestState: 'prepared' }; }
+    else { calls.push(request.params); result = request.params.requestState ? { content: [], structuredContent: { id: 'contact' } } : { resultType: 'input_required', requestState: 'prepared', inputRequests: {} }; }
     return Response.json({ jsonrpc: '2.0', id: request.id, result });
   }));
   const remote = new RemoteMcp({ apiKey: 'synthetic', baseUrl: 'https://example.test', identity: 'example', journalPath: join(root, 'calls') });
