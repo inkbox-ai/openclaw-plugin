@@ -647,3 +647,15 @@ Group attention uses the existing `groupReplyMode` and `companionResponseMode` s
 Ordinary groups recheck their current participants against configured local contact/recipient allowlists. Unresolved members cannot satisfy a configured allowlist. Companion uses the canonical authorized group activation and sponsor, revalidates that activation before host dispatch and effects, and never extends its grant to a direct message or another group. Explicit destinations retain their own authorization. Saved answers and attachments survive transient preflight failures without another model turn; accepted/unknown sends retain their receipts and are not automatically duplicated. Definitive policy rejections do not produce a replacement message.
 
 Use a compatible API. Use `inkbox_send_whatsapp` for explicit sends: retries retain the host tool-call identity, or an explicit stable `idempotencyKey`. Reuse that key and unchanged payload after uncertainty; a distinct intentional send needs a distinct logical key. The generic host message adapter does not supply a stable attempt ID, so it cannot send WhatsApp messages. Ordinary inbound final replies remain automatic.
+
+### Managed diagnostics
+
+When `INKBOX_HOSTED_MODE=1`, doctor reads the secret-free report named by
+`INKBOX_DIAGNOSTICS_FILE`. Reports must match the identity and harness, belong to
+this user, have private file permissions, and be no more than 60 seconds old.
+Missing, stale, or unhealthy reports do not establish readiness. With
+`INKBOX_DIAGNOSTIC_CONTEXT=terminal`, the signing key is checked in the runtime
+report; the key itself is not needed in the terminal. Runtime processes still
+require their own signing key. Managed delivery does not require ordinary webhook
+subscriptions. Standalone diagnostics are unchanged. These checks do not send
+messages or prove end-to-end delivery.

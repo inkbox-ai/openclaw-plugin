@@ -1,3 +1,4 @@
+import { hostedDiagnostics } from "./hosted-diagnostics.js";
 import { Inkbox } from "@inkbox/sdk";
 import { resolveInkboxAccount } from "./accounts.js";
 import { inkboxClientOptions } from "./sdk-options.js";
@@ -121,6 +122,13 @@ function fmt(label: string, value: string | null | undefined, masked = false): s
 async function runDoctor(options: InkboxCliOptions = {}): Promise<void> {
   const cfg = readCliConfig(options);
   console.log("Inkbox plugin doctor\n");
+  const hosted = hostedDiagnostics(cfg.identity, "openclaw", cfg.signingKey);
+  if (hosted) {
+    console.log(JSON.stringify(hosted, null, 2));
+    if (!hosted.ready) process.exitCode = 1;
+    return;
+  }
+
 
   // Section 1: config presence.
   console.log(`Config (${cfg.source}):`);
