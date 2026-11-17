@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.23
+
+### Changed
+- Require Inkbox SDK 0.7.39 for durable messaging and remote tool handling.
+
 ## 0.2.22
 
 - Make managed diagnostics use a recent runtime health report instead of terminal signing-key or ordinary webhook settings. Keep standalone checks and report unavailable runtime evidence.
