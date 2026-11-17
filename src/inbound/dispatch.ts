@@ -59,6 +59,7 @@ function isExplicitOutboundCallEnded(parsed: any): boolean {
 }
 
 export interface InboundHandlers {
+  onTranscription?(event: Record<string, any>): Promise<void> | void;
   onWhatsApp?(event: Record<string, any>): Promise<void>;
   onSlack?(event: Record<string, any>): Promise<void>;
   onCompanion?(event: Record<string, any>): Promise<void>;
@@ -142,6 +143,10 @@ export async function dispatchInbound(
     typeof (parsed as { event_type: unknown }).event_type === "string"
   ) {
     const eventType = (parsed as { event_type: string }).event_type;
+    if (["text.transcription_finished", "imessage.transcription_finished", "whatsapp.transcription_finished"].includes(eventType)) {
+      await handlers.onTranscription?.(parsed);
+      return { kind: eventType.split(".")[0] as "text" | "imessage" | "whatsapp" };
+    }
     if (eventType.startsWith("whatsapp.")) {
       if (!(WHATSAPP_EVENTS as readonly string[]).includes(eventType)) return { kind: "whatsapp" };
       if (!("companion" in parsed && parsed.companion != null && eventType === "whatsapp.received") && ["whatsapp.received", "whatsapp.reaction_received"].includes(eventType) && !anyInboundContactAllowed(resolveRemoteContactIds(parsed, "whatsapp"), allowedContactIds)) return { kind: "whatsapp" };

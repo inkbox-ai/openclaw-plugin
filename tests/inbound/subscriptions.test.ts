@@ -5,6 +5,7 @@ import {
   IMESSAGE_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
+  WHATSAPP_EVENT_TYPES,
   reconcileWebhookSubscription,
 } from "../../src/inbound/subscriptions.js";
 
@@ -500,4 +501,10 @@ describe("mixed identity subscription preservation", () => {
     await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url: "https://new.example/inkbox/webhook", eventTypes: A2A_EVENT_TYPES });
     expect(update).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled(); expect(create).toHaveBeenCalledTimes(1);
   });
+});
+
+it("includes voice-note completion in every automatic channel subscription", () => {
+  expect(TEXT_EVENT_TYPES).toContain("text.transcription_finished");
+  expect(IMESSAGE_EVENT_TYPES).toContain("imessage.transcription_finished");
+  expect(WHATSAPP_EVENT_TYPES).toContain("whatsapp.transcription_finished");
 });

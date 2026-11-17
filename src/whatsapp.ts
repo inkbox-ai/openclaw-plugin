@@ -43,6 +43,7 @@ async function cacheMedia(directory: string, name: string, bytes: Buffer): Promi
 }
 export const WHATSAPP_EVENTS = [
   "whatsapp.received",
+  "whatsapp.transcription_finished",
   "whatsapp.reaction_received",
   "whatsapp.sent",
   "whatsapp.delivered",

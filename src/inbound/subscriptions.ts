@@ -16,6 +16,7 @@ export const MAIL_EVENT_TYPES: readonly string[] = [
 
 export const TEXT_EVENT_TYPES: readonly string[] = [
   "text.received",
+  "text.transcription_finished",
   "text.sent",
   "text.delivered",
   "text.delivery_failed",
@@ -29,12 +30,13 @@ export const TEXT_EVENT_TYPES: readonly string[] = [
 // warrants a reply, a "love" usually does not).
 export const IMESSAGE_EVENT_TYPES: readonly string[] = [
   "imessage.received",
+  "imessage.transcription_finished",
   "imessage.sent",
   "imessage.delivered",
   "imessage.delivery_failed",
   "imessage.reaction_received",
 ];
-export const WHATSAPP_EVENT_TYPES: readonly string[] = ["whatsapp.received", "whatsapp.reaction_received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"];
+export const WHATSAPP_EVENT_TYPES: readonly string[] = ["whatsapp.received", "whatsapp.transcription_finished", "whatsapp.reaction_received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"];
 export const A2A_EVENT_TYPES: readonly string[] = [
   "a2a.task.created",
   "a2a.task.message",

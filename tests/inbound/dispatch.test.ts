@@ -293,3 +293,10 @@ describe("dispatchInbound", () => {
     });
   });
 });
+
+it.each(["text", "imessage", "whatsapp"])("routes %s transcription completion without requiring callback contacts or creating a message wake", async family => {
+  const onTranscription = vi.fn(async () => {}), onText = vi.fn(), onIMessage = vi.fn(), onWhatsApp = vi.fn();
+  await dispatchInbound({ event_type: `${family}.transcription_finished`, data: {} }, { onTranscription, onText, onIMessage, onWhatsApp }, ["allowed-contact"]);
+  expect(onTranscription).toHaveBeenCalledTimes(1);
+  expect(onText).not.toHaveBeenCalled(); expect(onIMessage).not.toHaveBeenCalled(); expect(onWhatsApp).not.toHaveBeenCalled();
+});

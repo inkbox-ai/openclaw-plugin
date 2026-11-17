@@ -1,3 +1,5 @@
+import { dispatchInbound } from "./dispatch.js";
+import { VoiceNoteInbox, pollVoiceNote, voiceNoteContext } from "../voice-notes.js";
 import { whatsappGroup, validWhatsAppGroup, validWhatsAppCompanion } from "../whatsapp-groups.js";
 import { checkOutboundRecipients } from "../allowlist.js";
 import { sendWhatsAppReplyFile, assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey, whatsappSendRejection } from "../whatsapp.js";
@@ -3768,7 +3770,7 @@ async function buildTextTurn(
   // marker doesn't apply.
   const senderIdentity =
     contact || isGroup ? undefined : singleWebhookAgentIdentity(event.data);
-  const mediaMarkers = textMediaMarkers(message.media);
+  const mediaMarkers = [...textMediaMarkers(message.media), escapeContactMemoryTokens(voiceNoteContext(message))];
   const text = [escapeContactMemoryTokens(rawText), ...mediaMarkers].filter(Boolean).join("\n");
   const conversationLabel = isGroup
     ? `Inkbox SMS group ${conversationId ?? remote}`
@@ -3871,7 +3873,7 @@ async function buildIMessageTurn(
   const senderIdentity = contact || isGroup ? undefined : singleWebhookAgentIdentity(event.data);
   const senderLabel =
     contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? remote;
-  const mediaMarkers = textMediaMarkers(message.media as any, "imessage_attachment");
+  const mediaMarkers = [...textMediaMarkers(message.media as any, "imessage_attachment"), escapeContactMemoryTokens(voiceNoteContext(message))];
   const text = [escapeContactMemoryTokens(message.content ?? ""), ...mediaMarkers]
     .filter(Boolean).join("\n");
   const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
@@ -5719,6 +5721,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
 
   async function shutdownA2A(): Promise<void> {
+    voiceNotes.close();
     companion.close();
     await slackProgress.close();
     await slackActivity.close();
@@ -6844,8 +6847,25 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   };
 
+  const deliverVoiceEvent = async (event: any): Promise<void> => {
+    await dispatchInbound(event, handlers, opts.account.config.allowedInboundContactIds);
+  };
+  const voiceNotes = new VoiceNoteInbox({
+    path: join(statePaths().dir, `voice-notes-${activityOwner}.json`),
+    poll: event => pollVoiceNote(event, { ...opts.account.config, identity: () => opts.runtime.getIdentity() }),
+    deliver: deliverVoiceEvent,
+    warn: () => opts.logger?.warn?.("Voice-note delivery is retained for recovery."),
+  });
+  opts.abortSignal?.addEventListener("abort", () => voiceNotes.close(), { once: true });
+  const voiceHandlers: InboundHandlers = { ...handlers,
+    onTranscription: async event => { await voiceNotes.accept(event); },
+    onText: async event => { if (!(await voiceNotes.accept(event))) await handlers.onText?.(event); },
+    onIMessage: async event => { if (!(await voiceNotes.accept(event))) await handlers.onIMessage?.(event); },
+    onWhatsApp: async event => { if (!(await voiceNotes.accept(event))) await handlers.onWhatsApp?.(event); },
+    onCompanion: async event => { if (!(await voiceNotes.accept(event))) await handlers.onCompanion?.(event); },
+  };
   return {
-    handlers,
+    handlers: voiceHandlers,
     wsHandler,
     activeCalls,
     eventState: (id) => companion.eventState(id),
@@ -6870,7 +6890,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     },
     catchUpA2A,
     catchUpHostedCalls,
-    catchUpCompanion: async () => { await slackActivity.recover(); await companion.recover(); await slackProgress.recover(); },
+    catchUpCompanion: async () => { voiceNotes.recover(); await slackActivity.recover(); await companion.recover(); await slackProgress.recover(); },
     shutdownA2A,
   };
 }

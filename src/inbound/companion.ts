@@ -1,3 +1,4 @@
+import { voiceNoteContext } from "../voice-notes.js";
 import { whatsappGroup, validWhatsAppGroup, renderWhatsAppMentions, renderWhatsAppReplyContext } from "../whatsapp-groups.js";
 import { isUnsupportedWhatsAppShape, whatsappDestinationEvidence, WhatsAppReadinessPending, whatsappAttachments, whatsappReady, whatsappDeliveryContext, type WhatsAppSendRejection } from "../whatsapp.js";
 import { checkedSlackUpload, type SlackUploadReceipt, type SlackUploadIntent } from "../slack-files.js";
@@ -996,6 +997,8 @@ export function createCompanionReceiver(opts: {
     const finishSources = (j: Journal) => {
       if (activation) j.activations[scope] = { ...activation, sources: [...new Set([...activation.sources, ...sources])] };
     };
+    const voiceContext = voiceNoteContext(message);
+    if (voiceContext) body += `\n${voiceContext}`;
     const input = makeInput(reply, body, activation?.sponsor);
     const approval = /^\/approve(?:\s|$)/i.test(input.rawText);
     const allowedApproval = approval && await opts.canApprove?.(input);
