@@ -1447,6 +1447,7 @@ describe("runSetupWizard", () => {
       url: "https://smoke-agent.inkboxwire.com/inkbox/webhook",
       eventTypes: [
         "text.received",
+        "text.transcription_finished",
         "text.sent",
         "text.delivered",
         "text.delivery_failed",
@@ -1492,6 +1493,7 @@ describe("runSetupWizard", () => {
             ]
           : [
               "text.received",
+              "text.transcription_finished",
               "text.sent",
               "text.delivered",
               "text.delivery_failed",
@@ -1502,7 +1504,7 @@ describe("runSetupWizard", () => {
         updatedAt: new Date(),
       },
       ...(filter.agentIdentityId ? [{ id: "sub-whatsapp", organizationId: "org-1", agentIdentityId: filter.agentIdentityId, mailboxId: null, phoneNumberId: null, url,
-        eventTypes: ["whatsapp.received", "whatsapp.reaction_received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"], status: "active", createdAt: new Date(), updatedAt: new Date() }] : []),
+        eventTypes: ["whatsapp.received", "whatsapp.transcription_finished", "whatsapp.reaction_received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"], status: "active", createdAt: new Date(), updatedAt: new Date() }] : []),
     ]);
     const prompter = createPrompter({ confirms: [false, true] });
 
@@ -1561,6 +1563,7 @@ describe("runSetupWizard", () => {
         agentIdentityId: "identity-1",
         eventTypes: [
           "imessage.received",
+          "imessage.transcription_finished",
           "imessage.sent",
           "imessage.delivered",
           "imessage.delivery_failed",
