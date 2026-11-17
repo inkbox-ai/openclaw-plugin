@@ -21,6 +21,7 @@ const hostVersion = JSON.parse(readFileSync(join(hostDist, "..", "package.json")
 const baselineWithoutFinalizer = hostVersion === "2026.5.27";
 // Earlier supported hosts let canonical silence waive a required source reply.
 const nativeRequiredReplyPolicy = hostVersion.localeCompare("2026.9.6", undefined, { numeric: true }) >= 0;
+const structuredTerminalReplies = hostVersion.localeCompare("2026.11.5", undefined, { numeric: true }) >= 0;
 
 // Exercise native dispatch through its public entry point. Private finalizer
 // booleans changed in September; host-owned reply expectations are authoritative.
@@ -62,10 +63,13 @@ describe("actual host intentional-silence contract", () => {
   // First native dispatch initializes host workers and SQLite under parallel CI load.
   it.skipIf(baselineWithoutFinalizer)("reproduces fallback after a private sentinel is hidden only by the adapter", async () => {
     const { deliver, result } = await finishInvisibleReply("[SILENT]");
-    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenCalledTimes(structuredTerminalReplies ? 1 : 2);
     expect(deliver.mock.calls[0][0].text).toBe("[SILENT]");
-    expect(deliver.mock.calls[1][0].text).not.toBe("[SILENT]");
-    expect(result.noVisibleReplyFallbackDelivered).toBe(true);
+    if (structuredTerminalReplies) expect(result.noVisibleReplyFallbackDelivered).not.toBe(true);
+    else {
+      expect(deliver.mock.calls[1][0].text).not.toBe("[SILENT]");
+      expect(result.noVisibleReplyFallbackDelivered).toBe(true);
+    }
   }, 15_000);
 
   it.skipIf(baselineWithoutFinalizer)("does not manufacture a fallback when ambient group policy permits canonical silence", async () => {
@@ -124,11 +128,16 @@ describe("actual host intentional-silence contract", () => {
     { name: "ordinary direct request", ambient: false, wasMentioned: false, policy: undefined },
     { name: "current group mention", ambient: true, wasMentioned: true, policy: undefined },
     { name: "explicit required group policy", ambient: true, wasMentioned: false, policy: "disallow" as const },
-  ])("keeps native required replies explicit for $name", async ({ ambient, wasMentioned, policy }) => {
+  ])("preserves the native canonical-silence policy for $name", async ({ ambient, wasMentioned, policy }) => {
     const { deliver, transform, result } = await finishInvisibleReply("NO_REPLY", true, ambient, { wasMentioned, policy });
-    expect(deliver).toHaveBeenCalledOnce();
-    expect(result.noVisibleReplyFallbackDelivered).toBe(true);
-    expect(transform.mock.calls.some(([payload]) => payload.text === "NO_REPLY")).toBe(false);
+    if (structuredTerminalReplies) {
+      expect(deliver).not.toHaveBeenCalled();
+      expect(result.noVisibleReplyFallbackDelivered).not.toBe(true);
+    } else {
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(result.noVisibleReplyFallbackDelivered).toBe(true);
+      expect(transform.mock.calls.some(([payload]) => payload.text === "NO_REPLY")).toBe(false);
+    }
   });
 
   it.skipIf(baselineWithoutFinalizer)("honors channel-transform suppression for legacy silent completion", async () => {
