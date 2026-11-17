@@ -49,11 +49,10 @@ const sendTools = new Set([
   "inkbox_send_sms", "inkbox_send_email", "inkbox_send_imessage", "inkbox_send_whatsapp", "inkbox_forward_email",
 ]);
 const transportTools = new Set(["tool_call", "dispatch_action", "tool_search_code"]);
-// OpenClaw 2026.9.6's inner source/incomplete-turn finalizers can overlook
-// intentional cross-channel tool completion. Neither exposes a public reason
-// discriminator. Match only their two verified fixed errors, with independent
-// accepted final-send evidence below; changed wording and real errors stay visible.
+// Match verified native missing-reply notices only after independent final-send
+// acceptance; unrelated errors and attachments remain visible.
 const nativeEmptyReplyTexts = new Set([
+  "No answer was returned. Ask again if you still need one.",
   "I finished the turn, but it did not produce a visible reply. Please try again, or start a new session if this keeps happening.",
   "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
 ]);

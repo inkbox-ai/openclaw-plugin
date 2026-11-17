@@ -3,6 +3,7 @@
 ## 0.2.23
 
 ### Changed
+- Keep confirmed explicit sends silent when the host produces a missing-reply notice, while preserving unrelated errors and attachments.
 - Require Inkbox SDK 0.7.39 for durable messaging and remote tool handling.
 
 ## 0.2.22

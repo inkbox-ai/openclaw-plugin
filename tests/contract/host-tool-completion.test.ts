@@ -148,7 +148,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         expect(capture.transform({ text: "A source acknowledgement" })).toEqual(succeeds ? null : { text: "A source acknowledgement" });
         if (requiredSourceFinalizer) {
           const nativeFailure = await nativeEmptyReplyPayload();
-          expect(capture.transform(nativeFailure)).toEqual(succeeds && !structuredTerminalReplies ? null : nativeFailure);
+          expect(capture.transform(nativeFailure)).toEqual(succeeds ? null : nativeFailure);
         }
       } finally {
         nativeCore?.cleanup();
@@ -211,7 +211,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
       caseDirectories.push(directory);
     }
   });
-  it.skipIf(!requiredSourceFinalizer).each([true, false])("preserves current native failures and scopes legacy empty-reply suppression with accepted send=%s", async (accepted) => {
+  it.skipIf(!requiredSourceFinalizer).each([true, false])("suppresses only native missing-reply notices after accepted final send=%s", async (accepted) => {
     const nativeFailure = await nativeEmptyReplyPayload();
     expect(nativeFailure).toMatchObject({ isError: true });
     const directory = await mkdtemp(join(tmpdir(), "inkbox-inner-completion-"));
@@ -235,8 +235,8 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         dispatcherOptions: { deliver, transformReplyPayload: capture.transform },
         replyResolver: async () => nativeFailure,
       });
-      expect(deliver).toHaveBeenCalledTimes(accepted && !structuredTerminalReplies ? 0 : 1);
-      if (accepted && !structuredTerminalReplies) expect(result.counts.final).toBe(0);
+      expect(deliver).toHaveBeenCalledTimes(accepted ? 0 : 1);
+      if (accepted) expect(result.counts.final).toBe(0);
       else expect(deliver.mock.calls[0][0]).toMatchObject(nativeFailure);
     } finally {
       capture.finish();

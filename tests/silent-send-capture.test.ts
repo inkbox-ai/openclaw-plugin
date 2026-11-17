@@ -13,6 +13,7 @@ const nativeIncompleteReply = {
   text: "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
   isError: true,
 };
+const nativeMissingReply = { text: "No answer was returned. Ask again if you still need one.", isError: true, isStatusNotice: true };
 function begin(runId = context.runId, nativeSessionId?: string) {
   const capture = beginSilentSendCapture(context.sessionKey);
   active.push(capture); capture.activate();
@@ -144,20 +145,20 @@ describe("run-scoped explicit send completion", () => {
     expect(first.capture.transform(reply)).toBeNull();
     expect(second.capture.transform(reply)).toBe(reply);
   });
-  it("suppresses only the exact native empty-reply error after an entirely accepted final batch", () => {
+  it.each([["legacy", nativeEmptyReply], ["current", nativeMissingReply]] as const)("suppresses only the verified %s missing-reply notice after an accepted final batch", (_name, nativeReply) => {
     const { capture } = begin();
-    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+    expect(capture.transform(nativeReply)).toBe(nativeReply);
     send();
-    expect(capture.transform(nativeEmptyReply)).toBeNull();
+    expect(capture.transform(nativeReply)).toBeNull();
     for (const payload of [
-      { ...nativeEmptyReply, text: `${nativeEmptyReply.text} Extra failure.` },
-      { ...nativeEmptyReply, text: "Provider request failed." },
-      { ...nativeEmptyReply, mediaUrl: "https://example.com/file" },
-      { ...nativeEmptyReply, mediaUrls: ["https://example.com/file"] },
-      { ...nativeEmptyReply, media: { kind: "file" } },
+      { ...nativeReply, text: `${nativeReply.text} Extra failure.` },
+      { ...nativeReply, text: "Provider request failed." },
+      { ...nativeReply, mediaUrl: "https://example.com/file" },
+      { ...nativeReply, mediaUrls: ["https://example.com/file"] },
+      { ...nativeReply, media: { kind: "file" } },
     ]) expect(capture.transform(payload)).toBe(payload);
     capture.finish();
-    expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+    expect(capture.transform(nativeReply)).toBe(nativeReply);
   });
   it.each(["failed", "incomplete", "mixed", "unowned", "invalid"])("preserves the exact native error for %s evidence", (kind) => {
     const { capture } = begin();
@@ -170,6 +171,7 @@ describe("run-scoped explicit send completion", () => {
       else recordSilentSendAfterToolCall({ toolName: "inkbox_send_email", toolCallId: "unknown" }, context);
     }
     expect(capture.transform(nativeEmptyReply)).toBe(nativeEmptyReply);
+    expect(capture.transform(nativeMissingReply)).toBe(nativeMissingReply);
   });
   it("does not bind an unrelated prompt or an uncorrelated event", () => {
     const capture = beginSilentSendCapture(context.sessionKey); active.push(capture); capture.activate();
