@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname } from "node:path";
 
 export type VoiceEvent = Record<string, any>;
-type Pending = { event: VoiceEvent; deadline: number };
+type Pending = { event: VoiceEvent; deadline: number; polled?: boolean; retryAt?: number };
 type Saved = { pending: Record<string, Pending>; done: Record<string, number> };
 const FAMILIES = new Set(["text", "imessage", "whatsapp"]);
 
@@ -145,9 +145,13 @@ export class VoiceNoteInbox {
   }
   private schedule(id: string): void {
     if (this.stopped || this.timers.has(id) || this.running.has(id)) return;
-    const delay = pending(source(this.saved.pending[id].event))
-      ? Math.max(0, this.saved.pending[id].deadline - Date.now())
-      : 0;
+    const entry = this.saved.pending[id];
+    if (!entry) return;
+    const delay = entry.retryAt !== undefined
+      ? Math.max(0, entry.retryAt - Date.now())
+      : pending(source(entry.event)) && !entry.polled
+        ? Math.max(0, entry.deadline - Date.now())
+        : 0;
     const timer = setTimeout(() => {
       this.timers.delete(id);
       this.launch(id, true);
@@ -161,8 +165,18 @@ export class VoiceNoteInbox {
     if (previous) return previous;
     const task = Promise.resolve()
       .then(() => this.finish(id, poll))
-      .catch(() => this.options.warn())
-      .finally(() => this.running.delete(id));
+      .catch(() => {
+        const entry = this.saved.pending[id];
+        if (entry) {
+          entry.retryAt = Date.now() + 5_000;
+          try { this.persist(); } catch { /* The original receipt remains retained. */ }
+        }
+        this.options.warn();
+      })
+      .finally(() => {
+        this.running.delete(id);
+        if (this.saved.pending[id]) this.schedule(id);
+      });
     this.running.set(id, task);
     return task;
   }
@@ -171,7 +185,9 @@ export class VoiceNoteInbox {
     if (!entry || this.stopped) return;
     clearTimeout(this.timers.get(id));
     this.timers.delete(id);
-    if (poll && pending(source(entry.event))) {
+    if (poll && pending(source(entry.event)) && !entry.polled) {
+      entry.polled = true;
+      this.persist();
       try {
         let timeout: ReturnType<typeof setTimeout> | undefined;
         const updated = await Promise.race([
@@ -186,6 +202,8 @@ export class VoiceNoteInbox {
       }
     }
     if (this.stopped || this.saved.pending[id] !== entry) return;
+    delete entry.retryAt;
+    this.persist();
     await this.options.deliver(entry.event);
     delete this.saved.pending[id];
     this.saved.done[id] = Date.now();

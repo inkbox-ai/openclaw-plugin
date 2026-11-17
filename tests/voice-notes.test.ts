@@ -189,6 +189,34 @@ describe("voice-note delivery", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(recovered.deliver).toHaveBeenCalledTimes(1);
   });
+  it("retries a transient host admission failure without polling a second time", async () => {
+    const { inbox, deliver, poll } = setup();
+    deliver.mockRejectedValueOnce(new Error("host temporarily unavailable"));
+    await inbox.accept(received());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(poll).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(poll).toHaveBeenCalledTimes(1);
+    await inbox.accept(completion());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(deliver).toHaveBeenCalledTimes(2);
+  });
+  it("retains the one-poll decision across restart after failed admission", async () => {
+    const path = join(directory, "poll-recovery.json");
+    const first = setup({ path });
+    first.deliver.mockRejectedValueOnce(new Error("host temporarily unavailable"));
+    await first.inbox.accept(received());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(first.poll).toHaveBeenCalledTimes(1);
+    first.inbox.close();
+    const second = setup({ path });
+    second.inbox.recover();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(second.deliver).toHaveBeenCalledTimes(1);
+    expect(second.poll).not.toHaveBeenCalled();
+  });
   it("polls the authenticated message read once without dropping raw metadata", async () => {
     const fetch = vi
       .spyOn(globalThis, "fetch")
