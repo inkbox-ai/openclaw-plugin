@@ -6,13 +6,20 @@ type Pending = { event: VoiceEvent; deadline: number; polled?: boolean; retryAt?
 type Saved = { pending: Record<string, Pending>; done: Record<string, number> };
 const FAMILIES = new Set(["text", "imessage", "whatsapp"]);
 
+export const TRANSCRIPTION_FINISHED = "message.transcription_finished";
+
+function channelOf(event: VoiceEvent): string | undefined {
+  return event.event_type === TRANSCRIPTION_FINISHED ? event.data?.channel : event.event_type?.split(".")[0];
+}
+
 function source(event: VoiceEvent): VoiceEvent | undefined {
-  return event.data?.[event.event_type?.startsWith("text.") ? "text_message" : "message"];
+  return event.data?.[channelOf(event) === "text" ? "text_message" : "message"];
 }
 function key(event: VoiceEvent): string | undefined {
   const message = source(event),
-    family = event.event_type?.split(".")[0];
-  return FAMILIES.has(family) && typeof message?.id === "string"
+    family = channelOf(event);
+  if (event.event_type === TRANSCRIPTION_FINISHED && event.data?.message_id !== message?.id) return undefined;
+  return family && FAMILIES.has(family) && typeof message?.id === "string"
     ? `${family}:${message.id}`
     : undefined;
 }
@@ -129,10 +136,10 @@ export class VoiceNoteInbox {
     if (this.stopped) throw new Error("Voice-note receiver is stopping.");
     if (typeof event.event_type !== "string") return false;
     const id = key(event);
-    if (!id) return false;
+    if (!id) return event.event_type === TRANSCRIPTION_FINISHED;
     if (process.env.INKBOX_HOSTED_MODE === "1")
-      return event.event_type.endsWith(".transcription_finished");
-    const completion = event.event_type.endsWith(".transcription_finished");
+      return event.event_type === TRANSCRIPTION_FINISHED;
+    const completion = event.event_type === TRANSCRIPTION_FINISHED;
     if (completion) {
       if (this.saved.done[id]) return true;
       const entry = this.saved.pending[id];
@@ -306,7 +313,7 @@ export async function pollVoiceNote(
   },
 ): Promise<VoiceEvent | undefined> {
   const message = source(event),
-    family = event.event_type?.split(".")[0];
+    family = channelOf(event);
   if (!message?.id || !options.apiKey) return;
   const signal = AbortSignal.timeout(10_000);
   const identity = await options.identity();

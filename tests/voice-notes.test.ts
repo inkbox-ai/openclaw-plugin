@@ -33,9 +33,9 @@ const received = (family = "imessage", statuses = ["pending"]): VoiceEvent => ({
   },
 });
 const completion = (family = "imessage", statuses = ["completed"]): VoiceEvent => ({
-  ...received(family, statuses),
+  data: { ...received(family, statuses).data, channel: family, message_id: "message-1" },
   id: "different-event-id",
-  event_type: `${family}.transcription_finished`,
+  event_type: "message.transcription_finished",
 });
 let directory: string;
 let inboxes: VoiceNoteInbox[];
@@ -74,6 +74,11 @@ describe("voice-note delivery", () => {
       const { inbox, deliver, poll } = setup();
       const original = received(family);
       expect(await inbox.accept(original)).toBe(true);
+      expect(deliver).not.toHaveBeenCalled();
+      const wrongId = completion(family);
+      wrongId.data.message_id = "unrelated-source";
+      expect(await inbox.accept(wrongId)).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
       expect(deliver).not.toHaveBeenCalled();
       await inbox.accept(completion(family));
       await vi.advanceTimersByTimeAsync(0);

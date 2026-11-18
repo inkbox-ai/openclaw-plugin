@@ -1,3 +1,4 @@
+import { TRANSCRIPTION_FINISHED } from "../voice-notes.js";
 import type { Inkbox, WebhookSubscription } from "@inkbox/sdk";
 import { InkboxAPIError } from "@inkbox/sdk";
 import type { PluginLogger } from "../client.js";
@@ -5,6 +6,8 @@ import type { PluginLogger } from "../client.js";
 // Full event sets the plugin subscribes to. We subscribe broadly and
 // filter in dispatch — receive events are load-bearing, the rest are
 // telemetry that downstream features may opt into.
+export const TRANSCRIPTION_EVENTS = [TRANSCRIPTION_FINISHED];
+
 export const MAIL_EVENT_TYPES: readonly string[] = [
   "message.received",
   "message.sent",
@@ -16,7 +19,6 @@ export const MAIL_EVENT_TYPES: readonly string[] = [
 
 export const TEXT_EVENT_TYPES: readonly string[] = [
   "text.received",
-  "text.transcription_finished",
   "text.sent",
   "text.delivered",
   "text.delivery_failed",
@@ -30,13 +32,12 @@ export const TEXT_EVENT_TYPES: readonly string[] = [
 // warrants a reply, a "love" usually does not).
 export const IMESSAGE_EVENT_TYPES: readonly string[] = [
   "imessage.received",
-  "imessage.transcription_finished",
   "imessage.sent",
   "imessage.delivered",
   "imessage.delivery_failed",
   "imessage.reaction_received",
 ];
-export const WHATSAPP_EVENT_TYPES: readonly string[] = ["whatsapp.received", "whatsapp.transcription_finished", "whatsapp.reaction_received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"];
+export const WHATSAPP_EVENT_TYPES: readonly string[] = ["whatsapp.received", "whatsapp.reaction_received", "whatsapp.sent", "whatsapp.delivered", "whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"];
 export const A2A_EVENT_TYPES: readonly string[] = [
   "a2a.task.created",
   "a2a.task.message",
@@ -92,8 +93,12 @@ function urlPathname(url: string): string | null {
   }
 }
 
+function eventFamily(event: string): string {
+  return event === TRANSCRIPTION_FINISHED ? event : event.split(".", 1)[0]!;
+}
+
 function eventFamilies(eventTypes: readonly string[]): Set<string> {
-  return new Set(eventTypes.map((eventType) => eventType.split(".", 1)[0]));
+  return new Set(eventTypes.map(eventFamily));
 }
 
 // A same-owner row is one of OUR stale rows when it points somewhere else
@@ -159,7 +164,7 @@ export async function reconcileWebhookSubscription(
 
   const existing = await inkbox.webhooks.subscriptions.list({ ...ownerFilter, scope: "identity" });
   const desiredFamilies = eventFamilies(desired.eventTypes);
-  const mergedEvents = (sub: WebhookSubscription) => [...new Set([...sub.eventTypes.filter((event) => !desiredFamilies.has(event.split(".", 1)[0]!)), ...desired.eventTypes])];
+  const mergedEvents = (sub: WebhookSubscription) => [...new Set([...sub.eventTypes.filter((event) => !desiredFamilies.has(eventFamily(event))), ...desired.eventTypes])];
   const belongsToDesiredChannel = (sub: WebhookSubscription) =>
     [...eventFamilies(sub.eventTypes)].some((family) =>
       desiredFamilies.has(family),

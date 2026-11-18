@@ -7041,7 +7041,6 @@ describe("configureInkboxIdentityDelivery", () => {
       url: "https://example.com/inkbox/webhook",
       eventTypes: [
         "imessage.received",
-        "imessage.transcription_finished",
         "imessage.sent",
         "imessage.delivered",
         "imessage.delivery_failed",

@@ -862,7 +862,8 @@ it("persists a pending voice initializer before later live input and resolves be
   const completed: any = structuredClone(init);
   delete completed.companion;
   completed.id = "voice-completed";
-  completed.event_type = "text.transcription_finished";
+  completed.event_type = "message.transcription_finished";
+  Object.assign(completed.data, { channel: "text", message_id: completed.data.text_message.id });
   completed.data.text_message.media[0].transcription = { status: "completed", text: "Recorded source update." };
   await dispatchInbound(completed, s.bridge.handlers);
   await settle(s.bridge);

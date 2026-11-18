@@ -5,7 +5,6 @@ import {
   IMESSAGE_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
-  WHATSAPP_EVENT_TYPES,
   reconcileWebhookSubscription,
 } from "../../src/inbound/subscriptions.js";
 
@@ -503,8 +502,11 @@ describe("mixed identity subscription preservation", () => {
   });
 });
 
-it("includes voice-note completion in every automatic channel subscription", () => {
-  expect(TEXT_EVENT_TYPES).toContain("text.transcription_finished");
-  expect(IMESSAGE_EVENT_TYPES).toContain("imessage.transcription_finished");
-  expect(WHATSAPP_EVENT_TYPES).toContain("whatsapp.transcription_finished");
+it("reconciles voice-note completion independently of a mailbox on the same URL", async () => {
+  const url = "https://example.com/inkbox/webhook";
+  const mail = makeSub({ id: "mail", url, eventTypes: ["message.received"] });
+  const { client, update, create } = makeClient({ list: vi.fn(async () => [mail]) });
+  await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url, eventTypes: ["message.transcription_finished"] });
+  expect(update).not.toHaveBeenCalled();
+  expect(create).toHaveBeenCalledWith({ agentIdentityId: "identity", url, eventTypes: ["message.transcription_finished"] });
 });
