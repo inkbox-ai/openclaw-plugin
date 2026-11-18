@@ -6177,6 +6177,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }, join(statePaths().dir, `slack-activity-${activityOwner}.json`), (message) => opts.logger?.warn?.(message));
   opts.abortSignal?.addEventListener("abort", () => { void slackActivity.close(); void slackProgress.close(); }, { once: true });
   const companion = createCompanionReceiver({
+    resolveVoiceNote: (event, deadline) => voiceNotes.resolve(event, deadline),
     accountId: opts.account.accountId,
     config: opts.account.config,
     runtime: opts.runtime,
@@ -6862,7 +6863,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     onText: async event => { if (!(await voiceNotes.accept(event))) await handlers.onText?.(event); },
     onIMessage: async event => { if (!(await voiceNotes.accept(event))) await handlers.onIMessage?.(event); },
     onWhatsApp: async event => { if (!(await voiceNotes.accept(event))) await handlers.onWhatsApp?.(event); },
-    onCompanion: async event => { if (!(await voiceNotes.accept(event))) await handlers.onCompanion?.(event); },
+    onCompanion: async event => { await handlers.onCompanion?.(event); },
   };
   return {
     handlers: voiceHandlers,

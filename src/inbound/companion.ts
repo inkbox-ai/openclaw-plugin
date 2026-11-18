@@ -31,7 +31,7 @@ function nativeSources(event: Record<string, any>): string[] {
 type Channel = CompanionChannel | "whatsapp";
 export type CompanionReply = Omit<CompanionReplyContext, "to" | "cc" | "channel"> & { channel: Channel; slackRoute?: SlackRoute; to?: string[]; cc?: string[]; identityId?: string };
 type Metadata = Omit<CompanionMetadata, "channel"> & { channel: Channel };
-type Job = { nativeMediaDelivered?: boolean; mediaReplies?: { path: string; text: string }[]; mediaUploads?: Record<string, { id?: string }>; replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappUncertain?: boolean; whatsappDestination?: WhatsAppSendIntent["destination"]; whatsappDestinationEvidence?: WhatsAppSendIntent["destinationEvidence"]; whatsappConversationId?: string; whatsappMediaIds?: string[]; whatsappReplyToMessageId?: string; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
+type Job = { voiceNoteDeadline?: number; voiceNoteResolved?: boolean; nativeMediaDelivered?: boolean; mediaReplies?: { path: string; text: string }[]; mediaUploads?: Record<string, { id?: string }>; replyNotAttempted?: boolean; awaitingUploads?: boolean; slackStopTarget?: string | null; sendUnconfirmed?: boolean; stopTargets?: string[]; stoppedBy?: string; nativeThreaded?: boolean; nativeOwner?: { sessionKey: string; runId: string }; uncertaintyRecorded?: boolean; toolSends?: Record<string, { kind?: "approval" | "attachment"; whatsappKey?: string; whatsappUncertain?: boolean; whatsappDestination?: WhatsAppSendIntent["destination"]; whatsappDestinationEvidence?: WhatsAppSendIntent["destinationEvidence"]; whatsappConversationId?: string; whatsappMediaIds?: string[]; whatsappReplyToMessageId?: string; whatsappRejection?: WhatsAppSendRejection; whatsappLookups?: number; uploadKey?: string; uploadLookups?: number; uploadFingerprint?: string; uploadTarget?: { connectionId: string; conversationId: string; workspaceId: string }; messageId?: string; text?: string; failed?: boolean; upload?: SlackUploadReceipt }>; nativeComplete?: boolean; burstAt?: number; mergedInto?: string; event: Record<string, any>; identityId: string; state: "pending" | "submitting" | "reply_pending" | "sending" | "done" | "paused"; reason?: string; outboundIds?: string[]; replies?: string[]; reply?: CompanionReply; sponsor?: string; sponsorContactId?: string | null; sources?: string[]; senderContactId?: string | null; attempts?: number; retryAt?: number };
 type Activation = { state: "submitting" | "initialized" | "paused"; sources: string[]; triggerId: string; sponsor: string; sponsorContactId?: string | null; reply: CompanionReply };
 // Context-only lifecycle history is bounded; send and source receipts are not expired.
 const WHATSAPP_OBSERVATION_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -161,6 +161,7 @@ function bounded(text: string): string {
 export function createCompanionReceiver(opts: {
   accountId: string; config: Partial<InkboxPluginConfig>; runtime: InkboxRuntime;
   submit(input: CompanionInput): Promise<string[] | void>;
+  resolveVoiceNote?(event: Record<string, any>, deadline?: number): Promise<Record<string, any>>;
   deliverMedia?(input: CompanionInput, path: string, text: string): Promise<void>;
   canApprove?(input: CompanionInput): Promise<boolean>;
   resolveApproval?(event: Record<string, any>, key: string, beforeResolve: () => Promise<boolean>): Promise<boolean>;
@@ -799,6 +800,18 @@ export function createCompanionReceiver(opts: {
     const scope = key(m, job.identityId);
     const identity = await opts.runtime.getIdentity();
     if (!job.identityId || identity.id !== job.identityId) throw new Error("Companion job identity has changed.");
+    if (job.state === "pending" && !job.voiceNoteResolved && opts.resolveVoiceNote) {
+      const resolved = await opts.resolveVoiceNote(job.event, job.voiceNoteDeadline);
+      if (stopped()) return;
+      if ((await opts.runtime.getIdentity()).id !== job.identityId) throw new Error("Companion job identity has changed.");
+      const current = (await read()).jobs[id];
+      if (!current || current.state !== "pending" || current.stoppedBy) return;
+      await mutate(j => {
+        j.jobs[id]!.event = resolved;
+        j.jobs[id]!.voiceNoteResolved = true;
+      }, [id]);
+      job = { ...current, event: resolved, voiceNoteResolved: true };
+    }
     const sourceMessage = source(job.event, m);
     let message = sourceMessage.message;
     const author = sourceMessage.author;
@@ -1343,6 +1356,7 @@ export function createCompanionReceiver(opts: {
         if (!admitWhatsAppReaction(j, event, identityId)) { duplicate = true; return; }
         const job: Job = { event: structuredClone(event), identityId, state: "pending", ...(event.companion.channel === "imessage" && opts.config.imessageThreadedReplies ? { nativeThreaded: true } : {}) };
         if (slackStop) job.slackStopTarget = slackStopTarget;
+        job.voiceNoteDeadline = Date.now() + 60_000;
         j.jobs[receipt] = job;
         if (savedSlackStop) {
           job.stopTargets = [savedSlackStop]; job.state = "done"; job.nativeComplete = true;

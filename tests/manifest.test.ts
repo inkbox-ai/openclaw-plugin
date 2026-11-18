@@ -73,6 +73,11 @@ function collectRuntimeTools(registrationMode = "tool-discovery"): {
 }
 
 describe("openclaw.plugin.json manifest parity", () => {
+  it("reports the same version as the installed package", () => {
+    const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8"));
+    expect(manifest.version).toBe(pkg.version);
+  });
+
   it("declares the same tool contract and optional metadata as runtime registration", () => {
     const runtime = collectRuntimeTools();
 

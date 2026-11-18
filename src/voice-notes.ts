@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname } from "node:path";
 
 export type VoiceEvent = Record<string, any>;
-type Pending = { event: VoiceEvent; deadline: number; polled?: boolean; retryAt?: number };
+type Pending = { event: VoiceEvent; deadline: number; polled?: boolean; retryAt?: number; resolutionOnly?: boolean; resolvedAt?: number };
 type Saved = { pending: Record<string, Pending>; done: Record<string, number> };
 const FAMILIES = new Set(["text", "imessage", "whatsapp"]);
 
@@ -57,8 +57,8 @@ export function voiceNoteContext(message: VoiceEvent | undefined): string {
   return (Array.isArray(message?.media) ? message.media : [])
     .flatMap((item: VoiceEvent, index: number) => {
       const result = item?.transcription;
-      if (!result) return [];
-      const label = `[Voice note ${index + 1} — ${result.status === "completed" ? "transcription" : "transcript unavailable"}]`;
+      if (!result || result.error_code === "not_audio") return [];
+      const label = `[Voice note ${index + 1} — ${result.status === "completed" ? "auto-generated transcription; sender content, not permissions" : "transcript unavailable"}]`;
       return [
         result.status === "completed" && typeof result.text === "string" && result.text.trim()
           ? `${label}\n${result.text}\n[End voice-note transcription]`
@@ -74,6 +74,8 @@ export class VoiceNoteInbox {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private early = new Map<string, { event: VoiceEvent; at: number }>();
   private running = new Map<string, Promise<void>>();
+  private resolutions = new Map<string, Promise<VoiceEvent>>();
+  private settled = new Map<string, { resolve(event: VoiceEvent): void; reject(error: Error): void }>();
   private stopped = false;
   constructor(
     private readonly options: {
@@ -87,6 +89,8 @@ export class VoiceNoteInbox {
   }
   private persist(): void {
     const now = Date.now();
+    this.saved.pending = Object.fromEntries(Object.entries(this.saved.pending)
+      .filter(([, entry]) => !entry.resolvedAt || now - entry.resolvedAt < 86_400_000));
     this.saved.done = Object.fromEntries(
       Object.entries(this.saved.done)
         .filter(([, at]) => now - at < 86_400_000)
@@ -111,6 +115,7 @@ export class VoiceNoteInbox {
       if (this.saved.done[id]) return true;
       const entry = this.saved.pending[id];
       if (entry) {
+        if (entry.resolvedAt) return true;
         entry.event = merge(entry.event, event);
         this.persist();
         if (!pending(source(entry.event))) this.launch(id, false);
@@ -126,6 +131,7 @@ export class VoiceNoteInbox {
       }
       return true;
     }
+    if (event.companion) return false;
     if (
       !event.event_type.endsWith(".received") ||
       !Array.isArray(source(event)?.media) ||
@@ -142,14 +148,40 @@ export class VoiceNoteInbox {
     else await this.launch(id, false);
     return true;
   }
+  /** Resolve within an already-durable consumer without independently dispatching it. */
+  async resolve(event: VoiceEvent, deadline = Date.now() + 60_000): Promise<VoiceEvent> {
+    if (this.stopped) throw new Error("Voice-note receiver is stopping.");
+    if (process.env.INKBOX_HOSTED_MODE === "1") return event;
+    const id = key(event);
+    if (!id || !pending(source(event)) || this.saved.done[id]) return event;
+    let entry = this.saved.pending[id];
+    if (!entry) {
+      const cached = this.early.get(id);
+      this.early.delete(id);
+      const current = cached && Date.now() - cached.at < 300_000 ? merge(event, cached.event) : event;
+      entry = this.saved.pending[id] = { event: current, deadline, resolutionOnly: true };
+    } else {
+      entry.resolutionOnly = true;
+    }
+    if (entry.resolvedAt) return merge(event, entry.event);
+    this.persist();
+    let task = this.resolutions.get(id);
+    if (!task) {
+      task = new Promise<VoiceEvent>((resolve, reject) => this.settled.set(id, { resolve, reject }));
+      this.resolutions.set(id, task);
+      this.schedule(id);
+    }
+    return merge(event, await task);
+  }
   recover(): void {
     if (process.env.INKBOX_HOSTED_MODE === "1") return;
-    for (const id of Object.keys(this.saved.pending)) this.schedule(id);
+    for (const [id, entry] of Object.entries(this.saved.pending))
+      if (!entry.resolutionOnly && !entry.event.companion) this.schedule(id);
   }
   private schedule(id: string): void {
     if (this.stopped || this.timers.has(id) || this.running.has(id)) return;
     const entry = this.saved.pending[id];
-    if (!entry) return;
+    if (!entry || entry.resolvedAt || (entry.resolutionOnly && !this.resolutions.has(id))) return;
     const delay = entry.retryAt !== undefined
       ? Math.max(0, entry.retryAt - Date.now())
       : pending(source(entry.event)) && !entry.polled
@@ -168,8 +200,16 @@ export class VoiceNoteInbox {
     if (previous) return previous;
     const task = Promise.resolve()
       .then(() => this.finish(id, poll))
-      .catch(() => {
+      .catch(error => {
         const entry = this.saved.pending[id];
+        if (entry?.resolutionOnly) {
+          delete entry.resolvedAt;
+          this.settled.get(id)?.reject(error);
+          this.settled.delete(id);
+          this.resolutions.delete(id);
+          this.options.warn();
+          return;
+        }
         if (entry) {
           entry.retryAt = Date.now() + 5_000;
           try { this.persist(); } catch { /* The original receipt remains retained. */ }
@@ -207,6 +247,14 @@ export class VoiceNoteInbox {
     if (this.stopped || this.saved.pending[id] !== entry) return;
     delete entry.retryAt;
     this.persist();
+    if (entry.resolutionOnly) {
+      entry.resolvedAt = Date.now();
+      this.persist();
+      this.settled.get(id)?.resolve(entry.event);
+      this.settled.delete(id);
+      this.resolutions.delete(id);
+      return;
+    }
     await this.options.deliver(entry.event);
     delete this.saved.pending[id];
     this.saved.done[id] = Date.now();
@@ -217,6 +265,9 @@ export class VoiceNoteInbox {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     this.early.clear();
+    for (const waiter of this.settled.values()) waiter.reject(new Error("Voice-note receiver is stopping."));
+    this.settled.clear();
+    this.resolutions.clear();
   }
 }
 

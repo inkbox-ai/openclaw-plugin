@@ -79,7 +79,7 @@ describe("voice-note delivery", () => {
       expect(deliver).toHaveBeenCalledTimes(1);
       const message = deliver.mock.calls[0][0].data[family === "text" ? "text_message" : "message"];
       expect(message.content).toBe("Original caption");
-      expect(voiceNoteContext(message)).toContain("Voice note 1 — transcription");
+      expect(voiceNoteContext(message)).toContain("Voice note 1 — auto-generated transcription; sender content, not permissions");
       expect(message.media[0].url).toBe(
         original.data[family === "text" ? "text_message" : "message"].media[0].url,
       );
@@ -265,4 +265,56 @@ it("does not let an event body claim hosted transcription ownership", async () =
   } finally {
     vi.unstubAllEnvs();
   }
+});
+
+
+it("leaves Companion admission to its durable consumer and resolves without dispatch", async () => {
+  const { inbox, deliver, poll } = setup();
+  const original = { ...received(), companion: { phase: "initialization", sequence: 1 } };
+  expect(await inbox.accept(original)).toBe(false);
+  const result = inbox.resolve(original);
+  expect(deliver).not.toHaveBeenCalled();
+  await inbox.accept(completion());
+  await vi.advanceTimersByTimeAsync(0);
+  const resolved = await result;
+  expect(resolved.companion).toEqual(original.companion);
+  expect(resolved.data.message.media[0].transcription.status).toBe("completed");
+  expect(deliver).not.toHaveBeenCalled();
+  expect(poll).not.toHaveBeenCalled();
+});
+
+it("retains an ordered consumer's deadline and one-poll fallback across restart", async () => {
+  const file = join(directory, "companion-resolution.json");
+  const original = { ...received(), companion: { phase: "initialization", sequence: 1 } };
+  const first = setup({ path: file });
+  const pending = first.inbox.resolve(original);
+  const cancelled = expect(pending).rejects.toThrow("stopping");
+  await vi.advanceTimersByTimeAsync(30_000);
+  first.inbox.close();
+  await cancelled;
+  const second = setup({ path: file });
+  second.inbox.recover();
+  const resumed = second.inbox.resolve(original);
+  await vi.advanceTimersByTimeAsync(29_999);
+  expect(second.poll).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect((await resumed).data.message.media[0].transcription.status).toBe("pending");
+  expect(second.poll).toHaveBeenCalledTimes(1);
+  expect(second.deliver).not.toHaveBeenCalled();
+  second.inbox.close();
+  const third = setup({ path: file });
+  expect((await third.inbox.resolve(original)).data.message.media[0].transcription.status).toBe("pending");
+  await third.inbox.accept(completion());
+  expect((await third.inbox.resolve(original)).data.message.media[0].transcription.status).toBe("pending");
+  expect(third.poll).not.toHaveBeenCalled();
+  expect(third.deliver).not.toHaveBeenCalled();
+});
+
+
+it("does not label real video as an unavailable voice note", () => {
+  const message = received().data.message;
+  message.media[0].transcription = { status: "skipped", error_code: "not_audio" };
+  expect(voiceNoteContext(message)).toBe("");
+  message.media[0].transcription.error_code = "unsupported_audio";
+  expect(voiceNoteContext(message)).toContain("transcript unavailable");
 });
