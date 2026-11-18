@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.19 (unreleased)
+## 0.2.24 (unreleased)
 
 - Wait for voice-note transcription completion before waking the agent, with a 60-second wait and one bounded message poll before the original-attachment fallback.
 - Register transcription completion notifications automatically and label transcripts separately from sender text.
