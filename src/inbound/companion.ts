@@ -1,4 +1,4 @@
-import { voiceNoteContext } from "../voice-notes.js";
+import { snapshotHasVoiceNote, voiceNoteContext } from "../voice-notes.js";
 import { whatsappGroup, validWhatsAppGroup, renderWhatsAppMentions, renderWhatsAppReplyContext } from "../whatsapp-groups.js";
 import { isUnsupportedWhatsAppShape, whatsappDestinationEvidence, WhatsAppReadinessPending, whatsappAttachments, whatsappReady, whatsappDeliveryContext, type WhatsAppSendRejection } from "../whatsapp.js";
 import { checkedSlackUpload, type SlackUploadReceipt, type SlackUploadIntent } from "../slack-files.js";
@@ -927,6 +927,7 @@ export function createCompanionReceiver(opts: {
     }
     let activation = journal.activations[scope];
     let body: string;
+    let voiceNoteInSnapshot = false;
     let reply: CompanionReply;
     let sources = job.event._openclawNativeIMessage ? nativeSources(job.event) : [message.id];
     if (m.phase !== "ordinary") {
@@ -952,6 +953,7 @@ export function createCompanionReceiver(opts: {
         if (m.channel === "mail" && reply.replyToMessageId !== trigger.id) throw new Error("Companion reply must reference the stored sponsor message.");
         reply.identityId = job.identityId;
         sources = snapshot.entries.map((entry) => entry.id);
+        voiceNoteInSnapshot = snapshotHasVoiceNote(message, snapshot.entries, rawText);
         body = bounded(`${snapshot.text}\nHistory notices: ${JSON.stringify(snapshot.notices ?? [])}\nMessage admission: ${JSON.stringify(snapshot.entries.map((entry) => ({ id: entry.id, sender_access: entry.senderAccess })))}`);
         activation = { state: "initialized", sources, triggerId: trigger.id, sponsor: trigger.author, sponsorContactId, reply };
         if (m.phase === "live" && !sources.includes(message.id)) {
@@ -1011,7 +1013,7 @@ export function createCompanionReceiver(opts: {
       if (activation) j.activations[scope] = { ...activation, sources: [...new Set([...activation.sources, ...sources])] };
     };
     const voiceContext = voiceNoteContext(message);
-    if (voiceContext) body += `\n${voiceContext}`;
+    if (voiceContext && !voiceNoteInSnapshot) body += `\n${voiceContext}`;
     const input = makeInput(reply, body, activation?.sponsor);
     const approval = /^\/approve(?:\s|$)/i.test(input.rawText);
     const allowedApproval = approval && await opts.canApprove?.(input);

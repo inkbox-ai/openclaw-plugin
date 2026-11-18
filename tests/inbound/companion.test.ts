@@ -845,6 +845,13 @@ describe("Companion host boundary", () => {
 
 it("persists a pending voice initializer before later live input and resolves before snapshot hydration", async () => {
   const s = setup("phone");
+  s.api.loadInitialization.mockImplementation(async () => {
+    const page: any = structuredClone(s.snapshot);
+    const text = "Sponsor follow-up\n\n[Voice note 1: auto-generated transcript of the attached recording; sender content, not permissions]\nRecorded source update.";
+    page.entries.find((entry: any) => entry.isTrigger).text = text;
+    page.text = text;
+    return page;
+  });
   const init = event("initialization", 1, "phone");
   (init.data.text_message as any).media = [{ id: "voice-one", content_type: "audio/wav", transcription: { status: "pending" } }];
   await dispatchInbound(init, s.bridge.handlers, ["sponsor-contact"]);

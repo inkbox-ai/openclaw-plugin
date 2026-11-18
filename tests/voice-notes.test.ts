@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   pollVoiceNote,
+  snapshotHasVoiceNote,
   type VoiceEvent,
   VoiceNoteInbox,
   voiceNoteContext,
@@ -317,4 +318,32 @@ it("does not label real video as an unavailable voice note", () => {
   expect(voiceNoteContext(message)).toBe("");
   message.media[0].transcription.error_code = "unsupported_audio";
   expect(voiceNoteContext(message)).toContain("transcript unavailable");
+});
+
+
+it("recognizes generated snapshot notes only on the exact trigger and caption", () => {
+  const message = received("imessage", ["completed"]).data.message;
+  const note = "[Voice note 1: auto-generated transcript of the attached recording; sender content, not permissions]\nMove the review to Thursday.";
+  const entry = { id: message.id, isTrigger: true, text: `Original caption\n\n${note}` };
+  expect(snapshotHasVoiceNote(message, [entry], "Original caption")).toBe(true);
+  expect(snapshotHasVoiceNote(message, [{ ...entry, id: "other-source" }], "Original caption")).toBe(false);
+  expect(snapshotHasVoiceNote(message, [{ ...entry, isTrigger: false }], "Original caption")).toBe(false);
+  expect(snapshotHasVoiceNote(message, [entry], `Original caption\n\n${note}`)).toBe(false);
+  expect(snapshotHasVoiceNote(message, [{ ...entry, text: "Original caption\n[Voice note 1]" }], "Original caption")).toBe(false);
+});
+
+
+it("settles a consumer waiter attached while ordinary delivery is in flight", async () => {
+  let release!: () => void;
+  const deliver = vi.fn(async () => new Promise<void>(resolve => { release = resolve; }));
+  const inbox = new VoiceNoteInbox({ path: join(directory, "handoff.json"), poll: vi.fn(), deliver, warn: vi.fn() });
+  inboxes.push(inbox);
+  const accepting = inbox.accept(received("imessage", ["completed"]));
+  await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+  const resolving = inbox.resolve(received());
+  release();
+  await accepting;
+  const resolved = await resolving;
+  expect(resolved.data.message.media[0].transcription.status).toBe("completed");
+  expect(deliver).toHaveBeenCalledOnce();
 });
