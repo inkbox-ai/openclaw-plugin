@@ -470,6 +470,11 @@ After the gateway prints `[gateway] ready`, `[inkbox] tunnel open`, mail/text su
 
 ## Tools
 
+Claimed identities can discover and execute the current remote catalog with
+`inkbox_remote_tools` and `inkbox_remote_call`. `inkbox_reply_current` declares a
+final reply to the current incoming email or direct SMS. See [remote tools](REMOTE_TOOLS.md)
+for approval, retry and compatibility behavior.
+
 Required by default:
 
 - Outbound: `inkbox_send_email`, `inkbox_send_sms`, `inkbox_send_imessage`
@@ -480,7 +485,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The dependency floor is the published `@inkbox/sdk` 0.7.29 release.
+- The dependency floor is `@inkbox/sdk` 0.7.39. Source development pins its exact Git revision.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
@@ -604,6 +609,7 @@ The package includes all `skills/*/SKILL.md` files in npm tarballs.
 ## Development Commands
 
 ```bash
+npx --yes pnpm@10.28.0 install --frozen-lockfile
 npm run typecheck
 npm test
 npm run build
@@ -641,3 +647,15 @@ Group attention uses the existing `groupReplyMode` and `companionResponseMode` s
 Ordinary groups recheck their current participants against configured local contact/recipient allowlists. Unresolved members cannot satisfy a configured allowlist. Companion uses the canonical authorized group activation and sponsor, revalidates that activation before host dispatch and effects, and never extends its grant to a direct message or another group. Explicit destinations retain their own authorization. Saved answers and attachments survive transient preflight failures without another model turn; accepted/unknown sends retain their receipts and are not automatically duplicated. Definitive policy rejections do not produce a replacement message.
 
 Use a compatible API. Use `inkbox_send_whatsapp` for explicit sends: retries retain the host tool-call identity, or an explicit stable `idempotencyKey`. Reuse that key and unchanged payload after uncertainty; a distinct intentional send needs a distinct logical key. The generic host message adapter does not supply a stable attempt ID, so it cannot send WhatsApp messages. Ordinary inbound final replies remain automatic.
+
+### Managed diagnostics
+
+When `INKBOX_HOSTED_MODE=1`, doctor reads the secret-free report named by
+`INKBOX_DIAGNOSTICS_FILE`. Reports must match the identity and harness, belong to
+this user, have private file permissions, and be no more than 60 seconds old.
+Missing, stale, or unhealthy reports do not establish readiness. With
+`INKBOX_DIAGNOSTIC_CONTEXT=terminal`, the signing key is checked in the runtime
+report; the key itself is not needed in the terminal. Runtime processes still
+require their own signing key. Managed delivery does not require ordinary webhook
+subscriptions. Standalone diagnostics are unchanged. These checks do not send
+messages or prove end-to-end delivery.

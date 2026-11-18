@@ -1,3 +1,4 @@
+import { hostedDiagnostics } from "./hosted-diagnostics.js";
 import { Inkbox, InkboxAPIError } from "@inkbox/sdk";
 import {
   getHealthCheck,
@@ -26,6 +27,7 @@ import { readCompanionQueueSummary } from "./inbound/companion.js";
 const SOURCE = "@inkbox/inkbox";
 
 const CHECKS = [
+  "inkbox/hosted-runtime",
   "inkbox/config-missing-api-key",
   "inkbox/config-missing-identity",
   "inkbox/config-missing-signing-key",
@@ -49,6 +51,7 @@ const CHECKS = [
 type InkboxCheckId = (typeof CHECKS)[number];
 
 const DESCRIPTIONS: Record<InkboxCheckId, string> = {
+  "inkbox/hosted-runtime": "Managed runtime readiness",
   "inkbox/config-missing-api-key": "Inkbox API key is configured",
   "inkbox/config-missing-identity": "Inkbox identity handle is configured",
   "inkbox/config-missing-signing-key": "Inkbox webhook signing key is configured",
@@ -182,6 +185,10 @@ export async function detectInkboxHealthFindings(
 ): Promise<readonly HealthFinding[]> {
   const findings: HealthFinding[] = [];
   const account = resolveInkboxAccount({ cfg: ctx.cfg, env });
+  const hosted = hostedDiagnostics(account.identity, "openclaw", account.signingKey, env);
+  if (hosted) return hosted.checks.filter((check) => !check.ok).map((check) =>
+    finding("inkbox/hosted-runtime", "error", check.detail, "channels.inkbox", "Inspect the managed runtime status."));
+
 
   if (!account.apiKey) {
     findings.push(

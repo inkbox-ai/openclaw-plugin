@@ -18,6 +18,7 @@ vi.mock("openclaw/plugin-sdk/inbound-envelope", () => ({
 }));
 
 import { createInkboxSessionBridge } from "../../src/inbound/session.js";
+import { isInkboxSilentReply } from "../../src/silent-reply.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
 import { wrapInboundHandlersWithBatching } from "../../src/inbound/batch.js";
 import { COMPANION_MAX_BYTES } from "../../src/inbound/companion.js";
@@ -191,7 +192,7 @@ describe("Companion host boundary", () => {
       // when present, without imposing that policy on older supported hosts.
       await dispatchInboundMessageWithDispatcher({
         ...options, ctx: { ...options.ctx, SessionKey: `${input.routeSessionKey}:baseline`, MessageSid: "native-companion-no-reply-baseline" },
-        dispatcherOptions: { deliver: async (payload) => { if (payload.text) expected.push(payload.text); return { visibleReplySent: false, suppression: { reason: "channel_transform" } }; } },
+        dispatcherOptions: { deliver: async (payload) => { if (payload.text && !isInkboxSilentReply(payload.text)) expected.push(payload.text); return { visibleReplySent: false, suppression: { reason: "channel_transform" } }; } },
       });
       const native = await dispatchInboundMessageWithDispatcher({ ...options, dispatcherOptions: { ...input.dispatcherOptions, deliver: input.delivery.deliver } });
       return { dispatched: true, admission: { kind: "dispatch" }, dispatchResult: native };

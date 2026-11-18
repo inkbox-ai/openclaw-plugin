@@ -15,7 +15,9 @@ const caseDirectories: string[] = [];
 afterAll(async () => { await Promise.all(caseDirectories.map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 }))); });
 const require = createRequire(import.meta.url);
 const dist = dirname(dirname(require.resolve("openclaw/plugin-sdk/reply-runtime")));
-const baseline = JSON.parse(readFileSync(join(dist, "..", "package.json"), "utf8")).version === "2026.5.27";
+const hostVersion = JSON.parse(readFileSync(join(dist, "..", "package.json"), "utf8")).version;
+const baseline = hostVersion === "2026.5.27";
+const structuredTerminalReplies = hostVersion.localeCompare("2026.11.5", undefined, { numeric: true }) >= 0;
 
 describe("auxiliary answer capture", () => {
   it("keeps normal text while ignoring silence markers and error payloads", () => {
@@ -58,8 +60,9 @@ describe.skipIf(baseline)("actual host auxiliary progress dispatch", () => {
         expect(sanitizeA2AProgressText(capture.lastText(), [], 60)).toBe(`${summary} (60s elapsed)`);
       } else {
         expect(oldCaptured[0]).toBe(summary);
-        expect(oldCaptured).toHaveLength(2);
-        expect(sanitizeA2AProgressText(oldCaptured.at(-1) ?? "", [], 60)).toBe("I'm continuing the requested work. (60s elapsed)");
+        expect(oldCaptured).toHaveLength(structuredTerminalReplies ? 1 : 2);
+        expect(sanitizeA2AProgressText(oldCaptured.at(-1) ?? "", [], 60)).toBe(structuredTerminalReplies
+          ? `${summary} (60s elapsed)` : "I'm continuing the requested work. (60s elapsed)");
       }
     } finally {
       vi.unstubAllEnvs();

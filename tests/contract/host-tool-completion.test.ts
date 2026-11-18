@@ -6,7 +6,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { wrapToolWithBeforeToolCallHook } from "openclaw/plugin-sdk/agent-harness-runtime";
 import * as agentHarnessRuntime from "openclaw/plugin-sdk/agent-harness-runtime";
-import { dispatchInboundMessageWithDispatcher } from "openclaw/plugin-sdk/reply-runtime";
+import { dispatchInboundMessageWithDispatcher, SILENT_REPLY_TOKEN } from "openclaw/plugin-sdk/reply-runtime";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -24,16 +24,25 @@ const baselineWithoutFinalizer = hostVersion === "2026.5.27";
 vi.setConfig({ testTimeout: 30_000 });
 const nativeToolCallPrefix = hostVersion.localeCompare("2026.9.8", undefined, { numeric: true }) >= 0 ? "tool_call" : "tool_search_code";
 const requiredSourceFinalizer = hostVersion.localeCompare("2026.9.6", undefined, { numeric: true }) >= 0;
+const structuredTerminalReplies = hostVersion.localeCompare("2026.11.5", undefined, { numeric: true }) >= 0;
 
-async function hostFunction(bundle: string, name: string, aliases: string[] = []): Promise<any> {
+async function hostFunction(bundle: string, name: string, aliases: string[] = [], renamed: string[] = []): Promise<any> {
+  const names = [name, ...renamed];
   const files = readdirSync(hostDist).filter((file) => [bundle, ...aliases].some((prefix) => file.startsWith(`${prefix}-`)) &&
     (file.endsWith(".js") || file.endsWith(".mjs")) &&
-    readFileSync(join(hostDist, file), "utf8").includes(`function ${name}(`));
+    names.some((candidate) => readFileSync(join(hostDist, file), "utf8").includes(`function ${candidate}(`)));
   expect(files, `Expected one host ${bundle} bundle`).toHaveLength(1);
   const exports = await import(pathToFileURL(join(hostDist, files[0])).href);
-  const fn = Object.values(exports).find((value) => typeof value === "function" && value.name === name);
+  const fn = Object.values(exports).find((value) => typeof value === "function" && names.includes(value.name));
   expect(fn, `Missing host ${name} contract`).toBeTypeOf("function");
   return fn;
+}
+
+async function nativeEmptyReplyPayload() {
+  const build = structuredTerminalReplies
+    ? await hostFunction("reply-completion", "createMissingReplyNotice")
+    : await hostFunction("commentary-progress-owner", "buildEmptyInteractiveReplyPayload", ["agent-runner-failure-reply"]);
+  return structuredTerminalReplies ? build() : build({ completion: { outcome: "missing" } });
 }
 
 function settledAttempt(results: Array<{ terminate?: boolean; isError?: boolean }>) {
@@ -47,7 +56,7 @@ function settledAttempt(results: Array<{ terminate?: boolean; isError?: boolean 
       ...results.map((result, index) => ({ role: "toolResult", toolCallId: `send-${index}`, toolName: "inkbox_send_email", isError: result.isError === true }))],
     toolMetas: results.map((result, index) => ({ toolCallId: `send-${index}`, toolName: "inkbox_send_email", ...result })),
     itemLifecycle: { startedCount: results.length, completedCount: results.length, activeCount: 0 },
-    assistantTexts: [], terminal: { kind: "completed" },
+    assistantTexts: [], terminal: { kind: structuredTerminalReplies ? "ok" : "completed" },
     replayMetadata: { replaySafe: false, hadPotentialSideEffects: true },
     currentAttemptReplayMetadata: { replaySafe: false, hadPotentialSideEffects: true },
   };
@@ -105,7 +114,8 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         let rawControl: any;
         if (transport === "exec") {
           const createCore = await hostFunction("tool-surface-bridge", "createAgentHarnessToolSurfaceRuntimeCore", ["local-model-lean"]);
-          nativeCore = createCore({ ...context, config: {}, agentId: "main", forceCodeModeControls: true, modelToolsEnabled: true, executeTool });
+          nativeCore = createCore({ ...context, config: {}, agentId: "main", ...(structuredTerminalReplies
+            ? { codeModeOverride: true } : { forceCodeModeControls: true }), modelToolsEnabled: true, executeTool });
           expect(nativeCore.codeModeControlsEnabled).toBe(true);
           rawControl = nativeCore.compactTools([sendTool], { hookContext: context }).tools.find((tool: any) => tool.name === "exec");
         } else {
@@ -137,8 +147,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         expect(capture.shape().invalid).toBe(!succeeds);
         expect(capture.transform({ text: "A source acknowledgement" })).toEqual(succeeds ? null : { text: "A source acknowledgement" });
         if (requiredSourceFinalizer) {
-          const buildEmptyReply = await hostFunction("commentary-progress-owner", "buildEmptyInteractiveReplyPayload", ["agent-runner-failure-reply"]);
-          const nativeFailure = buildEmptyReply({ completion: { outcome: "missing" } });
+          const nativeFailure = await nativeEmptyReplyPayload();
           expect(capture.transform(nativeFailure)).toEqual(succeeds ? null : nativeFailure);
         }
       } finally {
@@ -170,6 +179,8 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
       recordSilentSendAfterToolCall({ ...event, result: accepted
         ? { terminate: true, details: { inkboxSendCompletion: { accepted: true, completeSilently: true } } }
         : { isError: true } }, context);
+      if (structuredTerminalReplies && !reply) return accepted
+        ? { text: SILENT_REPLY_TOKEN } : await nativeEmptyReplyPayload();
       return reply ? { text: reply } : undefined;
     });
     capture.activate();
@@ -181,7 +192,8 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         replyResolver: resolver,
       });
       expect(resolver).toHaveBeenCalledOnce();
-      expect(transform).toHaveBeenCalled();
+      expect(capture.shape()).toMatchObject({ bound: true, batch: true, invalid: !accepted });
+      if (!structuredTerminalReplies || reply) expect(transform).toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledTimes(deliveries);
       if (reply && !accepted) expect(deliver.mock.calls[0][0]).toMatchObject({ text: reply });
       if (accepted) {
@@ -189,18 +201,18 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         expect(result.queuedFinal).toBe(false);
         expect(result.counts.final).toBe(0);
       }
-      else if (!reply) expect(result.noVisibleReplyFallbackDelivered).toBe(true);
+      else if (!reply) {
+        if (structuredTerminalReplies) expect(deliver.mock.calls[0][0]).toMatchObject({ isError: true });
+        else expect(result.noVisibleReplyFallbackDelivered).toBe(true);
+      }
     } finally {
       capture.finish();
       vi.unstubAllEnvs();
       caseDirectories.push(directory);
     }
   });
-  it.skipIf(!requiredSourceFinalizer).each([true, false])("handles the actual inner native empty-reply error with accepted final send=%s", async (accepted) => {
-    const buildEmptyReply = await hostFunction("commentary-progress-owner", "buildEmptyInteractiveReplyPayload", ["agent-runner-failure-reply"]);
-    // Use the native constructor, not a copied fixture: wording/metadata drift
-    // must fail this compatibility check rather than silently hide a new error.
-    const nativeFailure = buildEmptyReply({ completion: { outcome: "missing" } });
+  it.skipIf(!requiredSourceFinalizer).each([true, false])("suppresses only native missing-reply notices after accepted final send=%s", async (accepted) => {
+    const nativeFailure = await nativeEmptyReplyPayload();
     expect(nativeFailure).toMatchObject({ isError: true });
     const directory = await mkdtemp(join(tmpdir(), "inkbox-inner-completion-"));
     vi.stubEnv("OPENCLAW_STATE_DIR", directory);
@@ -233,7 +245,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     }
   });
   it("recognizes only entirely successful, explicitly terminating batches", async () => {
-    const evidence = await hostFunction("builtin-openclaw", "resolveSettledToolBatchEvidence", ["sdk"]);
+    const evidence = await hostFunction("builtin-openclaw", "resolveSettledToolBatchEvidence", ["sdk", "tool-terminal-outcome"]);
     expect(evidence(settledAttempt([{ terminate: true }])).intentionalTermination).toBe(true);
     expect(evidence(settledAttempt([{ terminate: true }, { terminate: true }])).intentionalTermination).toBe(true);
     expect(evidence(settledAttempt([{ terminate: true }, {}])).intentionalTermination).toBe(false);
@@ -242,11 +254,14 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
   });
 
   it("skips isolated finalization only for intentional completed actions", async () => {
-    const continuation = await hostFunction("builtin-openclaw", "resolveSettledToolTerminalContinuationInstruction", ["sdk"]);
-    const input = { executionContract: "strict-agentic", allowEmptyStopContinuation: true, payloadCount: 0, aborted: false, timedOut: false };
+    const continuation = await hostFunction("builtin-openclaw", "resolveSettledToolTerminalContinuationInstruction", ["sdk", "tool-terminal-outcome"], ["resolveSettledToolTerminalContinuation"]);
+    const input = { executionContract: "strict-agentic", allowEmptyStopContinuation: true, payloadCount: 0, aborted: false, timedOut: false, replyDeliveryState: "missing" };
     expect(continuation({ ...input, attempt: settledAttempt([{ terminate: true }]) })).toBeNull();
-    expect(continuation({ ...input, attempt: settledAttempt([{}]) })).toBeTypeOf("string");
-    expect(continuation({ ...input, attempt: settledAttempt([{ isError: true }]) })).toBeTypeOf("string");
+    for (const result of [{}, { isError: true }]) {
+      const next = continuation({ ...input, attempt: settledAttempt([result]) });
+      expect(structuredTerminalReplies ? next.instruction : next).toBeTypeOf("string");
+      if (structuredTerminalReplies) expect(next.disableTools).toBe(true);
+    }
   });
 
   it("does not misclassify intentional termination as an empty interactive failure", async () => {
@@ -255,7 +270,15 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     const input = { provider: "synthetic", model: "synthetic" };
     expect(classify({ ...input, result: { meta: { intentionalTerminalCompletion: "tool-batch" }, payloads: [] } })).toBeNull();
     expect(classify({ ...input, result: { meta: {}, payloads: [] } })).toMatchObject({ code: "empty_result" });
-    expect(classify({ ...input, result: { meta: { finalAssistantRawText: "NO_REPLY" }, payloads: [] } })).toBeNull();
+    const silentMeta = { finalAssistantRawText: SILENT_REPLY_TOKEN, ...(structuredTerminalReplies
+      ? { terminalReply: (await hostFunction("agent-run-terminal-reply", "prepareAgentRunTerminalReply"))({ rawText: SILENT_REPLY_TOKEN }).terminalReply }
+      : {}) };
+    if (structuredTerminalReplies) {
+      const completion = await hostFunction("reply-completion", "resolveReplyCompletion");
+      expect(completion("required", silentMeta.terminalReply.disposition).outcome).toBe("silent");
+      expect(completion("result-required", silentMeta.terminalReply.disposition).outcome).toBe("missing");
+    }
+    expect(classify({ ...input, result: { meta: silentMeta, payloads: [] } })).toBeNull();
     expect(classify({ ...input, result: { meta: { finalAssistantRawText: "[SILENT]" }, payloads: [] } })).toMatchObject({ code: "empty_result" });
   });
 });

@@ -6,6 +6,7 @@ export type WhatsAppSendIntent = { idempotencyKey: string; text?: string; mediaI
 
 /** Trusted, short-lived source ownership captured by native tool factories. */
 export type NativeSource = {
+  replyChannel?: "email" | "sms"; replySourceId?: string; replyRoute?: string;
   whatsapp?: boolean; whatsappGroup?: boolean; sourceMessageId?: string;
   identityId: string; conversationId: string; replyToMessageId?: string; slackRoute?: SlackRoute;
   author: string; companion?: boolean; closed: boolean; runId?: string; nativeSessionId?: string; marker?: string;
@@ -29,10 +30,27 @@ const key = Symbol.for("inkbox.native-source.v1");
 const shared = globalThis as typeof globalThis & { [key]?: Map<string, NativeSource> };
 const sources = shared[key] ??= new Map<string, NativeSource>();
 export function activeNativeSource(sessionKey?: string): NativeSource | undefined { return sessionKey ? sources.get(sessionKey) : undefined; }
+const waitKey = Symbol.for("inkbox.native-source-waiters.v1");
+const sharedWaiters = globalThis as typeof globalThis & { [waitKey]?: Map<string, Set<() => void>> };
+const waiters = sharedWaiters[waitKey] ??= new Map<string, Set<() => void>>();
+export async function acquireNativeSource(sessionKey: string, source: NativeSource, signal?: AbortSignal): Promise<() => void> {
+  while (sources.has(sessionKey)) {
+    signal?.throwIfAborted();
+    const queue = waiters.get(sessionKey) ?? new Set<() => void>();
+    if (queue.size >= 8) throw new Error("The incoming conversation queue is full.");
+    waiters.set(sessionKey, queue);
+    let wake!: () => void;
+    const waiting = new Promise<void>(resolve => { wake = resolve; });
+    queue.add(wake); signal?.addEventListener("abort", wake, { once: true });
+    try { await waiting; } finally { queue.delete(wake); signal?.removeEventListener("abort", wake); if (!queue.size) waiters.delete(sessionKey); }
+  }
+  signal?.throwIfAborted();
+  return bindNativeSource(sessionKey, source);
+}
 export function bindNativeSource(sessionKey: string, source: NativeSource): () => void {
   if (sources.has(sessionKey)) throw new Error("Native source session already has an active owner.");
   sources.set(sessionKey, source);
-  return () => { source.closed = true; if (sources.get(sessionKey) === source) sources.delete(sessionKey); };
+  return () => { source.closed = true; if (sources.get(sessionKey) === source) { sources.delete(sessionKey); for (const wake of waiters.get(sessionKey) ?? []) wake(); } };
 }
 export function assertNativeSource(source: NativeSource, identityId: string): void {
 
