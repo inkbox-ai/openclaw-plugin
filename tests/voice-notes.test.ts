@@ -233,3 +233,36 @@ describe("voice-note delivery", () => {
     expect(event?.data.text_message.media[0].transcription.status).toBe("completed");
   });
 });
+
+
+it.each(["text", "imessage", "whatsapp"])(
+  "does not add a second wait for configured hosted %s input",
+  async family => {
+    vi.stubEnv("INKBOX_HOSTED_MODE", "1");
+    try {
+      const { inbox, deliver, poll } = setup();
+      const event = received(family);
+      expect(await inbox.accept(event)).toBe(false);
+      const message = event.data[family === "text" ? "text_message" : "message"];
+      expect(voiceNoteContext(message)).toContain("transcript unavailable");
+      expect(await inbox.accept(completion(family))).toBe(true);
+      inbox.recover();
+      await vi.advanceTimersByTimeAsync(70_000);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(poll).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
+it("does not let an event body claim hosted transcription ownership", async () => {
+  vi.stubEnv("INKBOX_HOSTED_MODE", "");
+  try {
+    const { inbox, deliver } = setup();
+    expect(await inbox.accept({ ...received(), hosted_delivery: { starts_agent: true } })).toBe(true);
+    expect(deliver).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
