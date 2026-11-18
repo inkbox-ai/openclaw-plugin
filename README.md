@@ -637,7 +637,7 @@ MIT - see [LICENSE](./LICENSE).
 
 Incoming MMS, iMessage, and WhatsApp audio keeps its original attachment and caption. When a transcript is pending, the plugin waits up to 60 seconds for a completion notification, then reads the message once if needed. That fallback read is bounded to 10 seconds. A completed transcript reaches the agent as explicitly labeled voice-note context, not as an ordinary typed message.
 
-If transcription fails, is skipped, or remains unavailable after the wait and read, the original message follows the usual attachment-handling path. Completion notifications do not create a second turn. The plugin registers the three channel-specific transcription completion events automatically alongside its existing message subscriptions. Pending messages retain their original deadline across restarts.
+If transcription fails, is skipped, or remains unavailable after the wait and read, the original message follows the usual attachment-handling path. Completion notifications do not create a second turn. The plugin subscribes to `message.transcription_finished` once per identity. The event’s `data.channel` and `data.message_id` identify the original message; the plugin resumes that message in its original session. Pending messages retain their original deadline across restarts.
 
 ## Dedicated WhatsApp
 
