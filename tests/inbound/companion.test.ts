@@ -911,3 +911,43 @@ it("keeps a pending voice fallback checkpoint across consumer restart and cache 
     clock.mockRestore();
   }
 });
+
+
+it("retains a pending voice initializer without spending retries on repeated shutdowns", async () => {
+  const s = setup("phone");
+  const original = event("initialization", 1, "phone");
+  (original.data.text_message as any).media = [{ id: "voice-one", transcription: { status: "pending" } }];
+  const warn = vi.fn();
+  const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); return []; });
+  for (let shutdown = 0; shutdown < 6; shutdown++) {
+    const controller = new AbortController();
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const receiver = createCompanionReceiver({
+      accountId: "voice-shutdown", config: s.account.config, runtime: s.runtime as any,
+      signal: controller.signal, warn, submit, deliver: vi.fn(),
+      resolveVoiceNote: async () => new Promise((_, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("Voice-note receiver is stopping.")), { once: true });
+        entered();
+      }),
+    });
+    if (shutdown === 0) await receiver.accept(original);
+    const recovering = receiver.recover();
+    await waiting;
+    controller.abort();
+    await recovering;
+    const saved: any = Object.values((await journal()).value.jobs)[0];
+    expect(saved.state).toBe("pending");
+    expect(saved.attempts).toBeUndefined();
+    expect(saved.retryAt).toBeUndefined();
+    expect(saved.nativeComplete).toBeUndefined();
+  }
+  expect(warn).not.toHaveBeenCalled();
+  expect(submit).not.toHaveBeenCalled();
+  const restarted = createCompanionReceiver({
+    accountId: "voice-shutdown", config: s.account.config, runtime: s.runtime as any,
+    submit, deliver: vi.fn(), resolveVoiceNote: async value => value,
+  });
+  await restarted.recover();
+  expect(submit).toHaveBeenCalledTimes(1);
+});

@@ -1107,6 +1107,7 @@ export function createCompanionReceiver(opts: {
         if (blocked.has(scope)) continue;
         try { await processJob(id, job); }
         catch (error) {
+          if (stopped() && (await readJob(id))?.state === "pending") return;
           blocked.add(scope);
           let deferred = false;
           await mutate((j) => {
