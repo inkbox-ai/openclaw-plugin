@@ -78,6 +78,10 @@ async function storedJobs(): Promise<any[]> {
   return Promise.all(files.map(async (name) => JSON.parse(await readFile(join(dir, name), "utf8"))));
 }
 
+async function allDone(): Promise<boolean> {
+  return (await storedJobs()).every((job) => job.stage === "done");
+}
+
 function deps(overrides: Record<string, any> = {}) {
   return {
     dir,
@@ -251,7 +255,8 @@ describe("createInboundEventHandler", () => {
     const d = deps({ runTurn: vi.fn(async () => { throw new Error("model unavailable"); }) });
     const handler = create(d);
     await handler.handle(inboundEvent());
-    await until(() => handler.activity() === 0, "idle");
+    await until(allDone, "idle");
+    expect(d.runTurn).toHaveBeenCalledTimes(1);
     expect(d.reportFailure).toHaveBeenCalledTimes(1);
     const [data, error] = d.reportFailure.mock.calls[0];
     expect(data.delivery_id).toBe(DELIVERY_ID);
@@ -321,7 +326,7 @@ describe("createInboundEventHandler", () => {
       await until(async () => (await storedJobs())[0]?.attempts === index + 1, `attempt ${index + 1}`);
       await vi.advanceTimersByTimeAsync(delay);
     }
-    await until(() => second.activity() === 0, "report");
+    await until(allDone, "report");
     expect(failing).toHaveBeenCalledTimes(5);
     expect(d.reportFailure).toHaveBeenCalledTimes(1);
   });
@@ -340,9 +345,10 @@ describe("createInboundEventHandler", () => {
     }
     await until(() => reportFailure.mock.calls.length === 1, "first report");
     await until(async () => (await storedJobs())[0].attempts === 1 && (await storedJobs())[0].stage === "report", "report backoff");
-    expect(handler.activity()).toBe(1);
+    // A pending failure report does not keep the runtime awake.
+    expect(handler.activity()).toBe(0);
     await vi.advanceTimersByTimeAsync(30_000);
-    await until(() => handler.activity() === 0, "done");
+    await until(allDone, "done");
     expect(reportFailure).toHaveBeenCalledTimes(2);
     expect(runScript).toHaveBeenCalledTimes(5);
   });
@@ -362,6 +368,46 @@ describe("createInboundEventHandler", () => {
     expect(d.reportFailure).not.toHaveBeenCalled();
     expect(d.runTurn.mock.calls[0][0].message).toContain("Invoice 42 needs review");
     expect(d.runTurn.mock.calls[0][0].message).not.toContain('{"paid":true}');
+  });
+
+  it("reports an agent turn interrupted by a restart instead of repeating it", async () => {
+    const first = create(deps({ runTurn: vi.fn(() => new Promise<void>(() => {})) }));
+    await first.handle(inboundEvent());
+    await until(async () => (await storedJobs())[0]?.started === true, "turn started");
+    first.close();
+    const d = deps();
+    create(d);
+    await until(() => d.reportFailure.mock.calls.length === 1, "report");
+    expect(d.runTurn).not.toHaveBeenCalled();
+    expect(d.reportFailure.mock.calls[0][1]).toBe("agent turn was interrupted by a restart");
+  });
+
+  it("reports a failed turn on script output without re-running the script", async () => {
+    const runScript = vi.fn(async () => ({ ok: true, stdout: "summary", error: "" }));
+    const d = deps({ runScript, runTurn: vi.fn(async () => { throw new Error("model unavailable"); }) });
+    const handler = create(d);
+    await handler.handle(inboundEvent({ type: "script", command: "x" }));
+    await until(allDone, "done");
+    expect(runScript).toHaveBeenCalledTimes(1);
+    expect(d.runTurn).toHaveBeenCalledTimes(1);
+    expect(d.reportFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [200, false], [409, false], [400, false], [404, false], [408, true], [429, true], [500, true], [undefined, true],
+  ])("treats a report response of %s as retry=%s", async (status, retried) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const reportFailure = status === 200
+      ? vi.fn(async () => {})
+      : vi.fn(async () => { throw Object.assign(new Error(`HTTP ${status ?? "network"}`), status ? { statusCode: status } : {}); });
+    const handler = create(deps({ reportFailure, runTurn: vi.fn(async () => { throw new Error("boom"); }) }));
+    await handler.handle(inboundEvent());
+    await until(() => reportFailure.mock.calls.length === 1, "first report");
+    await until(async () => (await storedJobs())[0].stage === (retried ? "report" : "done") &&
+      (!retried || (await storedJobs())[0].attempts === 1), "settled");
+    await vi.advanceTimersByTimeAsync(30_000);
+    await until(() => reportFailure.mock.calls.length === (retried ? 2 : 1), "retry");
+    expect(handler.activity()).toBe(0);
   });
 
   it("ignores events without a delivery_id", async () => {

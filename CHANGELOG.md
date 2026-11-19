@@ -3,8 +3,8 @@
 ## 0.2.25 (unreleased)
 
 - Add local delivery mode (`INKBOX_DELIVERY_MODE=local`): no tunnel, public route, or subscription changes; signature verification is unchanged and identities without a tunnel are supported.
-- Handle `inbound.received` in local mode with the source's `agent` or `script` handler. Deliveries are written to a durable queue before they are acknowledged, deduplicated by `delivery_id` (a replay runs again), and resume after a restart. A failing script runs at most 5 times (retries after 10 s, 30 s, 2 min, 10 min); a failing script or agent turn is reported as failed with its `delivery_id`, and reports are retried for up to 24 hours. Script output is capped at 64 KiB of stdout and a 4 KiB stderr tail; request bodies in agent messages are capped at 64 KiB. The event requires a valid Inkbox signature.
-- The session bridge exposes `activity()` with the number of queued, retrying, or unreported inbound events.
+- Handle `inbound.received` in local mode with the source's `agent` or `script` handler. Deliveries are written to a durable queue before they are acknowledged, deduplicated by `delivery_id` (a replay runs again), and resume after a restart. A failing script runs at most 5 times (retries after 10 s, 30 s, 2 min, 10 min); an agent turn runs at most once: a failed or interrupted turn is reported, never repeated, and a failed turn on script output does not run the script again. Failures are reported with the `delivery_id`; while the plugin runs, the report is retried with backoff for up to 24 hours across restarts. A 2xx, a 409 (stale delivery) or any other 4xx except 408 and 429 ends the retries. Script output is capped at 64 KiB of stdout and a 4 KiB stderr tail; request bodies in agent messages are capped at 64 KiB. The event requires a valid Inkbox signature.
+- The session bridge exposes `activity()` with the number of queued, running, or script-retrying inbound events; pending failure reports are not counted.
 - Require `@inkbox/sdk` 0.7.41 or later.
 
 ## 0.2.24 (unreleased)

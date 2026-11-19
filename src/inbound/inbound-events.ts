@@ -71,6 +71,8 @@ interface Job {
   attempts: number;
   dueAt: number;
   output?: string;
+  /** Set before the agent turn starts; an interrupted turn is reported, never repeated. */
+  started?: boolean;
   error?: string;
   reportSince?: number;
   doneAt?: number;
@@ -266,6 +268,10 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       return;
     }
     if (job.stage === "turn") {
+      if (job.started) return toReport(job, "agent turn was interrupted by a restart");
+      const started: Job = { ...job, started: true };
+      await save(started);
+      jobs.set(job.key, started);
       const message = job.output !== undefined
         ? buildInboundMessage(data, job.output, "utf8")
         : buildInboundMessage(data, data.request.body ?? "", data.request.body_encoding);
@@ -273,7 +279,7 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
         await deps.runTurn({ source: data.source.name, eventId: data.event_id, message });
       } catch (error) {
         deps.logger?.warn?.(`Inkbox inbound event ${data.event_id} agent turn failed: ${describe(error)}`);
-        return toReport(job, `agent turn failed: ${describe(error)}`);
+        return toReport(started, `agent turn failed: ${describe(error)}`);
       }
       return finish(job);
     }
@@ -371,9 +377,9 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       if (jobs.has(key)) return "completed";
       return persisting.has(key) ? "pending" : "absent";
     },
-    /** Queued, running, retrying, or unreported work; keeps a hosted runtime awake. */
+    /** Queued, running, or script-retrying work; keeps a hosted runtime awake. Pending failure reports do not. */
     activity(): number {
-      return persisting.size + [...jobs.values()].filter((job) => job.stage !== "done").length;
+      return persisting.size + [...jobs.values()].filter((job) => job.stage === "script" || job.stage === "turn").length;
     },
     ready,
     close(): void {
