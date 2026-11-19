@@ -9,6 +9,7 @@ import type { PluginLogger } from "../client.js";
 export const INBOUND_RECEIVED = "inbound.received";
 export const LOCAL_DELIVERY_MAX_BODY_BYTES = 2 * 1024 * 1024;
 export const SCRIPT_TIMEOUT_MS = 120_000;
+export const TURN_TIMEOUT_MS = 30 * 60 * 1000;
 export const SCRIPT_RETRY_DELAYS_MS = [10_000, 30_000, 120_000, 600_000];
 export const SCRIPT_STDOUT_MAX_BYTES = 64 * 1024;
 export const SCRIPT_STDERR_MAX_BYTES = 4 * 1024;
@@ -294,13 +295,22 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       const message = job.output !== undefined
         ? buildInboundMessage(data, job.output, "utf8")
         : buildInboundMessage(data, data.request.body ?? "", data.request.body_encoding);
+      let bound: ReturnType<typeof setTimeout> | undefined;
       try {
-        await deps.runTurn({ source: data.source.name, eventId: data.event_id, message }, abort.signal);
+        await Promise.race([
+          deps.runTurn({ source: data.source.name, eventId: data.event_id, message }, abort.signal),
+          new Promise<never>((_, reject) => {
+            bound = setTimeout(() => reject(new Error(`agent turn did not finish within ${TURN_TIMEOUT_MS / 60_000} minutes`)), TURN_TIMEOUT_MS);
+            bound.unref?.();
+          }),
+        ]);
       } catch (error) {
         // Left started: the next start reports the interrupted turn.
         if (closed) return;
         deps.logger?.warn?.(`Inkbox inbound event ${data.event_id} agent turn failed: ${describe(error)}`);
         return toReport(started, `agent turn failed: ${describe(error)}`);
+      } finally {
+        clearTimeout(bound);
       }
       return finish(job);
     }

@@ -10,6 +10,7 @@ import {
   SCRIPT_RETRY_DELAYS_MS,
   SCRIPT_STDERR_MAX_BYTES,
   SCRIPT_STDOUT_MAX_BYTES,
+  TURN_TIMEOUT_MS,
   buildInboundMessage,
   createInboundEventHandler,
   localDeliveryMode,
@@ -269,6 +270,20 @@ describe("createInboundEventHandler", () => {
     const [data, error] = d.reportFailure.mock.calls[0];
     expect(data.delivery_id).toBe(DELIVERY_ID);
     expect(error).toBe("agent turn failed: model unavailable");
+  });
+
+  it("reports an agent turn that does not finish within 30 minutes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const d = deps({ runTurn: vi.fn(() => new Promise<void>(() => {})) });
+    const handler = create(d);
+    await handler.handle(inboundEvent());
+    await until(() => d.runTurn.mock.calls.length === 1, "turn");
+    await vi.advanceTimersByTimeAsync(TURN_TIMEOUT_MS - 1);
+    expect(d.reportFailure).not.toHaveBeenCalled();
+    expect(handler.activity()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await until(() => d.reportFailure.mock.calls.length === 1 && handler.activity() === 0, "report");
+    expect(d.reportFailure.mock.calls[0][1]).toBe("agent turn failed: agent turn did not finish within 30 minutes");
   });
 
   it("passes the request to the script on stdin", async () => {
