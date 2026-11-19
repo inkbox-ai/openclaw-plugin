@@ -5,6 +5,7 @@ import {
   IMESSAGE_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
+  WHATSAPP_EVENT_TYPES,
   reconcileWebhookSubscription,
 } from "../../src/inbound/subscriptions.js";
 
@@ -509,4 +510,33 @@ it("reconciles voice-note completion independently of a mailbox on the same URL"
   await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url, eventTypes: ["message.transcription_finished"] });
   expect(update).not.toHaveBeenCalled();
   expect(create).toHaveBeenCalledWith({ agentIdentityId: "identity", url, eventTypes: ["message.transcription_finished"] });
+});
+
+it("adopts shared WhatsApp coverage across repeated starts without writes", async () => {
+  const url = "https://example.com/webhook";
+  const rows = [makeSub({ url, eventTypes: [...WHATSAPP_EVENT_TYPES, "whatsapp.future"] })];
+  const { client, list, create, update, delete: remove } = makeClient({ list: vi.fn(async () => rows) });
+  for (let start = 0; start < 2; start++) {
+    await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url, eventTypes: WHATSAPP_EVENT_TYPES });
+  }
+  expect(list).toHaveBeenCalledWith({ agentIdentityId: "identity", scope: "identity", url });
+  expect(create).not.toHaveBeenCalled();
+  expect(update).not.toHaveBeenCalled();
+  expect(remove).not.toHaveBeenCalled();
+});
+
+it("registers only WhatsApp events not covered at this endpoint, including after a race", async () => {
+  const url = "https://example.com/webhook";
+  const [first, second, ...rest] = WHATSAPP_EVENT_TYPES;
+  const initial = makeSub({ url, eventTypes: [first, "whatsapp.future"] });
+  const list = vi.fn().mockResolvedValueOnce([initial]).mockResolvedValueOnce([
+    initial, makeSub({ url, eventTypes: [second] }),
+  ]);
+  const create = vi.fn().mockRejectedValueOnce(new InkboxAPIError(409, "Overlapping events"))
+    .mockResolvedValueOnce(makeSub({ url, eventTypes: rest }));
+  const { client, update, delete: remove } = makeClient({ list, create });
+  await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url, eventTypes: WHATSAPP_EVENT_TYPES });
+  expect(create.mock.calls.map(([body]) => body.eventTypes)).toEqual([[second, ...rest], rest]);
+  expect(update).not.toHaveBeenCalled();
+  expect(remove).not.toHaveBeenCalled();
 });

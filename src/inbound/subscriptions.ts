@@ -162,6 +162,27 @@ export async function reconcileWebhookSubscription(
       ? { phoneNumberId: desired.phoneNumberId! }
       : { agentIdentityId: desired.agentIdentityId! };
 
+  if (hasIdentity && desired.eventTypes.length > 0 && desired.eventTypes.every((event) => event.startsWith("whatsapp."))) {
+    const subscriptions = inkbox.webhooks.subscriptions;
+    let needed = [...desired.eventTypes];
+    let conflict: InkboxAPIError | undefined;
+    while (true) {
+      const rows = await subscriptions.list({ ...ownerFilter, scope: "identity", url: desired.url });
+      const covering = rows.filter((row) => row.url === desired.url && row.eventTypes.some((event) => needed.includes(event)));
+      const covered = new Set(covering.flatMap((row) => row.eventTypes));
+      const missing = needed.filter((event) => !covered.has(event));
+      if (!missing.length) return covering[0]!;
+      if (conflict && missing.length === needed.length) throw conflict;
+      try {
+        return await subscriptions.create({ ...ownerFilter, url: desired.url, eventTypes: missing });
+      } catch (error) {
+        if (!(error instanceof InkboxAPIError) || error.statusCode !== 409) throw error;
+        conflict = error;
+        needed = missing;
+      }
+    }
+  }
+
   const existing = await inkbox.webhooks.subscriptions.list({ ...ownerFilter, scope: "identity" });
   const desiredFamilies = eventFamilies(desired.eventTypes);
   const mergedEvents = (sub: WebhookSubscription) => [...new Set([...sub.eventTypes.filter((event) => !desiredFamilies.has(eventFamily(event))), ...desired.eventTypes])];
