@@ -93,13 +93,14 @@ function urlPathname(url: string): string | null {
   }
 }
 
-function transcriptionEventUnsupported(error: unknown): boolean {
+/** An API that predates transcription completions rejects only that event type. */
+export function transcriptionEventUnsupported(error: unknown): boolean {
   if (!(error instanceof InkboxAPIError) || error.statusCode !== 422) return false;
   const issues = error.detail;
   return Array.isArray(issues) && issues.length > 0 && issues.every((issue) =>
     issue?.type === "enum" && issue.input === TRANSCRIPTION_FINISHED &&
     Array.isArray(issue.loc) && issue.loc[0] === "body" &&
-    issue.loc[1] === "event_types" && issue.loc[2] === 0
+    issue.loc[1] === "event_types" && Number.isInteger(issue.loc[2])
   );
 }
 

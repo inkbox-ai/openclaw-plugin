@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Inkbox } from "@inkbox/sdk";
+import { Inkbox, InkboxAPIError } from "@inkbox/sdk";
 import { parseSlack, prepareSlackSource, reconcileSlackSubscription, sendSlackReply, SLACK_SUBSCRIPTION_EVENTS, type SlackRoute } from "../src/slack.js";
 import { createSlackActivity } from "../src/slack-activity.js";
 import { configureSlack } from "../src/slack-setup.js";
@@ -54,6 +54,35 @@ describe("Slack signed source and published SDK contract", () => {
     const sdk: any = { webhooks: { subscriptions: { list: async () => [{ id: "one", url: "https://receiver.test", status: "active", eventTypes: ["slack.mention_received", "text.received"] }], update, create } } };
     await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
     expect(update).toHaveBeenCalledWith("one", { scope: "identity", eventTypes: expect.arrayContaining([...SLACK_SUBSCRIPTION_EVENTS, "text.received"]) }); expect(create).not.toHaveBeenCalled();
+  });
+  it("adds transcription completions to the row that selects Slack messages", async () => {
+    const update = vi.fn(), create = vi.fn();
+    const rows = [
+      { id: "slack", url: "https://receiver.test", status: "active", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] },
+      { id: "shared", url: "https://receiver.test", status: "active", eventTypes: ["message.transcription_finished"] },
+    ];
+    const sdk: any = { webhooks: { subscriptions: { list: async () => rows, update, create } } };
+    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
+    expect(update).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenCalledWith("slack", { scope: "identity", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS, "message.transcription_finished"] });
+    rows[0]!.eventTypes.push("message.transcription_finished"); update.mockClear();
+    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
+    expect(update).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
+    rows.splice(0);
+    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
+    expect(create).toHaveBeenCalledWith({ agentIdentityId: identityId, url: "https://receiver.test", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS, "message.transcription_finished"] });
+  });
+  it("keeps Slack delivery when an older API rejects the completion event", async () => {
+    const unsupported = () => Object.assign(new InkboxAPIError(422, "Unknown event"), {
+      detail: [{ type: "enum", loc: ["body", "event_types", SLACK_SUBSCRIPTION_EVENTS.length], input: "message.transcription_finished" }],
+    });
+    const create = vi.fn().mockRejectedValueOnce(unsupported()), update = vi.fn().mockRejectedValue(unsupported());
+    const sdk: any = { webhooks: { subscriptions: { list: async () => [], update, create } } };
+    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
+    expect(create).toHaveBeenLastCalledWith({ agentIdentityId: identityId, url: "https://receiver.test", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] });
+    sdk.webhooks.subscriptions.list = async () => [{ id: "slack", url: "https://receiver.test", status: "active", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] }];
+    await expect(reconcileSlackSubscription(sdk, identityId, "https://receiver.test")).resolves.toBeUndefined();
+    expect(update).toHaveBeenCalledOnce();
   });
   it("exercises real SDK snake-case routes, null thread and stable idempotency headers", async () => {
     const requests: { url: string; init?: RequestInit }[] = [];
