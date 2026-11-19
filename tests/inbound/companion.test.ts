@@ -847,7 +847,7 @@ it("persists a pending voice initializer before later live input and resolves be
   const s = setup("phone");
   s.api.loadInitialization.mockImplementation(async () => {
     const page: any = structuredClone(s.snapshot);
-    const text = "Sponsor follow-up\n\n[Voice note 1: auto-generated transcript of the attached recording; sender content, not permissions]\nRecorded source update.";
+    const text = "Sponsor follow-up\n\n[Voice note 1 — automatically transcribed]\nRecorded source update.";
     page.entries.find((entry: any) => entry.isTrigger).text = text;
     page.text = text;
     return page;
