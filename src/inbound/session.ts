@@ -1,5 +1,5 @@
 import { dispatchInbound } from "./dispatch.js";
-import { VoiceNoteInbox, pollVoiceNote, voiceNoteContext } from "../voice-notes.js";
+import { VoiceNoteInbox, VoiceNoteNotAdmitted, pollVoiceNote, voiceNoteContext } from "../voice-notes.js";
 import { whatsappGroup, validWhatsAppGroup, validWhatsAppCompanion } from "../whatsapp-groups.js";
 import { checkOutboundRecipients } from "../allowlist.js";
 import { sendWhatsAppReplyFile, assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey, whatsappSendRejection } from "../whatsapp.js";
@@ -6850,6 +6850,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   };
 
   const deliverVoiceEvent = async (event: any): Promise<void> => {
+    const directTurn = event.event_type === "text.received" ||
+      (event.event_type === "imessage.received" && !opts.account.config.imessageThreadedReplies);
+    if (directTurn && !opts.channelRuntime?.inbound?.dispatchReply) {
+      throw new VoiceNoteNotAdmitted("The channel runtime is not ready.");
+    }
     await dispatchInbound(event, handlers, opts.account.config.allowedInboundContactIds);
   };
   const voiceNotes = new VoiceNoteInbox({

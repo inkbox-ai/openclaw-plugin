@@ -2,8 +2,10 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname } from "node:path";
 
 export type VoiceEvent = Record<string, any>;
-type Pending = { event: VoiceEvent; deadline: number; polled?: boolean; retryAt?: number; resolutionOnly?: boolean; resolvedAt?: number };
-type Saved = { pending: Record<string, Pending>; done: Record<string, number> };
+export class VoiceNoteNotAdmitted extends Error {}
+
+type Pending = { event: VoiceEvent; deadline: number; polled?: boolean; handoff?: "attempting" | "retry"; retryAt?: number; resolutionOnly?: boolean; resolvedAt?: number };
+type Saved = { handoffVersion?: number; pending: Record<string, Pending>; done: Record<string, number> };
 const FAMILIES = new Set(["text", "imessage", "whatsapp"]);
 
 export const TRANSCRIPTION_FINISHED = "message.transcription_finished";
@@ -115,6 +117,15 @@ export class VoiceNoteInbox {
     },
   ) {
     if (existsSync(options.path)) this.saved = JSON.parse(readFileSync(options.path, "utf8"));
+    if (this.saved.handoffVersion !== 1) {
+      // Older receipts that reached delivery had no pre-call checkpoint.
+      for (const entry of Object.values(this.saved.pending)) {
+        if (!entry.resolutionOnly && (entry.polled || entry.retryAt || !pending(source(entry.event)))) {
+          entry.handoff = "attempting";
+        }
+      }
+      this.saved.handoffVersion = 1;
+    }
   }
   private persist(): void {
     const now = Date.now();
@@ -144,7 +155,7 @@ export class VoiceNoteInbox {
       if (this.saved.done[id]) return true;
       const entry = this.saved.pending[id];
       if (entry) {
-        if (entry.resolvedAt) return true;
+        if (entry.resolvedAt || entry.handoff) return true;
         entry.event = merge(entry.event, event);
         this.persist();
         if (!pending(source(entry.event))) this.launch(id, false);
@@ -189,6 +200,8 @@ export class VoiceNoteInbox {
       this.early.delete(id);
       const current = cached && Date.now() - cached.at < 300_000 ? merge(event, cached.event) : event;
       entry = this.saved.pending[id] = { event: current, deadline, resolutionOnly: true };
+    } else if (entry.handoff) {
+      return merge(event, entry.event);
     } else {
       entry.resolutionOnly = true;
     }
@@ -210,7 +223,7 @@ export class VoiceNoteInbox {
   private schedule(id: string): void {
     if (this.stopped || this.timers.has(id) || this.running.has(id)) return;
     const entry = this.saved.pending[id];
-    if (!entry || entry.resolvedAt || (entry.resolutionOnly && !this.resolutions.has(id))) return;
+    if (!entry || entry.handoff === "attempting" || entry.resolvedAt || (entry.resolutionOnly && !this.resolutions.has(id))) return;
     const delay = entry.retryAt !== undefined
       ? Math.max(0, entry.retryAt - Date.now())
       : pending(source(entry.event)) && !entry.polled
@@ -239,7 +252,7 @@ export class VoiceNoteInbox {
           this.options.warn();
           return;
         }
-        if (entry) {
+        if (entry && entry.handoff !== "attempting") {
           entry.retryAt = Date.now() + 5_000;
           try { this.persist(); } catch { /* The original receipt remains retained. */ }
         }
@@ -257,7 +270,7 @@ export class VoiceNoteInbox {
     if (!entry || this.stopped) return;
     clearTimeout(this.timers.get(id));
     this.timers.delete(id);
-    if (poll && pending(source(entry.event)) && !entry.polled) {
+    if (!entry.handoff && poll && pending(source(entry.event)) && !entry.polled) {
       entry.polled = true;
       this.persist();
       try {
@@ -284,7 +297,16 @@ export class VoiceNoteInbox {
       this.resolutions.delete(id);
       return;
     }
-    await this.options.deliver(entry.event);
+    // Persist before calling the host: a crash or generic exception does not
+    // prove that the turn was refused.
+    entry.handoff = "attempting";
+    this.persist();
+    try {
+      await this.options.deliver(entry.event);
+    } catch (error) {
+      if (error instanceof VoiceNoteNotAdmitted) entry.handoff = "retry";
+      throw error;
+    }
     delete this.saved.pending[id];
     this.saved.done[id] = Date.now();
     this.persist();
