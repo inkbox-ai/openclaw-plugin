@@ -5727,6 +5727,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
 
   async function shutdownA2A(): Promise<void> {
+    // A later start of this account opens the same queue; this one must stop first.
+    await inboundEvents?.close();
     voiceNotes.close();
     companion.close();
     await slackProgress.close();
@@ -6343,10 +6345,10 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   const inboundEvents = localDeliveryMode() ? createInboundEventHandler({
     dir: join(statePaths().dir, `inbound-${activityOwner}`),
     logger: opts.logger,
-    runTurn: async ({ source, eventId, message }) => {
+    runTurn: async ({ source, eventId, message }, signal) => {
       const name = source.replace(/[\[\]\r\n]/g, " ").slice(0, 80);
       let failure: string | undefined;
-      await dispatchInboundTurn({ ...opts, activeCalls, confirmDispatch: true, turn: {
+      await dispatchInboundTurn({ ...opts, activeCalls, confirmDispatch: true, dispatchAbortSignal: signal, replyOptionsOverride: { abortSignal: signal }, turn: {
         mode: "external",
         contactKey: `inbound:${name}`,
         sessionKeyOverride: `inbound:${name}`,

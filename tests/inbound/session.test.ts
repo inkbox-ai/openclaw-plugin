@@ -7017,6 +7017,30 @@ describe("createInkboxSessionBridge", () => {
       expect(await bridge.deliveryState({ ...event, data: { ...event.data, delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" } })).toBe("absent");
     });
 
+    it("shutdown closes the inbound queue and aborts the running turn", async () => {
+      const first = bridgeWith(true);
+      let aborted = false;
+      first.channelRuntime.inbound.dispatchReply = vi.fn((params: any) => new Promise((_resolve, reject) => {
+        params.replyOptions?.abortSignal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); });
+      }));
+      await first.bridge.handlers.onInboundEvent?.(event);
+      await vi.waitFor(() => expect(first.channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1));
+      await first.bridge.shutdownA2A();
+      expect(aborted).toBe(true);
+      expect(first.report).not.toHaveBeenCalled();
+      await expect(first.bridge.handlers.onInboundEvent?.({ ...event, data: { ...event.data, delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" } })).rejects.toThrow();
+
+      // The next start owns the queue alone and reports the interrupted turn.
+      const second = bridgeWith(true);
+      await vi.waitFor(() => expect(second.report).toHaveBeenCalledWith("smoke-agent", event.data.source.id, event.data.event_id, {
+        status: "failed",
+        error: "agent turn was interrupted by a restart",
+        deliveryId,
+      }));
+      expect(second.channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+      await second.bridge.shutdownA2A();
+    });
+
     it("reports an unconfirmed agent turn as failed with the delivery id", async () => {
       const { bridge, report } = bridgeWith(false);
       await bridge.handlers.onInboundEvent?.(event);

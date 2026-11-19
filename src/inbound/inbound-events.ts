@@ -13,7 +13,6 @@ export const SCRIPT_RETRY_DELAYS_MS = [10_000, 30_000, 120_000, 600_000];
 export const SCRIPT_STDOUT_MAX_BYTES = 64 * 1024;
 export const SCRIPT_STDERR_MAX_BYTES = 4 * 1024;
 export const AGENT_BODY_MAX_BYTES = 64 * 1024;
-export const REPORT_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const REPORT_RETRY_BASE_MS = 30_000;
 const REPORT_RETRY_MAX_MS = 60 * 60 * 1000;
 const REPORT_ERROR_MAX_CHARS = 2000;
@@ -54,10 +53,10 @@ export interface InboundTurn {
 export interface InboundEventDeps {
   /** Directory for the durable queue; one file per delivery. */
   dir: string;
-  /** Resolves only after the agent turn ran; rejects otherwise. */
-  runTurn(turn: InboundTurn): Promise<void>;
+  /** Resolves only after the agent turn ran; rejects otherwise. The signal aborts it on shutdown. */
+  runTurn(turn: InboundTurn, signal: AbortSignal): Promise<void>;
   reportFailure(data: InboundEventData, error: string): Promise<void>;
-  runScript?(command: string, input: string): Promise<ScriptResult>;
+  runScript?(command: string, input: string, signal: AbortSignal): Promise<ScriptResult>;
   now?(): number;
   logger?: PluginLogger;
 }
@@ -74,7 +73,6 @@ interface Job {
   /** Set before the agent turn starts; an interrupted turn is reported, never repeated. */
   started?: boolean;
   error?: string;
-  reportSince?: number;
   doneAt?: number;
 }
 
@@ -110,6 +108,17 @@ export function truncateAgentBody(body: string): string {
   return `${utf8Prefix(bytes, AGENT_BODY_MAX_BYTES)}\n(truncated)`;
 }
 
+function bodyText(body: string, encoding: string | undefined): string {
+  if (encoding !== "base64") return truncateAgentBody(body) || "(empty)";
+  const bytes = Buffer.from(body, "base64");
+  try {
+    // Text can arrive base64-encoded too; only bytes that are not UTF-8 are withheld.
+    return truncateAgentBody(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) || "(empty)";
+  } catch {
+    return `(binary body, ${bytes.length} bytes, not shown)`;
+  }
+}
+
 export function buildInboundMessage(data: InboundEventData, body: string, encoding: string | undefined): string {
   const name = data.source.name.replace(/[\[\]\r\n]/g, " ").slice(0, 80);
   const parts = [
@@ -120,13 +129,7 @@ export function buildInboundMessage(data: InboundEventData, body: string, encodi
   ];
   const instructions = data.source.instructions?.trim();
   if (instructions) parts.push("", "Instructions for this source (from your owner):", instructions);
-  parts.push(
-    "",
-    "Request body:",
-    encoding === "base64"
-      ? `(binary body, ${Buffer.from(body, "base64").length} bytes, not shown)`
-      : truncateAgentBody(body) || "(empty)",
-  );
+  parts.push("", "Request body:", bodyText(body, encoding));
   return parts.join("\n");
 }
 
@@ -134,7 +137,12 @@ export function buildInboundMessage(data: InboundEventData, body: string, encodi
  * Runs `command` with `/bin/sh -c` in the home directory, `input` on stdin. Output is drained
  * continuously; the first 64 KiB of stdout and the last 4 KiB of stderr are kept.
  */
-export function runInboundScript(command: string, input: string, timeoutMs = SCRIPT_TIMEOUT_MS): Promise<ScriptResult> {
+export function runInboundScript(
+  command: string,
+  input: string,
+  signal?: AbortSignal,
+  timeoutMs = SCRIPT_TIMEOUT_MS,
+): Promise<ScriptResult> {
   return new Promise((resolve) => {
     const child = spawn("/bin/sh", ["-c", command], { cwd: homedir(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
     const stdout: Buffer[] = [];
@@ -142,15 +150,17 @@ export function runInboundScript(command: string, input: string, timeoutMs = SCR
     let stderr = Buffer.alloc(0);
     let timedOut = false;
     // Kill the whole process group so children of the shell cannot outlive the timeout.
+    const kill = () => {
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      try { process.kill(-child.pid!, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+      kill();
     }, timeoutMs);
+    signal?.addEventListener("abort", kill, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
-      if (stdoutBytes >= SCRIPT_STDOUT_MAX_BYTES) return;
-      const kept = chunk.subarray(0, SCRIPT_STDOUT_MAX_BYTES - stdoutBytes);
-      stdout.push(kept);
-      stdoutBytes += kept.length;
+      if (stdoutBytes <= SCRIPT_STDOUT_MAX_BYTES) stdout.push(chunk.subarray(0, SCRIPT_STDOUT_MAX_BYTES + 1 - stdoutBytes));
+      stdoutBytes += chunk.length;
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr = Buffer.concat([stderr, chunk]);
@@ -163,11 +173,14 @@ export function runInboundScript(command: string, input: string, timeoutMs = SCR
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", kill);
       const ok = !timedOut && !spawnError && code === 0;
       const error = timedOut
         ? `timed out after ${Math.round(timeoutMs / 1000)} s`
         : spawnError?.message ?? (stderr.toString("utf8").replace(/^�+/, "").trim() || `exit code ${code}`);
-      resolve({ ok, stdout: utf8Prefix(Buffer.concat(stdout), SCRIPT_STDOUT_MAX_BYTES), error: ok ? "" : error });
+      const output = Buffer.concat(stdout);
+      const kept = utf8Prefix(output, SCRIPT_STDOUT_MAX_BYTES);
+      resolve({ ok, stdout: output.length > SCRIPT_STDOUT_MAX_BYTES ? `${kept}\n(truncated)` : kept, error: ok ? "" : error });
     };
     child.on("error", (error) => finish(null, error));
     child.on("close", (code) => finish(code));
@@ -191,7 +204,8 @@ function describe(error: unknown): string {
 export function createInboundEventHandler(deps: InboundEventDeps) {
   const jobs = new Map<string, Job>();
   const persisting = new Map<string, Promise<void>>();
-  const running = new Set<string>();
+  const running = new Map<string, Promise<void>>();
+  const abort = new AbortController();
   const runScript = deps.runScript ?? runInboundScript;
   const now = deps.now ?? Date.now;
   const file = (key: string) => join(deps.dir, `${createHash("sha256").update(key).digest("hex")}.json`);
@@ -232,7 +246,7 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
   }
 
   async function toReport(job: Job, error: string): Promise<void> {
-    const next: Job = { ...job, stage: "report", error: error.slice(-REPORT_ERROR_MAX_CHARS), attempts: 0, dueAt: now(), reportSince: now(), output: undefined };
+    const next: Job = { ...job, stage: "report", error: error.slice(-REPORT_ERROR_MAX_CHARS), attempts: 0, dueAt: now(), output: undefined };
     await save(next);
     jobs.set(job.key, next);
   }
@@ -240,6 +254,11 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
   async function step(job: Job): Promise<void> {
     const data = job.data!;
     if (job.stage === "script" && data.handler.type === "script") {
+      if (job.attempts > SCRIPT_RETRY_DELAYS_MS.length) return toReport(job, "script run was interrupted by a restart");
+      // Counted before the run so a crash mid-run still uses up the attempt.
+      const attempts = job.attempts + 1;
+      await save({ ...job, attempts });
+      jobs.set(job.key, { ...job, attempts });
       const request = data.request;
       const result = await runScript(data.handler.command, JSON.stringify({
         source: data.source.name,
@@ -247,8 +266,8 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
         headers: request.headers ?? {},
         body: request.body ?? "",
         body_encoding: request.body_encoding ?? "utf8",
-      }));
-      const attempts = job.attempts + 1;
+      }), abort.signal);
+      if (closed) return;
       if (result.ok) {
         if (!result.stdout.trim()) return finish(job);
         const next: Job = { ...job, stage: "turn", attempts, output: result.stdout, dueAt: now() };
@@ -276,8 +295,10 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
         ? buildInboundMessage(data, job.output, "utf8")
         : buildInboundMessage(data, data.request.body ?? "", data.request.body_encoding);
       try {
-        await deps.runTurn({ source: data.source.name, eventId: data.event_id, message });
+        await deps.runTurn({ source: data.source.name, eventId: data.event_id, message }, abort.signal);
       } catch (error) {
+        // Left started: the next start reports the interrupted turn.
+        if (closed) return;
         deps.logger?.warn?.(`Inkbox inbound event ${data.event_id} agent turn failed: ${describe(error)}`);
         return toReport(started, `agent turn failed: ${describe(error)}`);
       }
@@ -290,10 +311,6 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       } catch (error) {
         if (reportIsFinal(error)) {
           deps.logger?.info?.(`Inkbox inbound event ${data.event_id} failure report not applied: ${describe(error)}`);
-          return finish(job);
-        }
-        if (now() - (job.reportSince ?? now()) >= REPORT_RETRY_WINDOW_MS) {
-          deps.logger?.warn?.(`Inkbox inbound event ${data.event_id} failure could not be reported: ${describe(error)}`);
           return finish(job);
         }
         const delay = Math.min(REPORT_RETRY_BASE_MS * 2 ** job.attempts, REPORT_RETRY_MAX_MS);
@@ -313,8 +330,7 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
     const current = now();
     for (const job of pending.filter((entry) => entry.dueAt <= current).sort((a, b) => a.dueAt - b.dueAt)) {
       if (running.size >= MAX_CONCURRENT_JOBS) break;
-      running.add(job.key);
-      void step(job)
+      const task = step(job)
         .catch((error) => {
           deps.logger?.warn?.(`Inkbox inbound event ${job.data?.event_id} could not be processed: ${describe(error)}`);
           const latest = jobs.get(job.key);
@@ -324,6 +340,7 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
           running.delete(job.key);
           schedule();
         });
+      running.set(job.key, task);
     }
     const waiting = pending.filter((job) => !running.has(job.key));
     if (!waiting.length || running.size >= MAX_CONCURRENT_JOBS) return;
@@ -356,6 +373,7 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
     /** Resolves once the delivery is durably queued; rejects if it could not be stored. */
     async handle(event: Record<string, any>): Promise<void> {
       await ready;
+      if (closed) throw new Error("Inkbox inbound queue is closed.");
       const data = readData(event);
       if (!data) {
         deps.logger?.warn?.("Inkbox inbound event ignored (malformed payload).");
@@ -382,9 +400,12 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       return persisting.size + [...jobs.values()].filter((job) => job.stage === "script" || job.stage === "turn").length;
     },
     ready,
-    close(): void {
+    /** Stops the queue: kills running scripts, aborts running turns, and waits for both to settle. */
+    async close(): Promise<void> {
       closed = true;
       if (timer) clearTimeout(timer);
+      abort.abort();
+      await Promise.allSettled([...persisting.values(), ...running.values()]);
     },
   };
 }

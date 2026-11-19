@@ -684,17 +684,21 @@ the event is acknowledged and ignored.
 
 - `agent` handler: one turn in the session `inbound:<source>`. The message marks
   the request as untrusted external content, then adds the source's instructions
-  and the request body (binary bodies are noted, not shown; text over 64 KiB is
-  cut and marked `(truncated)`). The reply is not delivered anywhere; the agent
+  and the request body (a base64 body is shown as text when it is valid UTF-8,
+  otherwise noted as binary; text over 64 KiB is cut and marked `(truncated)`). The reply is not delivered anywhere; the agent
   acts with tools. A failed turn is reported as failed.
 - `script` handler: runs `/bin/sh -c "<command>"` in the home directory with a
   120-second timeout. Stdin is JSON with `source`, `event_id`, `headers`, `body`,
-  and `body_encoding`. The first 64 KiB of stdout and the last 4 KiB of stderr are
-  kept. Empty output finishes the event; other output starts an `agent` turn with
+  and `body_encoding`. The first 64 KiB of stdout (marked `(truncated)` when cut)
+  and the last 4 KiB of stderr are kept. Empty output finishes the event; other output starts an `agent` turn with
   that output as the body. A failing or timed-out script runs at most 5 times,
   retried after 10 s, 30 s, 2 min, and 10 min, and is then reported as failed with
-  the end of its stderr.
+  the end of its stderr. A run counts toward the limit before it starts, so a
+  restart never adds a sixth run.
 
-Failure reports are retried with backoff for up to 24 hours without running the
-script again. A report rejected because the event was delivered again since
+Failure reports carry at most 2,000 characters of error text and are retried with
+capped backoff while the plugin runs and on every start until accepted, without
+running the script again. Stopping the account stops the queue: a running script
+is killed and retried on the next start, and a running turn is aborted and
+reported as interrupted. A report rejected because the event was delivered again since
 counts as done.

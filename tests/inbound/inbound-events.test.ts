@@ -195,9 +195,15 @@ describe("buildInboundMessage", () => {
 
   it("notes a binary body instead of including it", () => {
     const message = buildInboundMessage({ ...data, source: { ...data.source, instructions: null } },
-      Buffer.from([0, 1, 2]).toString("base64"), "base64");
+      Buffer.from([0xff, 0xfe, 0]).toString("base64"), "base64");
     expect(message).toContain("(binary body, 3 bytes, not shown)");
     expect(message).not.toContain("Instructions for this source");
+  });
+
+  it("shows a base64 body that decodes to UTF-8 as text", () => {
+    const message = buildInboundMessage(data, Buffer.from('{"note":"café"}').toString("base64"), "base64");
+    expect(message).toContain('{"note":"café"}');
+    expect(message).not.toContain("binary body");
   });
 });
 
@@ -412,6 +418,80 @@ describe("createInboundEventHandler", () => {
     expect(handler.activity()).toBe(0);
   });
 
+  it("counts a script run before it starts and never runs a sixth time after a restart", async () => {
+    const seen: number[] = [];
+    const runScript = vi.fn(async () => {
+      seen.push((await storedJobs())[0].attempts);
+      return new Promise<never>(() => {});
+    });
+    const first = create(deps({ runScript }));
+    await first.handle(inboundEvent({ type: "script", command: "x" }));
+    await until(() => seen.length === 1, "first run");
+    expect(seen).toEqual([1]);
+    const [stored] = await storedJobs();
+    const { writeFile } = await import("node:fs/promises");
+    const [name] = (await readdir(dir)).filter((file) => file.endsWith(".json"));
+    // Five runs have started; the fifth was cut off by a restart.
+    await writeFile(join(dir, name), JSON.stringify({ ...stored, attempts: 5, dueAt: 0 }));
+    const d = deps();
+    create(d);
+    await until(() => d.reportFailure.mock.calls.length === 1, "report");
+    expect(d.runScript).not.toHaveBeenCalled();
+    expect(d.reportFailure.mock.calls[0][1]).toBe("script run was interrupted by a restart");
+  });
+
+  it("keeps retrying a failure report past 24 hours until it is accepted", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const reportFailure = vi.fn(async () => { throw Object.assign(new Error("HTTP 503"), { statusCode: 503 }); });
+    const handler = create(deps({ reportFailure, runTurn: vi.fn(async () => { throw new Error("boom"); }) }));
+    await handler.handle(inboundEvent());
+    await until(() => reportFailure.mock.calls.length === 1, "first report");
+    for (let hour = 0; hour < 30; hour++) {
+      await until(async () => (await storedJobs())[0].dueAt > Date.now(), "backoff");
+      await vi.advanceTimersByTimeAsync(3_600_000);
+    }
+    await until(async () => (await storedJobs())[0].dueAt > Date.now(), "backoff");
+    expect((await storedJobs())[0].stage).toBe("report");
+    expect(reportFailure.mock.calls.length).toBeGreaterThan(20);
+    reportFailure.mockResolvedValue(undefined);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    await until(allDone, "done");
+  });
+
+  it("caps the reported error at 2000 characters", async () => {
+    const d = deps({ runTurn: vi.fn(async () => { throw new Error(`${"e".repeat(5_000)}END`); }) });
+    const handler = create(d);
+    await handler.handle(inboundEvent());
+    await until(allDone, "done");
+    const error = d.reportFailure.mock.calls[0][1];
+    expect(error).toHaveLength(2000);
+    expect(error.endsWith("END")).toBe(true);
+  });
+
+  it("close kills a running script, aborts a running turn, and refuses new deliveries", async () => {
+    let turnSignal: AbortSignal | undefined;
+    const runTurn = vi.fn((_turn: any, signal: AbortSignal) => new Promise<void>((_resolve, reject) => {
+      turnSignal = signal;
+      signal.addEventListener("abort", () => reject(new Error("aborted")));
+    }));
+    const handler = create(deps({ runScript: undefined, runTurn }));
+    await handler.handle(inboundEvent({ type: "script", command: "sleep 30" }));
+    await handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" }));
+    await until(() => runTurn.mock.calls.length === 1, "turn");
+    await until(async () => (await storedJobs()).some((job) => job.stage === "script" && job.attempts === 1), "script");
+    const started = Date.now();
+    await handler.close();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(turnSignal?.aborted).toBe(true);
+    await expect(handler.handle(inboundEvent(undefined, { delivery_id: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" }))).rejects.toThrow();
+    // The interrupted work stays queued for the next start: the script is retried, the turn reported.
+    const jobs = await storedJobs();
+    expect(jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "script", attempts: 1 }),
+      expect.objectContaining({ stage: "turn", started: true }),
+    ]));
+  });
+
   it("ignores events without a delivery_id", async () => {
     const d = deps();
     const handler = create(d);
@@ -445,14 +525,28 @@ describe("runInboundScript", () => {
 
   it("drains large output and keeps 64 KiB of stdout and a 4 KiB stderr tail", async () => {
     const result = await runInboundScript(
-      "head -c 3000000 /dev/zero | tr '\\0' a; head -c 3000000 /dev/zero | tr '\\0' e >&2; echo END >&2; exit 1", "", 20_000);
+      "head -c 3000000 /dev/zero | tr '\\0' a; head -c 3000000 /dev/zero | tr '\\0' e >&2; echo END >&2; exit 1", "", undefined, 20_000);
     expect(result.ok).toBe(false);
-    expect(Buffer.byteLength(result.stdout)).toBe(SCRIPT_STDOUT_MAX_BYTES);
+    expect(result.stdout).toBe(`${"a".repeat(SCRIPT_STDOUT_MAX_BYTES)}\n(truncated)`);
     expect(Buffer.byteLength(result.error)).toBeLessThanOrEqual(SCRIPT_STDERR_MAX_BYTES);
     expect(result.error.endsWith("END")).toBe(true);
   });
 
   it("kills the script and its children on timeout", async () => {
-    expect(await runInboundScript("sleep 30 & sleep 30", "", 200)).toMatchObject({ ok: false, error: "timed out after 0 s" });
+    expect(await runInboundScript("sleep 30 & sleep 30", "", undefined, 200)).toMatchObject({ ok: false, error: "timed out after 0 s" });
+  });
+
+  it("keeps exactly 64 KiB of stdout without a marker", async () => {
+    const result = await runInboundScript(`head -c ${SCRIPT_STDOUT_MAX_BYTES} /dev/zero | tr '\\0' a`, "");
+    expect(result.stdout).toBe("a".repeat(SCRIPT_STDOUT_MAX_BYTES));
+  });
+
+  it("kills the script when the signal aborts", async () => {
+    const abort = new AbortController();
+    const started = Date.now();
+    const run = runInboundScript("sleep 30 & sleep 30", "", abort.signal);
+    setTimeout(() => abort.abort(), 50);
+    expect((await run).ok).toBe(false);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });
