@@ -391,7 +391,7 @@ const slackReceived = (statuses = ["pending"]): VoiceEvent => {
     id: "slack-event",
     event_type: "slack.mention_received",
     companion: { channel: "slack", phase: "ordinary", sequence: 1 },
-    data: { ...data, message: { id: "slack-event", direction: "inbound", attachments: structuredClone(data.event.files) } },
+    data: { ...data, message: { id: slackMessageId, direction: "inbound", attachments: structuredClone(data.event.files) } },
   };
 };
 const slackCompletion = (statuses = ["completed"]): VoiceEvent => ({
@@ -472,6 +472,17 @@ describe("Slack voice-note resolution", () => {
     delete unkeyed.data.message_id;
     expect(await inbox.resolve(unkeyed)).toBe(unkeyed);
     expect(poll).not.toHaveBeenCalled();
+  });
+  it("keeps the original attachment when the envelope id differs from the verified source", async () => {
+    const { inbox, deliver, poll } = setup();
+    await inbox.accept(slackCompletion());
+    const mismatched = slackReceived();
+    mismatched.data.message.id = "55555555-5555-4555-8555-555555555555";
+    expect(await inbox.resolve(mismatched)).toBe(mismatched);
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(slackContext(mismatched)).toBe("[Voice note 1 — transcript unavailable] Process the original attachment as usual.");
+    expect(poll).not.toHaveBeenCalled();
+    expect(deliver).not.toHaveBeenCalled();
   });
   it("polls the retained Slack message by its ID", async () => {
     const files = slackData(["completed"]).event.files;

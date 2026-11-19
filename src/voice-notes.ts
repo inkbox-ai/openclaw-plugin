@@ -242,6 +242,8 @@ export class VoiceNoteInbox {
     if (this.stopped) throw new Error("Voice-note receiver is stopping.");
     if (process.env.INKBOX_HOSTED_MODE === "1") return event;
     const id = key(event);
+    // A Slack wait is keyed by the envelope's message id; it must name the verified source message.
+    if (channelOf(event) === "slack" && event.data?.message?.id !== event.data?.message_id) return event;
     if (!id || !pending(event) || this.saved.done[id]) return event;
     let entry = this.saved.pending[id];
     if (!entry) {
