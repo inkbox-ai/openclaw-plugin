@@ -52,7 +52,7 @@ import {
   type RealtimeVoiceTool,
 } from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
-import type { ResolvedInkboxAccount } from "../accounts.js";
+import { activityOwnerKey, type ResolvedInkboxAccount } from "../accounts.js";
 import {
   clearActiveA2ATurn,
   setActiveA2ATurn,
@@ -6151,7 +6151,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       threadId: input.reply.slackRoute ? input.reply.slackRoute.threadTs ?? undefined : `${mode}:${input.reply.conversationId}`,
     };
   }
-  const activityOwner = createHash("sha256").update(JSON.stringify([opts.account.accountId, opts.account.config.identity, opts.account.config.baseUrl])).digest("hex");
+  const activityOwner = activityOwnerKey(opts.account);
   const slackProgress = createSlackProgress({
     resource: async (route) => {
       if (!opts.account.config.slackEnabled) throw new Error("Slack is disabled.");

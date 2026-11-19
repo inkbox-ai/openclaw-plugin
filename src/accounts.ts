@@ -5,6 +5,12 @@ import {
   type VoiceAiAuthorityMode,
 } from "./voice-stack.js";
 
+import { createHash } from "node:crypto";
+
+export function activityOwnerKey(account: ResolvedInkboxAccount): string {
+  return createHash("sha256").update(JSON.stringify([account.accountId, account.config.identity, account.config.baseUrl])).digest("hex");
+}
+
 export const INKBOX_CHANNEL_ID = "inkbox" as const;
 export const DEFAULT_ACCOUNT_ID = "default";
 

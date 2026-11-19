@@ -100,6 +100,20 @@ export function snapshotHasVoiceNote(
 }
 
 /** Delay only audio-bearing messages; completion callbacks never create turns. */
+export function unconfirmedVoiceNoteIds(path: string): string[] {
+  let saved: Saved;
+  try {
+    saved = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  return Object.entries(saved.pending)
+    .filter(([, entry]) => entry.handoff === "attempting" && !entry.resolutionOnly)
+    .map(([id]) => id)
+    .sort();
+}
+
 export class VoiceNoteInbox {
   private saved: Saved = { pending: {}, done: {} };
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
