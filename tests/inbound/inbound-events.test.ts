@@ -63,7 +63,9 @@ function signed(event: Record<string, any>, key = SIGNING_KEY) {
 }
 
 async function until(condition: () => boolean | Promise<boolean>, label = "condition") {
-  for (let i = 0; i < 5000; i++) {
+  // hrtime and setImmediate stay real under the fake timers some tests use.
+  const deadline = process.hrtime.bigint() + 10_000_000_000n;
+  while (process.hrtime.bigint() < deadline) {
     if (await condition()) return;
     await new Promise((resolve) => setImmediate(resolve));
   }
