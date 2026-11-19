@@ -8,10 +8,46 @@ import { createSlackActivity } from "../src/slack-activity.js";
 import { configureSlack } from "../src/slack-setup.js";
 import { registerSlackTools } from "../src/tools/slack.js";
 import { bindNativeSource } from "../src/native-source.js";
+import { reconcileWebhookSubscription, TRANSCRIPTION_EVENTS } from "../src/inbound/subscriptions.js";
+import { TRANSCRIPTION_FINISHED } from "../src/voice-notes.js";
 const identityId = "11111111-1111-4111-8111-111111111111", connectionId = "22222222-2222-4222-8222-222222222222", sourceId = "33333333-3333-4333-8333-333333333333";
 const connection = { id: connectionId, identityId, workspaceId: "TINSTALL", botUserId: "UBOT", status: "connected" };
 function event(extra: Record<string, any> = {}) { return { id: "event-1", event_type: "slack.mention_received", data: { identity_id: identityId, connection_id: connectionId, workspace_id: "TINSTALL", conversation_id: "CROOM", actor_id: "UPERSON", message_ts: "1770000000.000123", thread_ts: null, message_kinds: ["mention"], sender_access: "direct", event: { type: "message", text: "<@UBOT> Hello" }, actor_profile: { id: "UPERSON", team_id: "THOME" }, ...extra } }; }
 function client() { return { slack: { listConnections: vi.fn(async () => ({ connections: [connection] })), listArchivedMessages: vi.fn(async () => ({ messages: [{ id: sourceId, connectionId, conversationId: "CROOM", messageTs: "1770000000.000123", threadTs: null, userId: "UPERSON", source: "event" }], nextCursor: null })), getUser: vi.fn(), sendMessage: vi.fn(async () => ({ id: "action", status: "sent" })) } }; }
+const receiver = "https://receiver.test";
+type Row = { id: string; url: string; status: string; eventTypes: string[] };
+// Mirrors the server rule: one active subscription per URL may list a given event.
+function subscriptionStore(initial: { id: string; eventTypes: string[] }[]) {
+  const rows: Row[] = initial.map((r) => ({ url: receiver, status: "active", ...r, eventTypes: [...r.eventTypes] }));
+  const copy = (r: Row) => ({ ...r, eventTypes: [...r.eventTypes] });
+  const overlaps = (id: string | undefined, url: string, eventTypes: string[]) => rows.some((r) => r.id !== id && r.status === "active" && r.url === url && r.eventTypes.some((e) => eventTypes.includes(e)));
+  const find = (id: string) => { const row = rows.find((r) => r.id === id); if (!row) throw new InkboxAPIError(404, "Not found"); return row; };
+  const api = {
+    list: vi.fn(async (q: { url?: string }) => rows.filter((r) => !q.url || r.url === q.url).map(copy)),
+    create: vi.fn(async (b: { url: string; eventTypes: string[] }) => {
+      if (overlaps(undefined, b.url, b.eventTypes)) throw new InkboxAPIError(409, "Overlapping events");
+      const row = { id: `created-${rows.length}`, url: b.url, status: "active", eventTypes: [...b.eventTypes] };
+      rows.push(row); return copy(row);
+    }),
+    update: vi.fn(async (id: string, b: { url?: string; eventTypes?: string[] }) => {
+      const row = find(id), url = b.url ?? row.url, eventTypes = b.eventTypes ?? row.eventTypes;
+      if (overlaps(id, url, eventTypes)) throw new InkboxAPIError(409, "Overlapping events");
+      Object.assign(row, { url, eventTypes: [...eventTypes] }); return copy(row);
+    }),
+    delete: vi.fn(async (id: string) => { rows.splice(rows.indexOf(find(id)), 1); }),
+  };
+  return { rows, api, sdk: { webhooks: { subscriptions: api } } as any };
+}
+// Boot order: the Slack row first, then the identity-wide completion reconcile.
+async function converge(sdk: any) {
+  await reconcileSlackSubscription(sdk, identityId, receiver);
+  await reconcileWebhookSubscription(sdk, { agentIdentityId: identityId, url: receiver, eventTypes: TRANSCRIPTION_EVENTS });
+}
+async function expectRestartIsQuiet(api: ReturnType<typeof subscriptionStore>["api"], sdk: any) {
+  Object.values(api).forEach((mock) => mock.mockClear());
+  await converge(sdk);
+  expect(api.create).not.toHaveBeenCalled(); expect(api.update).not.toHaveBeenCalled(); expect(api.delete).not.toHaveBeenCalled();
+}
 afterEach(() => vi.unstubAllGlobals());
 describe("Slack signed source and published SDK contract", () => {
   it.each(["denied", "unknown", "sponsored", "other"])("drops %s ordinary sender access", (sender_access) => { expect(parseSlack(event({ sender_access }), identityId)).toBeUndefined(); });
@@ -55,22 +91,33 @@ describe("Slack signed source and published SDK contract", () => {
     await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
     expect(update).toHaveBeenCalledWith("one", { scope: "identity", eventTypes: expect.arrayContaining([...SLACK_SUBSCRIPTION_EVENTS, "text.received"]) }); expect(create).not.toHaveBeenCalled();
   });
-  it("adds transcription completions to the row that selects Slack messages", async () => {
-    const update = vi.fn(), create = vi.fn();
-    const rows = [
-      { id: "slack", url: "https://receiver.test", status: "active", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] },
-      { id: "shared", url: "https://receiver.test", status: "active", eventTypes: ["message.transcription_finished"] },
-    ];
-    const sdk: any = { webhooks: { subscriptions: { list: async () => rows, update, create } } };
-    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
-    expect(update).toHaveBeenCalledOnce();
-    expect(update).toHaveBeenCalledWith("slack", { scope: "identity", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS, "message.transcription_finished"] });
-    rows[0]!.eventTypes.push("message.transcription_finished"); update.mockClear();
-    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
-    expect(update).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
-    rows.splice(0);
-    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
-    expect(create).toHaveBeenCalledWith({ agentIdentityId: identityId, url: "https://receiver.test", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS, "message.transcription_finished"] });
+  it("installs one Slack row holding completions, then restarts without writes", async () => {
+    const { rows, api, sdk } = subscriptionStore([]);
+    await converge(sdk);
+    expect(rows).toEqual([expect.objectContaining({ eventTypes: [...SLACK_SUBSCRIPTION_EVENTS, TRANSCRIPTION_FINISHED] })]);
+    await expectRestartIsQuiet(api, sdk);
+  });
+  it("moves a standalone completion row onto the Slack row on upgrade", async () => {
+    const { rows, api, sdk } = subscriptionStore([{ id: "slack", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] }, { id: "completion", eventTypes: [TRANSCRIPTION_FINISHED] }]);
+    await converge(sdk);
+    expect(api.delete).toHaveBeenCalledWith("completion");
+    expect(rows).toEqual([expect.objectContaining({ id: "slack", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS, TRANSCRIPTION_FINISHED] })]);
+    await expectRestartIsQuiet(api, sdk);
+  });
+  it("keeps one completion holder across two Slack rows", async () => {
+    const { rows, api, sdk } = subscriptionStore([
+      { id: "channel", eventTypes: ["slack.channel_message_received"] },
+      { id: "slack", eventTypes: SLACK_SUBSCRIPTION_EVENTS.filter((e) => e !== "slack.channel_message_received") },
+      { id: "shared", eventTypes: ["text.received", TRANSCRIPTION_FINISHED] },
+    ]);
+    await converge(sdk);
+    expect(rows.filter((r) => r.eventTypes.includes(TRANSCRIPTION_FINISHED)).map((r) => r.id)).toEqual(["slack"]);
+    expect(rows.find((r) => r.id === "shared")?.eventTypes).toEqual(["text.received"]);
+    expect(rows.find((r) => r.id === "channel")?.eventTypes).toEqual(["slack.channel_message_received"]);
+    await expectRestartIsQuiet(api, sdk);
+    rows.find((r) => r.id === "slack")!.eventTypes.pop();
+    rows.find((r) => r.id === "channel")!.eventTypes.push(TRANSCRIPTION_FINISHED);
+    await expectRestartIsQuiet(api, sdk);
   });
   it("keeps Slack delivery when an older API rejects the completion event", async () => {
     const unsupported = () => Object.assign(new InkboxAPIError(422, "Unknown event"), {

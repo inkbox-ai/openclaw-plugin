@@ -10,6 +10,8 @@
 - A rejected transcription-notification registration is logged as a warning and no longer stops the channel from starting.
 - Require `@inkbox/sdk` 0.7.41 or later.
 - Wait for Slack voice-note transcripts like other channels: match `message.transcription_finished` by `data.message_id`, read the retained Slack message once after 60 seconds, and add the completion event to the Slack webhook subscription.
+- Wait for Slack voice-note transcripts like other channels: match `message.transcription_finished` by `data.message_id`, read the retained Slack message once after 60 seconds, and move the completion event onto the Slack webhook subscription so upgrades keep one subscription per event.
+- Treat a Slack message delivered again under a different event id as the same request.
 
 ## 0.2.24 (unreleased)
 
