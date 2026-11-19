@@ -5,6 +5,7 @@ import {
   IMESSAGE_EVENT_TYPES,
   MAIL_EVENT_TYPES,
   TEXT_EVENT_TYPES,
+  WHATSAPP_EVENT_TYPES,
   reconcileWebhookSubscription,
 } from "../../src/inbound/subscriptions.js";
 
@@ -42,6 +43,17 @@ function makeClient(
 }
 
 describe("reconcileWebhookSubscription", () => {
+  it("leaves other channels available when an older API rejects the transcription event", async () => {
+    const create = vi.fn().mockRejectedValueOnce(Object.assign(new InkboxAPIError(422, "Unknown event"), {
+      detail: [{type: "enum", loc: ["body", "event_types", 0, "MailWebhookEventType"], input: "message.transcription_finished"}],
+    }));
+    const { client } = makeClient({ create });
+    await expect(reconcileWebhookSubscription(client, {
+      agentIdentityId: "agent", url: "https://example.com/webhook", eventTypes: ["message.transcription_finished"],
+    })).resolves.toBeNull();
+    expect(create).toHaveBeenCalledOnce();
+  });
+
   it("creates a subscription when the owner has none", async () => {
     const { client, list, create, update } = makeClient({
       create: vi.fn(async (opts: any) => makeSub({ ...opts, mailboxId: opts.mailboxId })),
@@ -500,4 +512,42 @@ describe("mixed identity subscription preservation", () => {
     await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url: "https://new.example/inkbox/webhook", eventTypes: A2A_EVENT_TYPES });
     expect(update).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled(); expect(create).toHaveBeenCalledTimes(1);
   });
+});
+
+it("reconciles voice-note completion independently of a mailbox on the same URL", async () => {
+  const url = "https://example.com/inkbox/webhook";
+  const mail = makeSub({ id: "mail", url, eventTypes: ["message.received"] });
+  const { client, update, create } = makeClient({ list: vi.fn(async () => [mail]) });
+  await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url, eventTypes: ["message.transcription_finished"] });
+  expect(update).not.toHaveBeenCalled();
+  expect(create).toHaveBeenCalledWith({ agentIdentityId: "identity", url, eventTypes: ["message.transcription_finished"] });
+});
+
+it("adopts shared WhatsApp coverage across repeated starts without writes", async () => {
+  const url = "https://example.com/webhook";
+  const rows = [makeSub({ url, eventTypes: [...WHATSAPP_EVENT_TYPES, "whatsapp.future"] })];
+  const { client, list, create, update, delete: remove } = makeClient({ list: vi.fn(async () => rows) });
+  for (let start = 0; start < 2; start++) {
+    await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url, eventTypes: WHATSAPP_EVENT_TYPES });
+  }
+  expect(list).toHaveBeenCalledWith({ agentIdentityId: "identity", scope: "identity", url });
+  expect(create).not.toHaveBeenCalled();
+  expect(update).not.toHaveBeenCalled();
+  expect(remove).not.toHaveBeenCalled();
+});
+
+it("registers only WhatsApp events not covered at this endpoint, including after a race", async () => {
+  const url = "https://example.com/webhook";
+  const [first, second, ...rest] = WHATSAPP_EVENT_TYPES;
+  const initial = makeSub({ url, eventTypes: [first, "whatsapp.future"] });
+  const list = vi.fn().mockResolvedValueOnce([initial]).mockResolvedValueOnce([
+    initial, makeSub({ url, eventTypes: [second] }),
+  ]);
+  const create = vi.fn().mockRejectedValueOnce(new InkboxAPIError(409, "Overlapping events"))
+    .mockResolvedValueOnce(makeSub({ url, eventTypes: rest }));
+  const { client, update, delete: remove } = makeClient({ list, create });
+  await reconcileWebhookSubscription(client, { agentIdentityId: "identity", url, eventTypes: WHATSAPP_EVENT_TYPES });
+  expect(create.mock.calls.map(([body]) => body.eventTypes)).toEqual([[second, ...rest], rest]);
+  expect(update).not.toHaveBeenCalled();
+  expect(remove).not.toHaveBeenCalled();
 });

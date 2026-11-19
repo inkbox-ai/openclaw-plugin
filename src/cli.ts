@@ -1,8 +1,10 @@
 import { hostedDiagnostics } from "./hosted-diagnostics.js";
 import { Inkbox } from "@inkbox/sdk";
-import { resolveInkboxAccount } from "./accounts.js";
+import { join } from "node:path";
+import { unconfirmedVoiceNoteIds } from "./voice-notes.js";
+import { activityOwnerKey, resolveInkboxAccount } from "./accounts.js";
 import { inkboxClientOptions } from "./sdk-options.js";
-import { readIdentityState } from "./state.js";
+import { readIdentityState, statePaths } from "./state.js";
 import { bootstrap } from "./bootstrap.js";
 
 // CLI registrar — called by OpenClaw with a commander-style `program` so we
@@ -84,6 +86,7 @@ export function registerInkboxCli(program: any, options: InkboxCliOptions = {}):
 }
 
 interface CliConfig {
+  activityOwner: string;
   apiKey: string | undefined;
   identity: string | undefined;
   baseUrl: string | undefined;
@@ -105,6 +108,7 @@ function readCliConfig(options: InkboxCliOptions = {}): CliConfig {
   });
   const hasOpenClawConfig = Boolean(account.config.apiKey || account.config.identity);
   return {
+    activityOwner: activityOwnerKey(account),
     apiKey: account.apiKey,
     identity: account.identity,
     baseUrl: account.baseUrl,
@@ -144,6 +148,14 @@ async function runDoctor(options: InkboxCliOptions = {}): Promise<void> {
     );
     process.exitCode = 1;
     return;
+  }
+
+  try {
+    const ids = unconfirmedVoiceNoteIds(join(statePaths().dir, `voice-notes-${cfg.activityOwner}.json`));
+    console.log(`Unconfirmed voice notes (${ids.length}): ${ids.join(", ") || "none"}`);
+  } catch {
+    console.log("Unconfirmed voice notes: local inbox unreadable.");
+    process.exitCode = 1;
   }
 
   // Section 2: live API check.

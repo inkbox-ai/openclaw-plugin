@@ -98,6 +98,7 @@ export class SmsBatcher {
     if (!this.enabled()) return false;
     // Only batch text.received — delivery-status events fire-and-forget.
     if (event.event_type !== "text.received") return false;
+    if (event.data?.text_message?.media?.length) return false;
     const keyInfo = batchKey(event);
     if (!keyInfo) return false;
 
@@ -242,6 +243,7 @@ export class IMessageBatcher {
   accept(event: IMessageWebhookPayload): boolean {
     if (!this.enabled()) return false;
     if (event.event_type !== "imessage.received") return false;
+    if (event.data?.message?.media?.length) return false;
     const keyInfo = imessageBatchKey(event);
     if (!keyInfo) return false;
 

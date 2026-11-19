@@ -5,6 +5,7 @@ import type {
   PhoneIncomingCallWebhookPayload,
   CallEndedWebhookPayload,
 } from "@inkbox/sdk";
+import { TRANSCRIPTION_FINISHED } from "../voice-notes.js";
 import { WHATSAPP_EVENTS } from "../whatsapp.js";
 import { inboundContactAllowed } from "../allowlist.js";
 
@@ -59,6 +60,7 @@ function isExplicitOutboundCallEnded(parsed: any): boolean {
 }
 
 export interface InboundHandlers {
+  onTranscription?(event: Record<string, any>): Promise<void> | void;
   onWhatsApp?(event: Record<string, any>): Promise<void>;
   onSlack?(event: Record<string, any>): Promise<void>;
   onCompanion?(event: Record<string, any>): Promise<void>;
@@ -97,7 +99,7 @@ export interface InboundHandlers {
 }
 
 export interface DispatchResult {
-  kind: "slack" | "mail" | "text" | "imessage" | "whatsapp" | "a2a" | "call-ended" | "call" | "external";
+  kind: "transcription" | "slack" | "mail" | "text" | "imessage" | "whatsapp" | "a2a" | "call-ended" | "call" | "external";
   // Only populated for kind="call". The handler builds the response body
   // from this.
   callDecision?: InboundCallDecision;
@@ -142,6 +144,10 @@ export async function dispatchInbound(
     typeof (parsed as { event_type: unknown }).event_type === "string"
   ) {
     const eventType = (parsed as { event_type: string }).event_type;
+    if (eventType === TRANSCRIPTION_FINISHED) {
+      await handlers.onTranscription?.(parsed);
+      return { kind: "transcription" };
+    }
     if (eventType.startsWith("whatsapp.")) {
       if (!(WHATSAPP_EVENTS as readonly string[]).includes(eventType)) return { kind: "whatsapp" };
       if (!("companion" in parsed && parsed.companion != null && eventType === "whatsapp.received") && ["whatsapp.received", "whatsapp.reaction_received"].includes(eventType) && !anyInboundContactAllowed(resolveRemoteContactIds(parsed, "whatsapp"), allowedContactIds)) return { kind: "whatsapp" };

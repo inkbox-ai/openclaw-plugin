@@ -1,3 +1,5 @@
+import { dispatchInbound } from "./dispatch.js";
+import { VoiceNoteInbox, VoiceNoteNotAdmitted, pollVoiceNote, voiceNoteContext } from "../voice-notes.js";
 import { whatsappGroup, validWhatsAppGroup, validWhatsAppCompanion } from "../whatsapp-groups.js";
 import { checkOutboundRecipients } from "../allowlist.js";
 import { sendWhatsAppReplyFile, assertWhatsAppText, isUnsupportedWhatsAppShape, whatsappDestinationEvidence, whatsappReady, whatsappSendKey, whatsappSendRejection } from "../whatsapp.js";
@@ -50,7 +52,7 @@ import {
   type RealtimeVoiceTool,
 } from "openclaw/plugin-sdk/realtime-voice";
 import type { InkboxRuntime, PluginLogger } from "../client.js";
-import type { ResolvedInkboxAccount } from "../accounts.js";
+import { activityOwnerKey, type ResolvedInkboxAccount } from "../accounts.js";
 import {
   clearActiveA2ATurn,
   setActiveA2ATurn,
@@ -107,6 +109,7 @@ import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
 import {
   IMESSAGE_EVENT_TYPES,
   WHATSAPP_EVENT_TYPES,
+  TRANSCRIPTION_EVENTS,
   A2A_EVENT_TYPES,
   CALL_EVENT_TYPES,
   MAIL_EVENT_TYPES,
@@ -3768,7 +3771,7 @@ async function buildTextTurn(
   // marker doesn't apply.
   const senderIdentity =
     contact || isGroup ? undefined : singleWebhookAgentIdentity(event.data);
-  const mediaMarkers = textMediaMarkers(message.media);
+  const mediaMarkers = [...textMediaMarkers(message.media), escapeContactMemoryTokens(voiceNoteContext(message))];
   const text = [escapeContactMemoryTokens(rawText), ...mediaMarkers].filter(Boolean).join("\n");
   const conversationLabel = isGroup
     ? `Inkbox SMS group ${conversationId ?? remote}`
@@ -3871,7 +3874,7 @@ async function buildIMessageTurn(
   const senderIdentity = contact || isGroup ? undefined : singleWebhookAgentIdentity(event.data);
   const senderLabel =
     contact?.name ?? senderIdentity?.display_name ?? senderIdentity?.agent_handle ?? remote;
-  const mediaMarkers = textMediaMarkers(message.media as any, "imessage_attachment");
+  const mediaMarkers = [...textMediaMarkers(message.media as any, "imessage_attachment"), escapeContactMemoryTokens(voiceNoteContext(message))];
   const text = [escapeContactMemoryTokens(message.content ?? ""), ...mediaMarkers]
     .filter(Boolean).join("\n");
   const conversationPart = conversationId ? ` conversation_id=${conversationId}` : "";
@@ -5719,6 +5722,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
 
   async function shutdownA2A(): Promise<void> {
+    voiceNotes.close();
     companion.close();
     await slackProgress.close();
     await slackActivity.close();
@@ -6147,7 +6151,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       threadId: input.reply.slackRoute ? input.reply.slackRoute.threadTs ?? undefined : `${mode}:${input.reply.conversationId}`,
     };
   }
-  const activityOwner = createHash("sha256").update(JSON.stringify([opts.account.accountId, opts.account.config.identity, opts.account.config.baseUrl])).digest("hex");
+  const activityOwner = activityOwnerKey(opts.account);
   const slackProgress = createSlackProgress({
     resource: async (route) => {
       if (!opts.account.config.slackEnabled) throw new Error("Slack is disabled.");
@@ -6174,6 +6178,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }, join(statePaths().dir, `slack-activity-${activityOwner}.json`), (message) => opts.logger?.warn?.(message));
   opts.abortSignal?.addEventListener("abort", () => { void slackActivity.close(); void slackProgress.close(); }, { once: true });
   const companion = createCompanionReceiver({
+    resolveVoiceNote: (event, deadline) => voiceNotes.resolve(event, deadline),
     accountId: opts.account.accountId,
     config: opts.account.config,
     runtime: opts.runtime,
@@ -6844,8 +6849,30 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
   };
 
+  const deliverVoiceEvent = async (event: any): Promise<void> => {
+    const directTurn = event.event_type === "text.received" ||
+      (event.event_type === "imessage.received" && !opts.account.config.imessageThreadedReplies);
+    if (directTurn && !opts.channelRuntime?.inbound?.dispatchReply) {
+      throw new VoiceNoteNotAdmitted("The channel runtime is not ready.");
+    }
+    await dispatchInbound(event, handlers, opts.account.config.allowedInboundContactIds);
+  };
+  const voiceNotes = new VoiceNoteInbox({
+    path: join(statePaths().dir, `voice-notes-${activityOwner}.json`),
+    poll: event => pollVoiceNote(event, { ...opts.account.config, identity: () => opts.runtime.getIdentity() }),
+    deliver: deliverVoiceEvent,
+    warn: () => opts.logger?.warn?.("Voice-note delivery is retained for recovery."),
+  });
+  opts.abortSignal?.addEventListener("abort", () => voiceNotes.close(), { once: true });
+  const voiceHandlers: InboundHandlers = { ...handlers,
+    onTranscription: async event => { await voiceNotes.accept(event); },
+    onText: async event => { if (!(await voiceNotes.accept(event))) await handlers.onText?.(event); },
+    onIMessage: async event => { if (!(await voiceNotes.accept(event))) await handlers.onIMessage?.(event); },
+    onWhatsApp: async event => { if (!(await voiceNotes.accept(event))) await handlers.onWhatsApp?.(event); },
+    onCompanion: async event => { await handlers.onCompanion?.(event); },
+  };
   return {
-    handlers,
+    handlers: voiceHandlers,
     wsHandler,
     activeCalls,
     eventState: (id) => companion.eventState(id),
@@ -6870,7 +6897,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     },
     catchUpA2A,
     catchUpHostedCalls,
-    catchUpCompanion: async () => { await slackActivity.recover(); await companion.recover(); await slackProgress.recover(); },
+    catchUpCompanion: async () => { voiceNotes.recover(); await slackActivity.recover(); await companion.recover(); await slackProgress.recover(); },
     shutdownA2A,
   };
 }
@@ -6890,6 +6917,7 @@ export async function configureInkboxIdentityDelivery(
     opts.runtime.getClient(),
   ]);
   if (opts.slackEnabled) await reconcileSlackSubscription(inkbox, identity.id, opts.webhookUrl);
+  await reconcileWebhookSubscription(inkbox, { agentIdentityId: identity.id, url: opts.webhookUrl, eventTypes: TRANSCRIPTION_EVENTS }, opts.logger);
   try { await reconcileWebhookSubscription(inkbox, { agentIdentityId: identity.id, url: opts.webhookUrl, eventTypes: WHATSAPP_EVENT_TYPES }, opts.logger); }
   catch (error) { opts.logger?.warn?.(`WhatsApp notification registration is unavailable: ${errorMessage(error)}`); }
   const mailboxId = identity.mailbox?.id;

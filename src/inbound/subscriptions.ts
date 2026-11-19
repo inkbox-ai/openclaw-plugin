@@ -1,3 +1,4 @@
+import { TRANSCRIPTION_FINISHED } from "../voice-notes.js";
 import type { Inkbox, WebhookSubscription } from "@inkbox/sdk";
 import { InkboxAPIError } from "@inkbox/sdk";
 import type { PluginLogger } from "../client.js";
@@ -5,6 +6,8 @@ import type { PluginLogger } from "../client.js";
 // Full event sets the plugin subscribes to. We subscribe broadly and
 // filter in dispatch — receive events are load-bearing, the rest are
 // telemetry that downstream features may opt into.
+export const TRANSCRIPTION_EVENTS = [TRANSCRIPTION_FINISHED];
+
 export const MAIL_EVENT_TYPES: readonly string[] = [
   "message.received",
   "message.sent",
@@ -90,8 +93,22 @@ function urlPathname(url: string): string | null {
   }
 }
 
+function transcriptionEventUnsupported(error: unknown): boolean {
+  if (!(error instanceof InkboxAPIError) || error.statusCode !== 422) return false;
+  const issues = error.detail;
+  return Array.isArray(issues) && issues.length > 0 && issues.every((issue) =>
+    issue?.type === "enum" && issue.input === TRANSCRIPTION_FINISHED &&
+    Array.isArray(issue.loc) && issue.loc[0] === "body" &&
+    issue.loc[1] === "event_types" && issue.loc[2] === 0
+  );
+}
+
+function eventFamily(event: string): string {
+  return event === TRANSCRIPTION_FINISHED ? event : event.split(".", 1)[0]!;
+}
+
 function eventFamilies(eventTypes: readonly string[]): Set<string> {
-  return new Set(eventTypes.map((eventType) => eventType.split(".", 1)[0]));
+  return new Set(eventTypes.map(eventFamily));
 }
 
 // A same-owner row is one of OUR stale rows when it points somewhere else
@@ -155,9 +172,30 @@ export async function reconcileWebhookSubscription(
       ? { phoneNumberId: desired.phoneNumberId! }
       : { agentIdentityId: desired.agentIdentityId! };
 
+  if (hasIdentity && desired.eventTypes.length > 0 && desired.eventTypes.every((event) => event.startsWith("whatsapp."))) {
+    const subscriptions = inkbox.webhooks.subscriptions;
+    let needed = [...desired.eventTypes];
+    let conflict: InkboxAPIError | undefined;
+    while (true) {
+      const rows = await subscriptions.list({ ...ownerFilter, scope: "identity", url: desired.url });
+      const covering = rows.filter((row) => row.url === desired.url && row.eventTypes.some((event) => needed.includes(event)));
+      const covered = new Set(covering.flatMap((row) => row.eventTypes));
+      const missing = needed.filter((event) => !covered.has(event));
+      if (!missing.length) return covering[0]!;
+      if (conflict && missing.length === needed.length) throw conflict;
+      try {
+        return await subscriptions.create({ ...ownerFilter, url: desired.url, eventTypes: missing });
+      } catch (error) {
+        if (!(error instanceof InkboxAPIError) || error.statusCode !== 409) throw error;
+        conflict = error;
+        needed = missing;
+      }
+    }
+  }
+
   const existing = await inkbox.webhooks.subscriptions.list({ ...ownerFilter, scope: "identity" });
   const desiredFamilies = eventFamilies(desired.eventTypes);
-  const mergedEvents = (sub: WebhookSubscription) => [...new Set([...sub.eventTypes.filter((event) => !desiredFamilies.has(event.split(".", 1)[0]!)), ...desired.eventTypes])];
+  const mergedEvents = (sub: WebhookSubscription) => [...new Set([...sub.eventTypes.filter((event) => !desiredFamilies.has(eventFamily(event))), ...desired.eventTypes])];
   const belongsToDesiredChannel = (sub: WebhookSubscription) =>
     [...eventFamilies(sub.eventTypes)].some((family) =>
       desiredFamilies.has(family),
@@ -231,6 +269,10 @@ export async function reconcileWebhookSubscription(
       eventTypes: [...desired.eventTypes],
     });
   } catch (err) {
+    if (desired.eventTypes.length === 1 && desired.eventTypes[0] === TRANSCRIPTION_FINISHED && transcriptionEventUnsupported(err)) {
+      logger?.warn?.("Transcription callbacks are unavailable on this API version");
+      return null;
+    }
     if (isDuplicateUrl409(err)) {
       // Concurrent activation created the row first; re-list and treat
       // as the create-result (PATCH event-types if they drift).

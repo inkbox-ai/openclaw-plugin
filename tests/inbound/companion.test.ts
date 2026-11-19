@@ -21,7 +21,7 @@ import { createInkboxSessionBridge } from "../../src/inbound/session.js";
 import { isInkboxSilentReply } from "../../src/silent-reply.js";
 import { dispatchInbound } from "../../src/inbound/dispatch.js";
 import { wrapInboundHandlersWithBatching } from "../../src/inbound/batch.js";
-import { COMPANION_MAX_BYTES } from "../../src/inbound/companion.js";
+import { COMPANION_MAX_BYTES, createCompanionReceiver } from "../../src/inbound/companion.js";
 import { handleInkboxWebhook } from "../../src/inbound/handler.js";
 import { createHmac } from "node:crypto";
 import { AgentIdentity, Inkbox } from "@inkbox/sdk";
@@ -840,4 +840,122 @@ describe("Companion host boundary", () => {
     } finally { timer.mockRestore(); }
   });
 
+});
+
+
+it("persists a pending voice initializer before later live input and resolves before snapshot hydration", async () => {
+  const s = setup("phone");
+  s.api.loadInitialization.mockImplementation(async () => {
+    const page: any = structuredClone(s.snapshot);
+    const text = "Sponsor follow-up\n\n[Voice note 1 — automatically transcribed]\nRecorded source update.";
+    page.entries.find((entry: any) => entry.isTrigger).text = text;
+    page.text = text;
+    return page;
+  });
+  const init = event("initialization", 1, "phone");
+  (init.data.text_message as any).media = [{ id: "voice-one", content_type: "audio/wav", transcription: { status: "pending" } }];
+  await dispatchInbound(init, s.bridge.handlers, ["sponsor-contact"]);
+  await dispatchInbound(event("live", 2, "phone"), s.bridge.handlers, ["sponsor-contact"]);
+  await vi.waitFor(async () => expect(Object.keys((await journal()).value.jobs)).toHaveLength(2));
+  expect(s.api.loadInitialization).not.toHaveBeenCalled();
+  expect(s.dispatchReply).not.toHaveBeenCalled();
+  const completed: any = structuredClone(init);
+  delete completed.companion;
+  completed.id = "voice-completed";
+  completed.event_type = "message.transcription_finished";
+  Object.assign(completed.data, { channel: "text", message_id: completed.data.text_message.id });
+  completed.data.text_message.media[0].transcription = { status: "completed", text: "Recorded source update." };
+  await dispatchInbound(completed, s.bridge.handlers);
+  await settle(s.bridge);
+  expect(s.api.loadInitialization).toHaveBeenCalledTimes(1);
+  expect(s.dispatchReply).toHaveBeenCalledTimes(2);
+  const first = s.dispatchReply.mock.calls[0]![0].ctxPayload.message.bodyForAgent;
+  expect(first).toContain("Recorded source update.");
+  expect(first.match(/Recorded source update\./g)).toHaveLength(1);
+  expect(s.dispatchReply.mock.calls[1]![0].ctxPayload.message.bodyForAgent).toContain("Sponsor follow-up");
+  await dispatchInbound(completed, s.bridge.handlers);
+  await settle(s.bridge);
+  expect(s.dispatchReply).toHaveBeenCalledTimes(2);
+});
+
+
+it("keeps a pending voice fallback checkpoint across consumer restart and cache expiry", async () => {
+  const s = setup("phone");
+  const firstSignal = new AbortController();
+  const restartedSignal = new AbortController();
+  const original = event("initialization", 1, "phone");
+  (original.data.text_message as any).media = [{ id: "voice-one", transcription: { status: "pending" } }];
+  const firstResolve = vi.fn(async (value: Record<string, any>) => value);
+  const resolvedAgain = vi.fn(async (_value: Record<string, any>) => { throw new Error("A saved fallback must not wait again"); });
+  const submitted: string[] = [];
+  const receiver = (resolveVoiceNote: (event: Record<string, any>) => Promise<Record<string, any>>, signal: AbortSignal) => createCompanionReceiver({
+    accountId: "voice-fallback", config: s.account.config, runtime: s.runtime as any, signal, resolveVoiceNote,
+    submit: async input => { await input.validateBeforeDispatch(); submitted.push(input.body); return []; },
+    deliver: async () => { throw new Error("No visible reply was requested"); },
+  });
+  s.api.loadInitialization.mockRejectedValueOnce(new Error("Snapshot temporarily unavailable"));
+  const first = receiver(firstResolve, firstSignal.signal);
+  await first.accept(original);
+  await first.idle();
+  expect(firstResolve).toHaveBeenCalledOnce();
+  const saved = Object.values((await journal()).value.jobs)[0] as any;
+  expect(saved.state).toBe("pending");
+  expect(saved.voiceNoteResolved).toBe(true);
+  expect(saved.event.data.text_message.media[0].transcription.status).toBe("pending");
+  expect(submitted).toHaveLength(0);
+  firstSignal.abort();
+  const future = Date.now() + 2 * 86_400_000;
+  const clock = vi.spyOn(Date, "now").mockReturnValue(future);
+  try {
+    const restarted = receiver(resolvedAgain, restartedSignal.signal);
+    await restarted.recover();
+    await restarted.idle();
+    expect(resolvedAgain).not.toHaveBeenCalled();
+    expect(firstResolve).toHaveBeenCalledOnce();
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toContain("transcript unavailable");
+  } finally {
+    restartedSignal.abort();
+    clock.mockRestore();
+  }
+});
+
+
+it("retains a pending voice initializer without spending retries on repeated shutdowns", async () => {
+  const s = setup("phone");
+  const original = event("initialization", 1, "phone");
+  (original.data.text_message as any).media = [{ id: "voice-one", transcription: { status: "pending" } }];
+  const warn = vi.fn();
+  const submit = vi.fn(async (input: any) => { await input.validateBeforeDispatch(); return []; });
+  for (let shutdown = 0; shutdown < 6; shutdown++) {
+    const controller = new AbortController();
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const receiver = createCompanionReceiver({
+      accountId: "voice-shutdown", config: s.account.config, runtime: s.runtime as any,
+      signal: controller.signal, warn, submit, deliver: vi.fn(),
+      resolveVoiceNote: async () => new Promise((_, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("Voice-note receiver is stopping.")), { once: true });
+        entered();
+      }),
+    });
+    if (shutdown === 0) await receiver.accept(original);
+    const recovering = receiver.recover();
+    await waiting;
+    controller.abort();
+    await recovering;
+    const saved: any = Object.values((await journal()).value.jobs)[0];
+    expect(saved.state).toBe("pending");
+    expect(saved.attempts).toBeUndefined();
+    expect(saved.retryAt).toBeUndefined();
+    expect(saved.nativeComplete).toBeUndefined();
+  }
+  expect(warn).not.toHaveBeenCalled();
+  expect(submit).not.toHaveBeenCalled();
+  const restarted = createCompanionReceiver({
+    accountId: "voice-shutdown", config: s.account.config, runtime: s.runtime as any,
+    submit, deliver: vi.fn(), resolveVoiceNote: async value => value,
+  });
+  await restarted.recover();
+  expect(submit).toHaveBeenCalledTimes(1);
 });

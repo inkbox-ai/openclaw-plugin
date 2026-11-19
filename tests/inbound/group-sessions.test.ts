@@ -263,3 +263,23 @@ describe("group conversation host routing", () => {
   });
 
 });
+
+
+it("holds a resolved SMS voice note until the native reply runtime is ready", async () => {
+  const { bridge, core, dispatchReply } = setup();
+  const original = event("sms");
+  original.data.text_message.media = [{ id: "audio-1", transcription: { status: "completed", text: "Call tomorrow." } }];
+  vi.useFakeTimers();
+  try {
+    Object.assign(core.inbound, { dispatchReply: undefined });
+    await receive(bridge, "sms", original);
+    expect(dispatchReply).not.toHaveBeenCalled();
+    core.inbound.dispatchReply = dispatchReply;
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.waitFor(() => expect(dispatchReply).toHaveBeenCalledTimes(1));
+    await receive(bridge, "sms", original);
+    expect(dispatchReply).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});

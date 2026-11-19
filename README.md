@@ -632,6 +632,13 @@ See [PLAN.md](./PLAN.md) for the longer architecture history and roadmap.
 
 MIT - see [LICENSE](./LICENSE).
 
+
+### Voice-note transcription
+
+Incoming MMS, iMessage, and WhatsApp audio keeps its original attachment and caption. When a transcript is pending, the plugin waits up to 60 seconds for a completion notification, then reads the message once if needed. That fallback read is bounded to 10 seconds. A completed transcript reaches the agent as explicitly labeled voice-note context, not as an ordinary typed message.
+
+If transcription fails, is skipped, or remains unavailable after the wait and read, the original message follows the usual attachment-handling path. Completion notifications do not create a second turn. The plugin subscribes to `message.transcription_finished` once per identity. The event’s `data.channel` and `data.message_id` identify the original message; the plugin resumes that message in its original session. Pending messages retain their original deadline across restarts.
+
 ## Dedicated WhatsApp
 
 WhatsApp is available by approval for an agent with a dedicated personal iMessage number. The channel uses that same number, not a shared line. Request access from the Inkbox Console. There is no local enable flag, self-service provisioning tool, or automatic SMS fallback. Existing installations subscribe to notifications independently of a cached disabled identity snapshot, so later approval does not require changing credentials.
