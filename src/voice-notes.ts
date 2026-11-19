@@ -172,13 +172,12 @@ export class VoiceNoteInbox {
       return true;
     }
     if (event.companion) return false;
-    if (
-      !event.event_type.endsWith(".received") ||
-      !Array.isArray(source(event)?.media) ||
-      !source(event)?.media.some((item: VoiceEvent) => item?.transcription)
-    )
+    if (!event.event_type.endsWith(".received")) return false;
+    const retained = this.saved.pending[id];
+    if (this.saved.done[id] || (retained && !retained.resolutionOnly)) return true;
+    if (!Array.isArray(source(event)?.media) || !source(event)?.media.some((item: VoiceEvent) => item?.transcription))
       return false;
-    if (this.saved.done[id] || this.saved.pending[id]) return true;
+    if (retained) return true;
     const cached = this.early.get(id);
     this.early.delete(id);
     const current = cached && Date.now() - cached.at < 300_000 ? merge(event, cached.event) : event;

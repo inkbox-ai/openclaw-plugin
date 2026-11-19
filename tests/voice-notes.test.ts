@@ -192,6 +192,9 @@ describe("voice-note delivery", () => {
     await vi.advanceTimersByTimeAsync(0);
     current.inbox.close();
     const recovered = setup();
+    const refreshed = received();
+    refreshed.data.message.media = [];
+    expect(await recovered.inbox.accept(refreshed)).toBe(true);
     recovered.inbox.recover();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(recovered.deliver).not.toHaveBeenCalled();
