@@ -332,7 +332,8 @@ it("does not label real video as an unavailable voice note", () => {
 
 it("recognizes generated snapshot notes only on the exact trigger and caption", () => {
   const message = received("imessage", ["completed"]).data.message;
-  const note = "[Voice note 1 — automatically transcribed]\nMove the review to Thursday.";
+  message.media.unshift({ content_type: "image/png" });
+  const note = "[Voice note 2 — automatically transcribed]\nMove the review to Thursday.";
   const entry = { id: message.id, isTrigger: true, text: `Original caption\n\n${note}` };
   expect(snapshotHasVoiceNote(message, [entry], "Original caption")).toBe(true);
   expect(snapshotHasVoiceNote(message, [{ ...entry, id: "other-source" }], "Original caption")).toBe(false);

@@ -85,9 +85,9 @@ export function snapshotHasVoiceNote(
 ): boolean {
   const trigger = entries.find(entry => entry.id === message?.id && entry.isTrigger === true);
   if (!trigger || !Array.isArray(message?.media)) return false;
-  const results = message.media.flatMap((item: VoiceEvent) => item?.transcription ? [item.transcription] : []);
-  const notes = results.flatMap((result: VoiceEvent, index: number) => {
-    if (result.error_code === "not_audio") return [];
+  const notes = message.media.flatMap((item: VoiceEvent, index: number) => {
+    const result = item?.transcription;
+    if (!result || result.error_code === "not_audio") return [];
     const text = typeof result.text === "string" ? result.text.trim() : "";
     if (result.status === "completed") return [text
       ? `[Voice note ${index + 1} — automatically transcribed]\n${text}`
