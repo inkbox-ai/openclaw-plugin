@@ -1,5 +1,6 @@
 import { RequestIdDedup } from "./dedup.js";
 import { dispatchInbound, type InboundHandlers } from "./dispatch.js";
+import { inboundDeliveryKey } from "./inbound-events.js";
 import { matchProvider } from "../webhook-providers/index.js";
 import type { PluginLogger } from "../client.js";
 
@@ -145,6 +146,7 @@ export async function handleInkboxWebhook(
     return { status: 400, body: "invalid json" };
   }
   const eventId =
+    parsed.event_type === "inbound.received" ? inboundDeliveryKey(parsed.data as Record<string, any>) ?? "" :
     ["message.received", "text.received", "imessage.received", "call.ended"].includes(String(parsed.event_type)) &&
     typeof parsed.id === "string" ? parsed.id : "";
   const dedupId = eventId ? `inkbox:event:${eventId}` : requestId;

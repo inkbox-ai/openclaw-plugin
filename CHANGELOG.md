@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.25 (unreleased)
+
+- Add local delivery mode (`INKBOX_DELIVERY_MODE=local`): no tunnel, public route, or subscription changes; signature verification is unchanged and identities without a tunnel are supported.
+- Handle `inbound.received` in local mode with the source's `agent` or `script` handler, deduplicated by delivery ID (event ID when absent) so replays run again. A failing script runs at most 5 times (retries after 10 s, 30 s, 2 min, 10 min) and is then reported as failed. Request bodies in agent messages are capped at 64 KiB.
+- Require `@inkbox/sdk` 0.7.41 or later.
+
 ## 0.2.24 (unreleased)
 
 - Wait for voice-note transcription completion before waking the agent, with a 60-second wait and one bounded message poll before the original-attachment fallback.

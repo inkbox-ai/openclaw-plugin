@@ -6942,6 +6942,48 @@ describe("createInkboxSessionBridge", () => {
     const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
     expect(ctxPayload.message.body).toContain("UNVERIFIED external event");
   });
+
+  it("runs an inbound agent event in the source session without delivering a reply", async () => {
+    const { runtime, sendText } = createRuntime();
+    const channelRuntime = createChannelRuntime("Recorded the payment.");
+    const bridge = createInkboxSessionBridge({
+      cfg: {},
+      account: { accountId: "default", identity: "smoke-agent", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any,
+      channelRuntime,
+    });
+    const event = {
+      event_type: "inbound.received",
+      data: {
+        event_id: "inbev_1",
+        delivery_id: "inbdlv_1",
+        source: { id: "inbsrc_1", name: "payments", instructions: "Record each paid invoice." },
+        handler: { type: "agent" },
+        signature_verified: true,
+        request: { headers: {}, body: "{\"paid\":true}", body_encoding: "utf8" },
+      },
+    };
+
+    await bridge.handlers.onInboundEvent?.(event);
+    expect(await bridge.deliveryState(event)).toBe("pending");
+    await vi.waitFor(() => expect(channelRuntime.deliveryResults).toHaveLength(1));
+    await vi.waitFor(async () => expect(await bridge.deliveryState(event)).toBe("completed"));
+
+    const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
+    expect(ctxPayload.route.routeSessionKey).toContain("inbound:payments");
+    expect(ctxPayload.extra.InkboxMode).toBe("external");
+    const body = ctxPayload.message.body as string;
+    expect(body).toContain("UNTRUSTED EXTERNAL CONTENT");
+    expect(body).toContain("Record each paid invoice.");
+    expect(body).toContain('{"paid":true}');
+    expect(channelRuntime.deliveryResults[0]).toMatchObject({ visibleReplySent: false });
+    expect(sendText).not.toHaveBeenCalled();
+
+    await bridge.handlers.onInboundEvent?.(event);
+    await flushMicrotasks();
+    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(await bridge.deliveryState({ ...event, data: { ...event.data, delivery_id: "inbdlv_2" } })).toBe("absent");
+  });
 });
 
 describe("configureInkboxIdentityDelivery", () => {

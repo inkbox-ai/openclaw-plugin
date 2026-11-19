@@ -106,6 +106,7 @@ import {
   type OutboundCallContext,
 } from "../outbound-call-context.js";
 import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
+import { createInboundEventHandler, inboundDeliveryKey } from "./inbound-events.js";
 import {
   IMESSAGE_EVENT_TYPES,
   WHATSAPP_EVENT_TYPES,
@@ -6335,7 +6336,38 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
     return false;
   }
+  const inboundEvents = createInboundEventHandler({
+    logger: opts.logger,
+    runTurn: async ({ source, eventId, message }) => {
+      const name = source.replace(/[\[\]\r\n]/g, " ").slice(0, 80);
+      await dispatchInboundTurn({ ...opts, activeCalls, turn: {
+        mode: "external",
+        contactKey: `inbound:${name}`,
+        sessionKeyOverride: `inbound:${name}`,
+        fromLabel: name,
+        conversationLabel: `${name} inbound events`,
+        body: message,
+        messageId: `inbound:${eventId}`,
+        threadId: `inbound:${eventId}`,
+        timestamp: Date.now(),
+        raw: { event_id: eventId },
+      } });
+    },
+    reportFailure: async (data, error) => {
+      const inbound = ((await opts.runtime.getClient()) as any).inbound;
+      // Older SDKs lack this method; the failure is then only logged.
+      if (typeof inbound?.reportInboundEventResult !== "function") {
+        opts.logger?.warn?.(`Inkbox inbound event ${data.event_id} failed: ${error}`);
+        return;
+      }
+      const identity = await opts.runtime.getIdentity();
+      await inbound.reportInboundEventResult(identity.agentHandle, data.source.id, data.event_id, { status: "failed", error });
+    },
+  });
   const handlers: InboundHandlers = {
+    async onInboundEvent(event) {
+      await inboundEvents.handle(event);
+    },
     async onCompanion(event) {
       const normalized = structuredClone(event);
       delete normalized._openclawNativeIMessage; delete normalized._openclawSlack;
@@ -6877,6 +6909,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     activeCalls,
     eventState: (id) => companion.eventState(id),
     deliveryState: async (event) => {
+      if (event.event_type === "inbound.received") return inboundEvents.state(inboundDeliveryKey(event.data));
       const companionState = await companion.eventState(event.id);
       if (companionState !== "absent") return companionState;
       if (["a2a.task.created", "a2a.task.message"].includes(event.event_type)) {

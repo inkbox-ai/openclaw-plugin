@@ -3,12 +3,14 @@ import type { InboundHandlers } from "./dispatch.js";
 import { openInkboxTunnel } from "./tunnel.js";
 import { registerInboundHttpRoute } from "./http-route.js";
 import { wrapInboundHandlersWithBatching } from "./batch.js";
+import { localDeliveryMode } from "./inbound-events.js";
 export { SmsBatcher, IMessageBatcher, DEFAULT_SMS_BATCH, wrapInboundHandlersWithBatching } from "./batch.js";
 export type { SmsBatchConfig, BatchedTextEvent, BatchedIMessageEvent } from "./batch.js";
 
 export { RequestIdDedup } from "./dedup.js";
 export { handleInkboxWebhook } from "./handler.js";
 export { dispatchInbound } from "./dispatch.js";
+export { localDeliveryMode, LOCAL_DELIVERY_MAX_BODY_BYTES } from "./inbound-events.js";
 export { openInkboxTunnel } from "./tunnel.js";
 export { registerInboundHttpRoute } from "./http-route.js";
 export type { InboundHandlers, InboundCallDecision, DispatchResult } from "./dispatch.js";
@@ -42,6 +44,11 @@ export function startInbound(opts: StartInboundOptions): void {
   }
   if (!cfg.identity) {
     logger?.warn?.("Inkbox inbound delivery skipped — no identity in config.");
+    return;
+  }
+
+  if (localDeliveryMode()) {
+    logger?.info?.("Inkbox local delivery mode; the host delivers webhooks, no tunnel or public route is opened.");
     return;
   }
 
