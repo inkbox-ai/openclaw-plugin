@@ -43,6 +43,17 @@ function makeClient(
 }
 
 describe("reconcileWebhookSubscription", () => {
+  it("leaves other channels available when an older API rejects the transcription event", async () => {
+    const create = vi.fn().mockRejectedValueOnce(Object.assign(new InkboxAPIError(422, "Unknown event"), {
+      detail: [{type: "enum", loc: ["body", "event_types", 0, "MailWebhookEventType"], input: "message.transcription_finished"}],
+    }));
+    const { client } = makeClient({ create });
+    await expect(reconcileWebhookSubscription(client, {
+      agentIdentityId: "agent", url: "https://example.com/webhook", eventTypes: ["message.transcription_finished"],
+    })).resolves.toBeNull();
+    expect(create).toHaveBeenCalledOnce();
+  });
+
   it("creates a subscription when the owner has none", async () => {
     const { client, list, create, update } = makeClient({
       create: vi.fn(async (opts: any) => makeSub({ ...opts, mailboxId: opts.mailboxId })),
