@@ -1,6 +1,6 @@
 import { slackMrkdwn } from "./slack-style.js";
 import { createHash } from "node:crypto";
-import type { Inkbox, SlackConnection } from "@inkbox/sdk";
+import { InkboxAPIError, type Inkbox, type SlackConnection } from "@inkbox/sdk";
 import { transcriptionEventUnsupported } from "./inbound/subscriptions.js";
 import { TRANSCRIPTION_FINISHED } from "./voice-notes.js";
 
@@ -60,32 +60,39 @@ export async function ownSlackConnection(client: Inkbox, identityId: string, con
 }
 /**
  * Slack completions reach only a subscription that also selected the original
- * Slack message, so the message row carries `message.transcription_finished`.
+ * Slack message, so one Slack message row carries `message.transcription_finished`.
  */
 export async function reconcileSlackSubscription(client: Inkbox, identityId: string, url: string): Promise<void> {
   const subscriptions = client.webhooks.subscriptions;
-  const rows = (await subscriptions.list({ agentIdentityId: identityId, scope: "identity", url })).filter((s) => s.url === url && s.eventTypes.some((e) => SLACK_SUBSCRIPTION_EVENTS.includes(e)));
+  const all = (await subscriptions.list({ agentIdentityId: identityId, scope: "identity", url })).filter((s) => s.url === url);
+  const rows = all.filter((s) => s.eventTypes.some((e) => SLACK_SUBSCRIPTION_EVENTS.includes(e)));
   if (rows.some((s) => s.status !== "active")) throw new Error("The Slack subscription is paused; resume it before starting.");
   const covered = new Set(rows.flatMap((s) => s.eventTypes));
   const missing = SLACK_SUBSCRIPTION_EVENTS.filter((e) => !covered.has(e));
-  const messages = rows.filter((s) => s.eventTypes.some((e) => (SLACK_EVENTS as readonly string[]).includes(e))).sort((a, b) => b.eventTypes.length - a.eventTypes.length);
-  // Older APIs reject the completion event; Slack delivery itself must still converge.
-  const write = async (eventTypes: string[], save: (eventTypes: string[]) => Promise<unknown>, required: boolean) => {
-    try { await save(eventTypes); }
-    catch (error) {
-      if (!transcriptionEventUnsupported(error)) throw error;
-      if (required) await save(eventTypes.filter((e) => e !== TRANSCRIPTION_FINISHED));
+  const kinds = (s: { eventTypes: string[] }) => s.eventTypes.filter((e) => (SLACK_EVENTS as readonly string[]).includes(e)).length;
+  const messages = rows.filter((s) => kinds(s) > 0);
+  // Extend the existing receiver: a second channel-only row would deliver mentions again.
+  const target = messages.find((s) => s.eventTypes.includes(TRANSCRIPTION_FINISHED)) ?? [...messages].sort((a, b) => kinds(b) - kinds(a))[0];
+  const finished = !target?.eventTypes.includes(TRANSCRIPTION_FINISHED);
+  if (!missing.length && !finished) return;
+  // One URL holds each event in a single active subscription, so move it to the target.
+  if (finished) {
+    for (const row of all) {
+      if (row === target || row.status !== "active" || !row.eventTypes.includes(TRANSCRIPTION_FINISHED)) continue;
+      const remaining = row.eventTypes.filter((e) => e !== TRANSCRIPTION_FINISHED);
+      if (remaining.length) { await subscriptions.update(row.id, { scope: "identity", eventTypes: remaining }); continue; }
+      try { await subscriptions.delete(row.id); }
+      catch (error) { if (!(error instanceof InkboxAPIError) || error.statusCode !== 404) throw error; }
     }
-  };
-  const [primary, ...others] = messages;
-  if (primary) {
-    const eventTypes = [...new Set([...primary.eventTypes, ...missing, TRANSCRIPTION_FINISHED])];
-    if (eventTypes.length !== primary.eventTypes.length) await write(eventTypes, (e) => subscriptions.update(primary.id, { scope: "identity", eventTypes: e }), missing.length > 0);
-  } else if (missing.length) {
-    await write([...missing, TRANSCRIPTION_FINISHED], (e) => subscriptions.create({ agentIdentityId: identityId, url, eventTypes: e }), true);
   }
-  for (const row of others) {
-    if (!row.eventTypes.includes(TRANSCRIPTION_FINISHED)) await write([...row.eventTypes, TRANSCRIPTION_FINISHED], (e) => subscriptions.update(row.id, { scope: "identity", eventTypes: e }), false);
+  const apply = (wanted: string[]) => target
+    ? subscriptions.update(target.id, { scope: "identity", eventTypes: [...new Set([...target.eventTypes, ...wanted])] })
+    : subscriptions.create({ agentIdentityId: identityId, url, eventTypes: wanted });
+  try { await apply([...missing, ...(finished ? [TRANSCRIPTION_FINISHED] : [])]); }
+  catch (error) {
+    if (!finished || !transcriptionEventUnsupported(error)) throw error;
+    // Older APIs reject the completion event; Slack delivery itself must still converge.
+    if (missing.length) await apply(missing);
   }
 }
 export function slackText(text: string): void {

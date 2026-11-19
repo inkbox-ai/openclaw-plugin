@@ -599,6 +599,15 @@ describe("Slack native host channel-wide Companion", () => {
     await f.bridge.catchUpCompanion();
     expect(f.dispatchReply).toHaveBeenCalledOnce();
   });
+  it("wakes the agent once when the same Slack message arrives under another envelope", async () => {
+    const f = slackBridge(), original: any = slackEvent(1, null); delete original.companion;
+    original.data.message_id = "55555555-5555-4555-8555-555555555555";
+    await dispatchInbound(original, f.bridge.handlers); await f.bridge.catchUpCompanion();
+    await vi.waitFor(() => expect(f.dispatchReply).toHaveBeenCalledOnce());
+    await dispatchInbound({ ...structuredClone(original), id: "slack-event-redelivered", event_type: "slack.mention_received" }, f.bridge.handlers);
+    await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+  });
   it.each([false, true])("runs a fresh Slack request after a confirmed Stop, including restart=%s", async (restart) => {
     const first = slackBridge(); let release!: () => void, entered!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; }), started = new Promise<void>((resolve) => { entered = resolve; });
