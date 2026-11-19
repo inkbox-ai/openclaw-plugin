@@ -106,7 +106,7 @@ import {
   type OutboundCallContext,
 } from "../outbound-call-context.js";
 import type { InboundCallDecision, InboundHandlers } from "./dispatch.js";
-import { createInboundEventHandler, inboundDeliveryKey } from "./inbound-events.js";
+import { createInboundEventHandler, inboundDeliveryKey, localDeliveryMode } from "./inbound-events.js";
 import {
   IMESSAGE_EVENT_TYPES,
   WHATSAPP_EVENT_TYPES,
@@ -279,6 +279,8 @@ export interface InkboxSessionBridge {
   catchUpHostedCalls(): Promise<void>;
   catchUpCompanion(): Promise<void>;
   shutdownA2A(): Promise<void>;
+  /** Pending work a hosted runtime must stay awake for: queued, retrying, or unreported inbound events. */
+  activity(): { inbound: number };
 }
 
 export interface ConfigureIdentityDeliveryOptions {
@@ -2530,6 +2532,8 @@ async function dispatchInboundTurn(
       onError?: (error: unknown) => void;
     };
     replyOptionsOverride?: Record<string, unknown>;
+    // Throw unless the host confirms the agent ran and the session was recorded.
+    confirmDispatch?: boolean;
     a2aContext?: ActiveA2ATurn;
     hostedSmsSettlement?: {
       accountId: string;
@@ -2543,7 +2547,7 @@ async function dispatchInboundTurn(
 ): Promise<void> {
   const core = opts.channelRuntime;
   if (!core?.inbound?.dispatchReply) {
-    if (opts.turn.companionReply) throw new Error("OpenClaw channelRuntime is unavailable for Companion delivery.");
+    if (opts.turn.companionReply || opts.confirmDispatch) throw new Error("OpenClaw channelRuntime is unavailable for confirmed delivery.");
     opts.logger?.warn?.(
       "Inkbox inbound event received, but OpenClaw channelRuntime is unavailable; dropping event.",
     );
@@ -2852,9 +2856,9 @@ async function dispatchInboundTurn(
         },
       },
     });
-    if (opts.turn.companionReply && (recordFailed || result?.dispatched !== true ||
+    if ((opts.turn.companionReply || opts.confirmDispatch) && (recordFailed || result?.dispatched !== true ||
         result.admission?.kind === "observeOnly" || result.dispatchResult?.beforeAgentRunBlocked)) {
-      throw new Error("OpenClaw did not confirm Companion turn execution and session recording.");
+      throw new Error("OpenClaw did not confirm turn execution and session recording.");
     }
     if (silentSendCapture?.completedSilently()) opts.onCompletedSilently?.();
     if (result?.dispatched === true && !recordFailed && result.admission?.kind !== "observeOnly" && !result.dispatchResult?.beforeAgentRunBlocked &&
@@ -6336,11 +6340,13 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     }
     return false;
   }
-  const inboundEvents = createInboundEventHandler({
+  const inboundEvents = localDeliveryMode() ? createInboundEventHandler({
+    dir: join(statePaths().dir, `inbound-${activityOwner}`),
     logger: opts.logger,
     runTurn: async ({ source, eventId, message }) => {
       const name = source.replace(/[\[\]\r\n]/g, " ").slice(0, 80);
-      await dispatchInboundTurn({ ...opts, activeCalls, turn: {
+      let failure: string | undefined;
+      await dispatchInboundTurn({ ...opts, activeCalls, confirmDispatch: true, turn: {
         mode: "external",
         contactKey: `inbound:${name}`,
         sessionKeyOverride: `inbound:${name}`,
@@ -6351,21 +6357,24 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
         threadId: `inbound:${eventId}`,
         timestamp: Date.now(),
         raw: { event_id: eventId },
+      }, deliveryOverride: {
+        // The reply goes nowhere; an error final reply means the turn failed.
+        deliver: async (payload, info) => {
+          if ((info?.kind ?? "final") === "final" && (payload as { isError?: unknown } | undefined)?.isError === true) failure = payloadText(payload).trim() || "agent error";
+          return { visibleReplySent: false };
+        },
       } });
+      if (failure) throw new Error(failure);
     },
     reportFailure: async (data, error) => {
-      const inbound = ((await opts.runtime.getClient()) as any).inbound;
-      // Older SDKs lack this method; the failure is then only logged.
-      if (typeof inbound?.reportInboundEventResult !== "function") {
-        opts.logger?.warn?.(`Inkbox inbound event ${data.event_id} failed: ${error}`);
-        return;
-      }
-      const identity = await opts.runtime.getIdentity();
-      await inbound.reportInboundEventResult(identity.agentHandle, data.source.id, data.event_id, { status: "failed", error });
+      const client = await opts.runtime.getClient(), identity = await opts.runtime.getIdentity();
+      await (client as any).inbound.reportInboundEventResult(identity.agentHandle, data.source.id, data.event_id,
+        { status: "failed", error, deliveryId: data.delivery_id });
     },
-  });
+  }) : undefined;
   const handlers: InboundHandlers = {
     async onInboundEvent(event) {
+      if (!inboundEvents) throw new Error("Inbound events require local delivery mode.");
       await inboundEvents.handle(event);
     },
     async onCompanion(event) {
@@ -6908,8 +6917,9 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     wsHandler,
     activeCalls,
     eventState: (id) => companion.eventState(id),
+    activity: () => ({ inbound: inboundEvents?.activity() ?? 0 }),
     deliveryState: async (event) => {
-      if (event.event_type === "inbound.received") return inboundEvents.state(inboundDeliveryKey(event.data));
+      if (event.event_type === "inbound.received") return inboundEvents?.state(inboundDeliveryKey(event.data)) ?? "absent";
       const companionState = await companion.eventState(event.id);
       if (companionState !== "absent") return companionState;
       if (["a2a.task.created", "a2a.task.message"].includes(event.event_type)) {

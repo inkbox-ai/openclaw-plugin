@@ -1,11 +1,15 @@
-import { homedir } from "node:os";
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@inkbox/sdk", () => ({ verifyWebhook: vi.fn(() => true) }));
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHmac } from "node:crypto";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AGENT_BODY_MAX_BYTES,
   SCRIPT_RETRY_DELAYS_MS,
+  SCRIPT_STDERR_MAX_BYTES,
+  SCRIPT_STDOUT_MAX_BYTES,
   buildInboundMessage,
   createInboundEventHandler,
   localDeliveryMode,
@@ -16,15 +20,21 @@ import { dispatchInbound } from "../../src/inbound/dispatch.js";
 import { handleInkboxWebhook } from "../../src/inbound/handler.js";
 import { RequestIdDedup } from "../../src/inbound/dedup.js";
 
+const SIGNING_KEY = "test-signing-key";
+const DELIVERY_ID = "2b0c3f4e-8a51-4f3e-9d0a-5c1e7b6a9f10";
+
+// The envelope the server signs and delivers to a hosted agent.
 function inboundEvent(handler: Record<string, unknown> = { type: "agent" }, overrides: Record<string, unknown> = {}) {
+  const deliveryId = (overrides.delivery_id as string | undefined) ?? DELIVERY_ID;
+  const id = `evt_${createHmac("sha256", "id").update(deliveryId).digest("hex")}`;
   return {
     event_type: "inbound.received",
-    timestamp: "2026-11-19T00:00:00Z",
+    timestamp: "2026-11-19T00:00:00+00:00",
     data: {
-      event_id: "inbev_1",
-      delivery_id: "inbdlv_1",
-      received_at: "2026-11-19T00:00:00Z",
-      source: { id: "inbsrc_1", name: "payments", instructions: "Record paid invoices." },
+      event_id: "inbev_6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+      delivery_id: DELIVERY_ID,
+      received_at: "2026-11-19T00:00:00+00:00",
+      source: { id: "inbsrc_0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", name: "payments", instructions: "Record paid invoices." },
       handler,
       signature_verified: true,
       request: {
@@ -37,15 +47,62 @@ function inboundEvent(handler: Record<string, unknown> = { type: "agent" }, over
       },
       ...overrides,
     },
+    id,
+    hosted_delivery: { version: 1, activation_id: "7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a", event_id: id, starts_agent: true },
   };
 }
 
-async function settle(handler: ReturnType<typeof createInboundEventHandler>, id = "inbdlv_1") {
-  await vi.waitFor(() => expect(handler.state(id)).toBe("completed"));
+function signed(event: Record<string, any>, key = SIGNING_KEY) {
+  const body = JSON.stringify(event);
+  const timestamp = "1795046400";
+  const signature = createHmac("sha256", key).update(`${event.id}.${timestamp}.${body}`).digest("hex");
+  return {
+    body,
+    headers: { "content-type": "application/json", "x-inkbox-request-id": event.id, "x-inkbox-timestamp": timestamp, "x-inkbox-signature": `sha256=${signature}` },
+  };
 }
 
-afterEach(() => {
+async function until(condition: () => boolean | Promise<boolean>, label = "condition") {
+  for (let i = 0; i < 5000; i++) {
+    if (await condition()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+let dir: string;
+const handlers: Array<ReturnType<typeof createInboundEventHandler>> = [];
+
+async function storedJobs(): Promise<any[]> {
+  const files = (await readdir(dir)).filter((name) => name.endsWith(".json"));
+  return Promise.all(files.map(async (name) => JSON.parse(await readFile(join(dir, name), "utf8"))));
+}
+
+function deps(overrides: Record<string, any> = {}) {
+  return {
+    dir,
+    runTurn: vi.fn(async (_turn: any) => {}),
+    reportFailure: vi.fn(async (_data: InboundEventData, _error: string) => {}),
+    runScript: vi.fn(async (_command: string, _input: string) => ({ ok: true, stdout: "", error: "" })),
+    ...overrides,
+  };
+}
+
+function create(d: ReturnType<typeof deps>) {
+  const handler = createInboundEventHandler(d);
+  handlers.push(handler);
+  return handler;
+}
+
+beforeEach(async () => {
+  dir = join(await mkdtemp(join(tmpdir(), "inkbox-inbound-")), "queue");
+});
+
+afterEach(async () => {
+  for (const handler of handlers.splice(0)) handler.close();
+  vi.useRealTimers();
   vi.unstubAllEnvs();
+  await rm(join(dir, ".."), { recursive: true, force: true });
 });
 
 describe("localDeliveryMode", () => {
@@ -64,45 +121,48 @@ describe("inbound.received routing", () => {
     const onExternal = vi.fn();
     const result = await dispatchInbound(inboundEvent(), { onInboundEvent, onExternal });
     expect(result.kind).toBe("inbound");
-    expect(onInboundEvent).toHaveBeenCalledTimes(1);
+    expect(onInboundEvent).toHaveBeenCalledWith(expect.objectContaining({ hosted_delivery: expect.any(Object) }));
     expect(onExternal).not.toHaveBeenCalled();
   });
 
   it("ignores the event outside local mode", async () => {
     vi.stubEnv("INKBOX_DELIVERY_MODE", "");
     const onInboundEvent = vi.fn();
-    const onExternal = vi.fn();
-    const result = await dispatchInbound(inboundEvent(), { onInboundEvent, onExternal });
+    const result = await dispatchInbound(inboundEvent(), { onInboundEvent, onExternal: vi.fn() });
     expect(result.kind).toBe("inbound");
     expect(onInboundEvent).not.toHaveBeenCalled();
-    expect(onExternal).not.toHaveBeenCalled();
   });
 
-  it("acks with 2xx and dedupes retries by delivery id", async () => {
+  it("acks a signed delivery and dedupes retries on delivery_id", async () => {
     vi.stubEnv("INKBOX_DELIVERY_MODE", "local");
     const onInboundEvent = vi.fn();
     const dedup = new RequestIdDedup(100);
-    const body = JSON.stringify(inboundEvent());
-    const headers = (id: string) => ({ "x-inkbox-request-id": id, "x-inkbox-signature": "s", "x-inkbox-timestamp": "1" });
-    const first = await handleInkboxWebhook(body, headers("req-1"), { signingKey: "k", handlers: { onInboundEvent }, dedup });
-    const second = await handleInkboxWebhook(body, headers("req-2"), { signingKey: "k", handlers: { onInboundEvent }, dedup });
-    expect(first.status).toBe(200);
-    expect(second).toEqual({ status: 200, body: "dup" });
-    expect(onInboundEvent).toHaveBeenCalledTimes(1);
-    const replay = inboundEvent(undefined, { delivery_id: "inbdlv_2" });
-    expect(await handleInkboxWebhook(JSON.stringify(replay), headers("req-3"), { signingKey: "k", handlers: { onInboundEvent }, dedup }))
+    const event = inboundEvent();
+    const first = signed(event);
+    expect(await handleInkboxWebhook(first.body, first.headers, { signingKey: SIGNING_KEY, handlers: { onInboundEvent }, dedup }))
+      .toEqual({ status: 200, body: "ok" });
+    const retry = signed({ ...event, timestamp: "2026-11-19T00:01:00+00:00" });
+    expect(await handleInkboxWebhook(retry.body, retry.headers, { signingKey: SIGNING_KEY, handlers: { onInboundEvent }, dedup }))
+      .toEqual({ status: 200, body: "dup" });
+    const replay = signed(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" }));
+    expect(await handleInkboxWebhook(replay.body, replay.headers, { signingKey: SIGNING_KEY, handlers: { onInboundEvent }, dedup }))
       .toEqual({ status: 200, body: "ok" });
     expect(onInboundEvent).toHaveBeenCalledTimes(2);
   });
 
-  it("acks with 2xx outside local mode without waking the agent", async () => {
-    vi.stubEnv("INKBOX_DELIVERY_MODE", "");
+  it("requires a verified Inkbox signature", async () => {
+    vi.stubEnv("INKBOX_DELIVERY_MODE", "local");
     const onInboundEvent = vi.fn();
-    const out = await handleInkboxWebhook(JSON.stringify(inboundEvent()),
-      { "x-inkbox-request-id": "r", "x-inkbox-signature": "s", "x-inkbox-timestamp": "1" },
-      { signingKey: "k", handlers: { onInboundEvent } });
-    expect(out.status).toBe(200);
+    const onExternal = vi.fn();
+    const event = inboundEvent();
+    const options = { signingKey: SIGNING_KEY, externalEvents: true, handlers: { onInboundEvent, onExternal } };
+    expect((await handleInkboxWebhook(JSON.stringify(event), {}, options)).status).toBe(401);
+    const forged = signed(event, "other-key");
+    expect((await handleInkboxWebhook(forged.body, forged.headers, options)).status).toBe(403);
+    const unkeyed = signed(event, "");
+    expect((await handleInkboxWebhook(unkeyed.body, unkeyed.headers, { ...options, signingKey: "" })).status).toBe(401);
     expect(onInboundEvent).not.toHaveBeenCalled();
+    expect(onExternal).not.toHaveBeenCalled();
   });
 });
 
@@ -123,7 +183,7 @@ describe("buildInboundMessage", () => {
     const body = "a".repeat(AGENT_BODY_MAX_BYTES - 1) + "é" + "tail";
     const message = buildInboundMessage(data, body, "utf8");
     expect(message.endsWith(`${"a".repeat(AGENT_BODY_MAX_BYTES - 1)}\n(truncated)`)).toBe(true);
-    expect(message).not.toContain("\uFFFD");
+    expect(message).not.toContain("�");
     expect(buildInboundMessage(data, "a".repeat(AGENT_BODY_MAX_BYTES), "utf8")).not.toContain("(truncated)");
   });
 
@@ -136,161 +196,187 @@ describe("buildInboundMessage", () => {
 });
 
 describe("createInboundEventHandler", () => {
-  function deps(scriptResults: Array<{ ok: boolean; stdout?: string; error?: string }> = []) {
-    const results = [...scriptResults];
-    return {
-      runTurn: vi.fn(async () => {}),
-      reportFailure: vi.fn(async () => {}),
-      runScript: vi.fn(async () => {
-        const next = results.shift() ?? { ok: true };
-        return { ok: next.ok, stdout: next.stdout ?? "", error: next.error ?? "" };
-      }),
-      sleep: vi.fn(async () => {}),
-    };
-  }
-
-  it("runs one agent turn keyed by source and dedupes on delivery id", async () => {
-    const d = deps();
-    const handler = createInboundEventHandler(d);
+  it("persists the delivery before acknowledging and completes it while the turn still runs", async () => {
+    let release!: () => void;
+    const d = deps({ runTurn: vi.fn(() => new Promise<void>((resolve) => { release = resolve; })) });
+    const handler = create(d);
+    expect(await handler.state(DELIVERY_ID)).toBe("absent");
     await handler.handle(inboundEvent());
-    await handler.handle(inboundEvent());
-    await settle(handler);
-    expect(d.runTurn).toHaveBeenCalledTimes(1);
-    expect(d.runTurn).toHaveBeenCalledWith(expect.objectContaining({ source: "payments", eventId: "inbev_1" }));
-    expect((d.runTurn.mock.calls[0] as any)[0].message).toContain('{"paid":true}');
+    expect(await storedJobs()).toEqual([expect.objectContaining({ key: DELIVERY_ID, stage: "turn" })]);
+    expect(await handler.state(DELIVERY_ID)).toBe("completed");
+    await until(() => d.runTurn.mock.calls.length === 1, "turn");
+    expect(handler.activity()).toBe(1);
+    release();
+    await until(() => handler.activity() === 0, "idle");
+    expect(await storedJobs()).toEqual([expect.objectContaining({ key: DELIVERY_ID, stage: "done" })]);
+    expect((await storedJobs())[0].data).toBeUndefined();
   });
 
-  it("runs a replay of the same event again", async () => {
+  it("runs one agent turn per delivery and again for a replay", async () => {
     const d = deps();
-    const handler = createInboundEventHandler(d);
+    const handler = create(d);
     await handler.handle(inboundEvent());
-    await handler.handle(inboundEvent(undefined, { delivery_id: "inbdlv_2" }));
-    await settle(handler);
-    await settle(handler, "inbdlv_2");
+    await handler.handle(inboundEvent());
+    await handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" }));
+    await until(() => d.runTurn.mock.calls.length === 2 && handler.activity() === 0, "turns");
+    expect(d.runTurn.mock.calls[0][0]).toEqual(expect.objectContaining({ source: "payments", eventId: "inbev_6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b" }));
+    expect(d.runTurn.mock.calls[0][0].message).toContain('{"paid":true}');
+    await handler.handle(inboundEvent());
     expect(d.runTurn).toHaveBeenCalledTimes(2);
   });
 
-  it("falls back to the event id without a delivery id", async () => {
+  it("dedupes on delivery_id across a restart", async () => {
     const d = deps();
-    const handler = createInboundEventHandler(d);
-    await handler.handle(inboundEvent(undefined, { delivery_id: undefined }));
-    await handler.handle(inboundEvent(undefined, { delivery_id: undefined }));
-    await settle(handler, "inbev_1");
+    const first = create(d);
+    await first.handle(inboundEvent());
+    await until(() => first.activity() === 0, "idle");
+    first.close();
+    const second = create(d);
+    await second.handle(inboundEvent());
+    expect(await second.state(DELIVERY_ID)).toBe("completed");
     expect(d.runTurn).toHaveBeenCalledTimes(1);
   });
 
-  it("reports pending while the handler runs", async () => {
-    let release!: () => void;
-    const d = deps();
-    d.runTurn.mockImplementation(() => new Promise<void>((resolve) => { release = resolve; }));
-    const handler = createInboundEventHandler(d);
-    expect(handler.state("inbdlv_1")).toBe("absent");
+  it("runs queued work outside the delivery's async context", async () => {
+    const scope = new AsyncLocalStorage<string>();
+    let seen: string | undefined = "unset";
+    const d = deps({ runTurn: vi.fn(async () => { seen = scope.getStore(); }) });
+    const handler = create(d);
+    await scope.run("delivery", () => handler.handle(inboundEvent()));
+    await until(() => d.runTurn.mock.calls.length === 1 && handler.activity() === 0, "turn");
+    expect(seen).toBeUndefined();
+  });
+
+  it("reports a failed agent turn with the delivery id", async () => {
+    const d = deps({ runTurn: vi.fn(async () => { throw new Error("model unavailable"); }) });
+    const handler = create(d);
     await handler.handle(inboundEvent());
-    expect(handler.state("inbdlv_1")).toBe("pending");
-    await vi.waitFor(() => expect(release).toBeDefined());
-    release();
-    await settle(handler);
+    await until(() => handler.activity() === 0, "idle");
+    expect(d.reportFailure).toHaveBeenCalledTimes(1);
+    const [data, error] = d.reportFailure.mock.calls[0];
+    expect(data.delivery_id).toBe(DELIVERY_ID);
+    expect(error).toBe("agent turn failed: model unavailable");
   });
 
   it("passes the request to the script on stdin", async () => {
-    const d = deps([{ ok: true }]);
-    const handler = createInboundEventHandler(d);
+    const d = deps();
+    const handler = create(d);
     await handler.handle(inboundEvent({ type: "script", command: "handle-payment" }));
-    await settle(handler);
-    const [command, input] = d.runScript.mock.calls[0] as unknown as [string, string];
+    await until(() => handler.activity() === 0, "idle");
+    const [command, input] = d.runScript.mock.calls[0];
     expect(command).toBe("handle-payment");
     expect(JSON.parse(input)).toEqual({
       source: "payments",
-      event_id: "inbev_1",
+      event_id: "inbev_6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
       headers: { "content-type": "application/json" },
       body: '{"paid":true}',
       body_encoding: "utf8",
     });
-  });
-
-  it("finishes without an agent turn when the script prints nothing", async () => {
-    const d = deps([{ ok: true, stdout: "  \n" }]);
-    const handler = createInboundEventHandler(d);
-    await handler.handle(inboundEvent({ type: "script", command: "true" }));
-    await settle(handler);
     expect(d.runTurn).not.toHaveBeenCalled();
     expect(d.reportFailure).not.toHaveBeenCalled();
   });
 
-  it("caps script output in the agent message but passes the full body on stdin", async () => {
+  it("passes the full body on stdin and caps the script output in the agent message", async () => {
     const big = "b".repeat(AGENT_BODY_MAX_BYTES + 10);
-    const d = deps([{ ok: true, stdout: big }]);
-    const handler = createInboundEventHandler(d);
+    const d = deps({ runScript: vi.fn(async () => ({ ok: true, stdout: big, error: "" })) });
+    const handler = create(d);
     await handler.handle(inboundEvent({ type: "script", command: "x" }, { request: { body: big, body_encoding: "utf8" } }));
-    await settle(handler);
-    expect(JSON.parse((d.runScript.mock.calls[0] as any)[1]).body).toBe(big);
-    const message = (d.runTurn.mock.calls[0] as any)[0].message as string;
+    await until(() => handler.activity() === 0, "idle");
+    expect(JSON.parse(d.runScript.mock.calls[0][1]).body).toBe(big);
+    const message = d.runTurn.mock.calls[0][0].message as string;
     expect(message.endsWith(`${"b".repeat(AGENT_BODY_MAX_BYTES)}\n(truncated)`)).toBe(true);
   });
 
-  it("wakes the agent with the script output", async () => {
-    const d = deps([{ ok: true, stdout: "Invoice 42 needs review" }]);
-    const handler = createInboundEventHandler(d);
-    await handler.handle(inboundEvent({ type: "script", command: "x" }));
-    await settle(handler);
-    const turn = (d.runTurn.mock.calls[0] as any)[0];
-    expect(turn.message).toContain("Invoice 42 needs review");
-    expect(turn.message).not.toContain('{"paid":true}');
-  });
-
-  it("runs a failing script 5 times with backoff and then reports failure", async () => {
-    vi.useFakeTimers();
-    try {
-      const failures = Array.from({ length: 6 }, () => ({ ok: false, error: "boom" }));
-      const { sleep: _sleep, ...rest } = deps(failures);
-      const d = { ...rest, sleep: undefined };
-      const handler = createInboundEventHandler(d);
-      await handler.handle(inboundEvent({ type: "script", command: "false" }));
-      for (const [index, delay] of [10_000, 30_000, 120_000, 600_000].entries()) {
-        await vi.advanceTimersByTimeAsync(delay - 1);
-        expect(d.runScript).toHaveBeenCalledTimes(index + 1);
-        await vi.advanceTimersByTimeAsync(1);
-      }
-      await vi.advanceTimersByTimeAsync(3_600_000);
-      expect(d.runScript).toHaveBeenCalledTimes(5);
-      expect(d.reportFailure).toHaveBeenCalledTimes(1);
-      expect(d.reportFailure).toHaveBeenCalledWith(expect.objectContaining({ event_id: "inbev_1" }), "boom");
-      expect(d.runTurn).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("uses the retry schedule 10 s, 30 s, 2 min, 10 min", async () => {
-    const failures = Array.from({ length: 6 }, () => ({ ok: false, error: "boom" }));
-    const d = deps(failures);
-    const handler = createInboundEventHandler(d);
+  it("retries a failing script after 10 s, 30 s, 2 min and 10 min, then reports it once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const d = deps({ runScript: vi.fn(async () => ({ ok: false, stdout: "", error: "boom" })) });
+    const handler = create(d);
     await handler.handle(inboundEvent({ type: "script", command: "false" }));
-    await settle(handler);
+    for (const [index, delay] of SCRIPT_RETRY_DELAYS_MS.entries()) {
+      await until(async () => (await storedJobs())[0]?.attempts === index + 1, `attempt ${index + 1}`);
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(d.runScript).toHaveBeenCalledTimes(index + 1);
+      expect(handler.activity()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    await until(() => d.reportFailure.mock.calls.length === 1 && handler.activity() === 0, "report");
+    await vi.advanceTimersByTimeAsync(3_600_000);
     expect(d.runScript).toHaveBeenCalledTimes(5);
-    expect(d.sleep.mock.calls.map((call: any) => call[0])).toEqual(SCRIPT_RETRY_DELAYS_MS);
-    expect(SCRIPT_RETRY_DELAYS_MS).toEqual([10_000, 30_000, 120_000, 600_000]);
-    expect(d.reportFailure).toHaveBeenCalledWith(expect.objectContaining({ event_id: "inbev_1" }), "boom");
+    expect(d.reportFailure).toHaveBeenCalledWith(expect.objectContaining({ delivery_id: DELIVERY_ID }), "boom");
     expect(d.runTurn).not.toHaveBeenCalled();
+  });
+
+  it("resumes a script retry after a restart without starting over", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const failing = vi.fn(async () => ({ ok: false, stdout: "", error: "boom" }));
+    const first = create(deps({ runScript: failing }));
+    await first.handle(inboundEvent({ type: "script", command: "false" }));
+    await until(async () => (await storedJobs())[0]?.attempts === 1, "first run");
+    first.close();
+    const d = deps({ runScript: failing });
+    const second = create(d);
+    await second.ready;
+    expect(second.activity()).toBe(1);
+    for (const [index, delay] of SCRIPT_RETRY_DELAYS_MS.entries()) {
+      await until(async () => (await storedJobs())[0]?.attempts === index + 1, `attempt ${index + 1}`);
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    await until(() => second.activity() === 0, "report");
+    expect(failing).toHaveBeenCalledTimes(5);
+    expect(d.reportFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a failed report with backoff without re-running the script and treats 409 as done", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const reportFailure = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("HTTP 503"), { statusCode: 503 }))
+      .mockRejectedValueOnce(Object.assign(new Error("HTTP 409: stale_delivery"), { statusCode: 409 }));
+    const runScript = vi.fn(async () => ({ ok: false, stdout: "", error: "boom" }));
+    const handler = create(deps({ runScript, reportFailure }));
+    await handler.handle(inboundEvent({ type: "script", command: "false" }));
+    for (const delay of SCRIPT_RETRY_DELAYS_MS) {
+      await until(async () => (await storedJobs())[0].dueAt > Date.now(), "backoff");
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    await until(() => reportFailure.mock.calls.length === 1, "first report");
+    await until(async () => (await storedJobs())[0].attempts === 1 && (await storedJobs())[0].stage === "report", "report backoff");
+    expect(handler.activity()).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await until(() => handler.activity() === 0, "done");
+    expect(reportFailure).toHaveBeenCalledTimes(2);
+    expect(runScript).toHaveBeenCalledTimes(5);
   });
 
   it("stops retrying once the script succeeds", async () => {
-    const d = deps([{ ok: false, error: "boom" }, { ok: true, stdout: "done" }]);
-    const handler = createInboundEventHandler(d);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const runScript = vi.fn()
+      .mockResolvedValueOnce({ ok: false, stdout: "", error: "boom" })
+      .mockResolvedValueOnce({ ok: true, stdout: "Invoice 42 needs review", error: "" });
+    const d = deps({ runScript });
+    const handler = create(d);
     await handler.handle(inboundEvent({ type: "script", command: "x" }));
-    await settle(handler);
-    expect(d.runScript).toHaveBeenCalledTimes(2);
-    expect(d.sleep).toHaveBeenCalledTimes(1);
+    await until(async () => (await storedJobs())[0]?.attempts === 1, "first run");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await until(() => handler.activity() === 0, "idle");
+    expect(runScript).toHaveBeenCalledTimes(2);
     expect(d.reportFailure).not.toHaveBeenCalled();
-    expect(d.runTurn).toHaveBeenCalledTimes(1);
+    expect(d.runTurn.mock.calls[0][0].message).toContain("Invoice 42 needs review");
+    expect(d.runTurn.mock.calls[0][0].message).not.toContain('{"paid":true}');
   });
 
-  it("ignores malformed events", async () => {
+  it("ignores events without a delivery_id", async () => {
     const d = deps();
-    const handler = createInboundEventHandler(d);
-    await handler.handle({ event_type: "inbound.received", data: { source: { name: "x" } } });
+    const handler = create(d);
+    await handler.handle(inboundEvent(undefined, { delivery_id: undefined }));
+    expect(await storedJobs()).toEqual([]);
     expect(d.runTurn).not.toHaveBeenCalled();
-    expect(d.runScript).not.toHaveBeenCalled();
+  });
+
+  it("rejects the delivery when it cannot be stored", async () => {
+    const d = deps({ dir: "/dev/null/inbound" });
+    const handler = create(d);
+    await expect(handler.handle(inboundEvent())).rejects.toThrow();
+    expect(await handler.state(DELIVERY_ID)).toBe("absent");
   });
 });
 
@@ -302,17 +388,23 @@ describe("runInboundScript", () => {
 
   it("reports the stderr tail on a non-zero exit", async () => {
     const result = await runInboundScript("echo bad input >&2; exit 3", "");
-    expect(result.ok).toBe(false);
-    expect(result.error).toBe("bad input");
+    expect(result).toEqual({ ok: false, stdout: "", error: "bad input" });
   });
 
   it("reports the exit code when stderr is empty", async () => {
-    const result = await runInboundScript("exit 4", "");
-    expect(result).toMatchObject({ ok: false, error: "exit code 4" });
+    expect(await runInboundScript("exit 4", "")).toMatchObject({ ok: false, error: "exit code 4" });
+  });
+
+  it("drains large output and keeps 64 KiB of stdout and a 4 KiB stderr tail", async () => {
+    const result = await runInboundScript(
+      "head -c 3000000 /dev/zero | tr '\\0' a; head -c 3000000 /dev/zero | tr '\\0' e >&2; echo END >&2; exit 1", "", 20_000);
+    expect(result.ok).toBe(false);
+    expect(Buffer.byteLength(result.stdout)).toBe(SCRIPT_STDOUT_MAX_BYTES);
+    expect(Buffer.byteLength(result.error)).toBeLessThanOrEqual(SCRIPT_STDERR_MAX_BYTES);
+    expect(result.error.endsWith("END")).toBe(true);
   });
 
   it("kills the script and its children on timeout", async () => {
-    const result = await runInboundScript("sleep 30 & sleep 30", "", 200);
-    expect(result).toMatchObject({ ok: false, error: "timed out after 0 s" });
+    expect(await runInboundScript("sleep 30 & sleep 30", "", 200)).toMatchObject({ ok: false, error: "timed out after 0 s" });
   });
 });

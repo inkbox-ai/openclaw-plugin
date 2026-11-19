@@ -675,20 +675,26 @@ subscriptions unchanged. Signature verification is unchanged, and request bodies
 up to 2 MiB are accepted. An identity does not need a tunnel in this mode.
 
 In local mode the plugin also handles `inbound.received`, a request that an
-external service sent to one of the identity's inbound sources. Retries of one
-delivery are deduplicated by `delivery_id` (or `event_id` when absent); a replay
-runs again. Outside local mode the event is acknowledged and
-ignored.
+external service sent to one of the identity's inbound sources. The event must
+carry a valid Inkbox signature. The plugin writes each delivery to a queue under
+`~/.openclaw/inkbox/` before acknowledging it, then processes the queue in the
+background and resumes it after a restart. Deliveries are deduplicated by
+`delivery_id`; a replay has a new `delivery_id` and runs again. Outside local mode
+the event is acknowledged and ignored.
 
 - `agent` handler: one turn in the session `inbound:<source>`. The message marks
   the request as untrusted external content, then adds the source's instructions
   and the request body (binary bodies are noted, not shown; text over 64 KiB is
-  cut and marked `(truncated)`). The reply is not
-  delivered anywhere; the agent acts with tools.
+  cut and marked `(truncated)`). The reply is not delivered anywhere; the agent
+  acts with tools. A failed turn is reported as failed.
 - `script` handler: runs `/bin/sh -c "<command>"` in the home directory with a
   120-second timeout. Stdin is JSON with `source`, `event_id`, `headers`, `body`,
-  and `body_encoding`. Empty output finishes the event; other output starts an
-  `agent` turn with that output as the body. A failing or timed-out script runs at
-  most 5 times, retried after 10 s, 30 s, 2 min, and 10 min, and is then reported as failed
-  with the end of its stderr. Reporting requires an SDK with
-  `inbound.reportInboundEventResult`; with older SDKs the failure is only logged.
+  and `body_encoding`. The first 64 KiB of stdout and the last 4 KiB of stderr are
+  kept. Empty output finishes the event; other output starts an `agent` turn with
+  that output as the body. A failing or timed-out script runs at most 5 times,
+  retried after 10 s, 30 s, 2 min, and 10 min, and is then reported as failed with
+  the end of its stderr.
+
+Failure reports are retried with backoff for up to 24 hours without running the
+script again. A report rejected because the event was delivered again since
+counts as done.

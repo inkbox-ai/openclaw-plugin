@@ -3,7 +3,8 @@
 ## 0.2.25 (unreleased)
 
 - Add local delivery mode (`INKBOX_DELIVERY_MODE=local`): no tunnel, public route, or subscription changes; signature verification is unchanged and identities without a tunnel are supported.
-- Handle `inbound.received` in local mode with the source's `agent` or `script` handler, deduplicated by delivery ID (event ID when absent) so replays run again. A failing script runs at most 5 times (retries after 10 s, 30 s, 2 min, 10 min) and is then reported as failed. Request bodies in agent messages are capped at 64 KiB.
+- Handle `inbound.received` in local mode with the source's `agent` or `script` handler. Deliveries are written to a durable queue before they are acknowledged, deduplicated by `delivery_id` (a replay runs again), and resume after a restart. A failing script runs at most 5 times (retries after 10 s, 30 s, 2 min, 10 min); a failing script or agent turn is reported as failed with its `delivery_id`, and reports are retried for up to 24 hours. Script output is capped at 64 KiB of stdout and a 4 KiB stderr tail; request bodies in agent messages are capped at 64 KiB. The event requires a valid Inkbox signature.
+- The session bridge exposes `activity()` with the number of queued, retrying, or unreported inbound events.
 - Require `@inkbox/sdk` 0.7.41 or later.
 
 ## 0.2.24 (unreleased)

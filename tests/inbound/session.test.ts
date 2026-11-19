@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const realtimeMock = vi.hoisted(() => ({
   available: true,
@@ -6943,46 +6946,87 @@ describe("createInkboxSessionBridge", () => {
     expect(ctxPayload.message.body).toContain("UNVERIFIED external event");
   });
 
-  it("runs an inbound agent event in the source session without delivering a reply", async () => {
-    const { runtime, sendText } = createRuntime();
-    const channelRuntime = createChannelRuntime("Recorded the payment.");
-    const bridge = createInkboxSessionBridge({
-      cfg: {},
-      account: { accountId: "default", identity: "smoke-agent", config: { identity: "smoke-agent" } } as any,
-      runtime: runtime as any,
-      channelRuntime,
-    });
+  describe("inbound.received", () => {
+    const deliveryId = "2b0c3f4e-8a51-4f3e-9d0a-5c1e7b6a9f10";
+    const envelopeId = `evt_${"a".repeat(64)}`;
     const event = {
       event_type: "inbound.received",
+      timestamp: "2026-11-19T00:00:00+00:00",
       data: {
-        event_id: "inbev_1",
-        delivery_id: "inbdlv_1",
-        source: { id: "inbsrc_1", name: "payments", instructions: "Record each paid invoice." },
+        event_id: "inbev_6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+        delivery_id: deliveryId,
+        received_at: "2026-11-19T00:00:00+00:00",
+        source: { id: "inbsrc_0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", name: "payments", instructions: "Record each paid invoice." },
         handler: { type: "agent" },
         signature_verified: true,
-        request: { headers: {}, body: "{\"paid\":true}", body_encoding: "utf8" },
+        request: { method: "POST", query: {}, headers: {}, content_type: "application/json", body: "{\"paid\":true}", body_encoding: "utf8" },
       },
+      id: envelopeId,
+      hosted_delivery: { version: 1, activation_id: "7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a", event_id: envelopeId, starts_agent: true },
     };
+    let home: string;
 
-    await bridge.handlers.onInboundEvent?.(event);
-    expect(await bridge.deliveryState(event)).toBe("pending");
-    await vi.waitFor(() => expect(channelRuntime.deliveryResults).toHaveLength(1));
-    await vi.waitFor(async () => expect(await bridge.deliveryState(event)).toBe("completed"));
+    beforeEach(async () => {
+      home = await mkdtemp(join(tmpdir(), "inkbox-inbound-home-"));
+      vi.stubEnv("HOME", home);
+      vi.stubEnv("INKBOX_DELIVERY_MODE", "local");
+    });
 
-    const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
-    expect(ctxPayload.route.routeSessionKey).toContain("inbound:payments");
-    expect(ctxPayload.extra.InkboxMode).toBe("external");
-    const body = ctxPayload.message.body as string;
-    expect(body).toContain("UNTRUSTED EXTERNAL CONTENT");
-    expect(body).toContain("Record each paid invoice.");
-    expect(body).toContain('{"paid":true}');
-    expect(channelRuntime.deliveryResults[0]).toMatchObject({ visibleReplySent: false });
-    expect(sendText).not.toHaveBeenCalled();
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      await rm(home, { recursive: true, force: true });
+    });
 
-    await bridge.handlers.onInboundEvent?.(event);
-    await flushMicrotasks();
-    expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
-    expect(await bridge.deliveryState({ ...event, data: { ...event.data, delivery_id: "inbdlv_2" } })).toBe("absent");
+    function bridgeWith(dispatched: boolean, replyText = "Recorded the payment.") {
+      const { runtime, sendText } = createRuntime();
+      const report = vi.fn(async () => undefined);
+      const getClient = runtime.getClient;
+      runtime.getClient = vi.fn(async () => ({ ...(await getClient()), inbound: { reportInboundEventResult: report } }));
+      const channelRuntime = createChannelRuntime(replyText);
+      const base = channelRuntime.inbound.dispatchReply;
+      channelRuntime.inbound.dispatchReply = vi.fn(async (params: any) => { await base(params); return { dispatched }; });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", identity: "smoke-agent", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+      });
+      return { bridge, channelRuntime, sendText, report };
+    }
+
+    it("completes the delivery once queued and runs one turn in the source session", async () => {
+      const { bridge, channelRuntime, sendText, report } = bridgeWith(true);
+      await bridge.handlers.onInboundEvent?.(event);
+      expect(await bridge.deliveryState(event)).toBe("completed");
+      await vi.waitFor(() => expect(bridge.activity()).toEqual({ inbound: 0 }));
+
+      const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
+      expect(ctxPayload.route.routeSessionKey).toContain("inbound:payments");
+      expect(ctxPayload.extra.InkboxMode).toBe("external");
+      const body = ctxPayload.message.body as string;
+      expect(body).toContain("UNTRUSTED EXTERNAL CONTENT");
+      expect(body).toContain("Record each paid invoice.");
+      expect(body).toContain('{"paid":true}');
+      expect(channelRuntime.deliveryResults[0]).toMatchObject({ visibleReplySent: false });
+      expect(sendText).not.toHaveBeenCalled();
+      expect(report).not.toHaveBeenCalled();
+
+      await bridge.handlers.onInboundEvent?.(event);
+      await flushMicrotasks();
+      expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+      expect(await bridge.deliveryState({ ...event, data: { ...event.data, delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" } })).toBe("absent");
+    });
+
+    it("reports an unconfirmed agent turn as failed with the delivery id", async () => {
+      const { bridge, report } = bridgeWith(false);
+      await bridge.handlers.onInboundEvent?.(event);
+      await vi.waitFor(() => expect(bridge.activity()).toEqual({ inbound: 0 }));
+      expect(report).toHaveBeenCalledWith("smoke-agent", event.data.source.id, event.data.event_id, {
+        status: "failed",
+        error: "agent turn failed: OpenClaw did not confirm turn execution and session recording.",
+        deliveryId,
+      });
+    });
   });
 });
 
