@@ -1,6 +1,8 @@
 import { slackMrkdwn } from "./slack-style.js";
 import { createHash } from "node:crypto";
 import type { Inkbox, SlackConnection } from "@inkbox/sdk";
+import { transcriptionEventUnsupported } from "./inbound/subscriptions.js";
+import { TRANSCRIPTION_FINISHED } from "./voice-notes.js";
 
 export const SLACK_EVENTS = ["slack.dm_received", "slack.group_dm_received", "slack.channel_message_received", "slack.mention_received", "slack.thread_reply_received"] as const;
 export const SLACK_STOP = "slack.session_stopped";
@@ -56,16 +58,35 @@ export async function ownSlackConnection(client: Inkbox, identityId: string, con
   if (matches.length !== 1 || matches[0]!.identityId !== identityId || (!readOnly && matches[0]!.status !== "connected") || (generation !== undefined && matches[0]!.generation !== generation)) throw new Error("Slack connection is not connected to this identity.");
   return matches[0]!;
 }
+/**
+ * Slack completions reach only a subscription that also selected the original
+ * Slack message, so the message row carries `message.transcription_finished`.
+ */
 export async function reconcileSlackSubscription(client: Inkbox, identityId: string, url: string): Promise<void> {
   const subscriptions = client.webhooks.subscriptions;
   const rows = (await subscriptions.list({ agentIdentityId: identityId, scope: "identity", url })).filter((s) => s.url === url && s.eventTypes.some((e) => SLACK_SUBSCRIPTION_EVENTS.includes(e)));
   if (rows.some((s) => s.status !== "active")) throw new Error("The Slack subscription is paused; resume it before starting.");
   const covered = new Set(rows.flatMap((s) => s.eventTypes));
   const missing = SLACK_SUBSCRIPTION_EVENTS.filter((e) => !covered.has(e));
-  if (!missing.length) return;
   const messages = rows.filter((s) => s.eventTypes.some((e) => (SLACK_EVENTS as readonly string[]).includes(e))).sort((a, b) => b.eventTypes.length - a.eventTypes.length);
-  if (messages.length) await subscriptions.update(messages[0]!.id, { scope: "identity", eventTypes: [...new Set([...messages[0]!.eventTypes, ...missing])] });
-  else await subscriptions.create({ agentIdentityId: identityId, url, eventTypes: missing });
+  // Older APIs reject the completion event; Slack delivery itself must still converge.
+  const write = async (eventTypes: string[], save: (eventTypes: string[]) => Promise<unknown>, required: boolean) => {
+    try { await save(eventTypes); }
+    catch (error) {
+      if (!transcriptionEventUnsupported(error)) throw error;
+      if (required) await save(eventTypes.filter((e) => e !== TRANSCRIPTION_FINISHED));
+    }
+  };
+  const [primary, ...others] = messages;
+  if (primary) {
+    const eventTypes = [...new Set([...primary.eventTypes, ...missing, TRANSCRIPTION_FINISHED])];
+    if (eventTypes.length !== primary.eventTypes.length) await write(eventTypes, (e) => subscriptions.update(primary.id, { scope: "identity", eventTypes: e }), missing.length > 0);
+  } else if (missing.length) {
+    await write([...missing, TRANSCRIPTION_FINISHED], (e) => subscriptions.create({ agentIdentityId: identityId, url, eventTypes: e }), true);
+  }
+  for (const row of others) {
+    if (!row.eventTypes.includes(TRANSCRIPTION_FINISHED)) await write([...row.eventTypes, TRANSCRIPTION_FINISHED], (e) => subscriptions.update(row.id, { scope: "identity", eventTypes: e }), false);
+  }
 }
 export function slackText(text: string): void {
   if (!text || [...text].length > 12_000 || text.includes("\0")) throw new Error("Slack text must be 1–12000 characters without NUL characters.");

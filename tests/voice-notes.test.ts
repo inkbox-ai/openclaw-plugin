@@ -10,6 +10,7 @@ import {
   VoiceNoteInbox,
   VoiceNoteNotAdmitted,
   voiceNoteContext,
+  voiceNoteMessage,
 } from "../src/voice-notes.js";
 
 const received = (family = "imessage", statuses = ["pending"]): VoiceEvent => ({
@@ -358,4 +359,134 @@ it("settles a consumer waiter attached while ordinary delivery is in flight", as
   const resolved = await resolving;
   expect(resolved.data.message.media[0].transcription.status).toBe("completed");
   expect(deliver).toHaveBeenCalledOnce();
+});
+
+
+const slackMessageId = "44444444-4444-4444-8444-444444444444";
+const slackData = (statuses: string[]) => ({
+  identity_id: "agent-1",
+  connection_id: "connection-1",
+  workspace_id: "TWORK",
+  conversation_id: "CROOM",
+  message_ts: "1770000000.000100",
+  thread_ts: null,
+  message_id: slackMessageId,
+  event: {
+    type: "message",
+    text: "Original caption",
+    files: statuses.map((status, index) => ({
+      id: `F${index}`,
+      name: "voice.m4a",
+      mimetype: "audio/mp4",
+      transcription: status === "pending"
+        ? { status }
+        : { status, text: status === "completed" ? "Move the review to Thursday." : null, error_code: status === "failed" ? "provider_error" : null },
+    })),
+  },
+});
+/** The normalized consumer event: the Slack envelope plus its Companion message view. */
+const slackReceived = (statuses = ["pending"]): VoiceEvent => {
+  const data: VoiceEvent = slackData(statuses);
+  return {
+    id: "slack-event",
+    event_type: "slack.mention_received",
+    companion: { channel: "slack", phase: "ordinary", sequence: 1 },
+    data: { ...data, message: { id: "slack-event", direction: "inbound", attachments: structuredClone(data.event.files) } },
+  };
+};
+const slackCompletion = (statuses = ["completed"]): VoiceEvent => ({
+  id: "slack-completion",
+  event_type: "message.transcription_finished",
+  data: { ...slackData(statuses), channel: "slack" },
+});
+const slackContext = (event: VoiceEvent) => voiceNoteContext(voiceNoteMessage(event, event.data.message));
+
+describe("Slack voice-note resolution", () => {
+  it("waits for the matching completion, labels it, and never wakes independently", async () => {
+    const { inbox, deliver, poll } = setup();
+    const original = slackReceived();
+    expect(await inbox.accept(original)).toBe(false);
+    const result = inbox.resolve(original);
+    const unrelated = slackCompletion();
+    unrelated.data.message_id = "55555555-5555-4555-8555-555555555555";
+    expect(await inbox.accept(unrelated)).toBe(true);
+    const moved = slackCompletion();
+    moved.data.connection_id = "connection-2";
+    expect(await inbox.accept(moved)).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await Promise.race([result.then(() => "settled"), Promise.resolve("waiting")])).toBe("waiting");
+    expect(await inbox.accept(slackCompletion())).toBe(true);
+    const resolved = await result;
+    expect(resolved.companion).toEqual(original.companion);
+    expect(resolved.data.event.files[0].transcription.status).toBe("completed");
+    expect(resolved.data.message.attachments[0].transcription.status).toBe("completed");
+    expect(slackContext(resolved)).toBe("[Voice note 1 — automatically transcribed]\nMove the review to Thursday.");
+    expect(await inbox.accept(slackCompletion(["failed"]))).toBe(true);
+    expect((await inbox.resolve(original)).data.event.files[0].transcription.status).toBe("completed");
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(poll).not.toHaveBeenCalled();
+  });
+  it("uses an early completion without waiting", async () => {
+    const { inbox, poll } = setup();
+    await inbox.accept(slackCompletion());
+    const result = inbox.resolve(slackReceived());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slackContext(await result)).toContain("automatically transcribed");
+    expect(poll).not.toHaveBeenCalled();
+  });
+  it("polls once at 60 seconds and uses the archived result", async () => {
+    const { inbox, deliver, poll } = setup({ poll: async (event) => ({ ...event, data: { ...event.data, event: { ...event.data.event, files: slackData(["completed"]).event.files } } }) });
+    const result = inbox.resolve(slackReceived());
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(poll).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(poll).toHaveBeenCalledTimes(1);
+    expect(slackContext(await result)).toContain("Move the review to Thursday.");
+    expect(deliver).not.toHaveBeenCalled();
+  });
+  it("falls back to the original attachment after the wait and one poll", async () => {
+    const { inbox, poll } = setup();
+    const result = inbox.resolve(slackReceived());
+    await vi.advanceTimersByTimeAsync(60_000);
+    const resolved = await result;
+    expect(poll).toHaveBeenCalledTimes(1);
+    expect(resolved.data.event.files[0].transcription.status).toBe("pending");
+    expect(slackContext(resolved)).toBe("[Voice note 1 — transcript unavailable] Process the original attachment as usual.");
+    await inbox.accept(slackCompletion());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+  it("delivers a failed transcription as an unavailable voice note", async () => {
+    const { inbox } = setup();
+    const result = inbox.resolve(slackReceived());
+    await inbox.accept(slackCompletion(["failed"]));
+    expect(slackContext(await result)).toBe("[Voice note 1 — transcript unavailable] Process the original attachment as usual.");
+  });
+  it("does not delay a Slack message without enrolled audio", async () => {
+    const { inbox, poll } = setup();
+    const plain = slackReceived();
+    delete plain.data.event.files[0].transcription;
+    expect(await inbox.resolve(plain)).toBe(plain);
+    const unkeyed = slackReceived();
+    delete unkeyed.data.message_id;
+    expect(await inbox.resolve(unkeyed)).toBe(unkeyed);
+    expect(poll).not.toHaveBeenCalled();
+  });
+  it("polls the retained Slack message by its ID", async () => {
+    const files = slackData(["completed"]).event.files;
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      messages: [{ id: slackMessageId, connection_id: "connection-1", conversation_id: "CROOM", message_ts: "1770000000.000100", files }],
+    })));
+    const identity = vi.fn();
+    const event = await pollVoiceNote(slackReceived(), { apiKey: "synthetic-key", baseUrl: "https://example.com/", identity });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toBe(
+      `https://example.com/api/v1/slack/connections/connection-1/archive/messages?message_id=${slackMessageId}`,
+    );
+    expect(identity).not.toHaveBeenCalled();
+    expect(event?.data.event.files[0].transcription.status).toBe("completed");
+    fetch.mockResolvedValue(new Response(JSON.stringify({ messages: [{ id: "another", connection_id: "connection-1", files }] })));
+    expect(await pollVoiceNote(slackReceived(), { apiKey: "synthetic-key", identity })).toBeUndefined();
+  });
 });
