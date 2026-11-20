@@ -103,7 +103,7 @@
   "packageManager": "pnpm@10.28.0",
   "pnpm": {
     "overrides": {
-      "@inkbox/sdk": "github:inkbox-ai/inkbox#84386f5ea022a9594fb901894f927ee444c2cf91&path:/sdk/typescript"
+      "@inkbox/sdk": "github:inkbox-ai/inkbox#c173831c7ac6a78649090741e06977627568ce95&path:/sdk/typescript"
     }
   }
 }
