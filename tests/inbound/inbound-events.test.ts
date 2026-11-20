@@ -1,12 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AGENT_BODY_MAX_BYTES,
+  InboundQueueFull,
+  MAX_PENDING_EVENTS,
   SCRIPT_RETRY_DELAYS_MS,
   SCRIPT_STDERR_MAX_BYTES,
   SCRIPT_STDOUT_MAX_BYTES,
@@ -232,7 +234,7 @@ describe("createInboundEventHandler", () => {
     await handler.handle(inboundEvent());
     await handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" }));
     await until(() => d.runTurn.mock.calls.length === 2 && handler.activity() === 0, "turns");
-    expect(d.runTurn.mock.calls[0][0]).toEqual(expect.objectContaining({ source: "payments", eventId: "inbev_6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b" }));
+    expect(d.runTurn.mock.calls[0][0]).toEqual(expect.objectContaining({ sourceId: "inbsrc_0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", source: "payments", eventId: "inbev_6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b" }));
     expect(d.runTurn.mock.calls[0][0].message).toContain('{"paid":true}');
     await handler.handle(inboundEvent());
     expect(d.runTurn).toHaveBeenCalledTimes(2);
@@ -272,18 +274,65 @@ describe("createInboundEventHandler", () => {
     expect(error).toBe("agent turn failed: model unavailable");
   });
 
-  it("reports an agent turn that does not finish within 30 minutes", async () => {
+  it("aborts and reports an agent turn that does not finish within 30 minutes", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    const d = deps({ runTurn: vi.fn(() => new Promise<void>(() => {})) });
+    let signal: AbortSignal | undefined;
+    const d = deps({ runTurn: vi.fn((_turn: any, turnSignal: AbortSignal) => { signal = turnSignal; return new Promise<void>(() => {}); }) });
     const handler = create(d);
     await handler.handle(inboundEvent());
     await until(() => d.runTurn.mock.calls.length === 1, "turn");
     await vi.advanceTimersByTimeAsync(TURN_TIMEOUT_MS - 1);
     expect(d.reportFailure).not.toHaveBeenCalled();
+    expect(signal?.aborted).toBe(false);
     expect(handler.activity()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     await until(() => d.reportFailure.mock.calls.length === 1 && handler.activity() === 0, "report");
+    expect(signal?.aborted).toBe(true);
     expect(d.reportFailure.mock.calls[0][1]).toBe("agent turn failed: agent turn did not finish within 30 minutes");
+  });
+
+  it("refuses new deliveries while the queue is full and still dedupes queued ones", async () => {
+    vi.stubEnv("INKBOX_DELIVERY_MODE", "local");
+    const d = deps({ runTurn: vi.fn(() => new Promise<void>(() => {})) });
+    const handler = create(d);
+    const id = (index: number) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    for (let index = 0; index < MAX_PENDING_EVENTS; index++) await handler.handle(inboundEvent(undefined, { delivery_id: id(index) }));
+    await handler.handle(inboundEvent(undefined, { delivery_id: id(0) }));
+    await expect(handler.handle(inboundEvent(undefined, { delivery_id: id(MAX_PENDING_EVENTS) }))).rejects.toBeInstanceOf(InboundQueueFull);
+    expect(await handler.state(id(MAX_PENDING_EVENTS))).toBe("absent");
+
+    const full = signed(inboundEvent(undefined, { delivery_id: id(MAX_PENDING_EVENTS) }));
+    const dedup = new RequestIdDedup(100);
+    const options = { signingKey: SIGNING_KEY, handlers: { onInboundEvent: (event: Record<string, any>) => handler.handle(event) }, dedup };
+    expect(await handleInkboxWebhook(full.body, full.headers, options)).toEqual({ status: 503, body: "busy" });
+    // The refused delivery is not remembered, so its retry is processed.
+    expect((await handleInkboxWebhook(full.body, full.headers, options)).status).toBe(503);
+  });
+
+  it("keeps a record it cannot read and loads it on a later attempt", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const first = create(deps({ runTurn: vi.fn((_turn: any, signal: AbortSignal) => new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("aborted")));
+    })) }));
+    await first.handle(inboundEvent());
+    await until(async () => (await storedJobs())[0]?.started === true, "turn started");
+    await first.close();
+    const [name] = (await readdir(dir)).filter((file) => file.endsWith(".json"));
+    const stored = await readFile(join(dir, name), "utf8");
+    // A directory in its place makes the read fail without the record being malformed.
+    await rm(join(dir, name));
+    await mkdir(join(dir, name));
+    await writeFile(join(dir, `${"f".repeat(64)}.json`), "{not json");
+    const d = deps();
+    const second = create(d);
+    await second.ready;
+    expect(await readdir(dir)).toContain(name);
+    expect(await readdir(dir)).not.toContain(`${"f".repeat(64)}.json`);
+    await rm(join(dir, name), { recursive: true });
+    await writeFile(join(dir, name), stored);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await until(() => d.reportFailure.mock.calls.length === 1, "report");
+    expect(d.reportFailure.mock.calls[0][1]).toBe("agent turn was interrupted by a restart");
   });
 
   it("passes the request to the script on stdin", async () => {

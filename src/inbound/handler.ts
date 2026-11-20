@@ -1,6 +1,6 @@
 import { RequestIdDedup } from "./dedup.js";
 import { dispatchInbound, type InboundHandlers } from "./dispatch.js";
-import { INBOUND_RECEIVED, inboundDeliveryKey } from "./inbound-events.js";
+import { INBOUND_RECEIVED, InboundQueueFull, inboundDeliveryKey } from "./inbound-events.js";
 import { matchProvider } from "../webhook-providers/index.js";
 import type { PluginLogger } from "../client.js";
 
@@ -172,6 +172,7 @@ export async function handleInkboxWebhook(
     });
   } catch (error) {
     if (!durableCompanion) opts.dedup?.rollback(dedupId);
+    if (error instanceof InboundQueueFull) return { status: 503, body: "busy" };
     throw error;
   }
   if (!durableCompanion) opts.dedup?.commit(dedupId);

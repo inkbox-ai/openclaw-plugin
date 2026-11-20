@@ -485,7 +485,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The dependency floor is `@inkbox/sdk` 0.7.39. Source development pins its exact Git revision.
+- The dependency floor is `@inkbox/sdk` 0.7.41. Source development pins its exact Git revision.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`

@@ -7001,7 +7001,8 @@ describe("createInkboxSessionBridge", () => {
       await vi.waitFor(() => expect(bridge.activity()).toEqual({ inbound: 0 }));
 
       const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
-      expect(ctxPayload.route.routeSessionKey).toContain("inbound:payments");
+      expect(ctxPayload.route.routeSessionKey).toContain(`inbound:${event.data.source.id}`);
+      expect(ctxPayload.route.routeSessionKey).not.toContain("inbound:payments");
       expect(ctxPayload.extra.InkboxMode).toBe("external");
       const body = ctxPayload.message.body as string;
       expect(body).toContain("UNTRUSTED EXTERNAL CONTENT");
@@ -7039,6 +7040,35 @@ describe("createInkboxSessionBridge", () => {
       }));
       expect(second.channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
       await second.bridge.shutdownA2A();
+    });
+
+    it("gives same-named sources separate sessions", async () => {
+      const { bridge, channelRuntime } = bridgeWith(true);
+      await bridge.handlers.onInboundEvent?.(event);
+      await bridge.handlers.onInboundEvent?.({ ...event, data: { ...event.data, delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f",
+        source: { ...event.data.source, id: "inbsrc_1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e" } } });
+      await vi.waitFor(() => expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2));
+      const keys = channelRuntime.inbound.dispatchReply.mock.calls.map((call: any[]) => call[0].ctxPayload.route.routeSessionKey);
+      expect(new Set(keys).size).toBe(2);
+    });
+
+    it("finishes a failed event when the SDK cannot report it", async () => {
+      const { runtime } = createRuntime();
+      const channelRuntime = createChannelRuntime("ok");
+      const base = channelRuntime.inbound.dispatchReply;
+      channelRuntime.inbound.dispatchReply = vi.fn(async (params: any) => { await base(params); return { dispatched: false }; });
+      const warn = vi.fn();
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", identity: "smoke-agent", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+        logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+      } as any);
+      await bridge.handlers.onInboundEvent?.(event);
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining("this SDK cannot report it")));
+      await vi.waitFor(() => expect(bridge.activity()).toEqual({ inbound: 0 }));
+      await bridge.shutdownA2A();
     });
 
     it("reports an unconfirmed agent turn as failed with the delivery id", async () => {

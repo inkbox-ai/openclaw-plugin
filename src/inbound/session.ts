@@ -6345,13 +6345,14 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   const inboundEvents = localDeliveryMode() ? createInboundEventHandler({
     dir: join(statePaths().dir, `inbound-${activityOwner}`),
     logger: opts.logger,
-    runTurn: async ({ source, eventId, message }, signal) => {
+    runTurn: async ({ sourceId, source, eventId, message }, signal) => {
       const name = source.replace(/[\[\]\r\n]/g, " ").slice(0, 80);
       let failure: string | undefined;
+      // Keyed on the source id: names are neither unique nor fixed.
       await dispatchInboundTurn({ ...opts, activeCalls, confirmDispatch: true, dispatchAbortSignal: signal, replyOptionsOverride: { abortSignal: signal }, turn: {
         mode: "external",
-        contactKey: `inbound:${name}`,
-        sessionKeyOverride: `inbound:${name}`,
+        contactKey: `inbound:${sourceId}`,
+        sessionKeyOverride: `inbound:${sourceId}`,
         fromLabel: name,
         conversationLabel: `${name} inbound events`,
         body: message,
@@ -6370,7 +6371,11 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     },
     reportFailure: async (data, error) => {
       const client = await opts.runtime.getClient(), identity = await opts.runtime.getIdentity();
-      await (client as any).inbound.reportInboundEventResult(identity.agentHandle, data.source.id, data.event_id,
+      if (typeof client.inbound?.reportInboundEventResult !== "function") {
+        opts.logger?.warn?.(`Inkbox inbound event ${data.event_id} failed; this SDK cannot report it: ${error}`);
+        return;
+      }
+      await client.inbound.reportInboundEventResult(identity.agentHandle, data.source.id, data.event_id,
         { status: "failed", error, deliveryId: data.delivery_id });
     },
   }) : undefined;
