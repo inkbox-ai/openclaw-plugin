@@ -40,6 +40,7 @@ vi.mock("../src/inbound/websocket-upgrade.js", () => ({
   createInkboxWebSocketUpgradeHandler: mocks.createUpgradeHandler,
 }));
 
+import { openInkboxTunnel } from "../src/inbound/tunnel.js";
 import {
   registerInkboxPublicUrlInboundRoutes,
   startInkboxGatewayAccount,
@@ -395,5 +396,67 @@ describe("public-url call routing", () => {
 
     expect(dispose).toHaveBeenCalledTimes(1);
     expect(mocks.shutdownA2A).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("local delivery mode", () => {
+  beforeEach(() => {
+    vi.stubEnv("INKBOX_DELIVERY_MODE", "local");
+    mocks.configureDelivery.mockReset();
+    mocks.shutdownA2A.mockReset();
+    vi.mocked(openInkboxTunnel).mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("opens no tunnel and changes no subscriptions", async () => {
+    const abort = new AbortController();
+    abort.abort();
+    const setStatus = vi.fn();
+    await startInkboxGatewayAccount({
+      cfg: {},
+      accountId: "default",
+      account: {
+        accountId: "default",
+        enabled: true,
+        configured: true,
+        identity: "agent",
+        config: { apiKey: "ApiKey_test", identity: "agent", signingKey: "whsec_test" },
+      } as any,
+      abortSignal: abort.signal,
+      log: {},
+      setStatus,
+    });
+
+    expect(openInkboxTunnel).not.toHaveBeenCalled();
+    expect(mocks.configureDelivery).not.toHaveBeenCalled();
+    expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({ connected: true, mode: "local" }));
+    expect(mocks.shutdownA2A).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers no public routes", () => {
+    const registerHttpRoute = vi.fn();
+    const routesBefore = mocks.routeOptions.length;
+    registerInkboxPublicUrlInboundRoutes({
+      registerHttpRoute,
+      runtime: {
+        config: {
+          current: () => ({
+            channels: {
+              inkbox: {
+                apiKey: "ApiKey_test",
+                identity: "local-agent",
+                signingKey: "whsec_test",
+                publicUrl: "https://example.com",
+              },
+            },
+          }),
+        },
+      },
+    });
+    expect(registerHttpRoute).not.toHaveBeenCalled();
+    expect(mocks.routeOptions).toHaveLength(routesBefore);
   });
 });

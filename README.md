@@ -485,7 +485,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The dependency floor is `@inkbox/sdk` 0.7.39. Source development pins its exact Git revision.
+- The dependency floor is `@inkbox/sdk` 0.7.41. Source development pins its exact Git revision.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
@@ -666,3 +666,40 @@ report; the key itself is not needed in the terminal. Runtime processes still
 require their own signing key. Managed delivery does not require ordinary webhook
 subscriptions. Standalone diagnostics are unchanged. These checks do not send
 messages or prove end-to-end delivery.
+
+### Local delivery and inbound sources
+
+With `INKBOX_DELIVERY_MODE=local`, the host delivers Inkbox webhooks to the plugin
+locally. The plugin opens no tunnel, registers no public route, and leaves webhook
+subscriptions unchanged. Signature verification is unchanged, and request bodies
+up to 2 MiB are accepted. An identity does not need a tunnel in this mode.
+
+In local mode the plugin also handles `inbound.received`, a request that an
+external service sent to one of the identity's inbound sources. The event must
+carry a valid Inkbox signature. The plugin writes each delivery to a queue under
+`~/.openclaw/inkbox/` before acknowledging it, then processes the queue in the
+background and resumes it after a restart. Deliveries are deduplicated by
+`delivery_id`; a replay has a new `delivery_id` and runs again. A malformed event
+is answered with 400 and not acknowledged. Outside local mode the event is
+acknowledged and ignored.
+
+- `agent` handler: one turn in the session `inbound:<source>`. The message marks
+  the request as untrusted external content, then adds the source's instructions
+  and the request body (a base64 body is shown as text when it is valid UTF-8,
+  otherwise noted as binary; text over 64 KiB is cut and marked `(truncated)`). The reply is not delivered anywhere; the agent
+  acts with tools. A failed turn is reported as failed.
+- `script` handler: runs `/bin/sh -c "<command>"` in the home directory with a
+  120-second timeout. Stdin is JSON with `source`, `event_id`, `headers`, `body`,
+  and `body_encoding`. The first 64 KiB of stdout (marked `(truncated)` when cut)
+  and the last 4 KiB of stderr are kept. Empty output finishes the event; other output starts an `agent` turn with
+  that output as the body. A failing or timed-out script runs at most 5 times,
+  retried after 10 s, 30 s, 2 min, and 10 min, and is then reported as failed with
+  the end of its stderr. A run counts toward the limit before it starts, so a
+  restart never adds a sixth run.
+
+Failure reports carry at most 2,000 characters of error text and are retried with
+capped backoff while the plugin runs and on every start until accepted, without
+running the script again. Stopping the account stops the queue: a running script
+is killed and retried on the next start, and a running turn is aborted and
+reported as interrupted. A report rejected because the event was delivered again since
+counts as done.
