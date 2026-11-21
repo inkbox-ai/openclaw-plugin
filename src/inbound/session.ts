@@ -6407,7 +6407,8 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       if (connection.workspaceId !== route.workspaceId) throw new Error("Slack source workspace mismatch.");
       const normalized = structuredClone(event);
       delete normalized._openclawSlack;
-      let id = event.id, botUserId = connection.botUserId;
+      // One Slack message can arrive under several envelopes; its retained message id is the source identity.
+      let id = !route.nativeStop && typeof event.data.message_id === "string" && event.data.message_id ? event.data.message_id : event.id, botUserId = connection.botUserId;
       if (event.companion) {
         const prepared = await prepareSlackSource(client, identity.id, normalized);
         Object.assign(route, prepared.route); id = prepared.id; botUserId = prepared.botUserId;
