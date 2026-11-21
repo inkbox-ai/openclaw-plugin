@@ -78,7 +78,7 @@ export interface InboundTurn {
 export interface InboundEventDeps {
   /** Directory for the durable queue; one file per delivery. */
   dir: string;
-  /** Directory the agent reads each event's files from, one subdirectory per event_id. */
+  /** Directory the agent reads each event's files from, one subdirectory per delivery_id. */
   eventsDir: string;
   /** Resolves only after the agent turn ran; rejects otherwise. The signal aborts it on shutdown or timeout. */
   runTurn(turn: InboundTurn, signal: AbortSignal): Promise<void>;
@@ -149,9 +149,15 @@ function utf8Text(bytes: Buffer): string | undefined {
   }
 }
 
-/** Writes `body` and `request.json` to `<root>/<event_id>/` and returns that directory. */
+/** The header is trusted, so it gets only a well-formed media type; the raw value stays in request.json. */
+function mediaType(value: string | null | undefined): string {
+  const type = (value ?? "").split(";")[0].trim().toLowerCase();
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(type) ? type : "unknown";
+}
+
+/** Writes `body` and `request.json` to `<root>/<delivery_id>/` and returns that directory. */
 export async function writeEventFiles(root: string, data: InboundEventData, body: Buffer): Promise<string> {
-  if (!/^[\w-]+$/.test(data.event_id)) throw new Error("event_id is not a safe directory name");
+  if (!/^[\w-]+$/.test(data.delivery_id)) throw new Error("delivery_id is not a safe directory name");
   await mkdir(root, { recursive: true, mode: 0o700 });
   const request = data.request;
   const metadata = {
@@ -167,9 +173,10 @@ export async function writeEventFiles(root: string, data: InboundEventData, body
     body_encoding: request.body_encoding ?? "utf8",
     body_bytes: requestBody(request).length,
   };
-  const target = join(root, data.event_id);
+  // Keyed on the delivery, so a replay never replaces files an earlier turn may still read.
+  const target = join(root, data.delivery_id);
   // Built in a private temporary directory, then renamed into place whole.
-  const temporary = await mkdtemp(join(root, `.${data.event_id}.`));
+  const temporary = await mkdtemp(join(root, `.${data.delivery_id}.`));
   try {
     await writeFile(join(temporary, "body"), body, { mode: 0o600, flag: "wx" });
     await writeFile(join(temporary, "request.json"), `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -201,11 +208,12 @@ export function buildInboundMessage(
 ): string {
   const name = data.source.name.replace(/[\[\]\r\n]/g, " ").slice(0, 80);
   const text = utf8Text(body);
+  const subject = script ? "The script output" : "The body";
   const parts = [
     `[inkbox:inbound source=${name}] Webhook event received by inbound source "${name}".`,
     "Your text reply is not delivered anywhere; act with tools if action is needed, otherwise stop.",
     `Signature: ${data.signature_verified === true ? "verified" : "not checked (this source does not verify signatures)"}`,
-    `Received: ${data.received_at || "unknown"} · Content type: ${data.request.content_type || "unknown"} · Size: ${body.length} bytes`,
+    `Received: ${data.received_at || "unknown"} · Content type: ${mediaType(data.request.content_type)} · Size: ${requestBody(data.request).length} bytes`,
   ];
   if (files) {
     parts.push(
@@ -222,9 +230,9 @@ export function buildInboundMessage(
   if (!files) {
     parts.push(text === undefined ? `(binary body, ${body.length} bytes, not shown)` : truncateAgentBody(text) || "(empty)");
   } else if (text === undefined) {
-    parts.push(`The body is binary (${body.length} bytes). Read it from ${join(files, "body")} if you need it.`);
+    parts.push(`${subject} is binary (${body.length} bytes). Read it from ${join(files, "body")} if you need it.`);
   } else if (body.length > AGENT_INLINE_BODY_MAX_BYTES) {
-    parts.push(`The body is ${body.length} bytes, too large to show here. Read it from ${join(files, "body")} if you need it.`);
+    parts.push(`${subject} is ${body.length} bytes, too large to show here. Read it from ${join(files, "body")} if you need it.`);
   } else {
     parts.push(text || "(empty)");
   }
@@ -314,13 +322,9 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
-  let sweptAt = -Infinity;
-
-  async function sweep(): Promise<void> {
-    if (now() - sweptAt < EVENT_FILES_SWEEP_MS) return;
-    sweptAt = now();
-    await sweepEventFiles(deps.eventsDir, sweptAt - EVENT_FILES_MAX_AGE_MS);
-  }
+  const sweep = () => sweepEventFiles(deps.eventsDir, now() - EVENT_FILES_MAX_AGE_MS);
+  const sweepTimer = setInterval(() => void sweep(), EVENT_FILES_SWEEP_MS);
+  sweepTimer.unref?.();
 
   async function save(job: Job): Promise<void> {
     const target = file(job.key);
@@ -406,7 +410,6 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       if (job.started) return toReport(job, "agent turn was interrupted by a restart");
       const script = job.output !== undefined;
       const body = script ? Buffer.from(job.output!, "utf8") : requestBody(data.request);
-      await sweep();
       const files = await writeEventFiles(deps.eventsDir, data, body).catch((error) => {
         deps.logger?.warn?.(`Inkbox inbound event ${data.event_id} files could not be written: ${describe(error)}`);
         return undefined;
@@ -534,6 +537,7 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
   }
 
   const ready = (async () => {
+    await sweep();
     await mkdir(deps.dir, { recursive: true, mode: 0o700 });
     const paths: string[] = [];
     for (const name of await readdir(deps.dir)) {
@@ -542,7 +546,6 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       if (/^[a-f0-9]{64}\.json$/.test(name)) paths.push(path);
     }
     await loadAll(paths);
-    await sweep();
     schedule();
   })();
   void ready.catch((error) => deps.logger?.warn?.(`Inkbox inbound queue is unavailable: ${describe(error)}`));
@@ -606,6 +609,7 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       closed = true;
       if (timer) clearTimeout(timer);
       if (reloadTimer) clearTimeout(reloadTimer);
+      clearInterval(sweepTimer);
       abort.abort();
       await Promise.allSettled([...persisting.values(), ...running.values()]);
     },

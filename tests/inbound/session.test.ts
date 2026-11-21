@@ -7021,7 +7021,7 @@ describe("createInkboxSessionBridge", () => {
       expect(ctxPayload.route.routeSessionKey).not.toContain("inbound:payments");
       expect(ctxPayload.extra.InkboxMode).toBe("external");
       const body = ctxPayload.message.body as string;
-      const files = join(home, ".openclaw", "inkbox", "inbound", "events", event.data.event_id);
+      const files = join(home, ".inkbox", "inbound", "events", event.data.delivery_id);
       expect(body).toContain(`Event files: ${files}\n`);
       expect(await readFile(join(files, "body"), "utf8")).toBe('{"paid":true}');
       expect(body).toContain("Record each paid invoice.");

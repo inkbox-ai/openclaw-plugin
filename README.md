@@ -684,16 +684,18 @@ is answered with 400 and not acknowledged. Outside local mode the event is
 acknowledged and ignored.
 
 - `agent` handler: one turn in the session `inbound:<source>`. Before the turn,
-  the plugin writes the event to `~/.openclaw/inkbox/inbound/events/<event_id>/`
-  (directory mode 0700, files 0600): `body` holds the request body exactly as
-  received (a base64 body is decoded to its bytes), and `request.json` holds the
-  method, query, headers, content type, body encoding and size, signature status,
-  and event metadata. The message names the source, the signature status, the
-  received time, content type and size, and the absolute path of that directory,
-  then adds the source's instructions. A UTF-8 body of at most 4 KiB is included
-  inline as untrusted data; a larger or binary body is only pointed to. Event
-  directories older than 7 days are deleted at startup and at most once an hour
-  after that. If the files cannot be written, the message says so and includes
+  the plugin writes the event to `~/.inkbox/inbound/events/<delivery_id>/`
+  (directory mode 0700, files 0600), so a replay gets its own directory: `body`
+  holds the request body exactly as received (a base64 body is decoded to its
+  bytes), and `request.json` holds the event and delivery IDs, method, query,
+  headers, raw content type, body encoding and size, and signature status. The
+  message names the source, the signature status, the received time, the media
+  type (parameters dropped; `unknown` when malformed) and the request body size,
+  and the absolute path of that directory, then adds the source's instructions.
+  The body follows under an untrusted-data label: a UTF-8 body of at most 4 KiB
+  is included inline; a larger or binary body is only pointed to. Event
+  directories older than 7 days are deleted at startup and every hour after
+  that. If the files cannot be written, the message says so and includes
   the body inline instead (text over 64 KiB is cut and marked `(truncated)`;
   binary bodies are noted, not shown). The reply is not delivered anywhere; the
   agent acts with tools. A failed turn is reported as failed.

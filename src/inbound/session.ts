@@ -8,6 +8,7 @@ import { trackNativeOwner } from "../native-owner.js";
 import { terminalReceipt } from "../terminal-reply.js";
 import { acquireNativeSource, type NativeSource } from "../native-source.js";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { statePaths } from "../state.js";
 import { SLACK_REPLY_STYLE, parseSlack, prepareSlackSource, ownSlackConnection, slackControlText, slackRouteKey, sendSlackReply, reconcileSlackSubscription, type SlackRoute } from "../slack.js";
 import { createSlackActivity } from "../slack-activity.js";
@@ -6348,7 +6349,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
   const inboundEvents = localDeliveryMode() ? createInboundEventHandler({
     dir: join(statePaths().dir, `inbound-${activityOwner}`),
-    eventsDir: join(statePaths().dir, "inbound", "events"),
+    eventsDir: join(homedir(), ".inkbox", "inbound", "events"),
     logger: opts.logger,
     bounded: !opts.externalAdmission,
     runTurn: async ({ sourceId, source, eventId, message }, signal) => {
