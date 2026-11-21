@@ -192,6 +192,7 @@ describe("buildInboundMessage", () => {
   it("points at the event files and shows a small text body inline", () => {
     expect(buildInboundMessage(data, Buffer.from('{"paid":true}'), { files })).toBe([
       '[inkbox:inbound source=payments] Webhook event received by inbound source "payments".',
+      "Your text reply is not delivered anywhere; act with tools if action is needed, otherwise stop.",
       "Signature: verified",
       "Received: 2026-11-19T00:00:00+00:00 · Content type: application/json · Size: 13 bytes",
       `Event files: ${files}`,

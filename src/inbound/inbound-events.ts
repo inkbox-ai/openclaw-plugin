@@ -203,6 +203,7 @@ export function buildInboundMessage(
   const text = utf8Text(body);
   const parts = [
     `[inkbox:inbound source=${name}] Webhook event received by inbound source "${name}".`,
+    "Your text reply is not delivered anywhere; act with tools if action is needed, otherwise stop.",
     `Signature: ${data.signature_verified === true ? "verified" : "not checked (this source does not verify signatures)"}`,
     `Received: ${data.received_at || "unknown"} · Content type: ${data.request.content_type || "unknown"} · Size: ${body.length} bytes`,
   ];
