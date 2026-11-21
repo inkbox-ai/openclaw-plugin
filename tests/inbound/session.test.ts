@@ -7205,6 +7205,34 @@ describe("configureInkboxIdentityDelivery", () => {
     });
   });
 
+  it("keeps configuring delivery when transcription callbacks are rejected", async () => {
+    const identity = {
+      id: "identity-1",
+      mailbox: null,
+      phoneNumber: null,
+      imessageEnabled: true,
+      setIncomingCallAction: vi.fn(async () => ({})),
+    };
+    const runtime = deliveryRuntime(identity);
+    const inkbox = await runtime.getClient();
+    inkbox.webhooks.subscriptions.create.mockImplementation(async (opts: any) => {
+      if (opts.eventTypes.includes("message.transcription_finished")) throw new Error("rejected");
+      return { id: "sub-1", ...opts };
+    });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://example.com/inkbox/webhook",
+      logger: logger as any,
+    });
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Transcription callback registration is unavailable"));
+    expect(inkbox.webhooks.subscriptions.create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventTypes: expect.arrayContaining(["imessage.received"]) }),
+    );
+  });
+
   it("falls back to the number-scoped update when the SDK lacks the method", async () => {
     const identity = {
       id: "identity-1",

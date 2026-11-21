@@ -6973,7 +6973,8 @@ export async function configureInkboxIdentityDelivery(
     opts.runtime.getClient(),
   ]);
   if (opts.slackEnabled) await reconcileSlackSubscription(inkbox, identity.id, opts.webhookUrl);
-  await reconcileWebhookSubscription(inkbox, { agentIdentityId: identity.id, url: opts.webhookUrl, eventTypes: TRANSCRIPTION_EVENTS }, opts.logger);
+  try { await reconcileWebhookSubscription(inkbox, { agentIdentityId: identity.id, url: opts.webhookUrl, eventTypes: TRANSCRIPTION_EVENTS }, opts.logger); }
+  catch (error) { opts.logger?.warn?.(`Transcription callback registration is unavailable: ${errorMessage(error)}`); }
   try { await reconcileWebhookSubscription(inkbox, { agentIdentityId: identity.id, url: opts.webhookUrl, eventTypes: WHATSAPP_EVENT_TYPES }, opts.logger); }
   catch (error) { opts.logger?.warn?.(`WhatsApp notification registration is unavailable: ${errorMessage(error)}`); }
   const mailboxId = identity.mailbox?.id;

@@ -7,6 +7,7 @@
 - Each inbound source has its own session, keyed on the source ID. The queue holds at most 100 unfinished deliveries and 64 MiB; a delivery that does not fit is answered with 503 so the sender retries it later. Scripts and turns for one source run one at a time, so a turn's 30-minute limit never includes waiting behind another; a turn that does not finish within 30 minutes is aborted and reported. A queued record that cannot be read is kept and loaded again later, and a redelivery of it is answered with 503 until it loads; only a malformed record is discarded. A malformed event, including one without a source ID, is answered with 400 before it is acknowledged.
 - The session bridge exposes `activity()` with the number of queued, running, or script-retrying inbound events; pending failure reports are not counted.
 - The session bridge exposes `inboundAdmits(event)` so a host that acknowledges deliveries itself can refuse a new `inbound.received` delivery while the queue is full. With the `externalAdmission` option, a delivery the host already acknowledged is always queued.
+- A rejected transcription-notification registration is logged as a warning and no longer stops the channel from starting.
 - Require `@inkbox/sdk` 0.7.41 or later.
 
 ## 0.2.24 (unreleased)
