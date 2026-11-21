@@ -277,6 +277,8 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       const attempts = job.attempts + 1;
       await save({ ...job, attempts });
       jobs.set(job.key, { ...job, attempts });
+      // An abort listener added after close never fires, so do not start the run.
+      if (closed) return;
       const request = data.request;
       const result = await runScript(data.handler.command, JSON.stringify({
         source: data.source.name,
@@ -309,6 +311,7 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       const started: Job = { ...job, started: true };
       await save(started);
       jobs.set(job.key, started);
+      if (closed) return;
       const message = job.output !== undefined
         ? buildInboundMessage(data, job.output, "utf8")
         : buildInboundMessage(data, data.request.body ?? "", data.request.body_encoding);

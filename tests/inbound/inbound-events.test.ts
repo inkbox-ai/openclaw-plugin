@@ -83,6 +83,11 @@ async function storedJobs(): Promise<any[]> {
   return Promise.all(files.map(async (name) => JSON.parse(await readFile(join(dir, name), "utf8"))));
 }
 
+// The attempt count is stored before the script runs; the retry is scheduled only once dueAt moves ahead.
+function backedOff(jobs: any[], attempts: number): boolean {
+  return jobs[0]?.attempts === attempts && jobs[0].dueAt > Date.now();
+}
+
 async function allDone(): Promise<boolean> {
   return (await storedJobs()).every((job) => job.stage === "done");
 }
@@ -370,7 +375,7 @@ describe("createInboundEventHandler", () => {
     const handler = create(d);
     await handler.handle(inboundEvent({ type: "script", command: "false" }));
     for (const [index, delay] of SCRIPT_RETRY_DELAYS_MS.entries()) {
-      await until(async () => (await storedJobs())[0]?.attempts === index + 1, `attempt ${index + 1}`);
+      await until(async () => backedOff(await storedJobs(), index + 1), `attempt ${index + 1}`);
       await vi.advanceTimersByTimeAsync(delay - 1);
       expect(d.runScript).toHaveBeenCalledTimes(index + 1);
       expect(handler.activity()).toBe(1);
@@ -388,14 +393,14 @@ describe("createInboundEventHandler", () => {
     const failing = vi.fn(async () => ({ ok: false, stdout: "", error: "boom" }));
     const first = create(deps({ runScript: failing }));
     await first.handle(inboundEvent({ type: "script", command: "false" }));
-    await until(async () => (await storedJobs())[0]?.attempts === 1, "first run");
-    first.close();
+    await until(async () => backedOff(await storedJobs(), 1), "first run");
+    await first.close();
     const d = deps({ runScript: failing });
     const second = create(d);
     await second.ready;
     expect(second.activity()).toBe(1);
     for (const [index, delay] of SCRIPT_RETRY_DELAYS_MS.entries()) {
-      await until(async () => (await storedJobs())[0]?.attempts === index + 1, `attempt ${index + 1}`);
+      await until(async () => backedOff(await storedJobs(), index + 1), `attempt ${index + 1}`);
       await vi.advanceTimersByTimeAsync(delay);
     }
     await until(allDone, "report");
@@ -433,7 +438,7 @@ describe("createInboundEventHandler", () => {
     const d = deps({ runScript });
     const handler = create(d);
     await handler.handle(inboundEvent({ type: "script", command: "x" }));
-    await until(async () => (await storedJobs())[0]?.attempts === 1, "first run");
+    await until(async () => backedOff(await storedJobs(), 1), "first run");
     await vi.advanceTimersByTimeAsync(10_000);
     await until(() => handler.activity() === 0, "idle");
     expect(runScript).toHaveBeenCalledTimes(2);
@@ -551,6 +556,22 @@ describe("createInboundEventHandler", () => {
     // The interrupted work stays queued for the next start: the script is retried, the turn reported.
     const jobs = await storedJobs();
     expect(jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "script", attempts: 1 }),
+      expect.objectContaining({ stage: "turn", started: true }),
+    ]));
+  });
+
+  it("does not start a script or turn once close begins during its pre-run save", async () => {
+    const d = deps();
+    const handler = create(d);
+    await Promise.all([
+      handler.handle(inboundEvent({ type: "script", command: "x" })),
+      handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" })),
+    ]);
+    await handler.close();
+    expect(d.runScript).not.toHaveBeenCalled();
+    expect(d.runTurn).not.toHaveBeenCalled();
+    expect(await storedJobs()).toEqual(expect.arrayContaining([
       expect.objectContaining({ stage: "script", attempts: 1 }),
       expect.objectContaining({ stage: "turn", started: true }),
     ]));
