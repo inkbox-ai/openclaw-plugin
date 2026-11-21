@@ -70,6 +70,8 @@ export interface InboundEventDeps {
   runScript?(command: string, input: string, signal: AbortSignal): Promise<ScriptResult>;
   now?(): number;
   logger?: PluginLogger;
+  /** False when deliveries are acknowledged upstream after `admits`; an acknowledged one is never refused. */
+  bounded?: boolean;
 }
 
 type Stage = "script" | "turn" | "report" | "done";
@@ -436,7 +438,24 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
   })();
   void ready.catch((error) => deps.logger?.warn?.(`Inkbox inbound queue is unavailable: ${describe(error)}`));
 
+  function newJob(data: InboundEventData): Job {
+    return { key: data.delivery_id, stage: data.handler.type === "script" ? "script" : "turn", data, attempts: 0, dueAt: now() };
+  }
+
+  function fits(size: number): boolean {
+    let used = 0;
+    for (const bytes of pendingBytes.values()) used += bytes;
+    return pendingBytes.size < MAX_PENDING_EVENTS && used + size <= MAX_PENDING_BYTES;
+  }
+
   return {
+    /** False when a new delivery would not fit in the queue; duplicates and malformed events always do. */
+    async admits(event: Record<string, any>): Promise<boolean> {
+      await ready;
+      const data = readData(event);
+      if (!data || jobs.has(data.delivery_id) || persisting.has(data.delivery_id)) return true;
+      return fits(Buffer.byteLength(JSON.stringify(newJob(data))));
+    },
     /** Resolves once the delivery is durably queued; rejects if it could not be stored. */
     async handle(event: Record<string, any>): Promise<void> {
       await ready;
@@ -450,11 +469,9 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       if (jobs.has(key)) return;
       const inflight = persisting.get(key);
       if (inflight) return inflight;
-      const job: Job = { key, stage: data.handler.type === "script" ? "script" : "turn", data, attempts: 0, dueAt: now() };
+      const job = newJob(data);
       const size = Buffer.byteLength(JSON.stringify(job));
-      let used = 0;
-      for (const bytes of pendingBytes.values()) used += bytes;
-      if (pendingBytes.size >= MAX_PENDING_EVENTS || used + size > MAX_PENDING_BYTES) throw new InboundQueueFull();
+      if (deps.bounded !== false && !fits(size)) throw new InboundQueueFull();
       pendingBytes.set(key, size);
       const stored = save(job)
         .then(() => { jobs.set(key, job); schedule(); }, (error) => { pendingBytes.delete(key); throw error; })

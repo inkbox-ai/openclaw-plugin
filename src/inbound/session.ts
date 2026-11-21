@@ -267,6 +267,8 @@ export interface InkboxSessionBridgeOptions {
   channelRuntime?: ChannelRuntime;
   logger?: PluginLogger;
   getCallWebsocketUrl?: () => string | undefined;
+  /** Deliveries are acknowledged by the host after `inboundAdmits`, so the inbound queue never refuses them. */
+  externalAdmission?: boolean;
 }
 
 export interface InkboxSessionBridge {
@@ -281,6 +283,8 @@ export interface InkboxSessionBridge {
   shutdownA2A(): Promise<void>;
   /** Pending work a hosted runtime must stay awake for: queued, retrying, or unreported inbound events. */
   activity(): { inbound: number };
+  /** False when a new `inbound.received` delivery should be refused before it is acknowledged. */
+  inboundAdmits(event: Record<string, any>): Promise<boolean>;
 }
 
 export interface ConfigureIdentityDeliveryOptions {
@@ -6345,6 +6349,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   const inboundEvents = localDeliveryMode() ? createInboundEventHandler({
     dir: join(statePaths().dir, `inbound-${activityOwner}`),
     logger: opts.logger,
+    bounded: !opts.externalAdmission,
     runTurn: async ({ sourceId, source, eventId, message }, signal) => {
       const name = source.replace(/[\[\]\r\n]/g, " ").slice(0, 80);
       let failure: string | undefined;
@@ -6925,6 +6930,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
     activeCalls,
     eventState: (id) => companion.eventState(id),
     activity: () => ({ inbound: inboundEvents?.activity() ?? 0 }),
+    inboundAdmits: async (event) => (await inboundEvents?.admits(event)) ?? true,
     deliveryState: async (event) => {
       if (event.event_type === "inbound.received") return inboundEvents?.state(inboundDeliveryKey(event.data)) ?? "absent";
       const companionState = await companion.eventState(event.id);

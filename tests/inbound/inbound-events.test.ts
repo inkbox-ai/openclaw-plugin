@@ -314,6 +314,16 @@ describe("createInboundEventHandler", () => {
     expect((await handleInkboxWebhook(full.body, full.headers, options)).status).toBe(503);
   });
 
+  it("reports a full queue through admits and stores a host-acknowledged delivery past the cap", async () => {
+    const handler = create(deps({ bounded: false, runTurn: vi.fn(() => new Promise<void>(() => {})) }));
+    const id = (index: number) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    for (let index = 0; index < MAX_PENDING_EVENTS; index++) await handler.handle(inboundEvent(undefined, { delivery_id: id(index) }));
+    expect(await handler.admits(inboundEvent(undefined, { delivery_id: id(0) }))).toBe(true);
+    expect(await handler.admits(inboundEvent(undefined, { delivery_id: id(MAX_PENDING_EVENTS) }))).toBe(false);
+    await handler.handle(inboundEvent(undefined, { delivery_id: id(MAX_PENDING_EVENTS) }));
+    expect(await handler.state(id(MAX_PENDING_EVENTS))).toBe("completed");
+  });
+
   it("keeps a record it cannot read and loads it on a later attempt", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const first = create(deps({ runTurn: vi.fn((_turn: any, signal: AbortSignal) => new Promise<void>((_resolve, reject) => {

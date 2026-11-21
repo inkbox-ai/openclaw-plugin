@@ -240,6 +240,7 @@ import {
   registerOutboundCallContext,
 } from "../../src/outbound-call-context.js";
 import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/message-limits.js";
+import { MAX_PENDING_EVENTS } from "../../src/inbound/inbound-events.js";
 import {
   bindHostedSmsCaptureToRun,
   recordHostedModelCallEnded,
@@ -6977,7 +6978,7 @@ describe("createInkboxSessionBridge", () => {
       await rm(home, { recursive: true, force: true });
     });
 
-    function bridgeWith(dispatched: boolean, replyText = "Recorded the payment.") {
+    function bridgeWith(dispatched: boolean, replyText = "Recorded the payment.", externalAdmission = false) {
       const { runtime, sendText } = createRuntime();
       const report = vi.fn(async () => undefined);
       const getClient = runtime.getClient;
@@ -6990,9 +6991,24 @@ describe("createInkboxSessionBridge", () => {
         account: { accountId: "default", identity: "smoke-agent", config: { identity: "smoke-agent" } } as any,
         runtime: runtime as any,
         channelRuntime,
+        externalAdmission,
       });
       return { bridge, channelRuntime, sendText, report };
     }
+
+    it("with external admission, reports a full queue before acknowledgement and stores an acknowledged delivery", async () => {
+      const { bridge, channelRuntime } = bridgeWith(true, undefined, true);
+      channelRuntime.inbound.dispatchReply = vi.fn((params: any) => new Promise((_resolve, reject) => {
+        params.replyOptions?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")));
+      }));
+      const withId = (index: number) => ({ ...event, data: { ...event.data, delivery_id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` } });
+      for (let index = 0; index < MAX_PENDING_EVENTS; index++) await bridge.handlers.onInboundEvent?.(withId(index));
+      const late = withId(MAX_PENDING_EVENTS);
+      expect(await bridge.inboundAdmits(late)).toBe(false);
+      await bridge.handlers.onInboundEvent?.(late);
+      expect(await bridge.deliveryState(late)).toBe("completed");
+      await bridge.shutdownA2A();
+    });
 
     it("completes the delivery once queued and runs one turn in the source session", async () => {
       const { bridge, channelRuntime, sendText, report } = bridgeWith(true);
