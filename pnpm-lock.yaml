@@ -5,15 +5,15 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@inkbox/sdk': github:inkbox-ai/inkbox#c173831c7ac6a78649090741e06977627568ce95&path:/sdk/typescript
+  '@inkbox/sdk': github:inkbox-ai/inkbox#dbcc15ccd2304e6104e6dd5286155d923698294e&path:/sdk/typescript
 
 importers:
 
   .:
     dependencies:
       '@inkbox/sdk':
-        specifier: github:inkbox-ai/inkbox#c173831c7ac6a78649090741e06977627568ce95&path:/sdk/typescript
-        version: https://codeload.github.com/inkbox-ai/inkbox/tar.gz/c173831c7ac6a78649090741e06977627568ce95#path:/sdk/typescript
+        specifier: github:inkbox-ai/inkbox#dbcc15ccd2304e6104e6dd5286155d923698294e&path:/sdk/typescript
+        version: https://codeload.github.com/inkbox-ai/inkbox/tar.gz/dbcc15ccd2304e6104e6dd5286155d923698294e#path:/sdk/typescript
       json5:
         specifier: ^2.2.3
         version: 2.2.3
@@ -374,8 +374,8 @@ packages:
     peerDependencies:
       hono: ^4
 
-  '@inkbox/sdk@https://codeload.github.com/inkbox-ai/inkbox/tar.gz/c173831c7ac6a78649090741e06977627568ce95#path:/sdk/typescript':
-    resolution: {path: /sdk/typescript, tarball: https://codeload.github.com/inkbox-ai/inkbox/tar.gz/c173831c7ac6a78649090741e06977627568ce95}
+  '@inkbox/sdk@https://codeload.github.com/inkbox-ai/inkbox/tar.gz/dbcc15ccd2304e6104e6dd5286155d923698294e#path:/sdk/typescript':
+    resolution: {path: /sdk/typescript, tarball: https://codeload.github.com/inkbox-ai/inkbox/tar.gz/dbcc15ccd2304e6104e6dd5286155d923698294e}
     version: 0.7.41
     engines: {node: '>=22'}
 
@@ -2610,7 +2610,7 @@ snapshots:
     dependencies:
       hono: 4.12.18
 
-  '@inkbox/sdk@https://codeload.github.com/inkbox-ai/inkbox/tar.gz/c173831c7ac6a78649090741e06977627568ce95#path:/sdk/typescript':
+  '@inkbox/sdk@https://codeload.github.com/inkbox-ai/inkbox/tar.gz/dbcc15ccd2304e6104e6dd5286155d923698294e#path:/sdk/typescript':
     dependencies:
       '@peculiar/x509': 2.0.0
       ajv: 8.20.0

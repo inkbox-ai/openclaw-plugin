@@ -30,6 +30,13 @@ export class InboundQueueFull extends Error {
   }
 }
 
+/** The event is not a well-formed `inbound.received`; retrying it cannot succeed. */
+export class InboundEventInvalid extends Error {
+  constructor() {
+    super("Invalid inbound event.");
+  }
+}
+
 /** Hosted runtimes deliver webhooks locally instead of through a tunnel or public URL. */
 export function localDeliveryMode(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.INKBOX_DELIVERY_MODE?.trim().toLowerCase() === "local";
@@ -95,7 +102,7 @@ function readData(event: Record<string, any>): InboundEventData | undefined {
   if (
     typeof data?.event_id !== "string" || !data.event_id ||
     typeof data.delivery_id !== "string" || !data.delivery_id ||
-    typeof data.source?.id !== "string" || typeof data.source?.name !== "string" ||
+    typeof data.source?.id !== "string" || !data.source.id || typeof data.source?.name !== "string" ||
     !(handler?.type === "agent" || (handler?.type === "script" && typeof handler.command === "string"))
   ) {
     return undefined;
@@ -224,6 +231,8 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
   const runScript = deps.runScript ?? runInboundScript;
   const now = deps.now ?? Date.now;
   const file = (key: string) => join(deps.dir, `${createHash("sha256").update(key).digest("hex")}.json`);
+  // Records that could not be read yet; their deliveries are refused until they load.
+  const unreadable = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
@@ -365,10 +374,16 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
     if (timer) clearTimeout(timer);
     timer = undefined;
     if (closed) return;
+    // Scripts and turns run one at a time per source, so a turn's time limit never includes waiting behind another.
+    const lane = (job: Job | undefined) => job && job.stage !== "report" ? job.data?.source.id : undefined;
+    const busy = new Set([...running.keys()].map((key) => lane(jobs.get(key))).filter(Boolean));
     const pending = [...jobs.values()].filter((job) => job.stage !== "done" && !running.has(job.key));
     const current = now();
     for (const job of pending.filter((entry) => entry.dueAt <= current).sort((a, b) => a.dueAt - b.dueAt)) {
       if (running.size >= MAX_CONCURRENT_JOBS) break;
+      const source = lane(job);
+      if (source !== undefined && busy.has(source)) continue;
+      if (source !== undefined) busy.add(source);
       const task = step(job)
         .catch((error) => {
           deps.logger?.warn?.(`Inkbox inbound event ${job.data?.event_id} could not be processed: ${describe(error)}`);
@@ -381,7 +396,8 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
         });
       running.set(job.key, task);
     }
-    const waiting = pending.filter((job) => !running.has(job.key));
+    // A job blocked by its source runs when that source's job finishes.
+    const waiting = pending.filter((job) => !running.has(job.key) && !busy.has(lane(job)));
     if (!waiting.length || running.size >= MAX_CONCURRENT_JOBS) return;
     const next = Math.min(...waiting.map((job) => job.dueAt));
     timer = setTimeout(schedule, Math.max(0, next - now()));
@@ -415,12 +431,14 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
   }
 
   async function loadAll(paths: string[]): Promise<void> {
-    const unreadable: string[] = [];
-    for (const path of paths) if (!(await load(path))) unreadable.push(path);
-    if (!unreadable.length || closed) return;
-    deps.logger?.warn?.(`Inkbox inbound queue could not read ${unreadable.length} record(s); retrying.`);
+    for (const path of paths) {
+      if (await load(path)) unreadable.delete(path);
+      else unreadable.add(path);
+    }
+    if (!unreadable.size || closed) return;
+    deps.logger?.warn?.(`Inkbox inbound queue could not read ${unreadable.size} record(s); retrying.`);
     reloadTimer = setTimeout(() => {
-      void loadAll(unreadable).then(schedule, (error) => deps.logger?.warn?.(`Inkbox inbound queue reload failed: ${describe(error)}`));
+      void loadAll([...unreadable]).then(schedule, (error) => deps.logger?.warn?.(`Inkbox inbound queue reload failed: ${describe(error)}`));
     }, STORE_RETRY_MS);
     reloadTimer.unref?.();
   }
@@ -449,11 +467,13 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
   }
 
   return {
-    /** False when a new delivery would not fit in the queue; duplicates and malformed events always do. */
+    /** False when a new delivery would not fit in the queue or its record is unreadable; duplicates always fit. */
     async admits(event: Record<string, any>): Promise<boolean> {
       await ready;
       const data = readData(event);
-      if (!data || jobs.has(data.delivery_id) || persisting.has(data.delivery_id)) return true;
+      if (!data) throw new InboundEventInvalid();
+      if (jobs.has(data.delivery_id) || persisting.has(data.delivery_id)) return true;
+      if (unreadable.has(file(data.delivery_id))) return false;
       return fits(Buffer.byteLength(JSON.stringify(newJob(data))));
     },
     /** Resolves once the delivery is durably queued; rejects if it could not be stored. */
@@ -461,12 +481,11 @@ export function createInboundEventHandler(deps: InboundEventDeps) {
       await ready;
       if (closed) throw new Error("Inkbox inbound queue is closed.");
       const data = readData(event);
-      if (!data) {
-        deps.logger?.warn?.("Inkbox inbound event ignored (malformed payload).");
-        return;
-      }
+      if (!data) throw new InboundEventInvalid();
       const key = data.delivery_id;
       if (jobs.has(key)) return;
+      // Storing it again would replace the unread record, which may hold a started turn.
+      if (unreadable.has(file(key))) throw new InboundQueueFull();
       const inflight = persisting.get(key);
       if (inflight) return inflight;
       const job = newJob(data);

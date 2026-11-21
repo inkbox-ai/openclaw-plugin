@@ -679,8 +679,9 @@ external service sent to one of the identity's inbound sources. The event must
 carry a valid Inkbox signature. The plugin writes each delivery to a queue under
 `~/.openclaw/inkbox/` before acknowledging it, then processes the queue in the
 background and resumes it after a restart. Deliveries are deduplicated by
-`delivery_id`; a replay has a new `delivery_id` and runs again. Outside local mode
-the event is acknowledged and ignored.
+`delivery_id`; a replay has a new `delivery_id` and runs again. A malformed event
+is answered with 400 and not acknowledged. Outside local mode the event is
+acknowledged and ignored.
 
 - `agent` handler: one turn in the session `inbound:<source>`. The message marks
   the request as untrusted external content, then adds the source's instructions

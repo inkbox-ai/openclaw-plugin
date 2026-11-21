@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AGENT_BODY_MAX_BYTES,
+  InboundEventInvalid,
   InboundQueueFull,
   MAX_PENDING_EVENTS,
   SCRIPT_RETRY_DELAYS_MS,
@@ -25,6 +26,7 @@ import { RequestIdDedup } from "../../src/inbound/dedup.js";
 
 const SIGNING_KEY = "test-signing-key";
 const DELIVERY_ID = "2b0c3f4e-8a51-4f3e-9d0a-5c1e7b6a9f10";
+const OTHER_SOURCE = { id: "inbsrc_9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a", name: "billing" };
 
 // The envelope the server signs and delivers to a hosted agent.
 function inboundEvent(handler: Record<string, unknown> = { type: "agent" }, overrides: Record<string, unknown> = {}) {
@@ -343,11 +345,32 @@ describe("createInboundEventHandler", () => {
     await second.ready;
     expect(await readdir(dir)).toContain(name);
     expect(await readdir(dir)).not.toContain(`${"f".repeat(64)}.json`);
+    // A redelivery must not replace the record it could not read.
+    expect(await second.admits(inboundEvent())).toBe(false);
+    await expect(second.handle(inboundEvent())).rejects.toBeInstanceOf(InboundQueueFull);
     await rm(join(dir, name), { recursive: true });
     await writeFile(join(dir, name), stored);
     await vi.advanceTimersByTimeAsync(60_000);
     await until(() => d.reportFailure.mock.calls.length === 1, "report");
     expect(d.reportFailure.mock.calls[0][1]).toBe("agent turn was interrupted by a restart");
+    await second.handle(inboundEvent());
+    expect(d.runTurn).not.toHaveBeenCalled();
+  });
+
+  it("runs one job at a time per source and other sources alongside it", async () => {
+    const resolvers: Array<() => void> = [];
+    const d = deps({ runTurn: vi.fn(() => new Promise<void>((resolve) => resolvers.push(resolve))) });
+    const handler = create(d);
+    await handler.handle(inboundEvent());
+    await handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" }));
+    await handler.handle(inboundEvent(undefined, { delivery_id: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", source: OTHER_SOURCE }));
+    await until(() => d.runTurn.mock.calls.length === 2, "two sources");
+    expect(d.runTurn.mock.calls.map(([turn]: any[]) => turn.source)).toEqual(["payments", "billing"]);
+    resolvers[0]();
+    await until(() => d.runTurn.mock.calls.length === 3, "next turn for the source");
+    expect(d.runTurn.mock.calls[2][0].source).toBe("payments");
+    resolvers.slice(1).forEach((resolve) => resolve());
+    await until(() => handler.activity() === 0, "idle");
   });
 
   it("passes the request to the script on stdin", async () => {
@@ -555,7 +578,7 @@ describe("createInboundEventHandler", () => {
     }));
     const handler = create(deps({ runScript: undefined, runTurn }));
     await handler.handle(inboundEvent({ type: "script", command: "sleep 30" }));
-    await handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" }));
+    await handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f", source: OTHER_SOURCE }));
     await until(() => runTurn.mock.calls.length === 1, "turn");
     await until(async () => (await storedJobs()).some((job) => job.stage === "script" && job.attempts === 1), "script");
     const started = Date.now();
@@ -576,7 +599,7 @@ describe("createInboundEventHandler", () => {
     const handler = create(d);
     await Promise.all([
       handler.handle(inboundEvent({ type: "script", command: "x" })),
-      handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" })),
+      handler.handle(inboundEvent(undefined, { delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f", source: OTHER_SOURCE })),
     ]);
     await handler.close();
     expect(d.runScript).not.toHaveBeenCalled();
@@ -587,10 +610,25 @@ describe("createInboundEventHandler", () => {
     ]));
   });
 
-  it("ignores events without a delivery_id", async () => {
+  it("rejects events without a delivery_id or source id with 400 before admission", async () => {
+    vi.stubEnv("INKBOX_DELIVERY_MODE", "local");
     const d = deps();
     const handler = create(d);
-    await handler.handle(inboundEvent(undefined, { delivery_id: undefined }));
+    for (const event of [inboundEvent(undefined, { delivery_id: undefined }), inboundEvent(undefined, { source: { id: "", name: "payments" } })]) {
+      await expect(handler.handle(event)).rejects.toBeInstanceOf(InboundEventInvalid);
+      await expect(handler.admits(event)).rejects.toBeInstanceOf(InboundEventInvalid);
+      const { body, headers } = signed(event);
+      const options = { signingKey: SIGNING_KEY, handlers: { onInboundEvent: (value: Record<string, any>) => handler.handle(value) }, dedup: new RequestIdDedup(100) };
+      expect((await handleInkboxWebhook(body, headers, options)).status).toBe(400);
+      // A host that acknowledges after admits refuses it the same way, before acknowledging.
+      const acknowledge = vi.fn();
+      const hosted = { ...options, dedup: new RequestIdDedup(100), handlers: { onInboundEvent: async (value: Record<string, any>) => {
+        if (!(await handler.admits(value))) throw new InboundQueueFull();
+        acknowledge();
+      } } };
+      expect((await handleInkboxWebhook(body, headers, hosted)).status).toBe(400);
+      expect(acknowledge).not.toHaveBeenCalled();
+    }
     expect(await storedJobs()).toEqual([]);
     expect(d.runTurn).not.toHaveBeenCalled();
   });
