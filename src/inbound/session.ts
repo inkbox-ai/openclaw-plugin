@@ -6348,6 +6348,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
   }
   const inboundEvents = localDeliveryMode() ? createInboundEventHandler({
     dir: join(statePaths().dir, `inbound-${activityOwner}`),
+    eventsDir: join(statePaths().dir, "inbound", "events"),
     logger: opts.logger,
     bounded: !opts.externalAdmission,
     runTurn: async ({ sourceId, source, eventId, message }, signal) => {

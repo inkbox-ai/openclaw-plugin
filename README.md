@@ -683,16 +683,26 @@ background and resumes it after a restart. Deliveries are deduplicated by
 is answered with 400 and not acknowledged. Outside local mode the event is
 acknowledged and ignored.
 
-- `agent` handler: one turn in the session `inbound:<source>`. The message marks
-  the request as untrusted external content, then adds the source's instructions
-  and the request body (a base64 body is shown as text when it is valid UTF-8,
-  otherwise noted as binary; text over 64 KiB is cut and marked `(truncated)`). The reply is not delivered anywhere; the agent
-  acts with tools. A failed turn is reported as failed.
+- `agent` handler: one turn in the session `inbound:<source>`. Before the turn,
+  the plugin writes the event to `~/.openclaw/inkbox/inbound/events/<event_id>/`
+  (directory mode 0700, files 0600): `body` holds the request body exactly as
+  received (a base64 body is decoded to its bytes), and `request.json` holds the
+  method, query, headers, content type, body encoding and size, signature status,
+  and event metadata. The message names the source, the signature status, the
+  received time, content type and size, and the absolute path of that directory,
+  then adds the source's instructions. A UTF-8 body of at most 4 KiB is included
+  inline as untrusted data; a larger or binary body is only pointed to. Event
+  directories older than 7 days are deleted at startup and at most once an hour
+  after that. If the files cannot be written, the message says so and includes
+  the body inline instead (text over 64 KiB is cut and marked `(truncated)`;
+  binary bodies are noted, not shown). The reply is not delivered anywhere; the
+  agent acts with tools. A failed turn is reported as failed.
 - `script` handler: runs `/bin/sh -c "<command>"` in the home directory with a
   120-second timeout. Stdin is JSON with `source`, `event_id`, `headers`, `body`,
   and `body_encoding`. The first 64 KiB of stdout (marked `(truncated)` when cut)
   and the last 4 KiB of stderr are kept. Empty output finishes the event; other output starts an `agent` turn with
-  that output as the body. A failing or timed-out script runs at most 5 times,
+  that output as the body: it is written to the event's `body` file and labeled
+  as script output in the message. A failing or timed-out script runs at most 5 times,
   retried after 10 s, 30 s, 2 min, and 10 min, and is then reported as failed with
   the end of its stderr. A run counts toward the limit before it starts, so a
   restart never adds a sixth run.

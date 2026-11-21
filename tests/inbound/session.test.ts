@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7021,7 +7021,9 @@ describe("createInkboxSessionBridge", () => {
       expect(ctxPayload.route.routeSessionKey).not.toContain("inbound:payments");
       expect(ctxPayload.extra.InkboxMode).toBe("external");
       const body = ctxPayload.message.body as string;
-      expect(body).toContain("UNTRUSTED EXTERNAL CONTENT");
+      const files = join(home, ".openclaw", "inkbox", "inbound", "events", event.data.event_id);
+      expect(body).toContain(`Event files: ${files}\n`);
+      expect(await readFile(join(files, "body"), "utf8")).toBe('{"paid":true}');
       expect(body).toContain("Record each paid invoice.");
       expect(body).toContain('{"paid":true}');
       expect(channelRuntime.deliveryResults[0]).toMatchObject({ visibleReplySent: false });
