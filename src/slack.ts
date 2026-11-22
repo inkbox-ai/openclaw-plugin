@@ -59,8 +59,8 @@ export async function ownSlackConnection(client: Inkbox, identityId: string, con
   return matches[0]!;
 }
 /**
- * Slack completions reach only a subscription that also selected the original
- * Slack message, so one Slack message row carries `message.transcription_finished`.
+ * Every subscription with `message.transcription_finished` receives every Slack
+ * completion; one Slack message row carries it, since a URL holds each event once.
  */
 export async function reconcileSlackSubscription(client: Inkbox, identityId: string, url: string): Promise<void> {
   const subscriptions = client.webhooks.subscriptions;
