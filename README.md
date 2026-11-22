@@ -485,7 +485,7 @@ Required by default:
 - Inbound A2A tasks are delivered into isolated context sessions. During those
   turns, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, and
   `inkbox_a2a_fail` commit the task outcome explicitly.
-- The dependency floor is `@inkbox/sdk` 0.7.39. Source development pins its exact Git revision.
+- The dependency floor is `@inkbox/sdk` 0.7.41. Source development pins its exact Git revision.
 - Email reads: `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread`
 - SMS reads: `inkbox_list_text_conversations`, `inkbox_get_text_conversation` (conversation-ID aware, groups included by default)
 - iMessage reads: `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation`
@@ -666,3 +666,52 @@ report; the key itself is not needed in the terminal. Runtime processes still
 require their own signing key. Managed delivery does not require ordinary webhook
 subscriptions. Standalone diagnostics are unchanged. These checks do not send
 messages or prove end-to-end delivery.
+
+### Local delivery and inbound sources
+
+With `INKBOX_DELIVERY_MODE=local`, the host delivers Inkbox webhooks to the plugin
+locally. The plugin opens no tunnel, registers no public route, and leaves webhook
+subscriptions unchanged. Signature verification is unchanged, and request bodies
+up to 2 MiB are accepted. An identity does not need a tunnel in this mode.
+
+In local mode the plugin also handles `inbound.received`, a request that an
+external service sent to one of the identity's inbound sources. The event must
+carry a valid Inkbox signature. The plugin writes each delivery to a queue under
+`~/.openclaw/inkbox/` before acknowledging it, then processes the queue in the
+background and resumes it after a restart. Deliveries are deduplicated by
+`delivery_id`; a replay has a new `delivery_id` and runs again. A malformed event
+is answered with 400 and not acknowledged. Outside local mode the event is
+acknowledged and ignored.
+
+- `agent` handler: one turn in the session `inbound:<source>`. Before the turn,
+  the plugin writes the event to `~/.inkbox/inbound/events/<delivery_id>/`
+  (directory mode 0700, files 0600), so a replay gets its own directory: `body`
+  holds the request body exactly as received (a base64 body is decoded to its
+  bytes), and `request.json` holds the event and delivery IDs, method, query,
+  headers, raw content type, body encoding and size, and signature status. The
+  message names the source, the signature status, the received time, the media
+  type (parameters dropped; `unknown` when malformed) and the request body size,
+  and the absolute path of that directory, then adds the source's instructions.
+  The body follows under an untrusted-data label: a UTF-8 body of at most 4 KiB
+  is included inline; a larger or binary body is only pointed to. Event
+  directories older than 7 days are deleted at startup and every hour after
+  that. If the files cannot be written, the message says so and includes
+  the body inline instead (text over 64 KiB is cut and marked `(truncated)`;
+  binary bodies are noted, not shown). The reply is not delivered anywhere; the
+  agent acts with tools. A failed turn is reported as failed.
+- `script` handler: runs `/bin/sh -c "<command>"` in the home directory with a
+  120-second timeout. Stdin is JSON with `source`, `event_id`, `headers`, `body`,
+  and `body_encoding`. The first 64 KiB of stdout (marked `(truncated)` when cut)
+  and the last 4 KiB of stderr are kept. Empty output finishes the event; other output starts an `agent` turn with
+  that output as the body: it is written to the event's `body` file and labeled
+  as script output in the message. A failing or timed-out script runs at most 5 times,
+  retried after 10 s, 30 s, 2 min, and 10 min, and is then reported as failed with
+  the end of its stderr. A run counts toward the limit before it starts, so a
+  restart never adds a sixth run.
+
+Failure reports carry at most 2,000 characters of error text and are retried with
+capped backoff while the plugin runs and on every start until accepted, without
+running the script again. Stopping the account stops the queue: a running script
+is killed and retried on the next start, and a running turn is aborted and
+reported as interrupted. A report rejected because the event was delivered again since
+counts as done.

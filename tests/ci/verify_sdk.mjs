@@ -10,7 +10,7 @@ const manifest = JSON.parse(
   readFileSync(join(dirname(entry), "..", "package.json"), "utf8"),
 );
 const [major, minor, patch] = manifest.version.split(".").map(Number);
-const supportedVersion = major === 0 && (minor > 7 || (minor === 7 && patch >= 38));
+const supportedVersion = major === 0 && (minor > 7 || (minor === 7 && patch >= 41));
 const { RemoteMcp } = await import(require.resolve("@inkbox/sdk/remote-mcp"));
 if (typeof RemoteMcp !== "function") throw new Error("The remote tool transport is unavailable.");
 const { Inkbox } = await import(entry);
@@ -24,7 +24,8 @@ if (
   typeof client.whatsapp?.getThread !== "function" ||
   typeof client.whatsapp?.sendReaction !== "function" ||
   typeof client.whatsapp?.removeReaction !== "function" ||
-  typeof client.messageSends?.lookup !== "function"
+  typeof client.messageSends?.lookup !== "function" ||
+  typeof client.inbound?.reportInboundEventResult !== "function"
 )
   throw new Error(
     "The installed plugin did not resolve the compatible SDK.",

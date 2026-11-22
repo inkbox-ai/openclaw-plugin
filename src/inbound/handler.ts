@@ -1,5 +1,6 @@
 import { RequestIdDedup } from "./dedup.js";
 import { dispatchInbound, type InboundHandlers } from "./dispatch.js";
+import { INBOUND_RECEIVED, InboundEventInvalid, InboundQueueFull, inboundDeliveryKey } from "./inbound-events.js";
 import { matchProvider } from "../webhook-providers/index.js";
 import type { PluginLogger } from "../client.js";
 
@@ -63,6 +64,10 @@ export async function handleInkboxWebhook(
   opts: WebhookHandlerOptions,
 ): Promise<WebhookResponse> {
   const provider = matchProvider(headers);
+  // Inbound source events can run scripts; only an Inkbox signature checked against a configured key admits them.
+  if ((provider?.name !== "inkbox" || !opts.signingKey) && parseJsonObject(bodyText)?.event_type === INBOUND_RECEIVED) {
+    return { status: 401, body: "Inbound events require Inkbox authentication" };
+  }
   // Companion is reserved for Inkbox-signed delivery, never the opt-in
   // unverified or third-party event route.
   if (provider?.name !== "inkbox" && parseJsonObject(bodyText)?.companion != null) {
@@ -145,6 +150,7 @@ export async function handleInkboxWebhook(
     return { status: 400, body: "invalid json" };
   }
   const eventId =
+    parsed.event_type === INBOUND_RECEIVED ? inboundDeliveryKey(parsed.data as Record<string, any>) ?? "" :
     ["message.received", "text.received", "imessage.received", "call.ended"].includes(String(parsed.event_type)) &&
     typeof parsed.id === "string" ? parsed.id : "";
   const dedupId = eventId ? `inkbox:event:${eventId}` : requestId;
@@ -166,6 +172,8 @@ export async function handleInkboxWebhook(
     });
   } catch (error) {
     if (!durableCompanion) opts.dedup?.rollback(dedupId);
+    if (error instanceof InboundQueueFull) return { status: 503, body: "busy" };
+    if (error instanceof InboundEventInvalid) return { status: 400, body: "invalid inbound event" };
     throw error;
   }
   if (!durableCompanion) opts.dedup?.commit(dedupId);

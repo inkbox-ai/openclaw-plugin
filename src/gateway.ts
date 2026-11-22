@@ -16,6 +16,7 @@ import { openInkboxTunnel } from "./inbound/tunnel.js";
 import { registerInboundHttpRoute } from "./inbound/http-route.js";
 import { createInkboxWebSocketUpgradeHandler } from "./inbound/websocket-upgrade.js";
 import { wrapInboundHandlersWithBatching } from "./inbound/batch.js";
+import { localDeliveryMode } from "./inbound/inbound-events.js";
 import {
   configureInkboxIdentityDelivery,
   createInkboxSessionBridge,
@@ -83,7 +84,7 @@ function routeKey(accountId: string, path: string): string {
 }
 
 export function registerInkboxPublicUrlInboundRoutes(api: any): void {
-  if (typeof api?.registerHttpRoute !== "function") {
+  if (typeof api?.registerHttpRoute !== "function" || localDeliveryMode()) {
     return;
   }
   let cfg: unknown;
@@ -193,14 +194,30 @@ export async function startInkboxGatewayAccount(ctx: ChannelGatewayContext): Pro
   const handlers = wrapInboundHandlersWithBatching(bridge.handlers, account.config, ctx.log);
   void bridge.catchUpCompanion().catch(() => ctx.log?.warn?.("Companion recovery is unavailable."));
 
+  const local = localDeliveryMode();
   ctx.setStatus({
     accountId: account.accountId,
     name: account.name,
     configured: true,
     enabled: account.enabled,
     running: true,
-    mode: account.publicUrl ? "public-url" : "inkbox-tunnel",
+    mode: local ? "local" : account.publicUrl ? "public-url" : "inkbox-tunnel",
   });
+
+  // The host delivers webhooks to the plugin locally: no tunnel, public route, or subscription changes.
+  if (local) {
+    try {
+      await bridge.catchUpA2A();
+      await bridge.catchUpHostedCalls();
+      ctx.setStatus({ accountId: account.accountId, running: true, connected: true, mode: "local" });
+      scheduleInkboxAgentPrewarm(ctx, runtime, "local-gateway-start");
+      await waitForAbort(ctx.abortSignal);
+    } finally {
+      await bridge.shutdownA2A();
+      ctx.setStatus({ accountId: account.accountId, running: false, connected: false, mode: "local" });
+    }
+    return;
+  }
 
   if (account.publicUrl) {
     const webhookUrl = publicUrl(account.publicUrl, inkboxWebhookPath(account.accountId));

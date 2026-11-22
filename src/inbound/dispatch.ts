@@ -8,6 +8,7 @@ import type {
 import { TRANSCRIPTION_FINISHED } from "../voice-notes.js";
 import { WHATSAPP_EVENTS } from "../whatsapp.js";
 import { inboundContactAllowed } from "../allowlist.js";
+import { INBOUND_RECEIVED, localDeliveryMode } from "./inbound-events.js";
 
 // Sync response Inkbox expects for an inbound call webhook.
 export interface InboundCallDecision {
@@ -79,6 +80,9 @@ export interface InboundHandlers {
   onIMessage?(event: IMessageWebhookPayload): Promise<void> | void;
   onA2A?(event: Record<string, unknown>): Promise<void> | void;
   onCallEnded?(event: CallEndedWebhookPayload): Promise<void> | void;
+  // `inbound.received`: a request from an external service, routed by the
+  // server. Delivered only in local delivery mode.
+  onInboundEvent?(event: Record<string, any>): Promise<void> | void;
 
   // Inbound calls are synchronous — the HTTP response IS the routing decision.
   // Default if unspecified: reject. To answer, return clientWebsocketUrl
@@ -99,7 +103,7 @@ export interface InboundHandlers {
 }
 
 export interface DispatchResult {
-  kind: "transcription" | "slack" | "mail" | "text" | "imessage" | "whatsapp" | "a2a" | "call-ended" | "call" | "external";
+  kind: "transcription" | "slack" | "mail" | "text" | "imessage" | "whatsapp" | "a2a" | "call-ended" | "call" | "inbound" | "external";
   // Only populated for kind="call". The handler builds the response body
   // from this.
   callDecision?: InboundCallDecision;
@@ -191,6 +195,10 @@ export async function dispatchInbound(
     if (eventType.startsWith("a2a.")) {
       await handlers.onA2A?.(parsed as Record<string, unknown>);
       return { kind: "a2a" };
+    }
+    if (eventType === INBOUND_RECEIVED) {
+      if (localDeliveryMode()) await handlers.onInboundEvent?.(parsed as Record<string, any>);
+      return { kind: "inbound" };
     }
     if (eventType === "call.ended") {
       const contactIds = resolveRemoteContactIds(parsed, "call-ended");

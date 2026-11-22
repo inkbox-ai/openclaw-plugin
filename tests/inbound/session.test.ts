@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const realtimeMock = vi.hoisted(() => ({
   available: true,
@@ -237,6 +240,7 @@ import {
   registerOutboundCallContext,
 } from "../../src/outbound-call-context.js";
 import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/message-limits.js";
+import { MAX_PENDING_EVENTS } from "../../src/inbound/inbound-events.js";
 import {
   bindHostedSmsCaptureToRun,
   recordHostedModelCallEnded,
@@ -6942,6 +6946,160 @@ describe("createInkboxSessionBridge", () => {
     const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
     expect(ctxPayload.message.body).toContain("UNVERIFIED external event");
   });
+
+  describe("inbound.received", () => {
+    const deliveryId = "2b0c3f4e-8a51-4f3e-9d0a-5c1e7b6a9f10";
+    const envelopeId = `evt_${"a".repeat(64)}`;
+    const event = {
+      event_type: "inbound.received",
+      timestamp: "2026-11-19T00:00:00+00:00",
+      data: {
+        event_id: "inbev_6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+        delivery_id: deliveryId,
+        received_at: "2026-11-19T00:00:00+00:00",
+        source: { id: "inbsrc_0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", name: "payments", instructions: "Record each paid invoice." },
+        handler: { type: "agent" },
+        signature_verified: true,
+        request: { method: "POST", query: {}, headers: {}, content_type: "application/json", body: "{\"paid\":true}", body_encoding: "utf8" },
+      },
+      id: envelopeId,
+      hosted_delivery: { version: 1, activation_id: "7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a", event_id: envelopeId, starts_agent: true },
+    };
+    let home: string;
+
+    beforeEach(async () => {
+      home = await mkdtemp(join(tmpdir(), "inkbox-inbound-home-"));
+      vi.stubEnv("HOME", home);
+      vi.stubEnv("INKBOX_DELIVERY_MODE", "local");
+    });
+
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      await rm(home, { recursive: true, force: true });
+    });
+
+    function bridgeWith(dispatched: boolean, replyText = "Recorded the payment.", externalAdmission = false) {
+      const { runtime, sendText } = createRuntime();
+      const report = vi.fn(async () => undefined);
+      const getClient = runtime.getClient;
+      runtime.getClient = vi.fn(async () => ({ ...(await getClient()), inbound: { reportInboundEventResult: report } }));
+      const channelRuntime = createChannelRuntime(replyText);
+      const base = channelRuntime.inbound.dispatchReply;
+      channelRuntime.inbound.dispatchReply = vi.fn(async (params: any) => { await base(params); return { dispatched }; });
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", identity: "smoke-agent", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+        externalAdmission,
+      });
+      return { bridge, channelRuntime, sendText, report };
+    }
+
+    it("with external admission, reports a full queue before acknowledgement and stores an acknowledged delivery", async () => {
+      const { bridge, channelRuntime } = bridgeWith(true, undefined, true);
+      channelRuntime.inbound.dispatchReply = vi.fn((params: any) => new Promise((_resolve, reject) => {
+        params.replyOptions?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")));
+      }));
+      const withId = (index: number) => ({ ...event, data: { ...event.data, delivery_id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` } });
+      for (let index = 0; index < MAX_PENDING_EVENTS; index++) await bridge.handlers.onInboundEvent?.(withId(index));
+      const late = withId(MAX_PENDING_EVENTS);
+      expect(await bridge.inboundAdmits(late)).toBe(false);
+      await bridge.handlers.onInboundEvent?.(late);
+      expect(await bridge.deliveryState(late)).toBe("completed");
+      await bridge.shutdownA2A();
+    });
+
+    it("completes the delivery once queued and runs one turn in the source session", async () => {
+      const { bridge, channelRuntime, sendText, report } = bridgeWith(true);
+      await bridge.handlers.onInboundEvent?.(event);
+      expect(await bridge.deliveryState(event)).toBe("completed");
+      await vi.waitFor(() => expect(bridge.activity()).toEqual({ inbound: 0 }));
+
+      const ctxPayload = channelRuntime.inbound.dispatchReply.mock.calls[0][0].ctxPayload;
+      expect(ctxPayload.route.routeSessionKey).toContain(`inbound:${event.data.source.id}`);
+      expect(ctxPayload.route.routeSessionKey).not.toContain("inbound:payments");
+      expect(ctxPayload.extra.InkboxMode).toBe("external");
+      const body = ctxPayload.message.body as string;
+      const files = join(home, ".inkbox", "inbound", "events", event.data.delivery_id);
+      expect(body).toContain(`Event files: ${files}\n`);
+      expect(await readFile(join(files, "body"), "utf8")).toBe('{"paid":true}');
+      expect(body).toContain("Record each paid invoice.");
+      expect(body).toContain('{"paid":true}');
+      expect(channelRuntime.deliveryResults[0]).toMatchObject({ visibleReplySent: false });
+      expect(sendText).not.toHaveBeenCalled();
+      expect(report).not.toHaveBeenCalled();
+
+      await bridge.handlers.onInboundEvent?.(event);
+      await flushMicrotasks();
+      expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+      expect(await bridge.deliveryState({ ...event, data: { ...event.data, delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" } })).toBe("absent");
+    });
+
+    it("shutdown closes the inbound queue and aborts the running turn", async () => {
+      const first = bridgeWith(true);
+      let aborted = false;
+      first.channelRuntime.inbound.dispatchReply = vi.fn((params: any) => new Promise((_resolve, reject) => {
+        params.replyOptions?.abortSignal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); });
+      }));
+      await first.bridge.handlers.onInboundEvent?.(event);
+      await vi.waitFor(() => expect(first.channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1));
+      await first.bridge.shutdownA2A();
+      expect(aborted).toBe(true);
+      expect(first.report).not.toHaveBeenCalled();
+      await expect(first.bridge.handlers.onInboundEvent?.({ ...event, data: { ...event.data, delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f" } })).rejects.toThrow();
+
+      // The next start owns the queue alone and reports the interrupted turn.
+      const second = bridgeWith(true);
+      await vi.waitFor(() => expect(second.report).toHaveBeenCalledWith("smoke-agent", event.data.source.id, event.data.event_id, {
+        status: "failed",
+        error: "agent turn was interrupted by a restart",
+        deliveryId,
+      }));
+      expect(second.channelRuntime.inbound.dispatchReply).not.toHaveBeenCalled();
+      await second.bridge.shutdownA2A();
+    });
+
+    it("gives same-named sources separate sessions", async () => {
+      const { bridge, channelRuntime } = bridgeWith(true);
+      await bridge.handlers.onInboundEvent?.(event);
+      await bridge.handlers.onInboundEvent?.({ ...event, data: { ...event.data, delivery_id: "0f9e8d7c-6b5a-4c3d-8e2f-1a0b9c8d7e6f",
+        source: { ...event.data.source, id: "inbsrc_1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e" } } });
+      await vi.waitFor(() => expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(2));
+      const keys = channelRuntime.inbound.dispatchReply.mock.calls.map((call: any[]) => call[0].ctxPayload.route.routeSessionKey);
+      expect(new Set(keys).size).toBe(2);
+    });
+
+    it("finishes a failed event when the SDK cannot report it", async () => {
+      const { runtime } = createRuntime();
+      const channelRuntime = createChannelRuntime("ok");
+      const base = channelRuntime.inbound.dispatchReply;
+      channelRuntime.inbound.dispatchReply = vi.fn(async (params: any) => { await base(params); return { dispatched: false }; });
+      const warn = vi.fn();
+      const bridge = createInkboxSessionBridge({
+        cfg: {},
+        account: { accountId: "default", identity: "smoke-agent", config: { identity: "smoke-agent" } } as any,
+        runtime: runtime as any,
+        channelRuntime,
+        logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+      } as any);
+      await bridge.handlers.onInboundEvent?.(event);
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining("this SDK cannot report it")));
+      await vi.waitFor(() => expect(bridge.activity()).toEqual({ inbound: 0 }));
+      await bridge.shutdownA2A();
+    });
+
+    it("reports an unconfirmed agent turn as failed with the delivery id", async () => {
+      const { bridge, report } = bridgeWith(false);
+      await bridge.handlers.onInboundEvent?.(event);
+      await vi.waitFor(() => expect(bridge.activity()).toEqual({ inbound: 0 }));
+      expect(report).toHaveBeenCalledWith("smoke-agent", event.data.source.id, event.data.event_id, {
+        status: "failed",
+        error: "agent turn failed: OpenClaw did not confirm turn execution and session recording.",
+        deliveryId,
+      });
+    });
+  });
 });
 
 describe("configureInkboxIdentityDelivery", () => {
@@ -7047,6 +7205,34 @@ describe("configureInkboxIdentityDelivery", () => {
         "imessage.reaction_received",
       ],
     });
+  });
+
+  it("keeps configuring delivery when transcription callbacks are rejected", async () => {
+    const identity = {
+      id: "identity-1",
+      mailbox: null,
+      phoneNumber: null,
+      imessageEnabled: true,
+      setIncomingCallAction: vi.fn(async () => ({})),
+    };
+    const runtime = deliveryRuntime(identity);
+    const inkbox = await runtime.getClient();
+    inkbox.webhooks.subscriptions.create.mockImplementation(async (opts: any) => {
+      if (opts.eventTypes.includes("message.transcription_finished")) throw new Error("rejected");
+      return { id: "sub-1", ...opts };
+    });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    await configureInkboxIdentityDelivery({
+      runtime: runtime as any,
+      webhookUrl: "https://example.com/inkbox/webhook",
+      logger: logger as any,
+    });
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Transcription callback registration is unavailable"));
+    expect(inkbox.webhooks.subscriptions.create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventTypes: expect.arrayContaining(["imessage.received"]) }),
+    );
   });
 
   it("falls back to the number-scoped update when the SDK lacks the method", async () => {
