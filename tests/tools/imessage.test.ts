@@ -198,11 +198,13 @@ describe("registerIMessageReads", () => {
     expect(out.content[0].text).toContain("+15555550101");
   });
 
-  it("sends a tapback reaction", async () => {
+  it("reports the resolved message and part for an attachment tapback", async () => {
     const { api, tools } = createApi();
     const sendIMessageReaction = vi.fn().mockResolvedValue({
       id: "react-1",
       reaction: "like",
+      targetMessageId: "primary-1",
+      partIndex: 2,
     });
     registerIMessageReads(api, createRuntime({ sendIMessageReaction }));
     const out = await tools.get("inkbox_send_imessage_reaction")!.execute("turn-1", {
@@ -214,7 +216,7 @@ describe("registerIMessageReads", () => {
       reaction: "like",
       partIndex: 0,
     });
-    expect(out.content[0].text).toContain("like");
+    expect(out.content[0].text).toBe("Sent like tapback to message primary-1 part 2 (reaction id=react-1).");
   });
 
   it("marks a conversation read", async () => {
