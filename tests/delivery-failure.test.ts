@@ -13,13 +13,21 @@ import {
   classifySendRejection,
   clearOutboundFailures,
   DELIVERY_FAILURE_EVENT_TYPES,
+  applyOutboundContext,
+  getOutboundContext,
   imessageDeliveryFailure,
   mailDeliveryFailure,
   noteOutboundDeliveryFailure,
   outboundFailureKeys,
+  outboundContextSizeForTest,
+  OUTBOUND_CONTEXT_TTL_MS,
+  OUTBOUND_FAILURE_BODY_SNIPPET_CHARS,
   OUTBOUND_FAILURE_MAX_ATTEMPTS as MAX,
   OUTBOUND_FAILURE_STATE_TTL_MS,
+  popOutboundContext,
+  removeOutboundContext,
   resetDeliveryFailureStateForTest,
+  saveOutboundContext,
   textDeliveryFailure,
 } from "../src/delivery-failure.js";
 
@@ -372,5 +380,116 @@ describe("delivery-failure webhook extractors", () => {
     expect(failure!.errorCode).toBe("OPTED_OUT");
     expect(failure!.failedBody).toBe("See you at 5!");
     expect(failure!.conversationId).toBe("imsg-conv-1");
+  });
+});
+
+// ── Outbound delivery context (async webhook correlation) ───────────────────
+
+describe("outbound delivery context", () => {
+  it("stores and retrieves context by message id", () => {
+    saveOutboundContext({
+      messageId: "txt-1",
+      channel: "sms",
+      chatId: "contact-123",
+      recipient: "+15555550101",
+      body: "Production path SMS content",
+      conversationId: "conv-123",
+    });
+    const ctx = getOutboundContext("txt-1");
+    expect(ctx).toMatchObject({
+      channel: "sms",
+      chatId: "contact-123",
+      recipient: "+15555550101",
+      bodySnippet: "Production path SMS content",
+      conversationId: "conv-123",
+    });
+  });
+
+  it("truncates the body snippet to the shared limit", () => {
+    const longBody = "x".repeat(OUTBOUND_FAILURE_BODY_SNIPPET_CHARS + 50);
+    saveOutboundContext({
+      messageId: "txt-long",
+      channel: "sms",
+      chatId: "contact-1",
+      body: longBody,
+    });
+    const ctx = getOutboundContext("txt-long");
+    expect(ctx!.bodySnippet.length).toBe(OUTBOUND_FAILURE_BODY_SNIPPET_CHARS + 1);
+    expect(ctx!.bodySnippet.endsWith("…")).toBe(true);
+  });
+
+  it("pops context once and expires after the TTL", () => {
+    saveOutboundContext({
+      messageId: "txt-ttl",
+      channel: "sms",
+      chatId: "contact-1",
+      body: "hello",
+    });
+    expect(popOutboundContext("txt-ttl")?.bodySnippet).toBe("hello");
+    expect(getOutboundContext("txt-ttl")).toBeUndefined();
+
+    const staleAt = Date.now() - OUTBOUND_CONTEXT_TTL_MS - 1;
+    saveOutboundContext({
+      messageId: "txt-stale",
+      channel: "sms",
+      chatId: "contact-1",
+      body: "stale",
+      now: staleAt,
+    });
+    expect(getOutboundContext("txt-stale")).toBeUndefined();
+
+    saveOutboundContext({
+      messageId: "txt-fresh",
+      channel: "sms",
+      chatId: "contact-1",
+      body: "fresh",
+    });
+    expect(getOutboundContext("txt-fresh")?.bodySnippet).toBe("fresh");
+  });
+
+  it("merges stored context over thin webhook fields", () => {
+    saveOutboundContext({
+      messageId: "mail-1",
+      channel: "email",
+      chatId: "contact-123",
+      recipient: "kim@example.com",
+      body: "Production path Email content",
+      emailThreadId: "thread-real",
+      emailRfcMessageId: "rfc-real",
+      emailSubject: "Real subject",
+    });
+    const ctx = popOutboundContext("mail-1")!;
+    const merged = applyOutboundContext(
+      {
+        channel: "email",
+        eventType: "message.bounced",
+        stage: "bounced",
+        messageId: "mail-1",
+        recipient: undefined,
+        emailThreadId: "wrong-thread",
+        rfcMessageId: "<wrong@inkboxmail.com>",
+        subject: "Different Subject",
+        failedBody: "Different Subject",
+        raw: {},
+      },
+      ctx,
+    );
+    expect(merged.recipient).toBe("kim@example.com");
+    expect(merged.emailThreadId).toBe("thread-real");
+    expect(merged.rfcMessageId).toBe("rfc-real");
+    expect(merged.subject).toBe("Real subject");
+    expect(merged.failedBody).toBe("Production path Email content");
+  });
+
+  it("removeOutboundContext drops a delivered message", () => {
+    saveOutboundContext({
+      messageId: "txt-delivered",
+      channel: "sms",
+      chatId: "contact-1",
+      body: "gone",
+    });
+    removeOutboundContext("txt-delivered");
+    expect(getOutboundContext("txt-delivered")).toBeUndefined();
+    expect(outboundContextSizeForTest()).toBe(0);
   });
 });
