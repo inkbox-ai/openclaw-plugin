@@ -1,4 +1,4 @@
-import { snapshotHasVoiceNote, voiceNoteContext } from "../voice-notes.js";
+import { snapshotHasVoiceNote, voiceNoteContext, voiceNoteMessage } from "../voice-notes.js";
 import { whatsappGroup, validWhatsAppGroup, renderWhatsAppMentions, renderWhatsAppReplyContext } from "../whatsapp-groups.js";
 import { isUnsupportedWhatsAppShape, whatsappDestinationEvidence, WhatsAppReadinessPending, whatsappAttachments, whatsappReady, whatsappDeliveryContext, type WhatsAppSendRejection } from "../whatsapp.js";
 import { checkedSlackUpload, type SlackUploadReceipt, type SlackUploadIntent } from "../slack-files.js";
@@ -953,7 +953,9 @@ export function createCompanionReceiver(opts: {
         if (m.channel === "mail" && reply.replyToMessageId !== trigger.id) throw new Error("Companion reply must reference the stored sponsor message.");
         reply.identityId = job.identityId;
         sources = snapshot.entries.map((entry) => entry.id);
-        voiceNoteInSnapshot = snapshotHasVoiceNote(message, snapshot.entries, rawText);
+        // Slack snapshot text keeps the original message text, including any leading mention.
+        voiceNoteInSnapshot = snapshotHasVoiceNote(voiceNoteMessage(job.event, message), snapshot.entries,
+          m.channel === "slack" ? String(job.event._openclawSlack.route?.rawText ?? rawText) : rawText);
         body = bounded(`${snapshot.text}\nHistory notices: ${JSON.stringify(snapshot.notices ?? [])}\nMessage admission: ${JSON.stringify(snapshot.entries.map((entry) => ({ id: entry.id, sender_access: entry.senderAccess })))}`);
         activation = { state: "initialized", sources, triggerId: trigger.id, sponsor: trigger.author, sponsorContactId, reply };
         if (m.phase === "live" && !sources.includes(message.id)) {
@@ -1012,7 +1014,7 @@ export function createCompanionReceiver(opts: {
     const finishSources = (j: Journal) => {
       if (activation) j.activations[scope] = { ...activation, sources: [...new Set([...activation.sources, ...sources])] };
     };
-    const voiceContext = voiceNoteContext(message);
+    const voiceContext = voiceNoteContext(voiceNoteMessage(job.event, message));
     if (voiceContext && !voiceNoteInSnapshot) body += `\n${voiceContext}`;
     const input = makeInput(reply, body, activation?.sponsor);
     const approval = /^\/approve(?:\s|$)/i.test(input.rawText);

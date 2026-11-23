@@ -579,6 +579,35 @@ function slackBridge(config: Record<string, unknown> = {}) {
   return { bridge, slack, companion, dispatchReply, runtime, settings, actors };
 }
 describe("Slack native host channel-wide Companion", () => {
+  it("waits for a Slack voice-note transcript and wakes the agent once with the label", async () => {
+    const f = slackBridge(), messageId = "55555555-5555-4555-8555-555555555555";
+    const original: any = slackEvent(1, null); delete original.companion;
+    original.data.message_id = messageId;
+    original.data.event.files = [{ id: "FVOICE", name: "voice.m4a", mimetype: "audio/mp4", transcription: { status: "pending" } }];
+    await dispatchInbound(original, f.bridge.handlers);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(f.dispatchReply).not.toHaveBeenCalled();
+    const finished: any = { id: "slack-finished", event_type: "message.transcription_finished", timestamp: "2026-11-19T00:00:00Z", data: { ...structuredClone(original.data), channel: "slack" } };
+    finished.data.event.files[0].transcription = { status: "completed", text: "Ship the voice build.", error_code: null };
+    await dispatchInbound(finished, f.bridge.handlers);
+    await vi.waitFor(() => expect(f.dispatchReply).toHaveBeenCalledOnce());
+    const body = f.dispatchReply.mock.calls[0]![0].ctxPayload.message.bodyForAgent;
+    expect(body).toContain("[Voice note 1 — automatically transcribed]\nShip the voice build.");
+    expect(body.match(/\[Voice note 1 — automatically transcribed\]/g)).toHaveLength(1);
+    await dispatchInbound(finished, f.bridge.handlers);
+    await dispatchInbound(original, f.bridge.handlers);
+    await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+  });
+  it("wakes the agent once when the same Slack message arrives under another envelope", async () => {
+    const f = slackBridge(), original: any = slackEvent(1, null); delete original.companion;
+    original.data.message_id = "55555555-5555-4555-8555-555555555555";
+    await dispatchInbound(original, f.bridge.handlers); await f.bridge.catchUpCompanion();
+    await vi.waitFor(() => expect(f.dispatchReply).toHaveBeenCalledOnce());
+    await dispatchInbound({ ...structuredClone(original), id: "slack-event-redelivered", event_type: "slack.mention_received" }, f.bridge.handlers);
+    await f.bridge.catchUpCompanion();
+    expect(f.dispatchReply).toHaveBeenCalledOnce();
+  });
   it.each([false, true])("runs a fresh Slack request after a confirmed Stop, including restart=%s", async (restart) => {
     const first = slackBridge(); let release!: () => void, entered!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; }), started = new Promise<void>((resolve) => { entered = resolve; });
