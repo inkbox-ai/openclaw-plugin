@@ -22,14 +22,17 @@ function collectRuntimeTools(registrationMode = "tool-discovery"): {
   optionalToolNames: string[];
   hookNames: string[];
   commandHookNames: string[];
+  eventSubscriptions: string[];
 } {
   const tools: string[] = [];
   const optionalTools: string[] = [];
   const hookNames: string[] = [];
   const commandHookNames: string[] = [];
+  const eventSubscriptions: string[] = [];
   const api = {
     registrationMode,
     registerChannel: vi.fn(),
+    registerAgentEventSubscription(subscription: { id: string }) { eventSubscriptions.push(subscription.id); },
     registerHook(events: string[]) { commandHookNames.push(...events); },
     pluginConfig: {
       apiKey: "ApiKey_test",
@@ -69,6 +72,7 @@ function collectRuntimeTools(registrationMode = "tool-discovery"): {
     optionalToolNames: [...optionalTools].sort(),
     hookNames: [...hookNames].sort(),
     commandHookNames: [...commandHookNames].sort(),
+    eventSubscriptions,
   };
 }
 
@@ -91,6 +95,7 @@ describe("openclaw.plugin.json manifest parity", () => {
   });
 
   it.each(["full", "discovery", "tool-discovery"])("registers settlement hooks once in the host %s registry", (mode) => {
+    expect(collectRuntimeTools(mode).eventSubscriptions).toEqual(["inkbox-reply-outcomes"]);
     expect(collectRuntimeTools(mode).commandHookNames).toEqual(mode === "full" ? ["command:new", "command:reset"] : []);
     expect(collectRuntimeTools(mode).hookNames).toEqual([
       "after_tool_call",

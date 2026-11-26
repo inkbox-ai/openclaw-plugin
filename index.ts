@@ -1,4 +1,5 @@
 import { RemoteTools } from "./src/remote-tools.js";
+import { recordInkboxReplyLifecycle } from "./src/reply-capture.js";
 import { bindNativeSourceRun, guardNativeSourceTool, recordNativeSourceProgress } from "./src/native-source.js";
 import { bindNativeOwner, settleNativeOwner, guardRetiredNativeRun } from "./src/native-owner.js";
 import { bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall, reconcileSilentSendAgentEnd } from "./src/silent-send-capture.js";
@@ -175,6 +176,11 @@ function registerInkboxTools(api: any): void {
 }
 
 function registerHostedCallSettlementHooks(api: any): void {
+  api.registerAgentEventSubscription({
+    id: "inkbox-reply-outcomes",
+    streams: ["lifecycle"],
+    handle: recordInkboxReplyLifecycle,
+  });
   if (api.registrationMode === "full") {
     api.registerHook(["command:new", "command:reset"], (event: any) => {
       markNativeConversationReset(api.runtime?.channel, listInkboxAccountIds(api.runtime?.config?.current?.()), event);

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { recordInkboxReplyLifecycle } from "../../src/reply-capture.js";
 
 const realtimeMock = vi.hoisted(() => ({
   available: true,
@@ -418,6 +419,9 @@ function createChannelRuntime(
 ) {
   const deliveryResults: any[] = [];
   const dispatchReply = vi.fn(async (params: any) => {
+    const runId = `run-${params.ctxPayload.message.messageIdFull}`;
+    params.replyOptions?.onAgentRunStart?.(runId);
+    recordInkboxReplyLifecycle({ runId, stream: "lifecycle", data: { phase: "end" } });
     await onDispatch?.(params);
     const payload = { text: replyText };
     const transformed = params.dispatcherOptions?.transformReplyPayload
@@ -1552,12 +1556,15 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["throw", "error-payload"])("fails an A2A %s once instead of leaving the task working", async (failureMode) => {
+  it.each(["throw", "error-payload", "unflagged-payload"])("fails an A2A %s once instead of leaving the task working", async (failureMode) => {
     const { runtime, a2aReply } = createRuntime();
     const warn = vi.fn();
     const channelRuntime = createChannelRuntime("Partial answer must not complete an errored turn.", (params) => {
       if (failureMode === "throw") throw new TypeError("private model failure text");
-      params.dispatcherOptions.transformReplyPayload({ text: "private model failure text", isError: true });
+      recordInkboxReplyLifecycle({
+        runId: `run-${params.ctxPayload.message.messageIdFull}`, stream: "lifecycle", data: { phase: "error" },
+      });
+      params.dispatcherOptions.transformReplyPayload({ text: "private model failure text", isError: failureMode === "error-payload" });
     });
     const bridge = createInkboxSessionBridge({
       cfg: {},
@@ -1585,6 +1592,28 @@ describe("createInkboxSessionBridge", () => {
     expect(a2aReply.mock.calls.some(([, reply]) => reply.intent === "complete")).toBe(false);
     expect(JSON.stringify(warn.mock.calls)).not.toContain("private model failure text");
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledOnce();
+  });
+
+  it("completes a handled tool error with its useful answer despite a warning", async () => {
+    const { runtime, a2aReply } = createRuntime();
+    const answer = "The write did not work: the parent path is a file.";
+    const channelRuntime = createChannelRuntime(answer, (params) => {
+      params.dispatcherOptions.transformReplyPayload({ text: "Write failed", isError: true });
+    });
+    const bridge = createInkboxSessionBridge({
+      cfg: {}, account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any, channelRuntime,
+    });
+    await bridge.handlers.onA2A?.({
+      id: "event-handled-error", event_type: "a2a.task.created",
+      data: {
+        task_id: "task-handled-error", context_id: "context-handled-error",
+        message_id: "message-handled-error", caller: { handle: "caller" },
+        parts: [{ text: "Try writing the file and explain the result." }],
+      },
+    });
+    await vi.waitFor(() => expect(a2aReply).toHaveBeenCalledWith("task-handled-error", { intent: "complete", text: answer }));
+    expect(a2aReply.mock.calls.some(([, reply]) => reply.intent === "fail")).toBe(false);
   });
 
   it("serves an inbound A2A task in its context session and completes it once", async () => {

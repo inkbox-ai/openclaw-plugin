@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.27 (unreleased)
+
+- Use the matching native run's terminal outcome for automatic A2A replies. Runtime failures no longer complete tasks with an error banner; handled tool warnings preserve a successfully generated answer.
+- Fall back to a generic progress update when the progress writer fails.
+
 ## 0.2.26 (unreleased)
 
 - Wait for Slack voice-note transcripts like other channels: match `message.transcription_finished` by `data.message_id`, read the retained Slack message once after 60 seconds, and move the completion event onto the Slack webhook subscription so upgrades keep one subscription per event.
