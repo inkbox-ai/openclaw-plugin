@@ -84,8 +84,8 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     // the current prefix change even when direct tool_call remains compatible.
     for (const transport of [hostVersion.localeCompare("2026.10.10", undefined, { numeric: true }) >= 0 ? "dispatch_action" : "tool_call", "exec"]) {
       const priorRegistry = currentRegistry();
-      const catalogRef = (await hostFunction("local-model-lean", "createToolSearchCatalogRef", ["tool-search"]))();
-      const register = await hostFunction("local-model-lean", "registerHeadlessToolSearchCatalog", ["tool-search"]);
+      const catalogRef = (await hostFunction("local-model-lean", "createToolSearchCatalogRef", ["tool-search", "tool-contract-error"]))();
+      const register = await hostFunction("local-model-lean", "registerHeadlessToolSearchCatalog", ["tool-search", "tool-contract-error"]);
       const createControls = await hostFunction("local-model-lean", "createToolSearchTools", ["tool-search"]);
       const context = { sessionKey: `agent:main:inkbox:direct:${randomUUID()}`, runId: randomUUID() };
       const events: Array<{ toolName: string; toolCallId: string; runId: string }> = [];
