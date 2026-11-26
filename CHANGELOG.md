@@ -4,6 +4,7 @@
 
 - Use the matching native run's terminal outcome for automatic A2A replies. Runtime failures no longer complete tasks with an error banner; handled tool warnings preserve a successfully generated answer.
 - Fall back to a generic progress update when the progress writer fails.
+- Credential skill: on an Inkbox-hosted agent, direct users to save the vault unlock key as a Secret in the identity's Env vars tab instead of exporting it in a shell.
 
 ## 0.2.26 (unreleased)
 
