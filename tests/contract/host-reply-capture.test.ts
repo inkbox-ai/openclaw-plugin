@@ -51,6 +51,23 @@ describe("auxiliary answer capture", () => {
     } finally { release(); }
   });
 
+  it("treats only a known failure as failed for best-effort progress text", () => {
+    const capture = createInkboxTextReplyCapture();
+    const release = capture.trackNativeRun();
+    capture.onAgentRunStart("progress-run");
+    try {
+      capture.transformReplyPayload({ text: "I am checking the calculation." });
+      // No terminal event yet: completion stays unconfirmed, but the progress text is usable.
+      expect(capture.hasError()).toBe(true);
+      expect(capture.failed()).toBe(false);
+      recordInkboxReplyLifecycle({ runId: "progress-run", stream: "lifecycle", data: { phase: "error" } });
+      expect(capture.failed()).toBe(true);
+    } finally { release(); }
+    const untracked = createInkboxTextReplyCapture();
+    untracked.transformReplyPayload({ text: "error", isError: true });
+    expect(untracked.failed()).toBe(true);
+  });
+
   it("keeps normal text while ignoring silence markers and error payloads", () => {
     const capture = createInkboxTextReplyCapture();
     for (const payload of [{ text: "NO_REPLY" }, { text: "[SILENT]" }, { text: "error", isError: true }]) expect(capture.transformReplyPayload(payload)).toBeNull();

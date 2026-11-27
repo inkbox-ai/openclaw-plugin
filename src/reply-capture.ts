@@ -49,6 +49,8 @@ export function createInkboxTextReplyCapture() {
       // A tool warning is recoverable only when the run completed with an answer.
       return native ? native.failed !== false || (sawError && texts.length === 0) : sawError;
     },
+    // Best-effort callers such as progress updates drop text only for a known failure.
+    failed(): boolean { return native?.failed === true || (sawError && texts.length === 0); },
     lastText(): string { return texts.at(-1) ?? ""; },
   };
 }

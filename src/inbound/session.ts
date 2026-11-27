@@ -5088,7 +5088,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
     }
     return sanitizeA2AProgressText(
-      replyCapture.hasError() ? "" : replyCapture.lastText(),
+      replyCapture.failed() ? "" : replyCapture.lastText(),
       params.toolIdentifiers,
       params.elapsedSeconds,
     );
