@@ -1,0 +1,44 @@
+name: Install the matching OpenClaw host
+description: Globally install the OpenClaw version resolved in node_modules, cached by exact version.
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve host version
+      id: host
+      shell: bash
+      run: |
+        echo "version=$(node -p 'require("./node_modules/openclaw/package.json").version')" >> "$GITHUB_OUTPUT"
+        echo "node=$(node -p process.version)" >> "$GITHUB_OUTPUT"
+        echo "prefix=$(npm prefix -g)" >> "$GITHUB_OUTPUT"
+
+    # The published host ships a shrinkwrap, so its version fixes the whole tree.
+    - name: Restore cached host
+      id: cache
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ${{ steps.host.outputs.prefix }}/lib/node_modules/openclaw
+          ${{ steps.host.outputs.prefix }}/bin/openclaw
+        key: openclaw-host-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.host.outputs.node }}-${{ steps.host.outputs.version }}
+
+    - name: Install host
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        HOST_VERSION: ${{ steps.host.outputs.version }}
+      run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g "openclaw@$HOST_VERSION"
+
+    # Save before the host first runs so the cache holds only the npm install.
+    - name: Save host cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: |
+          ${{ steps.host.outputs.prefix }}/lib/node_modules/openclaw
+          ${{ steps.host.outputs.prefix }}/bin/openclaw
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+
+    - name: Check host
+      shell: bash
+      run: openclaw --version

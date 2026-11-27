@@ -83,10 +83,7 @@ jobs:
           npm run build
 
       - name: Install the matching OpenClaw host
-        run: |
-          HOST_VERSION="$(node -p 'require("./node_modules/openclaw/package.json").version')"
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g "openclaw@$HOST_VERSION"
-          openclaw --version
+        uses: ./.github/actions/install-openclaw-host
 
       - name: Onboard model provider (${{ matrix.mode }})
         env:
