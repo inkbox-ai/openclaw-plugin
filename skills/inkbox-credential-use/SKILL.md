@@ -23,7 +23,7 @@ When an action requires plaintext credentials (a password, an API key, an SSH ke
 - The vault unlock key must be available in the `INKBOX_OPENCLAW_VAULT_KEY` env var (or a custom env var if `vault.keyEnvVar` is configured).
 - The identity must have access grants to the secrets in question (admin-set via the Inkbox Console).
 
-Metadata listing works while locked. Reads refresh access and payloads on every call; login results expose `has_totp`, never a seed. If `INKBOX_OPENCLAW_VAULT_KEY` is not set, a plaintext/code tool call returns "Vault is locked." Direct the user to export the env var in the shell launching OpenClaw, then retry.
+Metadata listing works while locked. Reads refresh access and payloads on every call; login results expose `has_totp`, never a seed. If the key variable is not set, a plaintext/code tool call returns "Vault is locked. Set <variable> locally...". If this agent is hosted by Inkbox, ask the user to save the vault unlock key as a Secret named after the variable in that error (`INKBOX_OPENCLAW_VAULT_KEY` unless `vault.keyEnvVar` changes it) in this identity's Env vars tab and retry once the agent shows the change applied; exporting it in a terminal does not reach the agent. Otherwise, direct the user to export the env var in the shell launching OpenClaw, then retry.
 
 ## Workflow
 
@@ -50,7 +50,7 @@ Metadata listing works while locked. Reads refresh access and payloads on every 
 
 | Error | Meaning |
 |---|---|
-| `Vault is locked. Set the INKBOX_OPENCLAW_VAULT_KEY...` | Env var missing — direct the user to set it. |
+| `Vault is locked. Set the INKBOX_OPENCLAW_VAULT_KEY...` | Env var missing — direct the user to set it (hosted by Inkbox: a Secret in the identity's Env vars tab). |
 | `404` on get_* | Wrong secret id, or this identity doesn't have access. |
 | `TypeError` on get_login/get_api_key/get_ssh_key | Caller picked the wrong typed getter for the secret's type. Re-list to see `secretType`. |
 

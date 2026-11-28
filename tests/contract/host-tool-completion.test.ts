@@ -11,6 +11,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { beginSilentSendCapture, bindSilentSendCaptureToRun, recordSilentSendModelStarted, recordSilentSendBeforeToolCall, recordSilentSendAfterToolCall } from "../../src/silent-send-capture.js";
+import { bindToolRunSession, releaseToolRunSession, routedToolContext } from "../../src/tool-run-session.js";
 
 // Current hosts cache a process-wide SQLite handle. Keep case directories alive
 // until the isolated test file exits; session keys/stores remain case-specific.
@@ -74,7 +75,10 @@ describe("public host tool-result completion envelope", () => {
 });
 
 describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch completion", () => {
-  it.each([true, false])("handles real outer/nested transport hooks with send success=%s", async (succeeds) => {
+  it.each([
+    { succeeds: true, policyKey: false }, { succeeds: false, policyKey: false },
+    { succeeds: true, policyKey: true }, { succeeds: false, policyKey: true },
+  ])("handles real outer/nested transport hooks with send success=$succeeds policyKey=$policyKey", async ({ succeeds, policyKey }) => {
     const initialize = await hostFunction("hook-runner-global", "initializeGlobalHookRunner");
     const reset = await hostFunction("hook-runner-global", "resetGlobalHookRunner");
     const currentRegistry = await hostFunction("hook-runner-global", "getGlobalHookRunnerRegistry");
@@ -84,10 +88,12 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
     // the current prefix change even when direct tool_call remains compatible.
     for (const transport of [hostVersion.localeCompare("2026.10.10", undefined, { numeric: true }) >= 0 ? "dispatch_action" : "tool_call", "exec"]) {
       const priorRegistry = currentRegistry();
-      const catalogRef = (await hostFunction("local-model-lean", "createToolSearchCatalogRef", ["tool-search"]))();
-      const register = await hostFunction("local-model-lean", "registerHeadlessToolSearchCatalog", ["tool-search"]);
+      const catalogRef = (await hostFunction("local-model-lean", "createToolSearchCatalogRef", ["tool-search", "tool-contract-error"]))();
+      const register = await hostFunction("local-model-lean", "registerHeadlessToolSearchCatalog", ["tool-search", "tool-contract-error"]);
       const createControls = await hostFunction("local-model-lean", "createToolSearchTools", ["tool-search"]);
-      const context = { sessionKey: `agent:main:inkbox:direct:${randomUUID()}`, runId: randomUUID() };
+      // A routed main-session DM runs deferred tools under its per-peer policy key.
+      const context = { sessionKey: policyKey ? "agent:main:main" : `agent:main:inkbox:direct:${randomUUID()}`, sessionId: randomUUID(), runId: randomUUID() };
+      const catalogContext = policyKey ? { ...context, sessionKey: `agent:main:inkbox:default:direct:${randomUUID()}` } : context;
       const events: Array<{ toolName: string; toolCallId: string; runId: string }> = [];
       const receipt = { accepted: true, completeSilently: true };
       const execute = vi.fn(async () => succeeds
@@ -96,14 +102,15 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
       const capture = beginSilentSendCapture(context.sessionKey);
       let nativeCore: any;
       capture.activate();
+      bindToolRunSession(context);
       bindSilentSendCaptureToRun({ prompt: capture.marker }, context);
       recordSilentSendModelStarted({}, context);
       initialize({ hooks: [], plugins: [], trustedToolPolicies: [], typedHooks: [{ pluginId: "inkbox", hookName: "before_tool_call", handler: (event: any, hookContext: any) => {
         events.push(event);
-        recordSilentSendBeforeToolCall(event, hookContext);
+        recordSilentSendBeforeToolCall(event, routedToolContext(hookContext));
       } }, { pluginId: "inkbox", hookName: "after_tool_call", handler: recordSilentSendAfterToolCall }] });
       try {
-        const sendTool = { name: "inkbox_send_email", label: "Send email", description: "Send email", parameters: Type.Object({ completeSilently: Type.Boolean() }), execute };
+        const sendTool = wrapToolWithBeforeToolCallHook({ name: "inkbox_send_email", label: "Send email", description: "Send email", parameters: Type.Object({ completeSilently: Type.Boolean() }), execute }, context);
         const executeTool = async (params: any) => {
           const result = await params.tool.execute(params.toolCallId, params.input, params.signal, params.onUpdate);
           // The embedded subscription supplies this nested lifecycle event. Run
@@ -117,9 +124,9 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
           nativeCore = createCore({ ...context, config: {}, agentId: "main", ...(structuredTerminalReplies
             ? { codeModeOverride: true } : { forceCodeModeControls: true }), modelToolsEnabled: true, executeTool });
           expect(nativeCore.codeModeControlsEnabled).toBe(true);
-          rawControl = nativeCore.compactTools([sendTool], { hookContext: context }).tools.find((tool: any) => tool.name === "exec");
+          rawControl = nativeCore.compactTools([sendTool], { hookContext: catalogContext }).tools.find((tool: any) => tool.name === "exec");
         } else {
-          register({ catalogRef, hookContext: context, tools: [sendTool] });
+          register({ catalogRef, hookContext: catalogContext, tools: [sendTool] });
           rawControl = createControls({ ...context, catalogRef, config: {}, executeTool }).find((tool: any) => tool.name === transport);
         }
         expect(rawControl).toBeDefined();
@@ -152,6 +159,7 @@ describe.skipIf(baselineWithoutFinalizer)("actual host explicit tool-batch compl
         }
       } finally {
         nativeCore?.cleanup();
+        releaseToolRunSession(context);
         capture.finish();
         if (priorRegistry) initialize(priorRegistry);
         else reset();

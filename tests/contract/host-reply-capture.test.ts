@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { dispatchInboundMessageWithDispatcher } from "openclaw/plugin-sdk/reply-runtime";
-import { createInkboxTextReplyCapture } from "../../src/reply-capture.js";
+import { createInkboxTextReplyCapture, recordInkboxReplyLifecycle } from "../../src/reply-capture.js";
 import { sanitizeA2AProgressText } from "../../src/a2a-progress.js";
 
 // Current hosts cache a process-wide SQLite handle. Keep case directories alive
@@ -20,6 +20,66 @@ const baseline = hostVersion === "2026.5.27";
 const structuredTerminalReplies = hostVersion.localeCompare("2026.11.5", undefined, { numeric: true }) >= 0;
 
 describe("auxiliary answer capture", () => {
+  it("uses the final matching run outcome, ignores unrelated runs, and releases the subscription", () => {
+    const capture = createInkboxTextReplyCapture();
+    const release = capture.trackNativeRun();
+    capture.onAgentRunStart("capture-run");
+    const lifecycle = (runId: string, data: Record<string, unknown>) => recordInkboxReplyLifecycle({ runId, stream: "lifecycle", data });
+    try {
+      capture.transformReplyPayload({ text: "The write failed because the parent path is a file." });
+      capture.transformReplyPayload({ text: "Write failed", isError: true });
+      expect(capture.hasError()).toBe(true);
+      lifecycle("another-run", { phase: "end" });
+      expect(capture.hasError()).toBe(true);
+      lifecycle("capture-run", { phase: "error" });
+      expect(capture.hasError()).toBe(true);
+      lifecycle("capture-run", { phase: "start" });
+      lifecycle("capture-run", { phase: "end" });
+      expect(capture.hasError()).toBe(false);
+      lifecycle("another-run", { phase: "error" });
+      expect(capture.hasError()).toBe(false);
+      capture.onAgentRunStart("successor-run");
+      expect(capture.hasError()).toBe(true);
+      lifecycle("capture-run", { phase: "end" });
+      expect(capture.hasError()).toBe(true);
+      capture.onAgentRunStart("capture-run");
+      lifecycle("capture-run", { phase: "end", aborted: true });
+      expect(capture.hasError()).toBe(true);
+      release();
+      lifecycle("capture-run", { phase: "end" });
+      expect(capture.hasError()).toBe(true);
+    } finally { release(); }
+  });
+
+  it("treats a dispatch without an observed run as an error and ignores lifecycle events without data", () => {
+    const capture = createInkboxTextReplyCapture();
+    const release = capture.trackNativeRun();
+    try {
+      expect(capture.hasError()).toBe(true);
+      expect(capture.failed()).toBe(false);
+      capture.onAgentRunStart("dataless-run");
+      expect(() => recordInkboxReplyLifecycle({ runId: "dataless-run", stream: "lifecycle" })).not.toThrow();
+      expect(capture.hasError()).toBe(true);
+    } finally { release(); }
+  });
+
+  it("treats only a known failure as failed for best-effort progress text", () => {
+    const capture = createInkboxTextReplyCapture();
+    const release = capture.trackNativeRun();
+    capture.onAgentRunStart("progress-run");
+    try {
+      capture.transformReplyPayload({ text: "I am checking the calculation." });
+      // No terminal event yet: completion stays unconfirmed, but the progress text is usable.
+      expect(capture.hasError()).toBe(true);
+      expect(capture.failed()).toBe(false);
+      recordInkboxReplyLifecycle({ runId: "progress-run", stream: "lifecycle", data: { phase: "error" } });
+      expect(capture.failed()).toBe(true);
+    } finally { release(); }
+    const untracked = createInkboxTextReplyCapture();
+    untracked.transformReplyPayload({ text: "error", isError: true });
+    expect(untracked.failed()).toBe(true);
+  });
+
   it("keeps normal text while ignoring silence markers and error payloads", () => {
     const capture = createInkboxTextReplyCapture();
     for (const payload of [{ text: "NO_REPLY" }, { text: "[SILENT]" }, { text: "error", isError: true }]) expect(capture.transformReplyPayload(payload)).toBeNull();

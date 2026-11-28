@@ -47,10 +47,12 @@ describe("CI resilience contracts", () => {
     }
   });
   it("runs live gateways with the same host version outside the linked plugin tree", () => {
+    const hostInstall = readFileSync(resolve(".github", "actions", "install-openclaw-host", "action.yml"), "utf8");
+    expect(hostInstall).toContain('$(node -p \'require("./node_modules/openclaw/package.json").version\')');
+    expect(hostInstall).toContain('install -g "openclaw@$HOST_VERSION"');
     for (const name of workflows.filter((value) => value.startsWith("live-"))) {
       const workflow = readFileSync(resolve(".github", "workflows", name), "utf8");
-      expect(workflow).toContain('HOST_VERSION="$(node -p \'require("./node_modules/openclaw/package.json").version\')"');
-      expect(workflow).toContain('install -g "openclaw@$HOST_VERSION"');
+      expect(workflow).toContain("uses: ./.github/actions/install-openclaw-host");
       expect(workflow).not.toContain("install -g openclaw@latest");
       expect(workflow).not.toContain('node_modules/.bin" >> "$GITHUB_PATH"');
       expect(workflow).not.toContain("openclaw@2026.5.27");

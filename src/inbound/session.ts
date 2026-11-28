@@ -2826,6 +2826,7 @@ async function dispatchInboundTurn(
     }, ready: opts.turn.companionApprovalReady, activity: opts.turn.activity,
   };
   const releaseApprovalTurn = trackNativeApprovalTurn(core, approvalBinding);
+  const releaseReplyCapture = opts.replyCapture?.trackNativeRun();
   let releaseNativeSource: (() => void) | undefined;
   const acknowledgeBackgroundContext = async () => {
     try { await opts.turn.contextAcknowledged?.(); }
@@ -2845,7 +2846,10 @@ async function dispatchInboundTurn(
       recordInboundSession: core.session.recordInboundSession,
       dispatchReplyWithBufferedBlockDispatcher:
         core.reply.dispatchReplyWithBufferedBlockDispatcher,
-      ...(replyOptions ? { replyOptions } : {}),
+      replyOptions: {
+        ...replyOptions,
+        ...(opts.replyCapture ? { onAgentRunStart: opts.replyCapture.onAgentRunStart } : {}),
+      },
       delivery,
       replyPipeline: {},
       dispatcherOptions: { transformReplyPayload: (payload: { text?: string; isError?: boolean }) => {
@@ -2871,6 +2875,7 @@ async function dispatchInboundTurn(
       await acknowledgeBackgroundContext();
     }
   } finally {
+    releaseReplyCapture?.();
     nativeOwner?.close();
     releaseNativeSource?.();
     releaseApprovalTurn();
@@ -5083,7 +5088,7 @@ export function createInkboxSessionBridge(opts: InkboxSessionBridgeOptions): Ink
       }
     }
     return sanitizeA2AProgressText(
-      replyCapture.lastText(),
+      replyCapture.failed() ? "" : replyCapture.lastText(),
       params.toolIdentifiers,
       params.elapsedSeconds,
     );
