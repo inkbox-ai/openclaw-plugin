@@ -45,6 +45,7 @@ import {
   bindA2AProgressActivityToRun,
   recordA2AProgressToolActivity,
 } from "./src/a2a-progress-activity.js";
+import { bindToolRunSession, releaseToolRunSession, routedToolContext } from "./src/tool-run-session.js";
 
 type OpenClawChannelEntry = {
   id: string;
@@ -193,6 +194,7 @@ function registerHostedCallSettlementHooks(api: any): void {
     );
   });
   api.on("before_agent_run", async (event: any, context: any) => {
+    bindToolRunSession(context);
     bindNativeSourceRun(event, context);
     const ownerDecision = await bindNativeOwner(event, context);
     if (ownerDecision) return ownerDecision;
@@ -202,7 +204,8 @@ function registerHostedCallSettlementHooks(api: any): void {
     bindSilentSendCaptureToRun(event, context);
     bindA2AProgressActivityToRun(event, context);
   });
-  api.on("before_tool_call", async (event: any, context: any) => {
+  api.on("before_tool_call", async (event: any, hookContext: any) => {
+    const context = routedToolContext(hookContext);
     const sourceDecision = guardRetiredNativeRun(event, context) ?? guardNativeSourceTool(event, context);
     if (sourceDecision) return sourceDecision;
     recordSilentSendBeforeToolCall(event, context);
@@ -225,6 +228,7 @@ function registerHostedCallSettlementHooks(api: any): void {
   api.on("after_tool_call", (event: any, context: any) => recordNativeSourceProgress(event, context, true));
   api.on("agent_end", reconcileSilentSendAgentEnd);
   api.on("agent_end", (event: any, context: any) => {
+    releaseToolRunSession(context);
     remoteTools.get(api)?.end(context);
     return settleNativeOwner(event, context);
   });
