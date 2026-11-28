@@ -1594,6 +1594,32 @@ describe("createInkboxSessionBridge", () => {
     expect(channelRuntime.inbound.dispatchReply).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { name: "blocked", result: { dispatched: true, dispatchResult: { beforeAgentRunBlocked: true } } },
+    { name: "observe-only", result: { dispatched: true, admission: { kind: "observeOnly" } } },
+    { name: "steered", result: { dispatched: true, dispatchResult: { queuedFinal: false } } },
+  ])("fails an A2A task once when its $name dispatch starts no run", async ({ name, result }) => {
+    const { runtime, a2aReply } = createRuntime();
+    const channelRuntime = createChannelRuntime();
+    // The active run of another dispatch, if any, delivers its answer to that dispatch only.
+    channelRuntime.inbound.dispatchReply.mockImplementation(async () => result as any);
+    const bridge = createInkboxSessionBridge({
+      cfg: {}, account: { accountId: "default", config: { identity: "smoke-agent" } } as any,
+      runtime: runtime as any, channelRuntime,
+    });
+    await bridge.handlers.onA2A?.({
+      id: `event-no-run-${name}`, event_type: "a2a.task.created",
+      data: {
+        task_id: `task-no-run-${name}`, context_id: `context-no-run-${name}`,
+        message_id: `message-no-run-${name}`, caller: { handle: "caller" },
+        parts: [{ text: "Answer this task." }],
+      },
+    });
+    await vi.waitFor(() => expect(a2aRegistryMock.entries[`task-no-run-${name}:message-no-run-${name}`]?.state).toBe("finalized"));
+    expect(a2aReply.mock.calls.filter(([, reply]) => reply.intent === "fail")).toHaveLength(1);
+    expect(a2aReply.mock.calls.some(([, reply]) => reply.intent === "complete")).toBe(false);
+  });
+
   it("completes a handled tool error with its useful answer despite a warning", async () => {
     const { runtime, a2aReply } = createRuntime();
     const answer = "The write did not work: the parent path is a file.";

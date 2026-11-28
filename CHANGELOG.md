@@ -2,7 +2,7 @@
 
 ## 0.2.27 (unreleased)
 
-- Use the matching native run's terminal outcome for automatic A2A replies. Runtime failures no longer complete tasks with an error banner; handled tool warnings preserve a successfully generated answer.
+- Use the matching native run's terminal outcome for automatic A2A replies. Runtime failures no longer complete tasks with an error banner; handled tool warnings preserve a successfully generated answer. A task whose message starts no run of its own (blocked, observe-only, or steered into another task's active run) now fails instead of staying `working`.
 - Fall back to a generic progress update when the progress writer fails.
 - Credential skill: on an Inkbox-hosted agent, direct users to save the vault unlock key as a Secret in the identity's Env vars tab instead of exporting it in a shell.
 - Recognize Inkbox sends made through the host's deferred-tool wrapper in direct conversations on the main session. Hosts that report the nested call under a per-peer session key no longer cause a duplicate reply on the source channel or a post-call SMS correction attempt.

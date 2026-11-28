@@ -51,6 +51,18 @@ describe("auxiliary answer capture", () => {
     } finally { release(); }
   });
 
+  it("treats a dispatch without an observed run as an error and ignores lifecycle events without data", () => {
+    const capture = createInkboxTextReplyCapture();
+    const release = capture.trackNativeRun();
+    try {
+      expect(capture.hasError()).toBe(true);
+      expect(capture.failed()).toBe(false);
+      capture.onAgentRunStart("dataless-run");
+      expect(() => recordInkboxReplyLifecycle({ runId: "dataless-run", stream: "lifecycle" })).not.toThrow();
+      expect(capture.hasError()).toBe(true);
+    } finally { release(); }
+  });
+
   it("treats only a known failure as failed for best-effort progress text", () => {
     const capture = createInkboxTextReplyCapture();
     const release = capture.trackNativeRun();

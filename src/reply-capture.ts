@@ -7,12 +7,12 @@ const state = globalThis as typeof globalThis & { [registry]?: Set<NativeOutcome
 const outcomes = state[registry] ??= new Set<NativeOutcome>();
 
 export function recordInkboxReplyLifecycle(event: {
-  runId: string; stream: string; data: Record<string, unknown>;
+  runId: string; stream: string; data?: Record<string, unknown>;
 }): void {
   if (event.stream !== "lifecycle") return;
   for (const outcome of outcomes) {
     if (outcome.runId !== event.runId) continue;
-    const { phase, aborted, stopReason } = event.data;
+    const { phase, aborted, stopReason } = event.data ?? {};
     if (phase === "start") outcome.failed = undefined;
     if (phase === "error") outcome.failed = true;
     if (phase === "end") outcome.failed = aborted === true || stopReason === "error" || stopReason === "aborted";
@@ -47,6 +47,7 @@ export function createInkboxTextReplyCapture() {
     },
     hasError(): boolean {
       // A tool warning is recoverable only when the run completed with an answer.
+      // Without an observed run (blocked, observe-only, or steered into another run) this task gets no answer.
       return native ? native.failed !== false || (sawError && texts.length === 0) : sawError;
     },
     // Best-effort callers such as progress updates drop text only for a known failure.
